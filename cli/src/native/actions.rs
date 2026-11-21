@@ -1338,6 +1338,7 @@ impl DaemonState {
         };
         let shared_count = Arc::new(AtomicU64::new(0));
         let shared_captured = Arc::new(AtomicU64::new(0));
+        let shared_late = Arc::new(AtomicU64::new(0));
         let shared_contact_sheet_count = Arc::new(AtomicU64::new(0));
         let shared_screenshot_capture = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.recording_state.device_scale = initial_frame.device_scale;
@@ -1369,6 +1370,7 @@ impl DaemonState {
             self.recording_state.fps,
             shared_count.clone(),
             shared_captured.clone(),
+            shared_late.clone(),
             self.recording_state.cursor,
             self.recording_state.shared_cursor.clone(),
             self.recording_state.cursor_overlays.clone(),
@@ -1382,6 +1384,7 @@ impl DaemonState {
         self.recording_state.capture_task = Some(handle);
         self.recording_state.shared_frame_count = Some(shared_count);
         self.recording_state.shared_captured_count = Some(shared_captured);
+        self.recording_state.shared_late_frame_count = Some(shared_late);
         self.recording_state.shared_contact_sheet_count = Some(shared_contact_sheet_count);
         self.recording_state.shared_screenshot_capture = Some(shared_screenshot_capture);
         self.recording_state.cancel_tx = Some(cancel_tx);

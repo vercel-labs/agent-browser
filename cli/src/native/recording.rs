@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{AttachToTargetParams, AttachToTargetResult};
@@ -51,9 +51,10 @@ const HIGH_FPS_ENCODER_THREADS: &str = "4";
 /// VP8 budget chosen for readable UI text and thin drawing strokes.
 const WEBM_BITRATE_KBPS: u32 = 8000;
 
-/// Captured frames may wait briefly for compositing, but overload must fail
-/// the recording instead of silently degrading it into held frames.
-const ENCODER_FRAME_BUFFER: usize = 16;
+/// The encoder keeps only the newest captured frame, so a busy host that stalls
+/// ffmpeg holds the last image instead of losing the take. Frames written more
+/// than `MAX_ENCODER_LAG` after their slot are reported as `lateFrames`.
+const CONTACT_SHEET_FRAME_BUFFER: usize = 16;
 const MAX_ENCODER_LAG: Duration = Duration::from_millis(500);
 const ENCODER_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -524,10 +525,13 @@ pub struct RecordingState {
     pub frame_count: u64,
     /// Frames received from the screencast.
     pub captured_count: u64,
+    /// Frames written more than `MAX_ENCODER_LAG` after their slot, holding an earlier image.
+    pub late_frame_count: u64,
     pub contact_sheet_frame_count: u64,
     pub capture_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
     pub shared_frame_count: Option<Arc<AtomicU64>>,
     pub shared_captured_count: Option<Arc<AtomicU64>>,
+    pub shared_late_frame_count: Option<Arc<AtomicU64>>,
     pub shared_contact_sheet_count: Option<Arc<AtomicU64>>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
     /// Shared with the daemon's event handlers.
@@ -558,10 +562,12 @@ impl RecordingState {
             fps: DEFAULT_FPS,
             frame_count: 0,
             captured_count: 0,
+            late_frame_count: 0,
             contact_sheet_frame_count: 0,
             capture_task: None,
             shared_frame_count: None,
             shared_captured_count: None,
+            shared_late_frame_count: None,
             shared_contact_sheet_count: None,
             cancel_tx: None,
             capture_session: Arc::new(Mutex::new(None)),
@@ -653,6 +659,7 @@ pub fn recording_start(
     state.fps = fps;
     state.frame_count = 0;
     state.captured_count = 0;
+    state.late_frame_count = 0;
     state.contact_sheet_frame_count = 0;
     state.device_scale = 1.0;
     state.screenshot_capture = false;
@@ -696,6 +703,7 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
         "path": &state.output_path,
         "frames": state.frame_count,
         "capturedFrames": state.captured_count,
+        "lateFrames": state.late_frame_count,
         "fps": state.fps,
     });
     if let Some(ref path) = state.contact_sheet_path {
@@ -1441,29 +1449,6 @@ struct CapturedVideoFrame {
     device_height: f64,
 }
 
-async fn seed_recording_outputs(
-    frame_tx: &mpsc::Sender<CapturedVideoFrame>,
-    contact_tx: Option<&std::sync::mpsc::SyncSender<CapturedVideoFrame>>,
-    frame: CapturedVideoFrame,
-) -> Result<(), String> {
-    frame_tx
-        .send(frame.clone())
-        .await
-        .map_err(|_| "Recording encoder stopped unexpectedly".to_string())?;
-    if let Some(contact_tx) = contact_tx {
-        contact_tx.try_send(frame).map_err(|error| match error {
-            std::sync::mpsc::TrySendError::Full(_) => format!(
-                "Contact sheet analyzer fell behind by more than {} buffered frames",
-                ENCODER_FRAME_BUFFER
-            ),
-            std::sync::mpsc::TrySendError::Disconnected(_) => {
-                "Contact sheet analyzer stopped unexpectedly".to_string()
-            }
-        })?;
-    }
-    Ok(())
-}
-
 pub struct InitialRecordingFrame {
     pub image_data: Vec<u8>,
     pub device_width: f64,
@@ -1485,6 +1470,7 @@ pub fn spawn_recording_task(
     fps: u32,
     shared_count: Arc<AtomicU64>,
     shared_captured: Arc<AtomicU64>,
+    shared_late: Arc<AtomicU64>,
     cursor: bool,
     shared_cursor: SharedRecordingCursor,
     cursor_overlays: SharedCursorOverlays,
@@ -1513,9 +1499,9 @@ pub fn spawn_recording_task(
             height: initial_frame.device_height,
             scale: initial_frame.device_scale,
         };
-        let (frame_tx, frame_rx) = mpsc::channel(ENCODER_FRAME_BUFFER);
+        let (frame_tx, frame_rx) = watch::channel(None);
         let (contact_tx, mut contact_worker) = if let Some(path) = contact_sheet_path.as_ref() {
-            let (tx, rx) = std::sync::mpsc::sync_channel(ENCODER_FRAME_BUFFER);
+            let (tx, rx) = std::sync::mpsc::sync_channel(CONTACT_SHEET_FRAME_BUFFER);
             let contact_cursor = shared_cursor.clone();
             let path = path.clone();
             let worker = tokio::task::spawn_blocking(move || {
@@ -1550,8 +1536,12 @@ pub fn spawn_recording_task(
             device_width: initial_frame.device_width,
             device_height: initial_frame.device_height,
         };
-        let seeded = seed_recording_outputs(&frame_tx, contact_tx.as_ref(), frame).await;
-        shared_captured.fetch_add(1, Ordering::Relaxed);
+        let outputs = FrameOutputs {
+            frames: &frame_tx,
+            contact: contact_tx.as_ref(),
+            captured: &shared_captured,
+        };
+        let seeded = outputs.send(frame);
 
         let started = match seeded {
             Ok(()) => client
@@ -1566,12 +1556,6 @@ pub fn spawn_recording_task(
                 .await
                 .map_err(|error| format!("Failed to start screencast: {error}")),
             Err(error) => Err(error),
-        };
-
-        let outputs = FrameOutputs {
-            frames: &frame_tx,
-            contact: contact_tx.as_ref(),
-            captured: &shared_captured,
         };
         let mut sequence = 1u64;
         let recording_started = tokio::time::Instant::now();
@@ -1660,10 +1644,11 @@ pub fn spawn_recording_task(
             }
             return Err(error);
         }
-        let streamed = encoder
+        let encoded = encoder
             .await
             .map_err(|e| format!("Recording encoder task failed: {}", e))??;
-        shared_count.store(streamed, Ordering::Relaxed);
+        shared_count.store(encoded.frames, Ordering::Relaxed);
+        shared_late.store(encoded.late_frames, Ordering::Relaxed);
         let contact_sheet_count = match contact_worker {
             Some(worker) => worker
                 .await
@@ -1740,9 +1725,11 @@ struct PageSize {
 }
 
 /// Where captured frames go: the encoder, the contact sheet, and the counters
-/// `record stop` reports.
+/// `record stop` reports. Sending never waits on either output: the encoder
+/// keeps only the newest frame, and the contact sheet skips frames while it
+/// is busy.
 struct FrameOutputs<'a> {
-    frames: &'a mpsc::Sender<CapturedVideoFrame>,
+    frames: &'a watch::Sender<Option<CapturedVideoFrame>>,
     contact: Option<&'a std::sync::mpsc::SyncSender<CapturedVideoFrame>>,
     captured: &'a AtomicU64,
 }
@@ -1751,26 +1738,12 @@ impl FrameOutputs<'_> {
     fn send(&self, frame: CapturedVideoFrame) -> Result<(), String> {
         self.captured.fetch_add(1, Ordering::Relaxed);
         self.frames
-            .try_send(frame.clone())
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => format!(
-                    "Recording encoder fell behind by more than {} buffered frames",
-                    ENCODER_FRAME_BUFFER
-                ),
-                mpsc::error::TrySendError::Closed(_) => {
-                    "Recording encoder stopped unexpectedly".to_string()
-                }
-            })?;
+            .send(Some(frame.clone()))
+            .map_err(|_| "Recording encoder stopped unexpectedly".to_string())?;
         if let Some(contact) = self.contact {
-            contact.try_send(frame).map_err(|error| match error {
-                std::sync::mpsc::TrySendError::Full(_) => format!(
-                    "Contact sheet analyzer fell behind by more than {} buffered frames",
-                    ENCODER_FRAME_BUFFER
-                ),
-                std::sync::mpsc::TrySendError::Disconnected(_) => {
-                    "Contact sheet analyzer stopped unexpectedly".to_string()
-                }
-            })?;
+            if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = contact.try_send(frame) {
+                return Err("Contact sheet analyzer stopped unexpectedly".to_string());
+            }
         }
         Ok(())
     }
@@ -1972,9 +1945,6 @@ fn collect_contact_frames(
         let lag = frame.captured_at.elapsed();
         max_lag = max_lag.max(lag);
         processed += 1;
-        if lag > MAX_ENCODER_LAG {
-            return Err("Contact sheet analysis fell more than 500 ms behind capture".to_string());
-        }
     }
     let frames = collector.finish();
     if std::env::var_os("AGENT_BROWSER_DEBUG").is_some() {
@@ -2035,13 +2005,18 @@ fn render_cursor_frame(
     Ok(bytes)
 }
 
+struct EncodedVideo {
+    frames: u64,
+    late_frames: u64,
+}
+
 async fn encode_stream(
     output_path: String,
     fps: u32,
     cursor: bool,
     shared_cursor: SharedRecordingCursor,
-    mut frames: mpsc::Receiver<CapturedVideoFrame>,
-) -> Result<u64, String> {
+    mut frames: watch::Receiver<Option<CapturedVideoFrame>>,
+) -> Result<EncodedVideo, String> {
     let mut command = build_ffmpeg_command(&output_path, fps, cursor);
     let mut ffmpeg = spawn_ffmpeg_command(&mut command)?;
     let mut stdin = ffmpeg
@@ -2054,23 +2029,21 @@ async fn encode_stream(
     let mut latest: Option<CapturedVideoFrame> = None;
     let mut decoded = None;
     let mut written = 0u64;
+    let mut late = 0u64;
 
     loop {
         tokio::select! {
-            frame = frames.recv() => {
-                let Some(frame) = frame else { break };
-                if frame.captured_at.elapsed() > MAX_ENCODER_LAG {
-                    return Err("Recording encoder fell more than 500 ms behind capture".to_string());
+            changed = frames.changed() => {
+                if changed.is_err() {
+                    break;
                 }
+                let Some(frame) = frames.borrow_and_update().clone() else { continue };
                 if latest.is_none() {
                     interval.reset_at(frame.captured_at);
                 }
                 latest = Some(frame);
             }
             tick = interval.tick() => {
-                if tick.elapsed() > MAX_ENCODER_LAG && latest.is_some() {
-                    return Err("Recording encoder fell more than 500 ms behind capture".to_string());
-                }
                 let Some(frame) = latest.as_ref() else { continue };
                 let output_timestamp = cursor_timestamp();
                 let history = shared_cursor
@@ -2085,6 +2058,10 @@ async fn encode_stream(
                     write_encoder_bytes(&mut stdin, &frame.image_data).await?;
                 }
                 written += 1;
+                // After the write, so a frame the pipe held up counts as late too.
+                if tick.elapsed() > MAX_ENCODER_LAG {
+                    late += 1;
+                }
             }
         }
     }
@@ -2115,7 +2092,10 @@ async fn encode_stream(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ffmpeg failed: {}", ffmpeg_error_tail(&stderr)));
     }
-    Ok(written)
+    Ok(EncodedVideo {
+        frames: written,
+        late_frames: late,
+    })
 }
 
 fn scale_cursor_dimensions(
@@ -2185,6 +2165,7 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
 
     let counter = state.shared_frame_count.take();
     let captured = state.shared_captured_count.take();
+    let late = state.shared_late_frame_count.take();
     let contact_sheet = state.shared_contact_sheet_count.take();
     let screenshot_capture = state.shared_screenshot_capture.take();
     let handle = state.capture_task.take();
@@ -2204,6 +2185,9 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
     }
     if let Some(c) = captured {
         state.captured_count = c.load(Ordering::Relaxed);
+    }
+    if let Some(c) = late {
+        state.late_frame_count = c.load(Ordering::Relaxed);
     }
     if let Some(c) = contact_sheet {
         state.contact_sheet_frame_count = c.load(Ordering::Relaxed);
@@ -2515,13 +2499,17 @@ mod tests {
         let mut png = std::io::Cursor::new(Vec::new());
         image.write_to(&mut png, image::ImageFormat::Png).unwrap();
         let image_data = Arc::new(png.into_inner());
-        let (frame_tx, mut frame_rx) = mpsc::channel(1);
+        let (frame_tx, mut frame_rx) = watch::channel(None);
         let (contact_tx, contact_rx) = std::sync::mpsc::sync_channel(1);
 
-        seed_recording_outputs(
-            &frame_tx,
-            Some(&contact_tx),
-            CapturedVideoFrame {
+        let captured = AtomicU64::new(0);
+        let outputs = FrameOutputs {
+            frames: &frame_tx,
+            contact: Some(&contact_tx),
+            captured: &captured,
+        };
+        outputs
+            .send(CapturedVideoFrame {
                 sequence: 0,
                 image_data: image_data.clone(),
                 elapsed: Duration::ZERO,
@@ -2529,12 +2517,15 @@ mod tests {
                 timestamp: cursor_timestamp(),
                 device_width: 64.0,
                 device_height: 64.0,
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .unwrap();
+        assert_eq!(captured.load(Ordering::Relaxed), 1);
 
-        assert_eq!(frame_rx.recv().await.unwrap().image_data, image_data);
+        frame_rx.changed().await.unwrap();
+        assert_eq!(
+            frame_rx.borrow_and_update().as_ref().unwrap().image_data,
+            image_data
+        );
         drop(contact_tx);
         let cursor = Arc::new(Mutex::new(RecordingCursorHistory::default()));
         let frames =
@@ -2546,6 +2537,93 @@ mod tests {
         let path = dir.path().join("static.contact-sheet.png");
         write_contact_sheet(&path, &frames).unwrap();
         assert!(path.is_file());
+    }
+
+    #[tokio::test]
+    async fn busy_outputs_hold_frames_instead_of_failing_the_recording() {
+        let frame = |sequence, captured_at| CapturedVideoFrame {
+            sequence,
+            image_data: Arc::new(Vec::new()),
+            elapsed: Duration::ZERO,
+            captured_at,
+            timestamp: cursor_timestamp(),
+            device_width: 64.0,
+            device_height: 64.0,
+        };
+        let (frame_tx, frame_rx) = watch::channel(None);
+        let (contact_tx, contact_rx) = std::sync::mpsc::sync_channel(1);
+        let stalled = tokio::time::Instant::now() - Duration::from_secs(1);
+
+        let captured = AtomicU64::new(0);
+        let outputs = FrameOutputs {
+            frames: &frame_tx,
+            contact: Some(&contact_tx),
+            captured: &captured,
+        };
+        for sequence in 0..3 {
+            outputs
+                .send(frame(sequence, stalled))
+                .expect("a full contact queue skips the frame");
+        }
+        assert_eq!(frame_rx.borrow().as_ref().unwrap().sequence, 2);
+        assert_eq!(captured.load(Ordering::Relaxed), 3);
+
+        drop(contact_tx);
+        let cursor = Arc::new(Mutex::new(RecordingCursorHistory::default()));
+        let image = image::RgbImage::from_pixel(64, 64, image::Rgb([12, 34, 56]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let (late_tx, late_rx) = std::sync::mpsc::sync_channel(1);
+        late_tx
+            .send(CapturedVideoFrame {
+                image_data: Arc::new(png.into_inner()),
+                ..frame(0, stalled)
+            })
+            .unwrap();
+        drop(late_tx);
+        drop(contact_rx);
+        let frames =
+            collect_contact_frames(late_rx, DEFAULT_CONTACT_SHEET_THRESHOLD, false, &cursor)
+                .expect("a late frame is analyzed, not fatal");
+        assert_eq!(frames.len(), 1);
+    }
+
+    /// Requires FFmpeg. A frame that waited through a one second stall is held, not fatal.
+    #[tokio::test]
+    #[ignore]
+    async fn stalled_encoder_holds_the_last_frame_and_reports_late_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stalled.mp4");
+        let (tx, rx) = watch::channel(None);
+        let encoder = tokio::spawn(encode_stream(
+            path.to_string_lossy().into_owned(),
+            10,
+            false,
+            Arc::new(Mutex::new(RecordingCursorHistory::default())),
+            rx,
+        ));
+        let image = image::RgbImage::from_pixel(64, 64, image::Rgb([12, 34, 56]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        tx.send(Some(CapturedVideoFrame {
+            sequence: 0,
+            image_data: Arc::new(png.into_inner()),
+            elapsed: Duration::ZERO,
+            captured_at: tokio::time::Instant::now() - Duration::from_secs(1),
+            timestamp: cursor_timestamp(),
+            device_width: 64.0,
+            device_height: 64.0,
+        }))
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(tx);
+        let encoded = encoder
+            .await
+            .unwrap()
+            .expect("a stall must not lose the take");
+        assert!(encoded.frames >= 10, "frames {}", encoded.frames);
+        assert!(encoded.late_frames >= 4, "late {}", encoded.late_frames);
+        assert!(std::fs::metadata(&path).unwrap().len() > 1000);
     }
 
     /// Requires FFmpeg and ffprobe, but no browser. Check the actual file timeline.
@@ -2560,7 +2638,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join(format!("sparse.{extension}"));
-            let (tx, rx) = mpsc::channel(4);
+            let (tx, rx) = watch::channel(None);
             let encoder = tokio::spawn(encode_stream(
                 path.to_string_lossy().into_owned(),
                 30,
@@ -2572,7 +2650,7 @@ mod tests {
                 let image = image::RgbImage::from_pixel(64, 64, image::Rgb(color));
                 let mut png = std::io::Cursor::new(Vec::new());
                 image.write_to(&mut png, image::ImageFormat::Png).unwrap();
-                tx.send(CapturedVideoFrame {
+                tx.send(Some(CapturedVideoFrame {
                     sequence: sequence as u64,
                     image_data: Arc::new(png.into_inner()),
                     elapsed: Duration::ZERO,
@@ -2580,13 +2658,12 @@ mod tests {
                     timestamp: cursor_timestamp(),
                     device_width: 64.0,
                     device_height: 64.0,
-                })
-                .await
+                }))
                 .unwrap();
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
             drop(tx);
-            let count = encoder.await.unwrap().unwrap();
+            let count = encoder.await.unwrap().unwrap().frames;
             assert!(count >= 24, "expected repeated frames, got {count}");
             let probe = std::process::Command::new("ffprobe")
                 .args([
