@@ -81,6 +81,8 @@ Wait commands extend the CLI's read timeout to match their budget. Other command
 
 When a command times out because the page stopped responding, for example a script stuck in `while(true){}`, it fails with code `page_wedged`. If agent-browser launched the browser and the next command also times out, agent-browser replaces the stuck tab with a blank one, so later commands work again after you navigate. A page that recovers in between keeps its tab. With `--cdp` or `--auto-connect`, the tab belongs to your browser and is left as is. The tab is also left as is when an action policy denies `tab_new` or `tab_close` or requires confirmation for them.
 
+A command whose tab closes before Chrome answers fails right away with `Target closed: CDP session <id> detached` instead of waiting for the timeout. For example, `eval` fails this way when the script it runs calls `window.close()`. Run `agent-browser tab` to list the remaining tabs and switch to one. Iframes that a page adds and removes quickly are dropped the same way, so they don't hold up later commands.
+
 ## Related tools
 
 <table>

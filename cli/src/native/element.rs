@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
+use super::click_point::{place_in_dispatch_viewport, ClickPoint};
 
 #[derive(Debug, Clone)]
 pub struct RefEntry {
@@ -14,6 +15,8 @@ pub struct RefEntry {
     pub selector: Option<String>,
     pub frame_id: Option<String>,
     allow_role_fallback: bool,
+    /// Session and loader of the document the ref was issued in, when known.
+    document: Option<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -69,6 +72,7 @@ impl RefMap {
                 selector: None,
                 frame_id: frame_id.map(|s| s.to_string()),
                 allow_role_fallback: true,
+                document: None,
             },
         );
     }
@@ -87,6 +91,7 @@ impl RefMap {
                 selector: None,
                 frame_id: None,
                 allow_role_fallback: false,
+                document: None,
             },
         );
     }
@@ -109,8 +114,31 @@ impl RefMap {
                 selector: Some(selector),
                 frame_id: None,
                 allow_role_fallback: true,
+                document: None,
             },
         );
+    }
+
+    /// Bind a ref to the document currently recorded for its page and frame.
+    pub fn bind_recorded_document(
+        &mut self,
+        ref_id: &str,
+        page_session: &str,
+        frame: Option<&str>,
+    ) {
+        let document = self
+            .document_identity(page_session, frame)
+            .map(|(session, loader)| (session.to_string(), loader.to_string()));
+        if let Some(entry) = self.map.get_mut(ref_id) {
+            entry.document = document;
+        }
+    }
+
+    /// Bind a ref to a document observed when the ref was created.
+    pub fn bind_document(&mut self, ref_id: &str, session: &str, loader: &str) {
+        if let Some(entry) = self.map.get_mut(ref_id) {
+            entry.document = Some((session.to_string(), loader.to_string()));
+        }
     }
 
     pub fn get(&self, ref_id: &str) -> Option<&RefEntry> {
@@ -144,6 +172,15 @@ impl RefMap {
 
     pub fn begin_snapshot(&mut self) {
         self.map.clear();
+    }
+
+    /// Starts a replacement map with the same durable identities and ref counter.
+    pub fn for_snapshot(&self) -> Self {
+        Self {
+            map: HashMap::new(),
+            documents: self.documents.clone(),
+            next_ref: self.next_ref,
+        }
     }
 
     /// Observe the document behind a page/frame pair. Unknown documents never
@@ -223,6 +260,17 @@ impl RefMap {
         self.documents
             .retain(|(entry_page, _), _| entry_page != page_session);
         self.map.clear();
+    }
+
+    /// Session and loader of the document refs were issued in for a page/frame.
+    pub fn document_identity(
+        &self,
+        page_session: &str,
+        frame: Option<&str>,
+    ) -> Option<(&str, &str)> {
+        self.documents
+            .get(&(page_session.to_string(), frame.map(str::to_string)))
+            .map(|document| (document.session.as_str(), document.loader.as_str()))
     }
 
     /// Drop all document identities while preserving the monotonic ref counter.
@@ -334,27 +382,17 @@ async fn resolve_center_in_same_process_frame(
     let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
     let find_expr = build_find_element_js_in("doc", selector);
     let function = format!(
-        r#"function() {{
+        r#"async function() {{
             const doc = this.contentDocument;
             if (!doc) return null;
             const el = {find_expr};
             if (!el) return null;
-            if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
-            else el.scrollIntoView({{ block: 'center', inline: 'center' }});
-            const rect = el.getBoundingClientRect();
-            let x = rect.x + rect.width / 2;
-            let y = rect.y + rect.height / 2;
-            let win = doc.defaultView;
-            while (win && win.frameElement) {{
-                const frameRect = win.frameElement.getBoundingClientRect();
-                x += frameRect.x + win.frameElement.clientLeft;
-                y += frameRect.y + win.frameElement.clientTop;
-                win = win.parent;
-            }}
+            const clickPoint = {CLICK_POINT_JS};
+            const point = await clickPoint(el, doc);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            const topDoc = win ? win.document : doc;
-            return {{ x: x, y: y, reason: notActionable(topDoc, el, x, y), blocker: blockerAt(topDoc, el, x, y) }};
+            const topDoc = (point.view && point.view.document) || doc;
+            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(doc, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
         }}"#,
     );
     let result = client
@@ -364,6 +402,7 @@ async fn resolve_center_in_same_process_frame(
                 "objectId": owner_object_id,
                 "functionDeclaration": function,
                 "returnByValue": true,
+                "awaitPromise": true,
             })),
             Some(session_id),
         )
@@ -422,6 +461,165 @@ async fn resolve_object_in_same_process_frame(
         .ok_or_else(|| format!("Element not found in the selected frame: {}", selector))
 }
 
+const STALE_DOCUMENT_MARKER: &str = "is from a document that is no longer loaded";
+
+/// Reported when an action ran but the document it acted on was replaced
+/// before its effect could be read back.
+pub const STATE_NOT_VERIFIED: &str = "page navigated after the action; state not verified";
+
+/// Whether an error says the document a ref points into is gone: the stale-ref
+/// guard, or the browser reporting a destroyed context.
+fn document_gone(error: &str) -> bool {
+    error.contains(STALE_DOCUMENT_MARKER)
+        || error.contains("Cannot find context with specified id")
+        || error.contains("Inspected target navigated or closed")
+        || error.contains("Execution context was destroyed")
+}
+
+/// Run a read that confirms an action that already happened. A document that
+/// is gone by then is not a failure of the action: the read yields `None`.
+pub async fn read_after_action<T>(
+    read: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<Option<T>, String> {
+    match read.await {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if document_gone(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Fail a ref whose document has been replaced since it was issued: the page
+/// navigated (a click, script or redirect), or the iframe it lives in did.
+/// Same-document changes keep the loader, so their refs stay valid.
+pub(super) async fn ensure_ref_document_current(
+    client: &CdpClient,
+    session_id: &str,
+    ref_id: &str,
+    entry: &RefEntry,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    let frame = entry.frame_id.as_deref();
+    let Some((issued_session, issued_loader)) = entry.document.as_ref() else {
+        return Ok(());
+    };
+    let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
+    let stale = || {
+        format!(
+            "Ref @{ref_id} {STALE_DOCUMENT_MARKER} (the page navigated or the frame was removed). Take a new snapshot and use a fresh ref."
+        )
+    };
+    if issued_session != effective_session_id {
+        return Err(stale());
+    }
+    let Ok(tree) = client
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .await
+    else {
+        return Ok(());
+    };
+    // A document was recorded, so one that can no longer be read (frame gone,
+    // loader missing) is not the document the ref was issued in.
+    match super::snapshot::frame_loader(&tree["frameTree"], frame) {
+        Some(current) if current == issued_loader.as_str() => Ok(()),
+        _ => Err(stale()),
+    }
+}
+
+/// Session and loader of the document currently shown in a frame.
+pub(super) async fn current_document(
+    client: &CdpClient,
+    session_id: &str,
+    frame: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
+    let tree = client
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .await
+        .ok()?;
+    let loader = super::snapshot::frame_loader(&tree["frameTree"], frame)?;
+    Some((effective_session_id.to_string(), loader.to_string()))
+}
+
+async fn resolve_ref_center(
+    client: &CdpClient,
+    session_id: &str,
+    entry: &RefEntry,
+    ref_id: &str,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+    require_actionable: bool,
+) -> Result<(f64, f64, String), String> {
+    let effective_session_id =
+        resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
+
+    // Try cached backend_node_id first (fast path)
+    if let Some(backend_node_id) = entry.backend_node_id {
+        if let Some(object_id) =
+            resolve_node_object_id(client, effective_session_id, backend_node_id).await
+        {
+            if let Some(mut point) = node_click_point(
+                client,
+                effective_session_id,
+                &object_id,
+                selector_or_ref,
+                require_actionable,
+            )
+            .await?
+            {
+                place_in_dispatch_viewport(
+                    client,
+                    effective_session_id,
+                    entry.frame_id.as_deref(),
+                    backend_node_id,
+                    &mut point,
+                    selector_or_ref,
+                )
+                .await?;
+                return Ok((point.x, point.y, effective_session_id.to_string()));
+            }
+        }
+        if !entry.allow_role_fallback {
+            return Err(format!("Element ref {ref_id} is stale"));
+        }
+        // backend_node_id is stale; re-query the accessibility tree below
+    }
+
+    // Fallback: re-query the accessibility tree to find a fresh node by role/name
+    let fresh_id = find_node_id_by_role_name(
+        client,
+        session_id,
+        &entry.role,
+        &entry.name,
+        entry.nth,
+        entry.frame_id.as_deref(),
+        iframe_sessions,
+    )
+    .await?;
+    let object_id = resolve_node_object_id(client, effective_session_id, fresh_id)
+        .await
+        .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
+    let mut point = node_click_point(
+        client,
+        effective_session_id,
+        &object_id,
+        selector_or_ref,
+        require_actionable,
+    )
+    .await?
+    .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
+    place_in_dispatch_viewport(
+        client,
+        effective_session_id,
+        entry.frame_id.as_deref(),
+        fresh_id,
+        &mut point,
+        selector_or_ref,
+    )
+    .await?;
+    Ok((point.x, point.y, effective_session_id.to_string()))
+}
+
 pub async fn resolve_element_center(
     client: &CdpClient,
     session_id: &str,
@@ -434,80 +632,21 @@ pub async fn resolve_element_center(
         let entry = ref_map
             .get(&ref_id)
             .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
-
-        let effective_session_id =
-            resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
-
-        // Try cached backend_node_id first (fast path)
-        if let Some(backend_node_id) = entry.backend_node_id {
-            scroll_node_into_view(client, effective_session_id, backend_node_id).await;
-            let result: Result<DomGetBoxModelResult, String> = client
-                .send_command_typed(
-                    "DOM.getBoxModel",
-                    &DomGetBoxModelParams {
-                        backend_node_id: Some(backend_node_id),
-                        node_id: None,
-                        object_id: None,
-                    },
-                    Some(effective_session_id),
-                )
-                .await;
-
-            if let Ok(r) = result {
-                let (x, y) = box_model_center(&r.model);
-                check_node_interception(
-                    client,
-                    effective_session_id,
-                    backend_node_id,
-                    selector_or_ref,
-                    x,
-                    y,
-                    require_actionable,
-                )
-                .await?;
-                return Ok((x, y, effective_session_id.to_string()));
-            }
-            if !entry.allow_role_fallback {
-                return Err(format!("Element ref {ref_id} is stale"));
-            }
-            // backend_node_id is stale; re-query the accessibility tree below
-        }
-
-        // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let fresh_id = find_node_id_by_role_name(
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
+        let point = resolve_ref_center(
             client,
             session_id,
-            &entry.role,
-            &entry.name,
-            entry.nth,
-            entry.frame_id.as_deref(),
-            iframe_sessions,
-        )
-        .await?;
-        scroll_node_into_view(client, effective_session_id, fresh_id).await;
-        let result: DomGetBoxModelResult = client
-            .send_command_typed(
-                "DOM.getBoxModel",
-                &DomGetBoxModelParams {
-                    backend_node_id: Some(fresh_id),
-                    node_id: None,
-                    object_id: None,
-                },
-                Some(effective_session_id),
-            )
-            .await?;
-        let (x, y) = box_model_center(&result.model);
-        check_node_interception(
-            client,
-            effective_session_id,
-            fresh_id,
+            entry,
+            &ref_id,
             selector_or_ref,
-            x,
-            y,
+            iframe_sessions,
             require_actionable,
         )
-        .await?;
-        return Ok((x, y, effective_session_id.to_string()));
+        .await;
+        // A document replaced during resolution explains a failure here and
+        // would have been re-queried by the fallback on success.
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
+        return point;
     }
 
     // CSS selector: honor an active `frame <sel>` selection.
@@ -605,20 +744,14 @@ pub async fn session_viewport_offset(
     Err("Cyclic recording cursor frame ownership".to_string())
 }
 
-/// Hit-test a ref-resolved node at its computed click point and error if an
-/// unrelated element (overlay, banner, sticky header) would receive the input
-/// instead. Best effort: resolution failures skip the check rather than block
-/// the interaction.
-async fn check_node_interception(
+/// Resolve a backend node id to an object handle, or None when the node is
+/// gone so the caller can fall back to the accessibility tree.
+async fn resolve_node_object_id(
     client: &CdpClient,
     session_id: &str,
     backend_node_id: i64,
-    target: &str,
-    x: f64,
-    y: f64,
-    require_actionable: bool,
-) -> Result<(), String> {
-    let resolved: Result<DomResolveNodeResult, String> = client
+) -> Option<String> {
+    let resolved: DomResolveNodeResult = client
         .send_command_typed(
             "DOM.resolveNode",
             &DomResolveNodeParams {
@@ -628,26 +761,28 @@ async fn check_node_interception(
             },
             Some(session_id),
         )
-        .await;
-    let Ok(resolved) = resolved else {
-        return Ok(());
-    };
-    let Some(object_id) = resolved.object.object_id else {
-        return Ok(());
-    };
-    // Box-model coordinates are in the top-level viewport space, so the
-    // hit-test starts from the top document. For an OOPIF node the
-    // frameElement walk stops at the process boundary, where the frame's own
-    // document and session-local coordinates are already consistent.
+        .await
+        .ok()?;
+    resolved.object.object_id
+}
+
+/// Press point for a resolved node: scroll it in, wait for the page to settle,
+/// and report why the point cannot be pressed before input is dispatched.
+async fn node_click_point(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    target: &str,
+    require_actionable: bool,
+) -> Result<Option<ClickPoint>, String> {
     let function = format!(
-        r#"function(x, y) {{
-            let topDoc = this.ownerDocument || document;
-            while (topDoc.defaultView && topDoc.defaultView.frameElement) {{
-                topDoc = topDoc.defaultView.frameElement.ownerDocument;
-            }}
-            const blockerAt = {BLOCKER_AT_JS};
+        r#"async function() {{
+            if (!this.isConnected) return {{ connected: false }};
+            const doc = this.ownerDocument || document;
+            const clickPoint = {CLICK_POINT_JS};
+            const point = await clickPoint(this, doc);
             const notActionable = {ACTIONABILITY_JS};
-            return {{ blocker: blockerAt(topDoc, this, x, y), reason: notActionable(topDoc, this, x, y) }};
+            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView) }};
         }}"#,
     );
     let result = client
@@ -656,41 +791,98 @@ async fn check_node_interception(
             Some(serde_json::json!({
                 "objectId": object_id,
                 "functionDeclaration": function,
-                "arguments": [{ "value": x }, { "value": y }],
                 "returnByValue": true,
+                "awaitPromise": true,
             })),
             Some(session_id),
         )
-        .await;
-    if let Ok(value) = result {
-        let value = value.get("result").and_then(|r| r.get("value"));
-        if require_actionable {
-            if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
-                return Err(not_actionable_error(target, reason));
-            }
-        }
-        if let Some(blocker) = value
-            .and_then(|v| v.get("blocker"))
-            .and_then(|v| v.as_str())
-        {
-            return Err(intercepted_error(target, blocker));
+        .await?;
+    let value = result.get("result").and_then(|r| r.get("value"));
+    if value
+        .and_then(|v| v.get("connected"))
+        .and_then(|v| v.as_bool())
+        == Some(false)
+    {
+        return Ok(None);
+    }
+    if require_actionable {
+        if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
+            return Err(not_actionable_error(target, reason));
         }
     }
-    Ok(())
+    match (
+        value.and_then(|v| v.get("x")).and_then(|v| v.as_f64()),
+        value.and_then(|v| v.get("y")).and_then(|v| v.as_f64()),
+    ) {
+        (Some(x), Some(y)) => Ok(Some(ClickPoint { x, y })),
+        _ => Err(format!("Element not found: {}", target)),
+    }
 }
 
-/// Coordinates from DOM.getBoxModel are viewport-relative, and input events
-/// only land inside the viewport, so make sure the node is visible first.
-/// Best effort: a node that cannot be scrolled (display:none, detached) will
-/// fail in DOM.getBoxModel with a clearer error anyway.
-async fn scroll_node_into_view(client: &CdpClient, session_id: &str, backend_node_id: i64) {
-    let _ = client
-        .send_command(
-            "DOM.scrollIntoViewIfNeeded",
-            Some(serde_json::json!({ "backendNodeId": backend_node_id })),
-            Some(session_id),
+async fn resolve_ref_object_id(
+    client: &CdpClient,
+    session_id: &str,
+    entry: &RefEntry,
+    ref_id: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(String, String), String> {
+    let effective_session_id =
+        resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
+
+    // Try cached backend_node_id first (fast path)
+    if let Some(backend_node_id) = entry.backend_node_id {
+        let result: Result<DomResolveNodeResult, String> = client
+            .send_command_typed(
+                "DOM.resolveNode",
+                &DomResolveNodeParams {
+                    backend_node_id: Some(backend_node_id),
+                    node_id: None,
+                    object_group: Some("agent-browser".to_string()),
+                },
+                Some(effective_session_id),
+            )
+            .await;
+
+        if let Ok(r) = result {
+            if let Some(object_id) = r.object.object_id {
+                if !is_detached(client, effective_session_id, &object_id).await {
+                    return Ok((object_id, effective_session_id.to_string()));
+                }
+            }
+        }
+        if !entry.allow_role_fallback {
+            return Err(format!("Element ref {ref_id} is stale"));
+        }
+        // backend_node_id is stale; re-query the accessibility tree below
+    }
+
+    // Fallback: re-query the accessibility tree to find a fresh node by role/name
+    let fresh_id = find_node_id_by_role_name(
+        client,
+        session_id,
+        &entry.role,
+        &entry.name,
+        entry.nth,
+        entry.frame_id.as_deref(),
+        iframe_sessions,
+    )
+    .await?;
+    let result: DomResolveNodeResult = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(fresh_id),
+                node_id: None,
+                object_group: Some("agent-browser".to_string()),
+            },
+            Some(effective_session_id),
         )
-        .await;
+        .await?;
+    let object_id = result
+        .object
+        .object_id
+        .ok_or_else(|| format!("No objectId for ref {}", ref_id))?;
+    Ok((object_id, effective_session_id.to_string()))
 }
 
 pub async fn resolve_element_object_id(
@@ -704,64 +896,11 @@ pub async fn resolve_element_object_id(
         let entry = ref_map
             .get(&ref_id)
             .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
-
-        let effective_session_id =
-            resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
-
-        // Try cached backend_node_id first (fast path)
-        if let Some(backend_node_id) = entry.backend_node_id {
-            let result: Result<DomResolveNodeResult, String> = client
-                .send_command_typed(
-                    "DOM.resolveNode",
-                    &DomResolveNodeParams {
-                        backend_node_id: Some(backend_node_id),
-                        node_id: None,
-                        object_group: Some("agent-browser".to_string()),
-                    },
-                    Some(effective_session_id),
-                )
-                .await;
-
-            if let Ok(r) = result {
-                if let Some(object_id) = r.object.object_id {
-                    if !is_detached(client, effective_session_id, &object_id).await {
-                        return Ok((object_id, effective_session_id.to_string()));
-                    }
-                }
-            }
-            if !entry.allow_role_fallback {
-                return Err(format!("Element ref {ref_id} is stale"));
-            }
-            // backend_node_id is stale; re-query the accessibility tree below
-        }
-
-        // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let fresh_id = find_node_id_by_role_name(
-            client,
-            session_id,
-            &entry.role,
-            &entry.name,
-            entry.nth,
-            entry.frame_id.as_deref(),
-            iframe_sessions,
-        )
-        .await?;
-        let result: DomResolveNodeResult = client
-            .send_command_typed(
-                "DOM.resolveNode",
-                &DomResolveNodeParams {
-                    backend_node_id: Some(fresh_id),
-                    node_id: None,
-                    object_group: Some("agent-browser".to_string()),
-                },
-                Some(effective_session_id),
-            )
-            .await?;
-        let object_id = result
-            .object
-            .object_id
-            .ok_or_else(|| format!("No objectId for ref {}", ref_id))?;
-        return Ok((object_id, effective_session_id.to_string()));
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
+        let object =
+            resolve_ref_object_id(client, session_id, entry, &ref_id, iframe_sessions).await;
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
+        return object;
     }
 
     // Selector fallback (CSS or XPath): honor an active `frame <sel>` selection.
@@ -1007,8 +1146,34 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     let hit = d.elementFromPoint(lx, ly);
     while (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && hit.contentDocument && hit !== el) {
         const r = hit.getBoundingClientRect();
-        lx -= r.x + hit.clientLeft;
-        ly -= r.y + hit.clientTop;
+        const ownerWin = hit.ownerDocument.defaultView;
+        const style = ownerWin ? ownerWin.getComputedStyle(hit) : null;
+        const scaleX = hit.offsetWidth > 0 ? r.width / hit.offsetWidth : 1;
+        const scaleY = hit.offsetHeight > 0 ? r.height / hit.offsetHeight : 1;
+        const borderLeft = style ? (parseFloat(style.borderLeftWidth) || 0) : hit.clientLeft;
+        const borderTop = style ? (parseFloat(style.borderTopWidth) || 0) : hit.clientTop;
+        const padLeft = style ? (parseFloat(style.paddingLeft) || 0) : 0;
+        const padTop = style ? (parseFloat(style.paddingTop) || 0) : 0;
+        const padRight = style ? (parseFloat(style.paddingRight) || 0) : 0;
+        const padBottom = style ? (parseFloat(style.paddingBottom) || 0) : 0;
+        const contentLeft = r.x + (borderLeft + padLeft) * scaleX;
+        const contentTop = r.y + (borderTop + padTop) * scaleY;
+        const contentWidth = Math.max(0, hit.clientWidth - padLeft - padRight);
+        const contentHeight = Math.max(0, hit.clientHeight - padTop - padBottom);
+        const renderedWidth = contentWidth * scaleX;
+        const renderedHeight = contentHeight * scaleY;
+        if (
+            renderedWidth <= 0 || renderedHeight <= 0 ||
+            lx < contentLeft || lx >= contentLeft + renderedWidth ||
+            ly < contentTop || ly >= contentTop + renderedHeight
+        ) {
+            break;
+        }
+        const childWin = hit.contentDocument.defaultView;
+        const vw = (childWin && childWin.innerWidth) || contentWidth;
+        const vh = (childWin && childWin.innerHeight) || contentHeight;
+        lx = (lx - contentLeft) * (vw / renderedWidth);
+        ly = (ly - contentTop) * (vh / renderedHeight);
         d = hit.contentDocument;
         hit = d.elementFromPoint(lx, ly);
     }
@@ -1032,44 +1197,105 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     return desc;
 }"#;
 
+const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
+    const measure = () => {
+        const r = el.getBoundingClientRect();
+        const lx = r.x + r.width / 2;
+        const ly = r.y + r.height / 2;
+        let x = lx;
+        let y = ly;
+        const own = doc.defaultView || window;
+        let reachable = lx >= 0 && ly >= 0 && lx < own.innerWidth && ly < own.innerHeight;
+        const frames = [];
+        let win = own;
+        while (win && win.frameElement) {
+            const fe = win.frameElement;
+            const frameRect = fe.getBoundingClientRect();
+            const ownerWin = fe.ownerDocument.defaultView || win.parent;
+            const style = ownerWin.getComputedStyle(fe);
+            const scaleX = fe.offsetWidth > 0 ? frameRect.width / fe.offsetWidth : 1;
+            const scaleY = fe.offsetHeight > 0 ? frameRect.height / fe.offsetHeight : 1;
+            const borderLeft = parseFloat(style.borderLeftWidth) || 0;
+            const borderTop = parseFloat(style.borderTopWidth) || 0;
+            const padLeft = parseFloat(style.paddingLeft) || 0;
+            const padTop = parseFloat(style.paddingTop) || 0;
+            const padRight = parseFloat(style.paddingRight) || 0;
+            const padBottom = parseFloat(style.paddingBottom) || 0;
+            const contentLeft = frameRect.x + (borderLeft + padLeft) * scaleX;
+            const contentTop = frameRect.y + (borderTop + padTop) * scaleY;
+            const contentWidth = Math.max(0, fe.clientWidth - padLeft - padRight);
+            const contentHeight = Math.max(0, fe.clientHeight - padTop - padBottom);
+            const renderedWidth = contentWidth * scaleX;
+            const renderedHeight = contentHeight * scaleY;
+            const vw = win.innerWidth;
+            const vh = win.innerHeight;
+            x = contentLeft + (vw > 0 ? x * (renderedWidth / vw) : 0);
+            y = contentTop + (vh > 0 ? y * (renderedHeight / vh) : 0);
+            const parentWin = win.parent;
+            reachable = reachable
+                && renderedWidth > 0 && renderedHeight > 0
+                && x >= contentLeft && x < contentLeft + renderedWidth
+                && y >= contentTop && y < contentTop + renderedHeight
+                && x >= 0 && y >= 0
+                && x < parentWin.innerWidth && y < parentWin.innerHeight;
+            frames.push(fe);
+            win = parentWin;
+        }
+        const view = win || own;
+        reachable = reachable && x >= 0 && y >= 0 && x < view.innerWidth && y < view.innerHeight;
+        return { x: x, y: y, lx: lx, ly: ly, frames: frames, view: view, inView: reachable, box: r.width > 0 || r.height > 0 };
+    };
+    const settle = async (m) => {
+        for (let i = 0; i < 5; i++) {
+            await new Promise((resolve) => {
+                requestAnimationFrame(() => requestAnimationFrame(resolve));
+                setTimeout(resolve, 100);
+            });
+            const next = measure();
+            const moved = next.x !== m.x || next.y !== m.y;
+            m = next;
+            if (!moved) break;
+        }
+        return m;
+    };
+    let m = measure();
+    if (el.scrollIntoViewIfNeeded) {
+        el.scrollIntoViewIfNeeded(true);
+        const next = measure();
+        m = next.x !== m.x || next.y !== m.y ? await settle(next) : next;
+    }
+    for (let scrolls = 0; scrolls < 2 && m.box && !m.inView; scrolls++) {
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        for (const frame of [...m.frames].reverse()) frame.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        m = await settle(measure());
+    }
+    return { x: m.x, y: m.y, lx: m.lx, ly: m.ly, view: m.view, inView: m.inView };
+})"#;
+
 /// Returns why a click at (x, y) cannot reach `el`, or null when it can.
 /// It fails open when the engine lacks an API it needs.
-const ACTIONABILITY_JS: &str = r#"(doc, el, x, y) => {
+const ACTIONABILITY_JS: &str = r#"(el, inView) => {
     try {
         const rect = el.getBoundingClientRect();
         if ((rect.width <= 0 && rect.height <= 0) || ['hidden', 'collapse'].includes(el.ownerDocument.defaultView.getComputedStyle(el).visibility)) return 'not visible';
         if (el.disabled || el.matches(':disabled')) return 'disabled';
-        const view = doc.defaultView;
-        const outside = x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight;
-        if (outside && !doc.elementFromPoint(x, y)) return 'outside the viewport';
+        if (!inView) return 'outside the viewport';
     } catch (e) {}
     return null;
 }"#;
 
 fn build_selector_js(selector: &str) -> String {
     let find_expr = build_find_element_js(selector);
-    // Input events dispatch at viewport coordinates, so an element outside the
-    // viewport must be scrolled into view first or the click lands on nothing.
-    // The blocker check reports an overlay covering the click point instead of
-    // letting the input land on it and silently doing the wrong thing.
     format!(
-        r#"(() => {{
+        r#"(async () => {{
             const el = {find_expr};
             if (!el) return null;
-            const inView = (r) => r.width > 0 && r.height > 0 &&
-                r.bottom > 0 && r.right > 0 &&
-                r.top < (window.innerHeight || document.documentElement.clientHeight) &&
-                r.left < (window.innerWidth || document.documentElement.clientWidth);
-            let rect = el.getBoundingClientRect();
-            if (!inView(rect)) {{
-                el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-                rect = el.getBoundingClientRect();
-            }}
-            const x = rect.x + rect.width / 2;
-            const y = rect.y + rect.height / 2;
+            const clickPoint = {CLICK_POINT_JS};
+            const point = await clickPoint(el, document);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            return {{ x: x, y: y, reason: notActionable(document, el, x, y), blocker: blockerAt(document, el, x, y) }};
+            const topDoc = (point.view && point.view.document) || document;
+            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(document, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
         }})()"#,
     )
 }
@@ -1088,7 +1314,7 @@ async fn resolve_by_selector(
             &EvaluateParams {
                 expression: js,
                 return_by_value: Some(true),
-                await_promise: Some(false),
+                await_promise: Some(true),
             },
             Some(session_id),
         )
@@ -1112,7 +1338,7 @@ async fn resolve_by_selector(
     }
 }
 
-fn intercepted_error(target: &str, blocker: &str) -> String {
+pub(super) fn intercepted_error(target: &str, blocker: &str) -> String {
     format!(
         "Element '{}' is covered by <{}> at its click point, so the input would land on that element instead. Dismiss or interact with the covering element first (it is often a dialog, banner, or sticky header).",
         target, blocker
@@ -1124,17 +1350,6 @@ fn not_actionable_error(target: &str, reason: &str) -> String {
         "Element '{}' is {}, so the click would not reach it",
         target, reason
     )
-}
-
-fn box_model_center(model: &BoxModel) -> (f64, f64) {
-    // content quad: [x1,y1, x2,y2, x3,y3, x4,y4]
-    if model.content.len() >= 8 {
-        let x = (model.content[0] + model.content[2] + model.content[4] + model.content[6]) / 4.0;
-        let y = (model.content[1] + model.content[3] + model.content[5] + model.content[7]) / 4.0;
-        (x, y)
-    } else {
-        (0.0, 0.0)
-    }
 }
 
 pub async fn get_element_text(
@@ -1810,6 +2025,80 @@ mod tests {
         assert_eq!(map.next_ref_num(), 2);
     }
 
+    #[tokio::test]
+    async fn read_after_action_tolerates_only_a_gone_document() {
+        let gone = format!("Ref @e1 {STALE_DOCUMENT_MARKER} (x)");
+        assert_eq!(
+            read_after_action(async { Ok::<_, String>(true) }).await,
+            Ok(Some(true))
+        );
+        assert_eq!(
+            read_after_action(async { Err::<bool, _>(gone) }).await,
+            Ok(None)
+        );
+        assert_eq!(
+            read_after_action(async {
+                Err::<bool, _>(
+                    "CDP error (Runtime.callFunctionOn): Cannot find context with specified id"
+                        .to_string(),
+                )
+            })
+            .await,
+            Ok(None)
+        );
+        assert_eq!(
+            read_after_action(async { Err::<bool, _>("Element not found: @e1".to_string()) }).await,
+            Err("Element not found: @e1".to_string())
+        );
+    }
+
+    #[test]
+    fn refs_carry_the_document_they_were_issued_in() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-1")));
+        map.add("e1".to_string(), Some(1), "button", "Go", None);
+        map.bind_recorded_document("e1", "page-a", None);
+        // A later temp ref for another document does not rebind the first.
+        map.add("e2".to_string(), Some(2), "button", "Go", None);
+        map.bind_document("e2", "page-a", "loader-2");
+        assert_eq!(
+            map.get("e1").unwrap().document,
+            Some(("page-a".to_string(), "loader-1".to_string()))
+        );
+        assert_eq!(
+            map.get("e2").unwrap().document,
+            Some(("page-a".to_string(), "loader-2".to_string()))
+        );
+        // Without a recorded document a ref carries none.
+        map.add("e3".to_string(), Some(3), "button", "Go", None);
+        map.bind_recorded_document("e3", "page-b", None);
+        assert_eq!(map.get("e3").unwrap().document, None);
+    }
+
+    #[test]
+    fn document_identity_is_per_page_and_frame() {
+        let mut map = RefMap::new();
+        assert_eq!(map.document_identity("page-a", None), None);
+        assert!(map.observe_document("page-a", None, "page-a", Some("main-1")));
+        assert!(map.observe_document("page-a", Some("f"), "page-a", Some("frame-1")));
+        assert_eq!(
+            map.document_identity("page-a", None),
+            Some(("page-a", "main-1"))
+        );
+        assert_eq!(
+            map.document_identity("page-a", Some("f")),
+            Some(("page-a", "frame-1"))
+        );
+        // A frame-only snapshot after a navigation records the frame alone.
+        map.invalidate_page("page-a");
+        assert!(map.observe_document("page-a", Some("f"), "page-a", Some("frame-2")));
+        assert_eq!(map.document_identity("page-a", None), None);
+        assert_eq!(
+            map.document_identity("page-a", Some("f")),
+            Some(("page-a", "frame-2"))
+        );
+    }
+
     #[test]
     fn test_durable_refs_are_scoped_by_document_and_frame() {
         let mut map = RefMap::new();
@@ -1884,24 +2173,6 @@ mod tests {
         let js = build_count_elements_js("xpath=//li");
         assert!(js.contains("document.evaluate(\"//li\", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"));
         assert!(!js.contains("querySelectorAll"));
-    }
-
-    #[test]
-    fn test_box_model_center() {
-        let response: DomGetBoxModelResult = serde_json::from_value(serde_json::json!({
-            "model": {
-                "content": [10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
-                "padding": [9.0, 19.0, 111.0, 19.0, 111.0, 61.0, 9.0, 61.0],
-                "border": [8.0, 18.0, 112.0, 18.0, 112.0, 62.0, 8.0, 62.0],
-                "margin": [7.0, 17.0, 113.0, 17.0, 113.0, 63.0, 7.0, 63.0],
-                "width": 100.5,
-                "height": 40.25
-            }
-        }))
-        .unwrap();
-        let (x, y) = box_model_center(&response.model);
-        assert!((x - 60.0).abs() < 0.01);
-        assert!((y - 40.0).abs() < 0.01);
     }
 
     // -----------------------------------------------------------------------
