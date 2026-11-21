@@ -2213,18 +2213,27 @@ lb.querySelectorAll('[role=option]').forEach(function(o){o.addEventListener('cli
     .await;
     assert_eq!(get_data(&resp)["result"], "banana");
 
-    // Unknown option errors and lists what is available.
+    // Unknown option errors; the available options are in data.options, not
+    // in the message.
     let resp = execute_command(
         &json!({ "id": "8", "action": "select", "selector": "#cb", "values": ["Dragonfruit"] }),
         &mut state,
     )
     .await;
     assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(resp["code"], "option_not_found");
     assert!(
-        serde_json::to_string(&resp)
+        !resp["error"]
+            .as_str()
             .unwrap_or_default()
-            .contains("Available options"),
-        "error should list options: {resp}"
+            .contains("Banana"),
+        "page text stays out of the message: {resp}"
+    );
+    let options = resp["data"]["options"].as_array().expect("data.options");
+    let labels: Vec<_> = options.iter().filter_map(|o| o["label"].as_str()).collect();
+    assert!(
+        labels.contains(&"Banana") && labels.contains(&"Apple"),
+        "data.options should list the options: {resp}"
     );
 
     // Native <select> path is unchanged.
@@ -2978,6 +2987,14 @@ async fn e2e_form_actions_refuse_before_acting() {
     if resp["success"] != false || resp["code"] != "option_not_found" {
         failures.push(format!("hidden text matched as a label: {resp}"));
     }
+    // The options of a native select are in data.options, never in the message.
+    let listed = resp["data"]["options"].as_array().is_some_and(|o| {
+        o.iter()
+            .any(|o| o["label"] == "Short" && o["value"].is_string())
+    });
+    if !listed || resp["error"].as_str().unwrap_or_default().contains("Short") {
+        failures.push(format!("native select options: {resp}"));
+    }
     let resp = execute_command(
         &json!({ "id": "x", "action": "select", "selector": "#lbl", "values": ["Short"] }),
         &mut state,
@@ -3171,6 +3188,61 @@ async fn e2e_form_actions_focus_guard_allows_focusable_targets() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// `fill` and `type --clear` replace the content of an editable region inside a
+/// same-origin iframe, using the frame's own document and selection.
+#[tokio::test]
+#[ignore]
+async fn e2e_form_actions_clear_editable_in_same_origin_iframe() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body><iframe id='f' srcdoc=\"",
+        "<div id='ce' contenteditable>old</div>",
+        "<div id='ce2' contenteditable>old</div>\"></iframe></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "frame", "selector": "#f" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut failures = Vec::new();
+    for (action, selector, id) in [("fill", "#ce", "ce"), ("type", "#ce2", "ce2")] {
+        let cmd = if action == "fill" {
+            json!({ "id": "x", "action": "fill", "selector": selector, "value": "new" })
+        } else {
+            json!({ "id": "x", "action": "type", "selector": selector, "text": "new", "clear": true })
+        };
+        let resp = execute_command(&cmd, &mut state).await;
+        let got = evaluate_value(
+            &mut state,
+            &format!(
+                "document.getElementById('f').contentDocument.getElementById('{id}').innerText"
+            ),
+        )
+        .await;
+        if resp["success"] != true || got != json!("new") {
+            failures.push(format!(
+                "{action} {selector} in the iframe: {resp} -> {got}"
+            ));
+        }
+    }
+    let _ = execute_command(&json!({ "id": "z", "action": "close" }), &mut state).await;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A label stands for its control in every step; elements that can never take
 /// text are refused; typing reports a field that holds other than typed; and no
 /// message carries a string the page controls.
@@ -3195,6 +3267,8 @@ async fn e2e_form_actions_resolve_refuse_report_and_stay_clean() {
             "<input id='btn' type='button' value='b'><input id='sub' type='submit'><input id='rst' type='reset'>",
             "<input id='m' maxlength='5'><input id='mk'><input id='ok' value='ab'>",
             "<input id='ml' maxlength='12' value='hello world'>",
+            "<input id='sf5' maxlength='5' value='abcde' onfocus='this.select()'>",
+            "<input id='sfp' maxlength='5' value='abcde' onfocus='this.setSelectionRange(0, 2)'>",
             "<div id='ce' contenteditable>old</div><label id='celab' contenteditable>old</label><button id='cebtn' contenteditable>old</button>",
             "<label id='nolab' for='missing'>l</label><label id='wrap'>w</label><button id='bt'>b</button>",
             "<input id='selfocus' value='ab' onfocus='this.select()'><input id='auto'><input id='em' type='email'>",
@@ -3294,6 +3368,20 @@ async fn e2e_form_actions_resolve_refuse_report_and_stay_clean() {
     let warning = resp["warning"].as_str().unwrap_or_default();
     if resp["success"] != true || warning.is_empty() || warning.contains("hello") {
         failures.push(format!("type into a full maxlength field: {resp}"));
+    }
+
+    // A field that selects its text on focus has that text replaced, so a
+    // full replacement is not a cut; a real cut still is.
+    for (selector, text, cut) in [
+        ("#sf5", "12345", false),
+        ("#sfp", "12", false),
+        ("#sfp", "456789", true),
+    ] {
+        let resp = run(&mut state, "type", selector, &json!(text)).await;
+        let warning = resp["warning"].as_str().unwrap_or_default();
+        if resp["success"] != true || warning.starts_with("value_truncated") != cut {
+            failures.push(format!("type {text} into {selector}: {resp}"));
+        }
     }
 
     // Typing that the page limits or rewrites is reported, never failed, and

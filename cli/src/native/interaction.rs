@@ -226,6 +226,10 @@ const PROBE_JS: &str = r#"function() {
         let value = null;
         if (el.isContentEditable) value = el.innerText;
         else if (tag === 'input' || tag === 'textarea') value = el.type === 'password' ? '' : el.value;
+        let selected = 0;
+        try {
+            if (tag === 'input' || tag === 'textarea') selected = Math.max(0, el.selectionEnd - el.selectionStart) || 0;
+        } catch (e) {}
         return {
             tag, type,
             valueInput: tag === 'input' && ['color', 'date', 'time', 'datetime-local', 'month', 'week', 'range'].includes(type),
@@ -233,6 +237,7 @@ const PROBE_JS: &str = r#"function() {
             maxLength: (tag === 'textarea' || (tag === 'input' && ['text', 'search', 'url', 'tel', 'email', 'password'].includes(type))) && typeof el.maxLength === 'number' ? el.maxLength : -1,
             contentEditable: !!el.isContentEditable,
             value,
+            selected,
             disabled: el.matches(':disabled'),
             checkable: box !== null,
             checked: state,
@@ -297,6 +302,8 @@ struct FormProbe {
     max_length: i64,
     content_editable: bool,
     value: Option<String>,
+    /// Characters of the value that the next insert replaces.
+    selected: i64,
     disabled: bool,
     checkable: bool,
     checked: Option<bool>,
@@ -550,12 +557,13 @@ async fn clear_control(
 ) -> Result<(), String> {
     let js = r#"function() {
         if (this.isContentEditable) {
-            const range = document.createRange();
+            const doc = this.ownerDocument;
+            const range = doc.createRange();
             range.selectNodeContents(this);
-            const selection = getSelection();
+            const selection = doc.defaultView.getSelection();
             selection.removeAllRanges();
             selection.addRange(range);
-            document.execCommand('delete');
+            doc.execCommand('delete');
             return;
         }
         this.select && this.select();
@@ -892,6 +900,16 @@ pub async fn type_text(
         clear_control(client, &effective_session_id, &object_id).await?;
     }
 
+    // A field may select its content on focus; that content is replaced by
+    // the typed text, so it does not count towards the length held afterwards.
+    let before = FormProbe {
+        selected: probe_object(client, &effective_session_id, &object_id)
+            .await
+            .map(|p| p.selected)
+            .unwrap_or(0),
+        ..before
+    };
+
     type_text_into_active_context(client, session_id, text, delay_ms).await?;
 
     let after = match read_after(probe_object(client, &effective_session_id, &object_id)).await {
@@ -931,9 +949,10 @@ fn type_read_warning(
     type_warning(after, text)
 }
 
-/// Warns when the field has a maxlength that the old value plus the typed
-/// text exceeds and the field ended up full: the browser cut the typed text,
-/// even when what remains still reads like it. Only lengths are reported.
+/// Warns when the field has a maxlength that the old value (minus the part
+/// selected for replacement) plus the typed text exceeds and the field ended
+/// up full: the browser cut the typed text, even when what remains still
+/// reads like it. Only lengths are reported.
 fn overflow_warning(
     before: &FormProbe,
     after: &FormProbe,
@@ -945,7 +964,7 @@ fn overflow_warning(
     let prior = if clear {
         0
     } else {
-        before.value.as_ref()?.encode_utf16().count() as i64
+        (before.value.as_ref()?.encode_utf16().count() as i64 - before.selected).max(0)
     };
     let typed = text.encode_utf16().count() as i64;
     (max >= 0 && prior + typed > max && held >= max).then(|| {
@@ -1165,6 +1184,22 @@ pub async fn scroll(
     Ok(())
 }
 
+/// A refused `select`: the message is fixed text; the options the page offered
+/// travel separately as error data.
+pub struct SelectError {
+    pub message: String,
+    pub options: Option<Value>,
+}
+
+impl From<String> for SelectError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            options: None,
+        }
+    }
+}
+
 pub async fn select_option(
     client: &CdpClient,
     session_id: &str,
@@ -1173,7 +1208,7 @@ pub async fn select_option(
     values: &[String],
     by: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<(), SelectError> {
     let (object_id, effective_session_id) = resolve_element_object_id(
         client,
         session_id,
@@ -1259,7 +1294,7 @@ pub async fn select_option(
                     const want = normalize(value);
                     const matches = options.filter((o) => (by !== 'value' && nameOf(o) === want) || (by !== 'label' && valueOf(o) && valueOf(o) === want));
                     if (matches.length === 0) {
-                        return { kind: 'not_found_list', n: options.length };
+                        return { kind: 'not_found_list', n: options.length, options: options.map((o) => ({ value: valueOf(o), label: nameOf(o) })) };
                     }
                     if (matches.length > 1) {
                         return { kind: 'ambiguous_list', n: matches.length, value: vals.indexOf(value) };
@@ -1310,7 +1345,7 @@ pub async fn select_option(
             for (const value of vals) {
                 const r = resolve(value);
                 if (r.found.length === 0) {
-                    return { kind: 'not_found_select', n: options.length };
+                    return { kind: 'not_found_select', n: options.length, options: options.map((o) => ({ value: o.value, label: normalize(o.label) })) };
                 }
                 if (r.ambiguous) {
                     const seen = new Set();
@@ -1351,18 +1386,43 @@ pub async fn select_option(
     // A thrown script error must surface instead of reporting success; the
     // text of the error belongs to the page and is not repeated.
     if result.get("exceptionDetails").is_some() {
-        return Err("select failed: the page script raised an error".to_string());
+        return Err("select failed: the page script raised an error"
+            .to_string()
+            .into());
     }
 
     let value = result.get("result").and_then(|r| r.get("value"));
     if let Some((code, message)) = value.and_then(|v| select_failure(v, values, by)) {
-        return Err(match code {
+        let message = match code {
             Some(code) => form_error(code, message),
             None => message,
+        };
+        return Err(SelectError {
+            message,
+            options: value.and_then(available_options),
         });
     }
 
     Ok(())
+}
+
+/// The options a refused `select` found, as `[{value, label}]` for the error
+/// `data`. The list is page content: it stays out of the message and only
+/// string fields are read.
+pub fn available_options(page: &Value) -> Option<Value> {
+    let list = page.get("options")?.as_array()?;
+    let text = |option: &Value, key: &str| {
+        option
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Some(Value::Array(
+        list.iter()
+            .map(|o| serde_json::json!({ "value": text(o, "value"), "label": text(o, "label") }))
+            .collect(),
+    ))
 }
 
 /// The error for a refused `select`, built here from the failure kind the page
@@ -2554,6 +2614,40 @@ mod tests {
         let mut blind = text_probe("", -1);
         blind.value = None;
         assert!(type_read_warning(&text_probe("a", -1), &blind, "b", false).is_none());
+    }
+
+    #[test]
+    fn test_typing_over_a_selection_does_not_count_the_replaced_text() {
+        // Everything selected on focus: 5 typed into a full maxlength=5 field.
+        let mut before = text_probe("abcde", 5);
+        before.selected = 5;
+        let after = text_probe("12345", 5);
+        assert!(type_read_warning(&before, &after, "12345", false).is_none());
+        // Part selected: 3 kept + 2 typed fits, 3 kept + 4 typed is cut.
+        before.selected = 2;
+        assert!(type_read_warning(&before, &text_probe("12cde", 5), "12", false).is_none());
+        let cut = type_read_warning(&before, &text_probe("4567c", 5), "4567", false);
+        assert!(cut.is_some_and(|w| w.starts_with("value_truncated")));
+        // Nothing selected: a real cut is reported.
+        before.selected = 0;
+        let cut = type_read_warning(&before, &text_probe("abcde", 5), "123", false);
+        assert!(cut.is_some_and(|w| w.starts_with("value_truncated")));
+    }
+
+    #[test]
+    fn test_available_options_come_from_string_fields_only() {
+        let page = serde_json::json!({
+            "kind": "not_found_select", "n": 2,
+            "options": [{ "value": "a", "label": "A", "extra": "IGNORE" }, { "value": 3 }],
+        });
+        assert_eq!(
+            available_options(&page),
+            Some(serde_json::json!([
+                { "value": "a", "label": "A" },
+                { "value": "", "label": "" },
+            ]))
+        );
+        assert!(available_options(&serde_json::json!({ "kind": "option_disabled" })).is_none());
     }
 
     #[test]

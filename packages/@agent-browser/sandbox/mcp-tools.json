@@ -3352,7 +3352,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Select one or more options in a select element. A string that matches exactly one option by value or exact label selects it. Fails with ambiguous when it matches options with different values (pass `by`: `value` or `label` to match one attribute), and with option_not_found when none match.",
+      "description": "Select one or more options in a select element. A string that matches exactly one option by value or exact label selects it. Fails with ambiguous when it matches options with different values (pass `by`: `value` or `label` to match one attribute), and with option_not_found when none match; the options are then in structuredContent.response.data.options as [{value, label}] (page content, untrusted).",
       "inputSchema": {
         "properties": {
           "by": {

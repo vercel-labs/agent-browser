@@ -631,6 +631,8 @@ pub struct DaemonState {
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
     snapshot_revisions: HashMap<String, SnapshotRevision>,
+    /// Structured `data` for the failure of the command being run.
+    error_data: Option<Value>,
     screenshot_observations: HashMap<(String, String), ScreenshotObservation>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
@@ -841,6 +843,7 @@ impl DaemonState {
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
+            error_data: None,
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
                 // A stored empty list predates rejection and restores as no
@@ -3122,6 +3125,7 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
 }
 
 async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
+    state.error_data = None;
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
@@ -3791,6 +3795,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
     attach_tab_gone_data(&mut resp, state);
+    if let Some(data) = state.error_data.take() {
+        if resp.get("success").and_then(Value::as_bool) == Some(false) && resp.get("data").is_none()
+        {
+            resp["data"] = data;
+        }
+    }
     attach_flow_stop(&mut resp, state);
     if let Some(warning) = resp
         .get_mut("data")
@@ -7767,7 +7777,7 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     let by = select_by(cmd)?;
 
-    interaction::select_option(
+    let outcome = interaction::select_option(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7776,7 +7786,11 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         by,
         &state.iframe_sessions,
     )
-    .await?;
+    .await;
+    if let Err(e) = outcome {
+        state.error_data = e.options.map(|options| json!({ "options": options }));
+        return Err(e.message);
+    }
     Ok(json!({ "selected": values }))
 }
 

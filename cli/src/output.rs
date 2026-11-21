@@ -971,6 +971,17 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             color::error_indicator(),
             resp.error.as_deref().unwrap_or("Unknown error")
         );
+        if let Some(options) = resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("options"))
+            .and_then(|o| o.as_array())
+            .filter(|o| !o.is_empty())
+        {
+            let lines: Vec<String> = options.iter().map(|o| o.to_string()).collect();
+            let content = format!("Available options:\n{}", lines.join("\n"));
+            eprintln!("{}", format_with_boundaries(&content, None, opts));
+        }
         // Still print dialog warning after errors, since a pending dialog
         // is the most common cause of commands timing out
         if let Some(ref warning) = resp.warning {
@@ -2466,14 +2477,16 @@ string that matches options with different values (it equals one option's value 
 another's label, or several options share the label) fails with ambiguous and reports how many
 options matched. Pass --by value or --by label to match only that attribute, so every
 option is reachable, for example: select "#idx" 1 --by value. Options that share a value
-are one choice. No match fails with option_not_found. Several values on a select that is
+are one choice. No match fails with option_not_found; the message gives the option count
+and data.options lists them ([{value, label}], page content). Several values on a select that is
 not multiple (not_multiple), and a disabled select, are refused before anything changes.
 Put flags before --. Text after -- is literal, including values that look like flags.
 
 On a custom ARIA widget (role=combobox or role=listbox, as in Radix or Headless UI),
 select opens it when collapsed, waits for the visible role=option items, and clicks
-the ones whose accessible name or value matches. If none match, the error lists the
-available options, and a matched option marked aria-disabled is an error instead of
+the ones whose accessible name or value matches. If none match, the error carries the
+available options as data.options ([{value, label}], page content; wrapped in content
+boundaries when enabled), and a matched option marked aria-disabled is an error instead of
 a click. An option that is already selected in a multi-select listbox is left alone.
 
 Global Options:

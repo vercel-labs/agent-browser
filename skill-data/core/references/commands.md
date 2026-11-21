@@ -101,7 +101,7 @@ agent-browser uncheck @e1         # Uncheck checkbox
 agent-browser select @e1 "value"  # Select by visible label or value; an ambiguous string is an error, use --by value|label
 agent-browser select @e1 "a" "b"  # Select multiple options
 # On a custom ARIA combobox/listbox (Radix, Headless UI), select opens it and clicks the
-# role=option whose name or value matches; no match errors with the available options,
+# role=option whose name or value matches; no match errors, with the options in data.options (page content),
 # and a matched aria-disabled option errors instead of being clicked.
 agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
