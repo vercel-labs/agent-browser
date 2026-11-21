@@ -1,18 +1,8 @@
+#![cfg(unix)]
+
 use serde_json::{json, Value};
 use std::process::Command;
 use tempfile::TempDir;
-
-/// Winsock fails to initialize (os error 10106) without SystemRoot, so a
-/// cleared environment keeps the variables Windows needs to open sockets.
-fn windows_runtime_env() -> Vec<(String, std::ffi::OsString)> {
-    if !cfg!(windows) {
-        return Vec::new();
-    }
-    ["SystemRoot", "windir", "TEMP", "TMP"]
-        .into_iter()
-        .filter_map(|key| std::env::var_os(key).map(|value| (key.to_string(), value)))
-        .collect()
-}
 
 #[test]
 fn mcp_batch_rejects_invalid_commands() {
@@ -30,7 +20,6 @@ fn mcp_batch_rejects_invalid_commands() {
         .env("USERPROFILE", home.path())
         .env("AGENT_BROWSER_SOCKET_DIR", home.path().join("sockets"))
         .env("NO_COLOR", "1")
-        .envs(windows_runtime_env())
         .current_dir(home.path())
         .args(["mcp", "call", "agent_browser_batch", &batch_args])
         .output()
