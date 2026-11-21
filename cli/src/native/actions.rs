@@ -17819,10 +17819,17 @@ mod tests {
     #[tokio::test]
     async fn pin_tab_false_disables_a_pin_read_from_disk_on_attach() {
         use super::super::tab_binding::{load, save, TabBinding};
-        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_SESSION",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
         guard.remove("XDG_RUNTIME_DIR");
+        // Tests that do not take the env lock write `default.target` into whatever
+        // socket dir is current, so this binding lives under its own session name.
+        guard.set("AGENT_BROWSER_SESSION", "pin-false-read-from-disk");
         let mut state = DaemonState::new();
         assert!(!state.pin_tab);
         let session = state.session_id.clone();
@@ -17853,10 +17860,15 @@ mod tests {
     /// from the error arm and `launch_identity` survives the error.
     #[tokio::test]
     async fn apply_tab_binding_rollback_clears_launch_state_on_recovery_failure() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_SESSION",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
         guard.remove("XDG_RUNTIME_DIR");
+        guard.set("AGENT_BROWSER_SESSION", "rollback-recovery-failure");
 
         let mut state = DaemonState::new();
         fs::write(
@@ -24625,6 +24637,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_empty_state() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         let patterns = build_fetch_patterns(&state).await;
         assert!(
@@ -24763,6 +24777,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_with_routes() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
@@ -24825,6 +24841,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_collapses_repeated_wildcards() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
@@ -25023,6 +25041,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_adds_wildcard_for_domain_filter() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut df = state.domain_filter.write().await;
@@ -25035,6 +25055,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_adds_wildcard_for_origin_headers() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut oh = state.origin_headers.write().await;
@@ -25049,6 +25071,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_no_duplicate_wildcard() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
