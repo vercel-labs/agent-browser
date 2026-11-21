@@ -3344,10 +3344,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     settings_outcome
         .changes
         .extend(restore_applied.changes.iter().cloned());
-    lifecycle_relaunched_browser |= restore_applied.relaunched_browser;
-
     if !skip_launch {
         if needs_launch {
+            lifecycle_relaunched_browser |= restore_applied.relaunched_browser;
             // The launch settings take effect now.
             if let (Some(patch), Some(_)) = (launch_patch.as_ref(), launch_plan.as_ref()) {
                 match apply_settings_patch(state, patch, true).await {
@@ -3496,7 +3495,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     .map(|outcome| settings_outcome.absorb(outcome)),
                 None => Ok(()),
             };
-            lifecycle_relaunched_browser |= settings_outcome.relaunched_browser;
+            lifecycle_relaunched_browser |=
+                restore_applied.relaunched_browser || settings_outcome.relaunched_browser;
             let result = match applied {
                 Ok(()) => handle_launch(cmd, state).await,
                 Err(e) => Err(e),
@@ -18985,6 +18985,55 @@ mod tests {
             "{resp}"
         );
         assert_eq!(state.session_name.as_deref(), Some("old-key"));
+    }
+
+    /// A command that never launches closes the old browser for a new restore
+    /// key but relaunches nothing, so no relaunch is reported.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_close_with_a_new_restore_key_reports_no_relaunch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env, mut state) = restore_session("old-key");
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        std::fs::write(
+            &plugin_path,
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s' '{\"protocol\":\"agent-browser.plugin.v1\",\"success\":true,\"data\":{}}'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+        state.active_provider_connection = true;
+        state.active_provider_session = Some(ActiveProviderSession {
+            session: providers::ProviderSession {
+                provider: "plugin:cloud-browser".to_string(),
+                session_id: r#"{"sessionId":"s1"}"#.to_string(),
+            },
+            plugins: vec![crate::plugins::PluginConfig {
+                name: "cloud-browser".to_string(),
+                command: plugin_path.to_string_lossy().to_string(),
+                capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
+                ..crate::plugins::PluginConfig::default()
+            }],
+        });
+
+        let resp = execute_command(
+            &json!({
+                "id": "close-new-key",
+                "action": "close",
+                "settings": { "restore-key": "new-key" }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(state.session_name.as_deref(), Some("new-key"), "{resp}");
+        let lifecycle = &resp["data"]["lifecycle"];
+        assert_eq!(lifecycle["relaunchedBrowser"], false, "{resp}");
+        assert_eq!(lifecycle["launched"], false, "{resp}");
     }
 
     fn policy_file(dir: &tempfile::TempDir, body: &str) -> ActionPolicy {
