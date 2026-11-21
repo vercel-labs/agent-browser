@@ -23,7 +23,12 @@ use crate::native::interaction::{
 use crate::native::pointer::{ClickPlan, Modifiers, MouseButton};
 
 /// Reports BiDi's in-view center plus the shared actionability and blocker verdicts.
-fn prepare_js() -> String {
+fn prepare_js(reject_interactive_descendant: bool) -> String {
+    let strict = if reject_interactive_descendant {
+        "true"
+    } else {
+        "false"
+    };
     format!(
         r#"function() {{
             const el = this;
@@ -47,7 +52,7 @@ fn prepare_js() -> String {
             const y = Math.floor((top + bottom) / 2);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            const blocker = blockerAt(document, el, x, y);
+            const blocker = blockerAt(document, el, x, y, {strict});
             const reachable = x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight;
             return {{ x: x, y: y, reason: notActionable(el, reachable), blocker: blocker }};
         }}"#
@@ -110,7 +115,7 @@ pub(super) async fn prepare(
         .call_function_on_in_sandbox(
             &target.context,
             super::client::SANDBOX,
-            &prepare_js(),
+            &prepare_js(matches!(action, PointerAction::Check)),
             target.node_ref(),
         )
         .await?;

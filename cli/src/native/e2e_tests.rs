@@ -19713,38 +19713,59 @@ async fn e2e_firefox_check_rejects_buttons_under_click_policy() {
     firefox_open(&mut state, &format!("{}forms.html", fixture.url)).await;
     firefox_eval(
         &mut state,
-        r#"
+        r##"
         document.body.innerHTML = `
             <button id="delete">Delete</button>
-            <label id="wrap-label">
-                <input id="agree" type="checkbox">
-                <span>Agree</span>
-                <button id="nested-btn">Nested</button>
+            <label id="label-with-btn" style="display:inline-flex;align-items:center;width:240px;height:40px;position:relative">
+                <input id="label-cb" type="checkbox">
+                <button id="center-btn" style="position:absolute;left:80px;top:0;width:80px;height:40px">CenterBtn</button>
             </label>
-            <button id="aria-switch" role="switch" aria-checked="false">Switch</button>
+            <label id="label-with-link" style="display:inline-flex;align-items:center;width:240px;height:40px;position:relative">
+                <input id="link-cb" type="checkbox">
+                <a id="center-link" href="#evil" style="position:absolute;left:80px;top:0;width:80px;height:40px">CenterLink</a>
+            </label>
+            <label id="label-covered-cb" style="display:inline-block;position:relative;width:120px;height:40px">
+                <input id="covered-cb" type="checkbox" style="position:absolute;left:0;top:0;width:24px;height:24px">
+                <button id="cover-btn" style="position:absolute;left:0;top:0;width:40px;height:40px;z-index:10">Cover</button>
+            </label>
+            <label id="label-hidden-cb" style="display:inline-block;position:relative;width:200px;height:40px">
+                <input id="hidden-lbl-cb" type="checkbox" style="display:none">
+                <button id="hidden-center-btn" style="position:absolute;left:60px;top:0;width:80px;height:40px">HiddenCenter</button>
+            </label>
+            <div id="aria-with-btn" role="checkbox" aria-checked="false" style="position:relative;width:200px;height:40px">
+                <button id="aria-center-btn" style="position:absolute;left:60px;top:0;width:80px;height:40px">AriaCenter</button>
+            </div>
+            <button id="aria-switch" role="switch" aria-checked="false"><span>Switch</span></button>
             <div id="mat"><input id="mat-input" type="checkbox"><span>Mat</span></div>
         `;
         window.__clicks = [];
-        document.querySelector('#delete').addEventListener('click', () => window.__clicks.push('delete'));
-        document.querySelector('#nested-btn').addEventListener('click', () => window.__clicks.push('nested'));
+        for (const id of ['delete', 'center-btn', 'center-link', 'cover-btn', 'hidden-center-btn', 'aria-center-btn']) {
+            document.querySelector('#' + id).addEventListener('click', (e) => {
+                e.preventDefault();
+                window.__clicks.push(id);
+            });
+        }
         document.querySelector('#aria-switch').addEventListener('click', (e) => {
             const el = e.currentTarget;
             el.setAttribute('aria-checked', String(el.getAttribute('aria-checked') !== 'true'));
         });
-        "#,
+        "##,
     )
     .await;
 
-    for policy_json in [
+    for (round, policy_json) in [
         r#"{"default":"deny","allow":["check","uncheck"],"deny":["click"]}"#,
         r#"{"default":"deny","allow":["check","uncheck"],"confirm":["click"]}"#,
-    ] {
-        let policy_path = tmp.path().join("policy.json");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let policy_path = tmp.path().join(format!("policy-{round}.json"));
         std::fs::write(&policy_path, policy_json).unwrap();
         state.policy =
             Some(crate::native::policy::ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
 
-        for selector in ["#delete", "#nested-btn"] {
+        for selector in ["#delete", "#center-btn", "#center-link"] {
             let resp = firefox_act(&mut state, "check", selector, json!({})).await;
             assert_eq!(resp["success"], false, "{selector}: {resp}");
             assert!(
@@ -19755,29 +19776,50 @@ async fn e2e_firefox_check_rejects_buttons_under_click_policy() {
                 "{selector}: {resp}"
             );
         }
-    }
 
-    assert_success(&firefox_act(&mut state, "check", "#agree", json!({})).await);
-    assert_success(&firefox_act(&mut state, "check", "#aria-switch", json!({})).await);
-    assert_success(&firefox_act(&mut state, "check", "#mat", json!({})).await);
+        for (selector, blocker) in [
+            ("#label-covered-cb", "button#cover-btn"),
+            ("#aria-with-btn", "button#aria-center-btn"),
+        ] {
+            let resp = firefox_act(&mut state, "check", selector, json!({})).await;
+            assert_eq!(resp["success"], false, "{selector}: {resp}");
+            assert!(
+                resp["error"].as_str().unwrap_or("").contains(blocker),
+                "{selector}: {resp}"
+            );
+        }
+
+        let action = if round == 0 { "check" } else { "uncheck" };
+        for selector in [
+            "#label-with-btn",
+            "#label-with-link",
+            "#label-hidden-cb",
+            "#aria-switch",
+            "#mat",
+        ] {
+            assert_success(&firefox_act(&mut state, action, selector, json!({})).await);
+        }
+    }
 
     state.policy = None;
     assert_eq!(firefox_eval(&mut state, "window.__clicks").await, json!([]));
-    assert_eq!(
-        firefox_eval(&mut state, "document.querySelector('#agree').checked").await,
-        json!(true)
-    );
+    for id in ["#label-cb", "#link-cb", "#hidden-lbl-cb", "#mat-input"] {
+        assert_eq!(
+            firefox_eval(
+                &mut state,
+                &format!("document.querySelector('{id}').checked")
+            )
+            .await,
+            json!(false)
+        );
+    }
     assert_eq!(
         firefox_eval(
             &mut state,
             "document.querySelector('#aria-switch').getAttribute('aria-checked')"
         )
         .await,
-        json!("true")
-    );
-    assert_eq!(
-        firefox_eval(&mut state, "document.querySelector('#mat-input').checked").await,
-        json!(true)
+        json!("false")
     );
     firefox_close(&mut state).await;
 }

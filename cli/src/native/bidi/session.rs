@@ -38,6 +38,34 @@ const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptClosed",
 ];
 
+/// Desired BiDi data collector scope for a Firefox session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DataCollectorMode {
+    Off,
+    RequestsOnly,
+    HarAndRequests,
+}
+
+/// Active BiDi data collector state owned by a `FirefoxSession`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) enum DataCollectorState {
+    #[default]
+    Off,
+    Active {
+        id: String,
+        mode: DataCollectorMode,
+    },
+}
+
+impl DataCollectorState {
+    pub(super) fn mode(&self) -> DataCollectorMode {
+        match self {
+            Self::Off => DataCollectorMode::Off,
+            Self::Active { mode, .. } => *mode,
+        }
+    }
+}
+
 /// A Firefox session. Dropping it releases protocol clients and kills only an owned process.
 pub struct FirefoxSession {
     process: Option<FirefoxProcess>,
@@ -65,7 +93,7 @@ pub struct FirefoxSession {
     /// The download folder set on a browser someone else runs. Firefox keeps it and the
     /// emulation overrides after `session.end`, so close puts them back.
     attached_download_path: Option<String>,
-    pub(super) data_collector: Option<String>,
+    pub(super) data_collector: DataCollectorState,
     events: Events,
     pub net: NetContext,
     /// True once the single global network intercept is installed; it is never installed twice.
@@ -430,7 +458,7 @@ impl FirefoxSession {
             permissions,
             download_dir: options.download_path.clone(),
             attached_download_path: None,
-            data_collector: None,
+            data_collector: DataCollectorState::Off,
             events,
             net,
             intercepting: false,
@@ -1231,7 +1259,7 @@ pub(crate) mod tests {
             permissions: Arc::default(),
             download_dir: None,
             attached_download_path: None,
-            data_collector: None,
+            data_collector: DataCollectorState::Off,
             visited_origins: HashSet::new(),
             events,
             net: NetContext::default(),
