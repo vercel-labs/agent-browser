@@ -1,0 +1,9 @@
+# Linux GNU binaries are built with cargo-zigbuild's explicit glibc 2.28 floor.
+# Other platforms and raw executable paths are inferred from the asset names.
+[[artifact]]
+path = "dist/agent-browser-linux-x64"
+requires = { glibc_min = "2.28" }
+
+[[artifact]]
+path = "dist/agent-browser-linux-arm64"
+requires = { glibc_min = "2.28" }
