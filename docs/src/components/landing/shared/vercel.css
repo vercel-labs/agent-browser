@@ -1,0 +1,125 @@
+/*
+ * Stageshow look: Vercel (Geist design system).
+ *
+ * Every value points at a Geist token (`--ds-*`, `--font-geist-*`) with the
+ * Geist light value as a fallback. Inside an app that loads Geist, the stage
+ * follows the host's light or dark theme; anywhere else it renders as Geist
+ * light. Appearance only: stageshow's framing,
+ * craft and motion rules are unchanged.
+ *
+ * Uses the public @vercel/geistdocs theme tokens.
+ */
+.look-vercel .ss-stage {
+  /* Surfaces: the page ground is background-200, cards and windows background-100 */
+  --ss-canvas: var(--ds-background-200, #fafafa);
+  --ss-surface: var(--ds-background-100, #fff);
+  --ss-chrome: var(--ds-background-100, #fff);
+  --ss-raised: var(--ds-background-100, #fff);
+  --ss-well: var(--ds-gray-100, #f2f2f2);
+  --ss-fill: var(--ds-gray-200, #ebebeb);
+
+  /* Placeholder inks: Geist's alpha grays, kept close to the kit's weights */
+  --ss-ink-1: var(--ds-gray-alpha-100, rgba(0, 0, 0, 0.05));
+  --ss-ink-2: var(--ds-gray-alpha-100, rgba(0, 0, 0, 0.05));
+  --ss-ink-3: var(--ds-gray-alpha-200, rgba(0, 0, 0, 0.08));
+  --ss-ink-4: var(--ds-gray-alpha-300, rgba(0, 0, 0, 0.1));
+  --ss-ink-5: var(--ds-gray-alpha-500, rgba(0, 0, 0, 0.21));
+
+  /* Lines: the hairline Geist cards and inputs draw */
+  --ss-line: var(--ds-gray-alpha-400, rgba(0, 0, 0, 0.08));
+  --ss-line-faint: var(--ds-gray-alpha-100, rgba(0, 0, 0, 0.05));
+
+  /* Text and icons */
+  --ss-text-strong: var(--ds-gray-1000, #171717);
+  --ss-text: var(--ds-gray-900, #4d4d4d);
+  --ss-text-faint: var(--ds-gray-700, #8f8f8f);
+  --ss-icon: var(--ds-gray-900, #4d4d4d);
+  --ss-icon-faint: var(--ds-gray-600, #a8a8a8);
+
+  /* Accent: Vercel's primary action is black (white in dark). Blue is for
+     selection, focus and capture; use --ds-blue-700 directly for those. */
+  --ss-accent: var(--ds-gray-1000, #171717);
+  --ss-accent-2: var(--ds-gray-1000, #171717);
+  --ss-accent-soft: var(--ds-gray-alpha-200, rgba(0, 0, 0, 0.08));
+  --ss-accent-text: var(--ds-gray-1000, #171717);
+
+  /* Status. Success is Vercel blue, not green: a completed action, a check. */
+  --ss-success: var(--ds-blue-700, #006bff);
+  --ss-success-soft: var(--ds-blue-100, #f0f7ff);
+  --ss-success-text: var(--ds-blue-900, #005ff2);
+  --ss-danger: var(--ds-red-700, #fc0035);
+  --ss-danger-soft: var(--ds-red-100, #ffeeef);
+  --ss-danger-text: var(--ds-red-900, #d8001b);
+  --ss-warning: var(--ds-amber-700, #ffae00);
+  --ss-warning-soft: var(--ds-amber-100, #fff6de);
+  --ss-warning-text: var(--ds-amber-900, #aa4d00);
+
+  /* Type */
+  --ss-font: var(--font-geist-sans, "Geist", system-ui, -apple-system, sans-serif);
+  --ss-mono: var(--font-geist-mono, "Geist Mono", ui-monospace, "SF Mono", monospace);
+
+  /* Shape and density: Geist's radius scale (sm 4, md 6 = material-small and
+     inputs, xl 12 = menus, cards, modals; 16 fullscreen) and its small control */
+  --ss-radius-sm: 4px;
+  --ss-radius-md: 6px;
+  --ss-radius-lg: 12px;
+  --ss-radius-window: 12px;
+  --ss-radius-pill: 999px;
+  --ss-control: 32px;
+
+  /* Shadows: Geist's materials, with the 1px ring drawn at a true hairline
+     (--ss-hairline) since stages are scaled. Each maps to the nearest Geist
+     material:
+       control  material-small   ring + --ds-shadow-small
+       card     material-base    --ds-shadow-xs
+       float    material-menu    ring + --ds-shadow-xl (the menu fall)
+       window   material-modal   ring + --ds-shadow-2xl (the modal fall)
+       lift     modal-elevated   its own three layers (no ring-less token) */
+  --ss-shadow-control: 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, 0.08)), var(--ds-shadow-small, 0px 2px 2px rgba(0, 0, 0, 0.04));
+  --ss-shadow-card: var(--ds-shadow-xs, 0 1px 2px rgba(0, 0, 0, 0.04));
+  --ss-shadow-float: 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, 0.08)), var(--ds-shadow-xl, 0px 1px 1px rgba(0, 0, 0, 0.02), 0px 4px 8px -4px rgba(0, 0, 0, 0.04), 0px 16px 24px -8px rgba(0, 0, 0, 0.06));
+  --ss-shadow-window: 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, 0.08)), var(--ds-shadow-2xl, 0px 1px 1px rgba(0, 0, 0, 0.02), 0px 8px 16px -4px rgba(0, 0, 0, 0.04), 0px 24px 32px -8px rgba(0, 0, 0, 0.06));
+  --ss-shadow-hero: var(--ss-shadow-window);
+  --ss-shadow-satellite: var(--ss-shadow-window);
+  --ss-shadow-ground: var(--ss-shadow-window);
+  --ss-shadow-lift: 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, 0.08)), 0px 32px 72px -12px rgba(0, 0, 0, 0.06), 0px 8px 32px -12px rgba(0, 0, 0, 0.08), 0px 8px 24px -12px rgba(0, 0, 0, 0.12);
+
+  /* The arrow cursor in Geist's ink */
+  --ss-cursor-ink: var(--ds-gray-1000, #171717);
+}
+
+/* Terminals in Geist's dark values: the kit's Window chrome="terminal", or a
+   plain dark panel at card fidelity reading the same --ss-term-* tokens. A
+   terminal stays dark in both modes, so these are literals, not host tokens;
+   success keeps the theme's blue. */
+.look-vercel .ss-stage,
+.look-vercel .ss-window[data-chrome="terminal"] {
+  --ss-term-bg: #0a0a0a;
+  --ss-term-text: #ededed;
+  --ss-term-path: #a1a1a1;
+  --ss-term-sigil: #a1a1a1;
+  --ss-term-dim: #8f8f8f;
+  /* The one or two key lines in a terminal: Geist dark blue-900, readable on the dark ground */
+  --ss-term-agent: #47a8ff;
+  --ss-term-ok: var(--ds-blue-700, #006bff);
+  --ss-term-err: var(--ds-red-700, #fc0035);
+}
+
+/* Borders match the Geist card around the illustration: one real pixel of
+   --ds-gray-alpha-400. A host that scales its stage sets --ss-hairline to
+   1px / scale so the line stays crisp; it falls back to 1px. Fields draw it
+   too, as Geist's Input does. */
+.look-vercel .ss-field__box {
+  box-shadow: inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-400, rgba(0, 0, 0, 0.08)), 0 0 0 0 transparent;
+}
+
+/* A focused field, as Geist's Input draws a pointer focus: the border steps
+   up to --ds-gray-alpha-600 with a faint gray halo. Quiet on purpose: in an
+   illustration a focus ring should not pull the eye from the story. (Geist's
+   blue --ds-focus-ring is for keyboard focus.) Drawn as a shadow, as the kit's
+   own ring is, so focusing never moves the text. Appearance only. */
+.look-vercel .ss-field[data-focused] .ss-field__box {
+  box-shadow:
+    inset 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-600, rgba(0, 0, 0, 0.34)),
+    0 0 0 3px var(--ds-gray-alpha-100, rgba(0, 0, 0, 0.05));
+}
