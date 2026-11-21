@@ -68,7 +68,11 @@ impl HostPolicy {
     /// The policy of a saved flow.
     pub fn of(flow: &Flow) -> HostPolicy {
         HostPolicy {
-            narrowed: flow.allowed_hosts.clone(),
+            narrowed: flow
+                .allowed_hosts
+                .iter()
+                .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+                .collect(),
             ..HostPolicy::from_start(&flow.start_url)
         }
     }
@@ -79,7 +83,7 @@ impl HostPolicy {
     }
 
     pub fn allows_host(&self, host: &str) -> bool {
-        let host = host.to_ascii_lowercase();
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
         self.base.iter().any(|a| host_matches(&host, a))
             && (self.narrowed.is_empty() || self.narrowed.iter().any(|a| host_matches(&host, a)))
     }
@@ -122,5 +126,66 @@ impl HostPolicy {
                 self.base.join(", ")
             }
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn policy_accepts_equivalent_dns_hostnames() {
+        let policy = HostPolicy::from_start("https://Example.COM./start");
+        for url in [
+            "https://example.com./next",
+            "https://EXAMPLE.com/next",
+            "https://api.example.com./next",
+        ] {
+            assert!(policy.check(url).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn saved_host_restrictions_are_case_and_root_dot_insensitive() {
+        let flow: Flow = serde_json::from_value(json!({
+            "version": 1,
+            "name": "api",
+            "origin": "example.com",
+            "startUrl": "https://example.com/",
+            "allowedHosts": ["API.Example.COM."],
+            "steps": [],
+        }))
+        .unwrap();
+        let policy = HostPolicy::of(&flow);
+        assert!(policy.check("https://api.example.com/data").is_ok());
+        assert!(policy.check("https://api.example.com./data").is_ok());
+        assert!(policy.check("https://v1.api.example.com/data").is_ok());
+        for url in [
+            "https://example.com/data",
+            "https://www.example.com/data",
+            "https://notapi.example.com/data",
+            "https://api.example.com.evil.com/data",
+        ] {
+            assert!(policy.check(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn normalized_restrictions_do_not_widen_the_start_domain() {
+        let flow: Flow = serde_json::from_value(json!({
+            "version": 1,
+            "name": "api",
+            "origin": "a.vercel.app",
+            "startUrl": "https://a.vercel.app/",
+            "allowedHosts": ["A.Vercel.APP.", "B.Vercel.APP."],
+            "steps": [],
+        }))
+        .unwrap();
+        let policy = HostPolicy::of(&flow);
+        assert!(policy.check("https://a.vercel.app./data").is_ok());
+        assert!(policy.check("https://b.vercel.app./data").is_err());
+        assert!(policy.check("https://not-a.vercel.app/data").is_err());
+        assert!(policy.check("file://a.vercel.app/data").is_err());
     }
 }
