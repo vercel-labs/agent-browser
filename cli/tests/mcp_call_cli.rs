@@ -128,6 +128,110 @@ fn assert_mcp_session(result: &Value, session: &str) {
 }
 
 #[test]
+fn har_stop_without_recording_fails_on_cli_and_mcp() {
+    struct OwnedDaemon<'a> {
+        child: std::process::Child,
+        home: &'a TempDir,
+        config: &'a std::path::Path,
+    }
+    impl Drop for OwnedDaemon<'_> {
+        fn drop(&mut self) {
+            let closed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run(
+                    command(self.home)
+                        .env("AGENT_BROWSER_CONFIG", self.config)
+                        .args(["--session", "har-inactive", "close"]),
+                    "",
+                )
+            }));
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if !std::thread::panicking() {
+                assert!(
+                    matches!(closed, Ok(output) if output.status.success()),
+                    "owned session did not close"
+                );
+            }
+        }
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join("config.json");
+    std::fs::write(&config, "{}").unwrap();
+    let configured_command = || {
+        let mut cmd = command(&home);
+        cmd.env("AGENT_BROWSER_CONFIG", &config);
+        cmd
+    };
+    let mut daemon = OwnedDaemon {
+        child: configured_command()
+            .env("AGENT_BROWSER_DAEMON", "1")
+            .env("AGENT_BROWSER_SESSION", "har-inactive")
+            .env("AGENT_BROWSER_IDLE_TIMEOUT_MS", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .as_std_mut()
+            .spawn()
+            .unwrap(),
+        home: &home,
+        config: &config,
+    };
+    let endpoint = home.path().join("sockets").join(if cfg!(windows) {
+        "har-inactive.port"
+    } else {
+        "har-inactive.sock"
+    });
+    let started = std::time::Instant::now();
+    while !endpoint.exists() {
+        assert!(
+            daemon.child.try_wait().unwrap().is_none(),
+            "daemon exited early"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "daemon did not start"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let path = home.path().join("inactive.har");
+    let output = run(
+        configured_command()
+            .args([
+                "--session",
+                "har-inactive",
+                "--json",
+                "network",
+                "har",
+                "stop",
+            ])
+            .arg(&path),
+        "",
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cli["success"], false, "{cli}");
+    assert!(cli["error"]
+        .as_str()
+        .unwrap()
+        .contains("No HAR recording is active"));
+    assert!(!path.exists());
+
+    let output = run(
+        configured_command()
+            .args(["mcp", "call", "agent_browser_network_har_stop"])
+            .arg(json!({ "session": "har-inactive", "path": path }).to_string()),
+        "",
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let mcp: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(mcp["isError"], true, "{mcp}");
+    assert_eq!(mcp["structuredContent"]["response"]["error"], cli["error"]);
+    assert!(!path.exists());
+}
+
+#[test]
 fn mcp_call_prints_the_tool_result_and_version() {
     let (code, result) = mcp_call(&["agent_browser_tools_profiles"], None);
     assert_eq!(code, 0, "{result}");
