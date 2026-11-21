@@ -130,12 +130,54 @@ fn ensure_encryption_key() -> Result<Vec<u8>, String> {
     }
 
     let key_file = get_key_file_path();
-    fs::write(&key_file, format!("{}\n", key_hex))
-        .map_err(|e| format!("Failed to write encryption key: {}", e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600));
+    let tmp_file = dir.join(format!(
+        ".encryption-key.tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut file = {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(&tmp_file)
+            .map_err(|e| format!("Failed to create temporary encryption key: {}", e))?
+    };
+    if let Err(e) = file.write_all(format!("{}\n", key_hex).as_bytes()) {
+        let _ = fs::remove_file(&tmp_file);
+        return Err(format!("Failed to write encryption key: {}", e));
+    }
+    drop(file);
+
+    let link_result = fs::hard_link(&tmp_file, &key_file);
+    let _ = fs::remove_file(&tmp_file);
+    match link_result {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return get_encryption_key();
+        }
+        Err(_) => {
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&key_file) {
+                Ok(mut f) => {
+                    f.write_all(format!("{}\n", key_hex).as_bytes())
+                        .map_err(|e| format!("Failed to write encryption key: {}", e))?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return get_encryption_key();
+                }
+                Err(e) => return Err(format!("Failed to write encryption key: {}", e)),
+            }
+        }
     }
 
     let _ = writeln!(

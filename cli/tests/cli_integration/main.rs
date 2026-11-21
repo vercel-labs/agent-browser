@@ -1,0 +1,16 @@
+mod allowed_domains_cli;
+mod batch_cli;
+mod daemon_acquire_cli;
+mod dashboard_cli;
+mod doctor_cli;
+mod max_output_cli;
+mod mcp_call_cli;
+mod mcp_unknown_commands_cli;
+mod obscura_cli;
+mod pin_tab_cli;
+mod session_files_cli;
+mod session_settings_cli;
+mod session_validation_cli;
+mod skills_cli;
+mod tls_cli;
+mod unknown_commands_cli;

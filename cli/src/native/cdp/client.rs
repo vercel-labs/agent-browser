@@ -19,6 +19,22 @@ use tokio_tungstenite::Connector;
 
 use super::types::{CdpCommand, CdpError, CdpEvent, CdpMessage};
 
+pub(crate) const DEFAULT_CDP_COMMAND_TIMEOUT_SECS: u64 = 30;
+
+/// Returns the timeout for a single CDP command, honoring the test-only
+/// `AGENT_BROWSER_TEST_CDP_TIMEOUT_MS` override when running tests.
+pub(crate) fn cdp_command_timeout() -> Duration {
+    #[cfg(test)]
+    if let Ok(raw) = std::env::var("AGENT_BROWSER_TEST_CDP_TIMEOUT_MS") {
+        if let Ok(ms) = raw.trim().parse::<u64>() {
+            if ms > 0 {
+                return Duration::from_millis(ms);
+            }
+        }
+    }
+    Duration::from_secs(DEFAULT_CDP_COMMAND_TIMEOUT_SECS)
+}
+
 /// A command awaiting its response, with the session it was sent to so the
 /// reader can fail it as soon as that session detaches (#1991).
 struct PendingCommand<T> {
@@ -798,7 +814,7 @@ impl CdpClient {
             }
         }
 
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        let response = match tokio::time::timeout(cdp_command_timeout(), rx).await {
             Ok(Ok(resp)) => {
                 guard.done = true;
                 resp
@@ -958,7 +974,7 @@ impl CdpClient {
             }
         }
 
-        let text = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        let text = match tokio::time::timeout(cdp_command_timeout(), rx).await {
             Ok(Ok(text)) => {
                 guard.done = true;
                 text

@@ -17446,15 +17446,18 @@ async fn e2e_diagnostics_between_wedge_strikes_keep_the_strike() {
 async fn e2e_responsive_probe_clears_an_earlier_strike() {
     let mut state = DaemonState::new();
     launch_wedge_session(&mut state).await;
-    // Blocks past the CDP timeout and the probe, then yields.
+    let cdp_ms = crate::native::cdp::client::cdp_command_timeout().as_millis() as u64;
+    let probe_ms = crate::native::browser::renderer_probe_timeout_ms();
+    let extra_ms = (cdp_ms / 10).clamp(400, 3_000);
+    let busy_ms = cdp_ms + probe_ms + extra_ms;
     let resp = execute_command(
         &json!({ "id": "3", "action": "evaluate",
-                 "script": "const t = Date.now() + 36000; while (Date.now() < t) {}" }),
+                 "script": format!("const t = Date.now() + {busy_ms}; while (Date.now() < t) {{}}") }),
         &mut state,
     )
     .await;
     assert_eq!(resp["data"]["replaced"], false, "first strike: {}", resp);
-    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(extra_ms + 1_000)).await;
     // Times out while the renderer answers.
     let resp = execute_command(
         &json!({ "id": "4", "action": "evaluate", "script": "new Promise(() => {})" }),
@@ -17614,11 +17617,14 @@ async fn e2e_slow_finite_script_keeps_its_tab() {
         .unwrap()
         .to_string();
 
-    // Busy for longer than the CDP timeout plus the probe, then yields.
+    let cdp_ms = crate::native::cdp::client::cdp_command_timeout().as_millis() as u64;
+    let probe_ms = crate::native::browser::renderer_probe_timeout_ms();
+    let extra_ms = (cdp_ms / 10).clamp(400, 3_000);
+    let busy_ms = cdp_ms + probe_ms + extra_ms;
     let resp = execute_command(
         &json!({
             "id": "3", "action": "evaluate",
-            "script": "const t = Date.now(); while (Date.now() - t < 36000) {}",
+            "script": format!("const t = Date.now(); while (Date.now() - t < {busy_ms}) {{}}"),
         }),
         &mut state,
     )

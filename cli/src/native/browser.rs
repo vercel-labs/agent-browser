@@ -121,6 +121,20 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
 /// which only reloads a genuinely discarded one and just focuses a live one.
 const RENDERER_PROBE_TIMEOUT_MS: u64 = 3_000;
 
+/// Returns the renderer liveness-probe timeout, honoring the test-only
+/// `AGENT_BROWSER_TEST_PROBE_TIMEOUT_MS` override when running tests.
+pub(crate) fn renderer_probe_timeout_ms() -> u64 {
+    #[cfg(test)]
+    if let Ok(raw) = std::env::var("AGENT_BROWSER_TEST_PROBE_TIMEOUT_MS") {
+        if let Ok(ms) = raw.trim().parse::<u64>() {
+            if ms > 0 {
+                return ms;
+            }
+        }
+    }
+    RENDERER_PROBE_TIMEOUT_MS
+}
+
 /// How long a reactivated renderer gets to start answering before the tab is
 /// declared unrecoverable.
 const REVIVED_RENDERER_TIMEOUT_MS: u64 = 10_000;
@@ -1149,7 +1163,7 @@ impl BrowserManager {
             return None;
         }
         if self
-            .renderer_responds(&session_id, RENDERER_PROBE_TIMEOUT_MS)
+            .renderer_responds(&session_id, renderer_probe_timeout_ms())
             .await
         {
             // A slow command, not a wedge: an earlier strike no longer applies.
@@ -1211,7 +1225,7 @@ impl BrowserManager {
         };
         if page.target_id != suspect
             || self
-                .renderer_responds(&page.session_id, RENDERER_PROBE_TIMEOUT_MS)
+                .renderer_responds(&page.session_id, renderer_probe_timeout_ms())
                 .await
         {
             self.wedge_suspect = None;
@@ -1258,7 +1272,7 @@ impl BrowserManager {
         dialog_session: Option<&str>,
     ) -> Result<RendererState, String> {
         if self
-            .renderer_responds(session_id, RENDERER_PROBE_TIMEOUT_MS)
+            .renderer_responds(session_id, renderer_probe_timeout_ms())
             .await
         {
             return Ok(RendererState::Responsive);
@@ -1311,11 +1325,9 @@ impl BrowserManager {
     /// to a discarded session simply never answers (cleaned up when the probe
     /// times out) and does not reload or focus the tab.
     async fn find_live_page_index(&self, session_ids: &[String]) -> Option<usize> {
+        let probe_timeout_ms = renderer_probe_timeout_ms();
         if let Some(first) = session_ids.first() {
-            if self
-                .renderer_responds(first, RENDERER_PROBE_TIMEOUT_MS)
-                .await
-            {
+            if self.renderer_responds(first, probe_timeout_ms).await {
                 return Some(0);
             }
         }
@@ -1324,7 +1336,7 @@ impl BrowserManager {
             .enumerate()
             .skip(1)
             .map(|(index, session_id)| async move {
-                self.renderer_responds(session_id, RENDERER_PROBE_TIMEOUT_MS)
+                self.renderer_responds(session_id, probe_timeout_ms)
                     .await
                     .then_some(index)
             });
@@ -2044,7 +2056,8 @@ impl BrowserManager {
     /// target is gone counts. One that does not answer in time does not.
     async fn thaw(&self, session_id: &str) -> bool {
         let request = self.apply_keep(session_id, TabKeep::Frozen, false);
-        match tokio::time::timeout(Duration::from_millis(RENDERER_PROBE_TIMEOUT_MS), request).await
+        match tokio::time::timeout(Duration::from_millis(renderer_probe_timeout_ms()), request)
+            .await
         {
             Ok(Ok(())) => true,
             Ok(Err(error)) => is_session_detached_error(&error),
@@ -5844,5 +5857,20 @@ mod tests {
             0,
             "cancelled connect-time probes left orphaned CDP requests in the pending map"
         );
+    }
+
+    #[test]
+    fn default_cdp_and_probe_timeouts_match_production_constants() {
+        let _guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_TEST_CDP_TIMEOUT_MS",
+            "AGENT_BROWSER_TEST_PROBE_TIMEOUT_MS",
+        ]);
+        _guard.remove("AGENT_BROWSER_TEST_CDP_TIMEOUT_MS");
+        _guard.remove("AGENT_BROWSER_TEST_PROBE_TIMEOUT_MS");
+        assert_eq!(
+            crate::native::cdp::client::cdp_command_timeout(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(super::renderer_probe_timeout_ms(), 3_000);
     }
 }
