@@ -306,7 +306,13 @@ impl FirefoxSession {
         )
         .await
         {
-            Ok(()) => session.apply_attached_settings(options, &in_place).await,
+            Ok(()) => {
+                within_attach_deadline(
+                    deadline,
+                    session.apply_attached_settings(options, &in_place),
+                )
+                .await
+            }
             Err(error) => Err(error),
         };
         if let Err(error) = applied {
@@ -391,7 +397,7 @@ impl FirefoxSession {
                 .viewport_size
                 .filter(|_| !attached)
                 .map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
-            user_agent: options.user_agent.clone(),
+            user_agent: options.user_agent.clone().filter(|_| !attached),
             media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
                 media: None,
                 features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
@@ -561,7 +567,26 @@ impl FirefoxSession {
                 .position(|tab| tab == self.contexts.active_tab())
                 .and_then(|index| results.get(index));
             if let Some(Err(error)) = own {
-                return Err(error.clone());
+                let error = error.clone();
+                let applied_tabs: Vec<String> = tabs
+                    .into_iter()
+                    .zip(results)
+                    .filter_map(|(tab, result)| result.ok().map(|_| tab))
+                    .collect();
+                if !applied_tabs.is_empty() {
+                    let previous = self.emulation.read().unwrap().user_agent.clone();
+                    emulation::send_to_tabs(
+                        &self.bidi,
+                        &applied_tabs,
+                        &(
+                            "emulation.setUserAgentOverride",
+                            json!({"userAgent": previous}),
+                        ),
+                        ATTACHED_RESET_TIMEOUT,
+                    )
+                    .await;
+                }
+                return Err(error);
             }
             self.emulation.write().unwrap().user_agent = options.user_agent.clone();
         }
@@ -1126,7 +1151,7 @@ pub(crate) mod tests {
         test_session(bidi, rdp, events)
     }
 
-    async fn fake_bidi_with(
+    pub(crate) async fn fake_bidi_with(
         responder: impl Fn(&Value) -> Value + Send + 'static,
     ) -> (
         String,
@@ -1621,7 +1646,7 @@ pub(crate) mod tests {
     }
 
     /// A DevTools server on TCP that answers the accessibility handshake and ignores the rest.
-    async fn fake_devtools() -> DevtoolsEndpoint {
+    pub(crate) async fn fake_devtools() -> DevtoolsEndpoint {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = l.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -1674,6 +1699,78 @@ pub(crate) mod tests {
                 .iter()
                 .any(|method| method == "browsingContext.setViewport"),
             "attaching must not resize a tab the user owns"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_applies_user_agent_to_every_open_tab() {
+        let (url, _tx, _calls, messages) = fake_bidi_with(|v: &Value| match v["method"].as_str() {
+            Some("session.new") => json!({"capabilities": {"browserVersion": "150.0"}}),
+            Some("browsingContext.getTree") => json!({"contexts": [
+                {"context": "ctx-1", "url": "https://a.example/", "userContext": "default"},
+                {"context": "ctx-2", "url": "https://b.example/", "userContext": "default"},
+            ]}),
+            Some("script.callFunction") => {
+                json!({"type": "success", "result": {"type": "number", "value": 7}})
+            }
+            _ => json!({}),
+        })
+        .await;
+        let target = AttachTarget {
+            bidi_url: url,
+            devtools: fake_devtools().await,
+            devtools_explicit: true,
+        };
+        let options = LaunchOptions {
+            user_agent: Some("Agent/2.0".to_string()),
+            ..LaunchOptions::default()
+        };
+
+        let session = FirefoxSession::attach(&target, &options, NetContext::default(), false)
+            .await
+            .unwrap();
+        let applied: Vec<(Value, Value)> = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m["method"] == "emulation.setUserAgentOverride")
+            .map(|m| {
+                (
+                    m["params"]["contexts"].clone(),
+                    m["params"]["userAgent"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            applied,
+            vec![
+                (json!(["ctx-1"]), json!("Agent/2.0")),
+                (json!(["ctx-2"]), json!("Agent/2.0")),
+            ]
+        );
+
+        session.close().await;
+        let resets: Vec<(Value, Value)> = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                m["method"] == "emulation.setUserAgentOverride"
+                    && m["params"]["userAgent"].is_null()
+            })
+            .map(|m| {
+                (
+                    m["params"]["contexts"].clone(),
+                    m["params"]["userAgent"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            resets,
+            vec![
+                (json!(["ctx-1"]), Value::Null),
+                (json!(["ctx-2"]), Value::Null),
+            ]
         );
     }
 
