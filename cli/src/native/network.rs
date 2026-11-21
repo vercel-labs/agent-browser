@@ -223,26 +223,19 @@ async fn install_domain_filter_runtime_script(
     allowed_domains: &[String],
     paused_before_document: bool,
 ) -> Result<(), String> {
+    // An auto-attached target is paused before its first document, so it
+    // has no context to patch; the new-document script above covers it.
+    if paused_before_document {
+        return Ok(());
+    }
     let script = domain_filter_script(allowed_domains);
-    let evaluation = match client
+    let evaluation = client
         .send_command(
             "Runtime.evaluate",
             Some(json!({ "expression": &script })),
             Some(session_id),
         )
-        .await
-    {
-        Ok(evaluation) => evaluation,
-        // An auto-attached target is paused before its first document, so it
-        // has no context to patch; the new-document script above covers it.
-        Err(error)
-            if paused_before_document
-                && error.contains("Cannot find default execution context") =>
-        {
-            return Ok(())
-        }
-        Err(error) => return Err(error),
-    };
+        .await?;
     if let Some(details) = evaluation.get("exceptionDetails") {
         let message = details
             .get("exception")
@@ -718,16 +711,30 @@ mod tests {
         message: &'static str,
         paused_before_document: bool,
     ) -> Result<(), String> {
+        install_script_recording_methods(message, paused_before_document)
+            .await
+            .0
+    }
+
+    async fn install_script_recording_methods(
+        message: &'static str,
+        paused_before_document: bool,
+    ) -> (Result<(), String>, Vec<String>) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
+        let methods = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = methods.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             while let Some(Ok(Message::Text(text))) = ws.next().await {
                 let request: Value = serde_json::from_str(&text).unwrap();
+                seen.lock()
+                    .unwrap()
+                    .push(request["method"].as_str().unwrap_or("").to_string());
                 let mut response = json!({ "id": request["id"] });
                 if request["method"] == "Runtime.evaluate" {
                     response["error"] = json!({ "code": -32000, "message": message });
@@ -748,15 +755,16 @@ mod tests {
         .await;
         drop(client);
         server.abort();
-        result
+        let methods = methods.lock().unwrap().clone();
+        (result, methods)
     }
 
     #[tokio::test]
-    async fn domain_filter_script_skips_targets_without_a_context() {
-        assert_eq!(
-            install_script_with_runtime_error("Cannot find default execution context", true).await,
-            Ok(())
-        );
+    async fn domain_filter_script_does_not_evaluate_in_a_paused_target() {
+        let (result, methods) =
+            install_script_recording_methods("Execution context was destroyed.", true).await;
+        assert_eq!(result, Ok(()));
+        assert_eq!(methods, ["Page.addScriptToEvaluateOnNewDocument"]);
     }
 
     #[tokio::test]
@@ -774,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn domain_filter_script_fails_closed_on_other_runtime_errors() {
-        let error = install_script_with_runtime_error("Execution context was destroyed.", true)
+        let error = install_script_with_runtime_error("Execution context was destroyed.", false)
             .await
             .unwrap_err();
         assert!(
