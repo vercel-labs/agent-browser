@@ -370,6 +370,47 @@ pub fn parse_batch_command(args: &[String], flags: &Flags) -> Result<Value, Pars
     parse_command_with_batch_scope(args, flags, true)
 }
 
+/// Number of words that precede the operands of a command whose parser reads
+/// them directly, or `None` for commands that handle `--` themselves.
+fn operands_after(cmd: &str, rest: &[&str]) -> Option<usize> {
+    match cmd {
+        "select" | "upload" | "press" | "key" | "keydown" | "keyup" | "removeinitscript"
+        | "confirm" | "deny" => Some(0),
+        "keyboard" | "set" | "clipboard" | "auth" | "webmcp" | "plugin" | "plugins" | "dialog" => {
+            Some(1)
+        }
+        "tab" => Some(usize::from(matches!(
+            rest.first(),
+            Some(&("close" | "keep"))
+        ))),
+        _ => None,
+    }
+}
+
+/// Removes the `--` marker that precedes operands, so the values after it stay
+/// data. A lone `--` is itself the operand and is kept.
+fn drop_end_of_options<'a>(cmd: &str, mut rest: Vec<&'a str>) -> Vec<&'a str> {
+    if let Some(at) = operands_after(cmd, &rest) {
+        if rest.get(at) == Some(&"--") && rest.len() > at + 1 {
+            rest.remove(at);
+        }
+    }
+    rest
+}
+
+/// Same as [`drop_end_of_options`] for commands dispatched before parsing.
+pub fn strip_operand_marker(args: &mut Vec<String>) {
+    let Some(cmd) = args.first().cloned() else {
+        return;
+    };
+    let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+    if let Some(at) = operands_after(&cmd, &rest) {
+        if args.get(at + 1).map(String::as_str) == Some("--") && args.len() > at + 2 {
+            args.remove(at + 1);
+        }
+    }
+}
+
 fn parse_command_with_batch_scope(
     args: &[String],
     flags: &Flags,
@@ -694,6 +735,7 @@ fn parse_command_inner(
     reject_batch_global_flag(batch_item, &args[0])?;
     let cmd = args[0].as_str();
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+    let rest = drop_end_of_options(cmd, rest);
     let id = gen_id();
 
     if flags.cli_annotate && cmd != "screenshot" {
@@ -2155,6 +2197,7 @@ fn parse_command_inner(
                     //   tab new [url]
                     //   tab new --label <name> [url]
                     //   tab new [url] --label <name>
+                    //   tab new [--label <name>] -- <url>
                     let mut cmd = json!({ "id": id, "action": "tab_new" });
                     let mut i = 1;
                     while i < rest.len() {
@@ -2165,6 +2208,14 @@ fn parse_command_inner(
                                     usage: "tab new --label <name> [url]",
                                 })?;
                                 cmd["label"] = json!(name);
+                                i += 2;
+                            }
+                            "--" => {
+                                if let Some(url) =
+                                    rest.get(i + 1).filter(|_| cmd.get("url").is_none())
+                                {
+                                    cmd["url"] = json!(url);
+                                }
                                 i += 2;
                             }
                             other if !other.starts_with("--") && cmd.get("url").is_none() => {
@@ -4851,6 +4902,59 @@ pub fn shell_words_split(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operand_marker_is_accepted_by_every_documented_command() {
+        // (command without the marker, index to insert it at)
+        let cases: &[(&[&str], usize)] = &[
+            (&["select", "#a", "v"], 1),
+            (&["upload", "#f", "/tmp/a"], 1),
+            (&["press", "Enter"], 1),
+            (&["keydown", "Shift"], 1),
+            (&["keyup", "Shift"], 1),
+            (&["keyboard", "type", "hi"], 2),
+            (&["keyboard", "inserttext", "hi"], 2),
+            (&["set", "device", "iPhone 15"], 2),
+            (&["clipboard", "write", "hi"], 2),
+            (&["auth", "show", "name"], 2),
+            (&["auth", "delete", "name"], 2),
+            (&["webmcp", "cancel", "id"], 2),
+            (&["dialog", "accept", "text"], 2),
+            (&["tab", "t1"], 1),
+            (&["tab", "close", "t1"], 2),
+            (&["tab", "keep", "live", "t1"], 2),
+            (&["tab", "new", "https://example.com"], 2),
+        ];
+        let flags = default_flags();
+        for (words, at) in cases {
+            let plain: Vec<String> = words.iter().map(|s| s.to_string()).collect();
+            let mut marked = plain.clone();
+            marked.insert(*at, "--".to_string());
+            let mut a = parse_command(&plain, &flags).unwrap();
+            let mut b = parse_command(&marked, &flags)
+                .unwrap_or_else(|e| panic!("{words:?} with marker: {e:?}"));
+            a["id"] = json!(null);
+            b["id"] = json!(null);
+            assert_eq!(a, b, "{words:?}");
+        }
+        let mut plugin: Vec<String> = ["plugin", "show", "--", "x"].map(String::from).to_vec();
+        strip_operand_marker(&mut plugin);
+        assert_eq!(plugin, ["plugin", "show", "x"]);
+        let mut add: Vec<String> = ["plugin", "add", "--", "ref"].map(String::from).to_vec();
+        strip_operand_marker(&mut add);
+        assert_eq!(add, ["plugin", "add", "ref"]);
+    }
+
+    #[test]
+    fn tab_new_marker_makes_the_url_literal() {
+        let flags = default_flags();
+        let args: Vec<String> = ["tab", "new", "--label", "a", "--", "--x"]
+            .map(String::from)
+            .to_vec();
+        let parsed = parse_command(&args, &flags).unwrap();
+        assert_eq!(parsed["url"], "--x");
+        assert_eq!(parsed["label"], "a");
+    }
 
     fn default_flags() -> Flags {
         Flags {
