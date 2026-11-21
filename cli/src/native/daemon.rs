@@ -44,6 +44,10 @@ pub async fn run_daemon(session: &str) {
     // Settings are read before stderr goes away and before any file marks this
     // daemon as running: a stored security setting that cannot be used must
     // stop the start with a message the parent can show.
+    if let Err(e) = super::network::check_allowed_domains_env() {
+        eprintln!("{}", e);
+        process::exit(1);
+    }
     let store: Arc<dyn Store> = Arc::new(FsStore::new(&socket_dir, session));
     let settings = match Running::boot(store.as_ref(), session) {
         Ok(settings) => settings,

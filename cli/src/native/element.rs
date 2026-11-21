@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
+use super::click_point::{place_in_dispatch_viewport, ClickPoint};
 
 #[derive(Debug, Clone)]
 pub struct RefEntry {
@@ -14,6 +15,8 @@ pub struct RefEntry {
     pub selector: Option<String>,
     pub frame_id: Option<String>,
     allow_role_fallback: bool,
+    /// Session and loader of the document the ref was issued in, when known.
+    document: Option<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -69,6 +72,7 @@ impl RefMap {
                 selector: None,
                 frame_id: frame_id.map(|s| s.to_string()),
                 allow_role_fallback: true,
+                document: None,
             },
         );
     }
@@ -87,6 +91,7 @@ impl RefMap {
                 selector: None,
                 frame_id: None,
                 allow_role_fallback: false,
+                document: None,
             },
         );
     }
@@ -109,8 +114,31 @@ impl RefMap {
                 selector: Some(selector),
                 frame_id: None,
                 allow_role_fallback: true,
+                document: None,
             },
         );
+    }
+
+    /// Bind a ref to the document currently recorded for its page and frame.
+    pub fn bind_recorded_document(
+        &mut self,
+        ref_id: &str,
+        page_session: &str,
+        frame: Option<&str>,
+    ) {
+        let document = self
+            .document_identity(page_session, frame)
+            .map(|(session, loader)| (session.to_string(), loader.to_string()));
+        if let Some(entry) = self.map.get_mut(ref_id) {
+            entry.document = document;
+        }
+    }
+
+    /// Bind a ref to a document observed when the ref was created.
+    pub fn bind_document(&mut self, ref_id: &str, session: &str, loader: &str) {
+        if let Some(entry) = self.map.get_mut(ref_id) {
+            entry.document = Some((session.to_string(), loader.to_string()));
+        }
     }
 
     pub fn get(&self, ref_id: &str) -> Option<&RefEntry> {
@@ -144,6 +172,15 @@ impl RefMap {
 
     pub fn begin_snapshot(&mut self) {
         self.map.clear();
+    }
+
+    /// Starts a replacement map with the same durable identities and ref counter.
+    pub fn for_snapshot(&self) -> Self {
+        Self {
+            map: HashMap::new(),
+            documents: self.documents.clone(),
+            next_ref: self.next_ref,
+        }
     }
 
     /// Observe the document behind a page/frame pair. Unknown documents never
@@ -223,6 +260,17 @@ impl RefMap {
         self.documents
             .retain(|(entry_page, _), _| entry_page != page_session);
         self.map.clear();
+    }
+
+    /// Session and loader of the document refs were issued in for a page/frame.
+    pub fn document_identity(
+        &self,
+        page_session: &str,
+        frame: Option<&str>,
+    ) -> Option<(&str, &str)> {
+        self.documents
+            .get(&(page_session.to_string(), frame.map(str::to_string)))
+            .map(|document| (document.session.as_str(), document.loader.as_str()))
     }
 
     /// Drop all document identities while preserving the monotonic ref counter.
@@ -413,6 +461,165 @@ async fn resolve_object_in_same_process_frame(
         .ok_or_else(|| format!("Element not found in the selected frame: {}", selector))
 }
 
+const STALE_DOCUMENT_MARKER: &str = "is from a document that is no longer loaded";
+
+/// Reported when an action ran but the document it acted on was replaced
+/// before its effect could be read back.
+pub const STATE_NOT_VERIFIED: &str = "page navigated after the action; state not verified";
+
+/// Whether an error says the document a ref points into is gone: the stale-ref
+/// guard, or the browser reporting a destroyed context.
+fn document_gone(error: &str) -> bool {
+    error.contains(STALE_DOCUMENT_MARKER)
+        || error.contains("Cannot find context with specified id")
+        || error.contains("Inspected target navigated or closed")
+        || error.contains("Execution context was destroyed")
+}
+
+/// Run a read that confirms an action that already happened. A document that
+/// is gone by then is not a failure of the action: the read yields `None`.
+pub async fn read_after_action<T>(
+    read: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<Option<T>, String> {
+    match read.await {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if document_gone(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Fail a ref whose document has been replaced since it was issued: the page
+/// navigated (a click, script or redirect), or the iframe it lives in did.
+/// Same-document changes keep the loader, so their refs stay valid.
+pub(super) async fn ensure_ref_document_current(
+    client: &CdpClient,
+    session_id: &str,
+    ref_id: &str,
+    entry: &RefEntry,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    let frame = entry.frame_id.as_deref();
+    let Some((issued_session, issued_loader)) = entry.document.as_ref() else {
+        return Ok(());
+    };
+    let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
+    let stale = || {
+        format!(
+            "Ref @{ref_id} {STALE_DOCUMENT_MARKER} (the page navigated or the frame was removed). Take a new snapshot and use a fresh ref."
+        )
+    };
+    if issued_session != effective_session_id {
+        return Err(stale());
+    }
+    let Ok(tree) = client
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .await
+    else {
+        return Ok(());
+    };
+    // A document was recorded, so one that can no longer be read (frame gone,
+    // loader missing) is not the document the ref was issued in.
+    match super::snapshot::frame_loader(&tree["frameTree"], frame) {
+        Some(current) if current == issued_loader.as_str() => Ok(()),
+        _ => Err(stale()),
+    }
+}
+
+/// Session and loader of the document currently shown in a frame.
+pub(super) async fn current_document(
+    client: &CdpClient,
+    session_id: &str,
+    frame: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
+    let tree = client
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .await
+        .ok()?;
+    let loader = super::snapshot::frame_loader(&tree["frameTree"], frame)?;
+    Some((effective_session_id.to_string(), loader.to_string()))
+}
+
+async fn resolve_ref_center(
+    client: &CdpClient,
+    session_id: &str,
+    entry: &RefEntry,
+    ref_id: &str,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+    require_actionable: bool,
+) -> Result<(f64, f64, String), String> {
+    let effective_session_id =
+        resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
+
+    // Try cached backend_node_id first (fast path)
+    if let Some(backend_node_id) = entry.backend_node_id {
+        if let Some(object_id) =
+            resolve_node_object_id(client, effective_session_id, backend_node_id).await
+        {
+            if let Some(mut point) = node_click_point(
+                client,
+                effective_session_id,
+                &object_id,
+                selector_or_ref,
+                require_actionable,
+            )
+            .await?
+            {
+                place_in_dispatch_viewport(
+                    client,
+                    effective_session_id,
+                    entry.frame_id.as_deref(),
+                    backend_node_id,
+                    &mut point,
+                    selector_or_ref,
+                )
+                .await?;
+                return Ok((point.x, point.y, effective_session_id.to_string()));
+            }
+        }
+        if !entry.allow_role_fallback {
+            return Err(format!("Element ref {ref_id} is stale"));
+        }
+        // backend_node_id is stale; re-query the accessibility tree below
+    }
+
+    // Fallback: re-query the accessibility tree to find a fresh node by role/name
+    let fresh_id = find_node_id_by_role_name(
+        client,
+        session_id,
+        &entry.role,
+        &entry.name,
+        entry.nth,
+        entry.frame_id.as_deref(),
+        iframe_sessions,
+    )
+    .await?;
+    let object_id = resolve_node_object_id(client, effective_session_id, fresh_id)
+        .await
+        .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
+    let mut point = node_click_point(
+        client,
+        effective_session_id,
+        &object_id,
+        selector_or_ref,
+        require_actionable,
+    )
+    .await?
+    .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
+    place_in_dispatch_viewport(
+        client,
+        effective_session_id,
+        entry.frame_id.as_deref(),
+        fresh_id,
+        &mut point,
+        selector_or_ref,
+    )
+    .await?;
+    Ok((point.x, point.y, effective_session_id.to_string()))
+}
+
 pub async fn resolve_element_center(
     client: &CdpClient,
     session_id: &str,
@@ -425,57 +632,21 @@ pub async fn resolve_element_center(
         let entry = ref_map
             .get(&ref_id)
             .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
-
-        let effective_session_id =
-            resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
-
-        // Try cached backend_node_id first (fast path)
-        if let Some(backend_node_id) = entry.backend_node_id {
-            if let Some(object_id) =
-                resolve_node_object_id(client, effective_session_id, backend_node_id).await
-            {
-                if let Some((x, y)) = node_click_point(
-                    client,
-                    effective_session_id,
-                    &object_id,
-                    selector_or_ref,
-                    require_actionable,
-                )
-                .await?
-                {
-                    return Ok((x, y, effective_session_id.to_string()));
-                }
-            }
-            if !entry.allow_role_fallback {
-                return Err(format!("Element ref {ref_id} is stale"));
-            }
-            // backend_node_id is stale; re-query the accessibility tree below
-        }
-
-        // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let fresh_id = find_node_id_by_role_name(
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
+        let point = resolve_ref_center(
             client,
             session_id,
-            &entry.role,
-            &entry.name,
-            entry.nth,
-            entry.frame_id.as_deref(),
-            iframe_sessions,
-        )
-        .await?;
-        let object_id = resolve_node_object_id(client, effective_session_id, fresh_id)
-            .await
-            .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
-        let (x, y) = node_click_point(
-            client,
-            effective_session_id,
-            &object_id,
+            entry,
+            &ref_id,
             selector_or_ref,
+            iframe_sessions,
             require_actionable,
         )
-        .await?
-        .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
-        return Ok((x, y, effective_session_id.to_string()));
+        .await;
+        // A document replaced during resolution explains a failure here and
+        // would have been re-queried by the fallback on success.
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
+        return point;
     }
 
     // CSS selector: honor an active `frame <sel>` selection.
@@ -603,17 +774,15 @@ async fn node_click_point(
     object_id: &str,
     target: &str,
     require_actionable: bool,
-) -> Result<Option<(f64, f64)>, String> {
+) -> Result<Option<ClickPoint>, String> {
     let function = format!(
         r#"async function() {{
             if (!this.isConnected) return {{ connected: false }};
             const doc = this.ownerDocument || document;
             const clickPoint = {CLICK_POINT_JS};
             const point = await clickPoint(this, doc);
-            const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
-            const topDoc = (point.view && point.view.document) || doc;
-            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView), blocker: blockerAt(doc, this, point.lx, point.ly) || blockerAt(topDoc, this, point.x, point.y) }};
+            return {{ connected: true, x: point.x, y: point.y, reason: notActionable(this, point.inView) }};
         }}"#,
     );
     let result = client
@@ -641,19 +810,79 @@ async fn node_click_point(
             return Err(not_actionable_error(target, reason));
         }
     }
-    if let Some(blocker) = value
-        .and_then(|v| v.get("blocker"))
-        .and_then(|v| v.as_str())
-    {
-        return Err(intercepted_error(target, blocker));
-    }
     match (
         value.and_then(|v| v.get("x")).and_then(|v| v.as_f64()),
         value.and_then(|v| v.get("y")).and_then(|v| v.as_f64()),
     ) {
-        (Some(x), Some(y)) => Ok(Some((x, y))),
+        (Some(x), Some(y)) => Ok(Some(ClickPoint { x, y })),
         _ => Err(format!("Element not found: {}", target)),
     }
+}
+
+async fn resolve_ref_object_id(
+    client: &CdpClient,
+    session_id: &str,
+    entry: &RefEntry,
+    ref_id: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(String, String), String> {
+    let effective_session_id =
+        resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
+
+    // Try cached backend_node_id first (fast path)
+    if let Some(backend_node_id) = entry.backend_node_id {
+        let result: Result<DomResolveNodeResult, String> = client
+            .send_command_typed(
+                "DOM.resolveNode",
+                &DomResolveNodeParams {
+                    backend_node_id: Some(backend_node_id),
+                    node_id: None,
+                    object_group: Some("agent-browser".to_string()),
+                },
+                Some(effective_session_id),
+            )
+            .await;
+
+        if let Ok(r) = result {
+            if let Some(object_id) = r.object.object_id {
+                if !is_detached(client, effective_session_id, &object_id).await {
+                    return Ok((object_id, effective_session_id.to_string()));
+                }
+            }
+        }
+        if !entry.allow_role_fallback {
+            return Err(format!("Element ref {ref_id} is stale"));
+        }
+        // backend_node_id is stale; re-query the accessibility tree below
+    }
+
+    // Fallback: re-query the accessibility tree to find a fresh node by role/name
+    let fresh_id = find_node_id_by_role_name(
+        client,
+        session_id,
+        &entry.role,
+        &entry.name,
+        entry.nth,
+        entry.frame_id.as_deref(),
+        iframe_sessions,
+    )
+    .await?;
+    let result: DomResolveNodeResult = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(fresh_id),
+                node_id: None,
+                object_group: Some("agent-browser".to_string()),
+            },
+            Some(effective_session_id),
+        )
+        .await?;
+    let object_id = result
+        .object
+        .object_id
+        .ok_or_else(|| format!("No objectId for ref {}", ref_id))?;
+    Ok((object_id, effective_session_id.to_string()))
 }
 
 pub async fn resolve_element_object_id(
@@ -667,64 +896,11 @@ pub async fn resolve_element_object_id(
         let entry = ref_map
             .get(&ref_id)
             .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
-
-        let effective_session_id =
-            resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
-
-        // Try cached backend_node_id first (fast path)
-        if let Some(backend_node_id) = entry.backend_node_id {
-            let result: Result<DomResolveNodeResult, String> = client
-                .send_command_typed(
-                    "DOM.resolveNode",
-                    &DomResolveNodeParams {
-                        backend_node_id: Some(backend_node_id),
-                        node_id: None,
-                        object_group: Some("agent-browser".to_string()),
-                    },
-                    Some(effective_session_id),
-                )
-                .await;
-
-            if let Ok(r) = result {
-                if let Some(object_id) = r.object.object_id {
-                    if !is_detached(client, effective_session_id, &object_id).await {
-                        return Ok((object_id, effective_session_id.to_string()));
-                    }
-                }
-            }
-            if !entry.allow_role_fallback {
-                return Err(format!("Element ref {ref_id} is stale"));
-            }
-            // backend_node_id is stale; re-query the accessibility tree below
-        }
-
-        // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let fresh_id = find_node_id_by_role_name(
-            client,
-            session_id,
-            &entry.role,
-            &entry.name,
-            entry.nth,
-            entry.frame_id.as_deref(),
-            iframe_sessions,
-        )
-        .await?;
-        let result: DomResolveNodeResult = client
-            .send_command_typed(
-                "DOM.resolveNode",
-                &DomResolveNodeParams {
-                    backend_node_id: Some(fresh_id),
-                    node_id: None,
-                    object_group: Some("agent-browser".to_string()),
-                },
-                Some(effective_session_id),
-            )
-            .await?;
-        let object_id = result
-            .object
-            .object_id
-            .ok_or_else(|| format!("No objectId for ref {}", ref_id))?;
-        return Ok((object_id, effective_session_id.to_string()));
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
+        let object =
+            resolve_ref_object_id(client, session_id, entry, &ref_id, iframe_sessions).await;
+        ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
+        return object;
     }
 
     // Selector fallback (CSS or XPath): honor an active `frame <sel>` selection.
@@ -1385,43 +1561,66 @@ pub async fn is_element_enabled(
         .unwrap_or(true))
 }
 
+/// Returns the checked state of a native checkbox/radio, checkable ARIA widget,
+/// associated label, or single-checkbox wrapper, or `null` for any other element.
 pub(crate) const ELEMENT_CHECKED_JS: &str = r#"function() {
-                    var el = this;
-                    // Native checkbox/radio input
-                    var tag = el.tagName && el.tagName.toUpperCase();
-                    if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
-                        return el.checked;
-                    }
-                    // ARIA role-based checked state
-                    var role = el.getAttribute && el.getAttribute('role');
-                    var ariaCheckedRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'];
-                    if (role && ariaCheckedRoles.indexOf(role) !== -1) {
-                        return el.getAttribute('aria-checked') === 'true';
-                    }
-                    // Follow label association (Playwright follow-label retarget)
-                    var label = el;
-                    if (tag !== 'LABEL') {
-                        label = el.closest && el.closest('label');
-                    }
-                    if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
-                        var ctrl = label.control;
-                        if (ctrl.type === 'checkbox' || ctrl.type === 'radio') {
-                            return ctrl.checked;
-                        }
-                    }
-                    // Check for nested native input
-                    var input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
-                    if (input) return input.checked;
-                    return false;
-                }"#;
+    var el = this;
+    var tag = el.tagName && el.tagName.toUpperCase();
+    if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+        return el.checked;
+    }
+    var rawRole = el.getAttribute && el.getAttribute('role');
+    var role = rawRole ? rawRole.trim().toLowerCase() : '';
+    var alwaysCheckableRoles = ['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'];
+    if (role && alwaysCheckableRoles.indexOf(role) !== -1) {
+        return el.getAttribute('aria-checked') === 'true';
+    }
+    if ((role === 'option' || role === 'treeitem') && el.hasAttribute && el.hasAttribute('aria-checked')) {
+        return el.getAttribute('aria-checked') === 'true';
+    }
+    var nonCheckableTags = ['BUTTON', 'A', 'SELECT', 'TEXTAREA', 'INPUT', 'SUMMARY'];
+    var nonCheckableRoles = ['button', 'link', 'textbox', 'combobox', 'listbox', 'menuitem', 'searchbox', 'slider', 'spinbutton', 'tab'];
+    if ((tag && nonCheckableTags.indexOf(tag) !== -1) || (role && nonCheckableRoles.indexOf(role) !== -1)) {
+        return null;
+    }
+    var label = tag === 'LABEL' ? el : (el.closest && el.closest('label'));
+    if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
+        var interactive = el.closest && el.closest('button, a[href], select, textarea, summary, [role="button"], [role="link"]');
+        if (interactive && label.contains(interactive)) {
+            return null;
+        }
+        var ctrl = label.control;
+        if (ctrl.tagName && ctrl.tagName.toUpperCase() === 'INPUT' && (ctrl.type === 'checkbox' || ctrl.type === 'radio')) {
+            return ctrl.checked;
+        }
+        return null;
+    }
+    var inputs = el.querySelectorAll && el.querySelectorAll('input[type="checkbox"], input[type="radio"]');
+    if (inputs && inputs.length === 1) {
+        var otherInteractive = el.querySelector('button, a[href], input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), select, textarea, summary, [role="button"], [role="link"]');
+        if (!otherInteractive) {
+            return inputs[0].checked;
+        }
+    }
+    return null;
+}"#;
 
-pub async fn is_element_checked(
+/// Formats the error when `check` or `uncheck` targets a non-checkable element.
+pub(crate) fn not_checkable_error(target: &str) -> String {
+    format!(
+        "Element '{}' is not a checkbox, radio button, or checkable control",
+        target
+    )
+}
+
+/// Evaluates whether the target is checkable and returns its checked state, or `None` if it is not.
+pub async fn element_checked_state(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<bool, String> {
+) -> Result<Option<bool>, String> {
     let (object_id, effective_session_id) = resolve_element_object_id(
         client,
         session_id,
@@ -1431,11 +1630,6 @@ pub async fn is_element_checked(
     )
     .await?;
 
-    // Mirrors Playwright's getChecked() with follow-label retargeting:
-    // 1. If element is a native checkbox/radio input, return .checked
-    // 2. If element has an ARIA checked role, return aria-checked
-    // 3. Follow label → input association (label.control)
-    // 4. Check for nested checkbox/radio input as last resort
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.callFunctionOn",
@@ -1450,11 +1644,25 @@ pub async fn is_element_checked(
         )
         .await?;
 
-    Ok(result
-        .result
-        .value
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false))
+    Ok(result.result.value.and_then(|v| v.as_bool()))
+}
+
+pub async fn is_element_checked(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<bool, String> {
+    Ok(element_checked_state(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?
+    .unwrap_or(false))
 }
 
 pub(crate) const ELEMENT_INNER_TEXT_JS: &str = "function() { return this.innerText || ''; }";
@@ -1864,6 +2072,80 @@ mod tests {
 
         assert!(map.get("e1").is_none());
         assert_eq!(map.next_ref_num(), 2);
+    }
+
+    #[tokio::test]
+    async fn read_after_action_tolerates_only_a_gone_document() {
+        let gone = format!("Ref @e1 {STALE_DOCUMENT_MARKER} (x)");
+        assert_eq!(
+            read_after_action(async { Ok::<_, String>(true) }).await,
+            Ok(Some(true))
+        );
+        assert_eq!(
+            read_after_action(async { Err::<bool, _>(gone) }).await,
+            Ok(None)
+        );
+        assert_eq!(
+            read_after_action(async {
+                Err::<bool, _>(
+                    "CDP error (Runtime.callFunctionOn): Cannot find context with specified id"
+                        .to_string(),
+                )
+            })
+            .await,
+            Ok(None)
+        );
+        assert_eq!(
+            read_after_action(async { Err::<bool, _>("Element not found: @e1".to_string()) }).await,
+            Err("Element not found: @e1".to_string())
+        );
+    }
+
+    #[test]
+    fn refs_carry_the_document_they_were_issued_in() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-1")));
+        map.add("e1".to_string(), Some(1), "button", "Go", None);
+        map.bind_recorded_document("e1", "page-a", None);
+        // A later temp ref for another document does not rebind the first.
+        map.add("e2".to_string(), Some(2), "button", "Go", None);
+        map.bind_document("e2", "page-a", "loader-2");
+        assert_eq!(
+            map.get("e1").unwrap().document,
+            Some(("page-a".to_string(), "loader-1".to_string()))
+        );
+        assert_eq!(
+            map.get("e2").unwrap().document,
+            Some(("page-a".to_string(), "loader-2".to_string()))
+        );
+        // Without a recorded document a ref carries none.
+        map.add("e3".to_string(), Some(3), "button", "Go", None);
+        map.bind_recorded_document("e3", "page-b", None);
+        assert_eq!(map.get("e3").unwrap().document, None);
+    }
+
+    #[test]
+    fn document_identity_is_per_page_and_frame() {
+        let mut map = RefMap::new();
+        assert_eq!(map.document_identity("page-a", None), None);
+        assert!(map.observe_document("page-a", None, "page-a", Some("main-1")));
+        assert!(map.observe_document("page-a", Some("f"), "page-a", Some("frame-1")));
+        assert_eq!(
+            map.document_identity("page-a", None),
+            Some(("page-a", "main-1"))
+        );
+        assert_eq!(
+            map.document_identity("page-a", Some("f")),
+            Some(("page-a", "frame-1"))
+        );
+        // A frame-only snapshot after a navigation records the frame alone.
+        map.invalidate_page("page-a");
+        assert!(map.observe_document("page-a", Some("f"), "page-a", Some("frame-2")));
+        assert_eq!(map.document_identity("page-a", None), None);
+        assert_eq!(
+            map.document_identity("page-a", Some("f")),
+            Some(("page-a", "frame-2"))
+        );
     }
 
     #[test]

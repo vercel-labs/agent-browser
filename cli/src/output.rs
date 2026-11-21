@@ -2118,6 +2118,9 @@ tools and unchanged catalogs add no context or discovery polling.
 
 The `goto` and `navigate` aliases still require a URL.
 
+Unknown flags are rejected. To pass a URL that starts with `-`, put flags
+before `--`; values after `--` are positional.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
@@ -2220,7 +2223,7 @@ Options:
 Global Options:
   --json               Output metadata and content as JSON
   --headers <json>     Additional HTTP headers, such as Authorization
-  --allowed-domains <list>  Restrict read fetches and redirects to allowed domains
+  --allowed-domains <list>  Restrict read fetches and redirects to allowed domains; must list at least one
   --content-boundaries Wrap read output in boundary markers
   --max-output <chars> Truncate read output to N chars
   Invalid --max-output and AGENT_BROWSER_MAX_OUTPUT values warn and leave the
@@ -2506,6 +2509,8 @@ Usage: agent-browser download <selector> <path>
 Clicks an element that triggers a download and saves the file to the specified path.
 Only works with a browser agent-browser launched; rejected over --cdp,
 --auto-connect, or a provider because the remote endpoint names the saved file.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Arguments:
   selector             Element to click (CSS selector or @ref)
@@ -2742,6 +2747,9 @@ saves to a temporary directory with a generated filename.
 Headless Chromium screenshots hide native scrollbars for consistent image output.
 Pass --hide-scrollbars false when launching to keep native scrollbars visible.
 
+Unknown flags are rejected. To pass a selector or path that starts with `-`,
+put flags before `--`; values after `--` are positional.
+
 Options:
   --full, -f           Capture full page (not just viewport)
   --if-changed         Recommended: skip unchanged images to save tokens
@@ -2751,6 +2759,7 @@ Options:
                        Each label [N] corresponds to ref @eN from snapshot.
                        Prints a legend mapping labels to element roles/names.
                        With --json, annotations are included in the response.
+                       A failed annotated capture keeps the previous refs.
                        Supported on Chromium and Lightpanda.
   --screenshot-dir <path>  Default output directory for screenshots
                        (or AGENT_BROWSER_SCREENSHOT_DIR env)
@@ -2774,6 +2783,7 @@ Examples:
   agent-browser screenshot --annotate --json       # JSON output with annotations
   agent-browser screenshot --screenshot-dir ./shots # Save to custom directory
   agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
+  agent-browser screenshot body -- --draft.png   # Literal path starting with -
 "##
         }
         "pdf" => {
@@ -2783,6 +2793,8 @@ agent-browser pdf - Save page as PDF
 Usage: agent-browser pdf <path>
 
 Saves the current page as a PDF file.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Global Options:
   --json               Output as JSON
@@ -2803,17 +2815,23 @@ Usage: agent-browser snapshot [options]
 
 Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
-Refs can be reused across snapshots. Take a fresh snapshot after navigation.
+Refs can be reused across snapshots. Take a fresh snapshot after navigation:
+a ref issued for a document that has since been replaced, in the page or in its
+iframe, fails with "from a document that is no longer loaded". A snapshot taken
+while the document is being replaced fails with "The document changed while the
+snapshot was being captured"; run it again.
 If a ref's element was replaced, the action uses the one element with the same
 role and name. If that is ambiguous, it fails: run snapshot again.
 Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
+A snapshot that fails to capture, such as one scoped to a selector that matches
+nothing, leaves the previous refs in place while the document is unchanged.
 
 Options:
   -i, --interactive    Only include interactive elements
   -u, --urls           Include href URLs for link elements
   -c, --compact        Remove empty structural elements
   -d, --depth <n>      Limit tree depth
-  -s, --selector <sel> Scope snapshot to CSS selector
+  -s, --selector <sel> Scope snapshot to every element matching a CSS selector
       --delta          Return full state once, then unchanged or structural deltas
                        Deltas include ref changes and an exact treeChange line splice
       --full           Force full state and update the delta baseline
@@ -3083,10 +3101,12 @@ Configures various browser settings and emulation options.
 
 Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina;
-                             scale must be finite; mobile mode is unsupported in Firefox)
-  device <name>              Emulate device (e.g., "iPhone 12"; unsupported in Firefox;
-                             use set viewport plus the --user-agent launch flag or
-                             AGENT_BROWSER_USER_AGENT instead of set device)
+                             scale must be finite; mobile mode is unsupported in Firefox);
+                             kept across relaunches and new tabs
+  device <name>              Emulate device (e.g., "iPhone 12"): viewport, user agent and
+                             touch input (touch events exist after the next navigation);
+                             unsupported in Firefox (use set viewport plus the --user-agent
+                             launch flag or AGENT_BROWSER_USER_AGENT)
   geo <lat> <lng>            Set geolocation (coordinates must be finite)
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
@@ -3119,6 +3139,8 @@ agent-browser network - Network interception and monitoring
 Usage: agent-browser network <subcommand> [args]
 
 Intercept, mock, or monitor network requests.
+Unknown flags are rejected. To pass a path or URL that starts with `-`, put
+flags before `--`; values after `--` are positional.
 
 Subcommands:
   route <url> [options]      Intercept requests matching URL pattern
@@ -3477,6 +3499,8 @@ Usage: agent-browser trace start
        agent-browser trace stop [path]
 
 Record a Chrome DevTools trace for debugging.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Operations:
   start                Start recording trace
@@ -3503,6 +3527,8 @@ Usage: agent-browser profiler <operation> [options]
 Record a performance profile using Chrome DevTools Protocol (CDP) Tracing.
 The output JSON file can be loaded into Chrome DevTools Performance panel,
 Perfetto UI (https://ui.perfetto.dev/), or other trace analysis tools.
+Unknown flags are rejected. To pass a path that starts with `-`, put flags
+before `--`; values after `--` are positional.
 
 Operations:
   start                Start profiling
@@ -3550,6 +3576,8 @@ navigation unless you pass a URL. Capture starts on the page you already
 have open, so hydration and initial animations are not re-run cold.
 If a URL is provided, the active tab navigates there first.
 To record in a separate tab, run `tab new [url]` before `record start`.
+Unknown flags are rejected. To pass a path or URL that starts with `-`, put
+flags before `--`; values after `--` are positional.
 
 Requires ffmpeg on PATH with the libvpx and libx264 encoders (brew install
 ffmpeg, or apt install ffmpeg). Run `agent-browser doctor` to check.
@@ -3715,6 +3743,8 @@ agent-browser state - Manage browser state
 Usage: agent-browser state <operation> [args]
 
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
+Unknown flags are rejected. To pass a path or filename that starts with `-`,
+put flags before `--`; values after `--` are positional.
 
 Operations:
   save <path>                        Save current state, overwriting the file
@@ -4154,6 +4184,8 @@ separated by blank lines (or as a JSON array with --json).
 Put global flags such as `--init-script` and `--enable` on the outer batch
 invocation. Keep command-specific options and literal command arguments inside
 each item.
+`close --all`, `quit --all`, and `exit --all` cannot run inside a batch;
+run the command outside the batch instead.
 
 Options:
   --bail               Stop on first error (default: continue all commands)
@@ -4497,6 +4529,17 @@ Usage: agent-browser <command> [args] [options]
 
 Unknown commands exit with status 1, including when help is requested.
 
+These commands reject unknown flags and use the same -- boundary.
+Navigation: open/goto/navigate, back/forward/reload, pushstate.
+Interaction: click/dblclick, hover/focus/check/uncheck, drag, scroll,
+scrollintoview, tap. Capture and files: screenshot, pdf, download,
+record start/restart. Inspection and state: snapshot, frame, highlight,
+console, errors, trace start/stop, profiler start/stop,
+state save/load/list/clear/show/clean, network, flow steps/list, react,
+vitals, close, inspect. Put flags before --; values after -- are positional.
+Commands that accept negative numbers take them directly. Other commands
+may validate options differently.
+
 Start here (for AI agents):
   agent-browser skills get core
 
@@ -4788,7 +4831,7 @@ Options:
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
                              Invalid values warn and leave the existing output limit unchanged.
-  --allowed-domains <list>   Restrict network domains and non-HTTP document navigation; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --allowed-domains <list>   Restrict network domains and non-HTTP document navigation; must list at least one; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --capture <list>           Record the session as it runs; only flow is supported (or AGENT_BROWSER_CAPTURE)
                              On a running session without capture, passing it relaunches with capture on
                              Firefox does not support --capture flow
@@ -4919,7 +4962,7 @@ Environment:
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
   AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
-  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
+  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; an empty value is rejected; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
   AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts

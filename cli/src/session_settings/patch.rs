@@ -27,11 +27,73 @@ pub struct Patch {
     /// Keys whose requested value equals the running one but whose content
     /// differs (a CA file edited in place). Daemon-side only: never sent.
     changed_in_place: BTreeSet<Key>,
+    /// Connection entries that came from the environment or config rather
+    /// than the command line. They are session defaults: the plan applies them
+    /// only to a session that has no connection target yet.
+    ambient: BTreeSet<Key>,
 }
 
 /// Wire name of the forced-relaunch marker. It is not a setting, so it has no
 /// row in the table.
 const RELAUNCH_FIELD: &str = "relaunch";
+
+/// Wire name of the list of ambient connection entries. Absent means every
+/// entry is explicit, which is what a CLI without the field sends.
+const AMBIENT_FIELD: &str = "ambient";
+
+/// The settings an environment or config value can make ambient.
+pub(super) const AMBIENT_KEYS: [Key; 4] =
+    [Key::Cdp, Key::AutoConnect, Key::Provider, Key::CdpHeaders];
+
+/// The connection targets of one invocation after the environment and config
+/// defaults are resolved against the command line.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Targets {
+    pub cdp: Option<String>,
+    pub provider: Option<String>,
+    pub auto_connect: bool,
+}
+
+/// Which targets an invocation names. A target on the command line wins and
+/// drops the environment and config ones. Without one, a blank default names
+/// nothing and a single default is kept, picked by precedence: cdp, then
+/// auto-connect, then provider. A blank `-p ""` is kept: it resets the session.
+pub fn effective_targets(flags: &Flags) -> Targets {
+    let blank = |v: &String| v.trim().is_empty();
+    let mut cdp = flags.cdp.clone();
+    let mut provider = flags.provider.clone();
+    let mut auto_connect = flags.auto_connect;
+    if !flags.cli_cdp && cdp.as_ref().is_some_and(blank) {
+        cdp = None;
+    }
+    if !flags.cli_provider && provider.as_ref().is_some_and(blank) {
+        provider = None;
+    }
+    let explicit = flags.cli_cdp && cdp.is_some()
+        || flags.cli_provider && provider.as_ref().is_some_and(|v| !blank(v))
+        || flags.cli_auto_connect && auto_connect;
+    if explicit {
+        if !flags.cli_cdp {
+            cdp = None;
+        }
+        if !flags.cli_provider {
+            provider = None;
+        }
+        auto_connect &= flags.cli_auto_connect;
+    } else if cdp.is_some() {
+        auto_connect = false;
+        if !flags.cli_provider {
+            provider = None;
+        }
+    } else if auto_connect && !flags.cli_provider {
+        provider = None;
+    }
+    Targets {
+        cdp,
+        provider,
+        auto_connect,
+    }
+}
 
 impl fmt::Debug for Patch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -45,6 +107,10 @@ impl fmt::Debug for Patch {
         if self.relaunch {
             map.entry(&RELAUNCH_FIELD, &true);
         }
+        if !self.ambient.is_empty() {
+            let names: Vec<&str> = self.ambient.iter().map(|k| spec(*k).name).collect();
+            map.entry(&AMBIENT_FIELD, &names);
+        }
         map.finish()
     }
 }
@@ -52,15 +118,72 @@ impl fmt::Debug for Patch {
 impl Patch {
     /// Reads the resolved flags once per invocation. Pure.
     pub fn from_flags(flags: &Flags) -> Patch {
-        let entries = SPECS
+        let mut entries: BTreeMap<Key, Requested> = SPECS
             .iter()
             .filter_map(|s| (s.read)(flags).map(|requested| (s.key, requested)))
             .collect();
+        let targets = effective_targets(flags);
+        let mut ambient = BTreeSet::new();
+        for key in AMBIENT_KEYS {
+            let (kept, explicit) = match key {
+                Key::Cdp => (targets.cdp.is_some(), flags.cli_cdp),
+                Key::Provider => (targets.provider.is_some(), flags.cli_provider),
+                // Headers belong to an endpoint: the plan decides whether
+                // this invocation sends one.
+                Key::CdpHeaders => (
+                    flags.cli_cdp_headers
+                        || flags.cdp_headers.as_deref().is_some_and(|v| {
+                            // Defaults belong to the endpoint they name: not
+                            // to a different one given with `--cdp`.
+                            !v.trim().is_empty()
+                                && (!flags.cli_cdp
+                                    || targets
+                                        .cdp
+                                        .as_deref()
+                                        .is_none_or(|cdp| flags.default_headers_fit(cdp)))
+                        }),
+                    flags.cli_cdp_headers,
+                ),
+                _ => (
+                    targets.auto_connect || flags.no_auto_connect || flags.cli_auto_connect,
+                    flags.cli_auto_connect || flags.no_auto_connect,
+                ),
+            };
+            if !kept {
+                entries.remove(&key);
+            } else if !explicit && entries.contains_key(&key) {
+                ambient.insert(key);
+            }
+        }
         Patch {
             entries,
             relaunch: flags.relaunch,
             changed_in_place: BTreeSet::new(),
+            ambient,
         }
+    }
+
+    /// Whether the entry for `key` came from the environment or config.
+    pub fn is_ambient(&self, key: Key) -> bool {
+        self.ambient.contains(&key)
+    }
+
+    /// What a command that names its own endpoint sends: the targets from the
+    /// environment or config are dropped, and the headers from there go with
+    /// the endpoint it names.
+    pub fn without_ambient_connection(&self) -> Patch {
+        let mut patch = self.clone();
+        for key in std::mem::take(&mut patch.ambient) {
+            if key != Key::CdpHeaders {
+                patch.entries.remove(&key);
+            }
+        }
+        patch
+    }
+
+    fn retain_ambient(&mut self) {
+        let entries = &self.entries;
+        self.ambient.retain(|key| entries.contains_key(key));
     }
 
     pub fn is_noop(&self) -> bool {
@@ -88,6 +211,7 @@ impl Patch {
         live.relaunch = false;
         live.entries
             .retain(|key, _| spec(*key).effect == Effect::Live);
+        live.retain_ambient();
         live
     }
 
@@ -112,6 +236,7 @@ impl Patch {
     /// Drops a key the patch would otherwise carry.
     pub fn remove(&mut self, key: Key) {
         self.entries.remove(&key);
+        self.ambient.remove(&key);
     }
 
     pub fn get(&self, key: Key) -> Option<&Requested> {
@@ -149,6 +274,14 @@ impl Patch {
         if self.relaunch {
             object.insert(RELAUNCH_FIELD.to_string(), Value::Bool(true));
         }
+        if !self.ambient.is_empty() {
+            let names: Vec<Value> = self
+                .ambient
+                .iter()
+                .map(|k| Value::from(spec(*k).name))
+                .collect();
+            object.insert(AMBIENT_FIELD.to_string(), Value::Array(names));
+        }
         Some(Value::Object(object))
     }
 
@@ -159,7 +292,23 @@ impl Patch {
         let object = wire.as_object().ok_or(SettingsError::NotAnObject)?;
         let mut entries = BTreeMap::new();
         let mut relaunch = false;
+        let mut ambient = BTreeSet::new();
         for (name, value) in object {
+            if name == AMBIENT_FIELD {
+                let names = value.as_array().ok_or_else(|| {
+                    SettingsError::UnknownKey(format!("{} (expected a list of names)", name))
+                })?;
+                for item in names {
+                    let key = item
+                        .as_str()
+                        .and_then(spec_by_name)
+                        .map(|s| s.key)
+                        .filter(|key| AMBIENT_KEYS.contains(key))
+                        .ok_or_else(|| SettingsError::UnknownKey(format!("{} {}", name, item)))?;
+                    ambient.insert(key);
+                }
+                continue;
+            }
             if name == RELAUNCH_FIELD {
                 relaunch = value.as_bool().ok_or_else(|| {
                     SettingsError::UnknownKey(format!("{} (expected a boolean)", name))
@@ -187,11 +336,14 @@ impl Patch {
             };
             entries.insert(s.key, requested);
         }
-        Ok(Patch {
+        let mut patch = Patch {
             entries,
             relaunch,
             changed_in_place: BTreeSet::new(),
-        })
+            ambient,
+        };
+        patch.retain_ambient();
+        Ok(patch)
     }
 
     /// A patch that sets the given keys. Used for tests and for translating
@@ -201,6 +353,7 @@ impl Patch {
             entries: entries.into_iter().collect(),
             relaunch: false,
             changed_in_place: BTreeSet::new(),
+            ambient: BTreeSet::new(),
         }
     }
 }
