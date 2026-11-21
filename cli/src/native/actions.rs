@@ -6179,7 +6179,7 @@ async fn apply_settings_patch(
             .filter(|change| change.effect() == Effect::Launch)
             .map(|change| change.to_json(false))
             .collect();
-        let live = patch.without_launch_settings();
+        let live = patch.without_launch_settings_for(state.session_name.as_deref());
         (state.settings.plan(&live), deferred)
     };
     let changed = |key: Key| plan.changes.iter().any(|change| change.key == key);
@@ -18947,7 +18947,7 @@ mod tests {
                 "restore-check-text": null,
                 "restore-check-fn": null
             }),
-            true,
+            false,
         )
         .await
         .unwrap();
@@ -18963,6 +18963,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_non_launch_patch_with_another_key_leaves_running_policy_alone() {
+        let (_env, mut state) = restore_session("old-key");
+        assert_eq!(state.restore_save, "auto");
+
+        apply_wire(
+            &mut state,
+            json!({ "restore-key": "new-key", "restore-save": "never" }),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
+        assert_eq!(state.restore_save, "auto");
+    }
+
+    #[tokio::test]
     async fn test_restore_check_change_marks_loaded_state_for_validation() {
         let (_env, mut state) = restore_session("same-key");
         state.restore_status = "loaded".to_string();
@@ -18970,7 +18987,7 @@ mod tests {
         apply_wire(
             &mut state,
             json!({ "restore-key": "same-key", "restore-check-text": "Dashboard" }),
-            true,
+            false,
         )
         .await
         .unwrap();

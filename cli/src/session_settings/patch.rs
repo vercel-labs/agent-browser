@@ -230,18 +230,35 @@ impl Patch {
         (rest, unit)
     }
 
-    /// The patch without its launch settings (the restore unit included) and
-    /// without a forced relaunch: what a command that never launches a browser
-    /// can apply.
+    /// The patch without its launch settings and without a forced relaunch:
+    /// what a command that never launches a browser can apply. The restore
+    /// unit's save policy and checks are dropped too, because the caller does
+    /// not know which restore key is running; see `without_launch_settings_for`.
     pub fn without_launch_settings(&self) -> Patch {
+        self.without_launch_settings_inner(None)
+    }
+
+    /// Like `without_launch_settings`, for a caller that knows the running
+    /// restore key. The save policy and checks stay when the patch names no
+    /// restore key or the running one; a different key would put them on the
+    /// wrong key, so they are dropped with it.
+    pub fn without_launch_settings_for(&self, running_key: Option<&str>) -> Patch {
+        self.without_launch_settings_inner(Some(running_key))
+    }
+
+    fn without_launch_settings_inner(&self, running_key: Option<Option<&str>>) -> Patch {
         let mut live = self.clone();
         live.relaunch = false;
         live.entries
             .retain(|key, _| spec(*key).effect == Effect::Live);
-        // The save policy and checks belong to the restore key; without it
-        // they would apply to the key already running.
-        for key in RESTORE_UNIT {
-            if key != Key::RestoreKey {
+        let patch_key = self.value(Key::RestoreKey).and_then(Value::as_str);
+        let applies_to_running_key = match (patch_key, running_key) {
+            (None, Some(_)) => true,
+            (Some(k), Some(running)) => running == Some(k),
+            (_, None) => false,
+        };
+        if !applies_to_running_key {
+            for key in RESTORE_UNIT {
                 live.entries.remove(&key);
             }
         }
