@@ -419,6 +419,16 @@
         "from": "Browser clients must load from localhost, 127.0.0.1, ::1 or file://. Any other origin gets a 403 on the upgrade and needs a proxy.",
         "to": "Browser clients are checked by the Origin and Host headers of the upgrade. The Origin must have the same host and port as the Host the client connected to, and that host must be localhost, 127.0.0.1 or [::1] (the server itself listens on 127.0.0.1). A page on another port, a file:// page (browsers send Origin: null) and any other origin get a 403 on the upgrade. A custom viewer works when its page and the WebSocket share one authority, for example behind a reverse proxy that forwards the original Host; a proxy that rewrites Host to the stream address fails the check. Clients that send no Origin header, such as a server-side WebSocket client, are not restricted."
       }
+    ],
+    "/diffing": [
+      {
+        "from": "Without `--baseline`, the command automatically compares against the most recent snapshot taken in the current session.",
+        "to": "Without `--baseline`, the command automatically compares against the most recent snapshot taken on this tab."
+      },
+      {
+        "from": "Without --baseline, the command automatically compares against the most recent snapshot taken in the current session.",
+        "to": "Without --baseline, the command automatically compares against the most recent snapshot taken on this tab."
+      }
     ]
   },
   "resources": {
