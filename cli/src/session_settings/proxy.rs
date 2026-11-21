@@ -14,15 +14,13 @@ fn decode_proxy_credential(credential: &str) -> String {
 }
 
 pub fn parse_proxy(proxy_str: &str) -> ParsedProxy {
-    let Some(protocol_end) = proxy_str.find("://") else {
-        return ParsedProxy {
-            server: proxy_str.to_string(),
-            username: None,
-            password: None,
-        };
+    let (protocol, rest) = match proxy_str.find("://") {
+        Some(protocol_end) => (
+            Some(&proxy_str[..protocol_end + 3]),
+            &proxy_str[protocol_end + 3..],
+        ),
+        None => (None, proxy_str),
     };
-    let protocol = &proxy_str[..protocol_end + 3];
-    let rest = &proxy_str[protocol_end + 3..];
 
     let Some(at_pos) = rest.rfind('@') else {
         return ParsedProxy {
@@ -34,7 +32,10 @@ pub fn parse_proxy(proxy_str: &str) -> ParsedProxy {
 
     let creds = &rest[..at_pos];
     let server_part = &rest[at_pos + 1..];
-    let server = format!("{}{}", protocol, server_part);
+    let server = match protocol {
+        Some(protocol) => format!("{protocol}{server_part}"),
+        None => server_part.to_string(),
+    };
 
     let (username, password) = match creds.find(':') {
         Some(colon_pos) => {
