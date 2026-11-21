@@ -7,13 +7,14 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::bidi::BidiClient;
 use super::daemon::session;
-use super::session::FirefoxSession;
+use super::session::{DataCollectorMode, DataCollectorState, FirefoxSession};
 use super::target::resolve_target;
-use crate::native::actions::{
-    self as chrome, DaemonState, HarContentMode, HarEntry, RouteEntry, TrackedRequest,
-};
+use crate::native::actions::{self as chrome, DaemonState, HarContentMode, HarEntry, RouteEntry};
 use crate::native::downloads::{DownloadLedger, DownloadState};
-use crate::native::network::DomainFilter;
+use crate::native::network::{
+    clip, clip_bidi_header_object, clip_bidi_headers, decode_bidi_body_bounded, DomainFilter,
+    MAX_REQUEST_BODY_BYTES, MAX_REQUEST_LABEL_BYTES, MAX_REQUEST_URL_BYTES,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum NetworkDecision {
@@ -181,15 +182,6 @@ fn header_list(headers: &Value) -> Vec<(String, String)> {
             ))
         })
         .collect()
-}
-
-fn header_object(headers: &Value) -> Value {
-    Value::Object(
-        header_list(headers)
-            .into_iter()
-            .map(|(k, v)| (k, Value::String(v)))
-            .collect(),
-    )
 }
 
 fn bidi_headers(headers: Vec<(String, String)>) -> Value {
@@ -513,29 +505,45 @@ pub async fn drain(state: &mut DaemonState) {
         }
         apply_events(state, events).await;
     }
-    let wanted = state.har_recording || state.request_tracking;
+    let mode = if state.har_recording {
+        DataCollectorMode::HarAndRequests
+    } else if state.request_tracking {
+        DataCollectorMode::RequestsOnly
+    } else {
+        DataCollectorMode::Off
+    };
     if let Some(ff) = state.firefox.as_mut() {
-        collect_bodies(ff, wanted).await;
+        collect_bodies(ff, mode).await;
     }
 }
 
-/// Adds or removes the BiDi data collector, so Firefox keeps bodies only while something reads them.
-async fn collect_bodies(ff: &mut FirefoxSession, wanted: bool) {
-    if ff.data_collector.is_some() == wanted {
+/// Reconciles the Firefox BiDi data collector with `desired`, keeping request/response body
+/// buffering scoped to what the session is actually recording.
+async fn collect_bodies(ff: &mut FirefoxSession, desired: DataCollectorMode) {
+    if ff.data_collector.mode() == desired {
         return;
     }
-    let (method, params) = match ff.data_collector.take() {
-        Some(collector) => (
-            "network.removeDataCollector",
-            json!({ "collector": collector }),
-        ),
-        None => (
-            "network.addDataCollector",
-            json!({ "dataTypes": ["request", "response"], "maxEncodedDataSize": 10_000_000 }),
-        ),
+    if let DataCollectorState::Active { id, .. } = std::mem::take(&mut ff.data_collector) {
+        let _ = ff
+            .bidi
+            .send("network.removeDataCollector", json!({ "collector": id }))
+            .await;
+    }
+    let params = match desired {
+        DataCollectorMode::Off => return,
+        DataCollectorMode::RequestsOnly => json!({
+            "dataTypes": ["request"],
+            "maxEncodedDataSize": chrome::HAR_MAX_BODY_BYTES,
+        }),
+        DataCollectorMode::HarAndRequests => json!({
+            "dataTypes": ["request", "response"],
+            "maxEncodedDataSize": 10_000_000,
+        }),
     };
-    let reply = ff.bidi.send(method, params).await.ok();
-    ff.data_collector = reply.and_then(|r| r["collector"].as_str().map(String::from));
+    let reply = ff.bidi.send("network.addDataCollector", params).await.ok();
+    if let Some(id) = reply.and_then(|r| r["collector"].as_str().map(String::from)) {
+        ff.data_collector = DataCollectorState::Active { id, mode: desired };
+    }
 }
 
 /// The browsing context an event reports, when the event carries one.
@@ -591,51 +599,38 @@ fn last_har_entry<'a>(entries: &'a mut [HarEntry], id: &str) -> Option<&'a mut H
         .find(|entry| entry.request_id == id)
 }
 
-fn last_tracked_request<'a>(
-    entries: &'a mut [TrackedRequest],
-    id: &str,
-) -> Option<&'a mut TrackedRequest> {
-    entries
-        .iter_mut()
-        .rev()
-        .find(|entry| entry.request_id == id)
-}
-
 fn request_started(state: &mut DaemonState, p: &Value) {
     let request = &p["request"];
-    let id = request_id(p).to_string();
-    let url = request["url"].as_str().unwrap_or("").to_string();
-    let method = request["method"].as_str().unwrap_or("GET").to_string();
+    let id = request_id(p);
+    let url = request["url"].as_str().unwrap_or("");
+    let method = request["method"].as_str().unwrap_or("GET");
     let timestamp = p["timestamp"].as_f64();
     let millis = timestamp.map(|t| t as u64).unwrap_or_default();
-    let resource_type = resource_type(request).to_string();
+    let resource_type = resource_type(request);
     if let Some(timestamp) = timestamp.filter(|_| state.har_recording) {
-        state.har_entries.push(HarEntry {
-            request_id: id.clone(),
+        state.record_har_entry(HarEntry {
+            request_id: clip(id, MAX_REQUEST_LABEL_BYTES),
             wall_time: timestamp / 1000.0,
-            method: method.clone(),
-            url: url.clone(),
-            request_headers: header_list(&request["headers"]),
+            method: method.to_string(),
+            url: url.to_string(),
+            request_headers: clip_bidi_headers(&request["headers"]),
             request_body_size: request["bodySize"].as_i64().unwrap_or(0),
-            resource_type: resource_type.clone(),
+            resource_type: resource_type.to_string(),
             http_version: "HTTP/1.1".to_string(),
             response_body_size: -1,
             ..Default::default()
         });
     }
     if state.request_tracking {
-        state.tracked_requests.push(TrackedRequest {
+        state.tracked_requests.record_request(
+            id,
             url,
             method,
-            headers: header_object(&request["headers"]),
-            timestamp: millis,
+            clip_bidi_header_object(&request["headers"]),
+            millis,
             resource_type,
-            request_id: id,
-            post_data: None,
-            status: None,
-            response_headers: None,
-            mime_type: None,
-        });
+            None,
+        );
     }
 }
 
@@ -643,20 +638,23 @@ fn response_seen(state: &mut DaemonState, p: &Value, started: bool) {
     let id = request_id(p);
     let response = &p["response"];
     let status = response["status"].as_i64();
-    let mime = response["mimeType"].as_str().unwrap_or("").to_string();
+    let mime = response["mimeType"].as_str().unwrap_or("");
     if state.har_recording {
         if let Some(entry) = last_har_entry(&mut state.har_entries, id) {
-            let headers = header_list(&response["headers"]);
+            let headers = clip_bidi_headers(&response["headers"]);
             entry.status = status;
-            entry.status_text = response["statusText"].as_str().unwrap_or("").to_string();
-            entry.mime_type = mime.clone();
+            entry.status_text = clip(
+                response["statusText"].as_str().unwrap_or(""),
+                MAX_REQUEST_LABEL_BYTES,
+            );
+            entry.mime_type = clip(mime, MAX_REQUEST_LABEL_BYTES);
             entry.http_version = chrome::har_cdp_protocol_to_http_version(
                 response["protocol"].as_str().unwrap_or(""),
             );
             entry.redirect_url = headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("location"))
-                .map(|(_, v)| v.clone())
+                .map(|(_, v)| clip(v, MAX_REQUEST_URL_BYTES))
                 .unwrap_or_default();
             entry.response_headers = headers;
             entry.response_body_size = response["bodySize"]
@@ -672,11 +670,12 @@ fn response_seen(state: &mut DaemonState, p: &Value, started: bool) {
         }
     }
     if state.request_tracking {
-        if let Some(entry) = last_tracked_request(&mut state.tracked_requests, id) {
-            entry.status = status;
-            entry.mime_type = Some(mime);
-            entry.response_headers = Some(header_object(&response["headers"]));
-        }
+        state.tracked_requests.attach_response(
+            id,
+            status,
+            Some(mime),
+            Some(clip_bidi_header_object(&response["headers"])),
+        );
     }
 }
 
@@ -694,20 +693,8 @@ async fn data(bidi: &BidiClient, id: &str, data_type: &str) -> Result<(String, b
 }
 
 async fn request_body(state: &mut DaemonState, id: &str) {
-    let har_wanted = state.har_recording
-        && state
-            .har_entries
-            .iter()
-            .rev()
-            .find(|e| e.request_id == id)
-            .is_some_and(|e| e.post_data.is_none());
-    let tracked_wanted = state.request_tracking
-        && state
-            .tracked_requests
-            .iter()
-            .rev()
-            .find(|e| e.request_id == id)
-            .is_some_and(|e| e.post_data.is_none());
+    let har_wanted = state.har_needs_post_data(id);
+    let tracked_wanted = state.request_tracking && state.tracked_requests.needs_post_data(id);
     let Some(ff) = state
         .firefox
         .as_ref()
@@ -715,38 +702,26 @@ async fn request_body(state: &mut DaemonState, id: &str) {
     else {
         return;
     };
-    let Ok((body, base64)) = data(&ff.bidi, id, "request").await else {
+    let Ok((raw, base64)) = data(&ff.bidi, id, "request").await else {
         return;
     };
-    let body = if base64 {
-        let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body)
-        else {
-            return;
-        };
-        let Ok(body) = String::from_utf8(bytes) else {
-            return;
-        };
-        body
-    } else {
-        body
-    };
-    if body.is_empty() {
-        return;
-    }
     if har_wanted {
-        if let Some(entry) = last_har_entry(&mut state.har_entries, id) {
-            entry.post_data = Some(body.clone());
+        if let Some(body) =
+            decode_bidi_body_bounded(&raw, base64, chrome::HAR_MAX_BODY_BYTES, false)
+        {
+            state.attach_har_post_data(id, body);
         }
     }
     if tracked_wanted {
-        if let Some(entry) = last_tracked_request(&mut state.tracked_requests, id) {
-            entry.post_data = Some(body);
+        if let Some(body) = decode_bidi_body_bounded(&raw, base64, MAX_REQUEST_BODY_BYTES, true) {
+            state.tracked_requests.attach_post_data(id, &body);
         }
     }
 }
 
 async fn har_body(state: &mut DaemonState, id: &str) {
     let wanted = state.har_recording
+        && state.har_body_total_bytes < chrome::HAR_MAX_TOTAL_BODY_BYTES
         && state
             .har_entries
             .iter()
@@ -766,17 +741,7 @@ async fn har_body(state: &mut DaemonState, id: &str) {
     let Ok((body, base64)) = data(&ff.bidi, id, "response").await else {
         return;
     };
-    if body.is_empty()
-        || body.len() > chrome::HAR_MAX_BODY_BYTES
-        || state.har_body_total_bytes + body.len() > chrome::HAR_MAX_TOTAL_BODY_BYTES
-    {
-        return;
-    }
-    if let Some(entry) = last_har_entry(&mut state.har_entries, id) {
-        state.har_body_total_bytes += body.len();
-        entry.response_body = Some(body);
-        entry.response_body_base64 = base64;
-    }
+    state.attach_har_response_body(id, body, base64);
 }
 
 fn log_entry(state: &mut DaemonState, p: &Value) {
@@ -944,7 +909,7 @@ pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .and_then(Value::as_u64)
         .unwrap_or(state.default_timeout_ms);
     let ff = session(state)?;
-    collect_bodies(ff, true).await;
+    collect_bodies(ff, DataCollectorMode::HarAndRequests).await;
     let mut rx = ff.bidi.subscribe_buffered();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
@@ -967,7 +932,7 @@ pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             return Ok(json!({
                 "body": body,
                 "status": p["response"]["status"].as_i64().unwrap_or(0),
-                "headers": header_object(&p["response"]["headers"]),
+                "headers": clip_bidi_header_object(&p["response"]["headers"]),
             }));
         }
     }
@@ -1614,7 +1579,10 @@ mod tests {
                         json!("content-type,x-client");
                 }
             }
-            assert_eq!(header_object(&params["headers"]), expected_headers);
+            assert_eq!(
+                clip_bidi_header_object(&params["headers"]),
+                expected_headers
+            );
         }
     }
 
@@ -1864,11 +1832,11 @@ mod tests {
         );
         assert_eq!(entry.response_body.as_deref(), Some("har-response"));
         assert_eq!(
-            state.tracked_requests[0].post_data.as_deref(),
+            state.tracked_requests.entries()[0].post_data.as_deref(),
             Some("payload=har-probe")
         );
         assert_eq!(
-            serde_json::to_value(&state.tracked_requests[0]).unwrap()["postData"],
+            serde_json::to_value(&state.tracked_requests.entries()[0]).unwrap()["postData"],
             json!("payload=har-probe")
         );
 
@@ -1929,8 +1897,8 @@ mod tests {
         }
 
         assert_eq!(state.tracked_requests.len(), 2);
-        assert_eq!(state.tracked_requests[0].request_id, "active");
-        assert_eq!(state.tracked_requests[1].request_id, "frame");
+        assert_eq!(state.tracked_requests.entries()[0].request_id, "active");
+        assert_eq!(state.tracked_requests.entries()[1].request_id, "frame");
         assert_eq!(state.har_entries.len(), 2);
         assert_eq!(state.har_entries[0].request_id, "active");
         assert_eq!(state.har_entries[1].request_id, "frame");
@@ -2054,5 +2022,126 @@ mod tests {
                 "network.addDataCollector"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn tracked_requests_and_har_enforce_memory_and_body_budgets() {
+        let oversized_body = "p".repeat(chrome::HAR_MAX_BODY_BYTES + 1024);
+        let body_reply = oversized_body.clone();
+        let (ff, _, _) = crate::native::firefox::session::tests::fake_session_with(move |v| {
+            if v["method"] == "network.getData" {
+                json!({"bytes": {"type": "string", "value": body_reply}})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.request_tracking = true;
+        state.har_recording = true;
+        state.har_content_mode = HarContentMode::All;
+
+        let huge_url = format!(
+            "https://example.test/{}",
+            "u".repeat(MAX_REQUEST_URL_BYTES * 2)
+        );
+        let huge_headers = json!([
+            {"name": "X-Huge", "value": {"type": "string", "value": "h".repeat(64 * 1024)}}
+        ]);
+        apply_events(
+            &mut state,
+            vec![
+                json!({
+                    "method": "network.beforeRequestSent",
+                    "params": {
+                        "timestamp": 1_800_000_000_000.0,
+                        "request": {
+                            "request": "r-big",
+                            "url": huge_url,
+                            "method": "POST",
+                            "headers": huge_headers,
+                            "bodySize": oversized_body.len() as i64,
+                            "initiatorType": "fetch",
+                        },
+                    },
+                }),
+                json!({
+                    "method": "network.responseCompleted",
+                    "params": {
+                        "timestamp": 1_800_000_000_500.0,
+                        "request": {"request": "r-big"},
+                        "response": {
+                            "status": 200,
+                            "mimeType": "text/plain",
+                            "headers": huge_headers,
+                            "bodySize": oversized_body.len() as i64,
+                        },
+                    },
+                }),
+            ],
+        )
+        .await;
+
+        assert_eq!(state.har_entries.len(), 1);
+        assert_eq!(state.har_entries[0].post_data, None);
+        assert_eq!(state.har_entries[0].response_body, None);
+        assert_eq!(
+            state.har_entries[0].request_body_size,
+            oversized_body.len() as i64
+        );
+        assert_eq!(state.har_body_total_bytes, 0);
+
+        let tracked = &state.tracked_requests.entries()[0];
+        assert!(tracked.url.contains("...[truncated "));
+        assert!(tracked
+            .post_data
+            .as_deref()
+            .unwrap()
+            .contains("...[truncated "));
+        assert!(
+            state.tracked_requests.retained_bytes()
+                <= crate::native::network::MAX_TRACKED_REQUEST_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn data_collector_state_machine_scopes_buffering_to_recording_mode() {
+        let payloads = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let recorded = payloads.clone();
+        let (ff, _, _) = crate::native::firefox::session::tests::fake_session_with(move |v| {
+            let method = v["method"].as_str().unwrap_or("").to_string();
+            if method.contains("DataCollector") {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), v["params"].clone()));
+            }
+            if method == "network.addDataCollector" {
+                json!({"collector": "c-1"})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        state.request_tracking = true;
+        drain(&mut state).await;
+        state.har_recording = true;
+        drain(&mut state).await;
+        state.har_recording = false;
+        state.request_tracking = false;
+        drain(&mut state).await;
+
+        let calls = payloads.lock().unwrap();
+        assert_eq!(calls.len(), 4, "{calls:?}");
+        assert_eq!(calls[0].0, "network.addDataCollector");
+        assert_eq!(calls[0].1["dataTypes"], json!(["request"]));
+        assert_eq!(calls[1].0, "network.removeDataCollector");
+        assert_eq!(calls[2].0, "network.addDataCollector");
+        assert_eq!(calls[2].1["dataTypes"], json!(["request", "response"]));
+        assert_eq!(calls[3].0, "network.removeDataCollector");
     }
 }
