@@ -682,36 +682,51 @@ async fn toggle(
     iframe_sessions: &HashMap<String, String>,
     want_checked: bool,
 ) -> Result<ToggleOutcome, String> {
-    use super::element::{element_checked_state, not_checkable_error, read_after_action};
+    use super::element::{element_checked_state, plan_chrome_check, read_after_action, CheckPlan};
     let mut outcome = ToggleOutcome {
         position: None,
         verified: true,
     };
-    let Some(is_checked) = element_checked_state(
+    match plan_chrome_check(
         client,
         session_id,
         ref_map,
         selector_or_ref,
         iframe_sessions,
+        want_checked,
     )
     .await?
-    else {
-        return Err(not_checkable_error(selector_or_ref));
-    };
-    if is_checked == want_checked {
-        return Ok(outcome);
+    {
+        CheckPlan::Reject(err) => return Err(err),
+        CheckPlan::AlreadySet => return Ok(outcome),
+        CheckPlan::DomClick(_) => {
+            let retried = read_after_action(js_click_checkbox(
+                client,
+                session_id,
+                ref_map,
+                selector_or_ref,
+                iframe_sessions,
+            ))
+            .await?;
+            outcome.verified = retried.is_some();
+            return Ok(outcome);
+        }
+        CheckPlan::Pointer((x, y, effective_session_id)) => {
+            let offset =
+                session_viewport_offset(client, session_id, &effective_session_id, iframe_sessions)
+                    .await?;
+            let result = dispatch_click(
+                client,
+                &effective_session_id,
+                &[effective_session_id.as_str(), session_id],
+                x,
+                y,
+                ClickSpec::default(),
+            )
+            .await?;
+            outcome.position = Some((result.x + offset.0, result.y + offset.1));
+        }
     }
-    let result = click_element(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        ClickSpec::default(),
-        iframe_sessions,
-        false,
-    )
-    .await?;
-    outcome.position = Some(result.position);
 
     let after = read_after_action(element_checked_state(
         client,
@@ -739,43 +754,6 @@ async fn toggle(
     Ok(outcome)
 }
 
-pub(crate) const CLICK_CHECKBOX_JS: &str = r#"function() {
-            var el = this;
-            var tag = el.tagName && el.tagName.toUpperCase();
-            if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
-                el.click();
-                return;
-            }
-            var rawRole = el.getAttribute && el.getAttribute('role');
-            var role = rawRole ? rawRole.trim().toLowerCase() : '';
-            var alwaysCheckableRoles = ['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'];
-            if (role && (alwaysCheckableRoles.indexOf(role) !== -1 || ((role === 'option' || role === 'treeitem') && el.hasAttribute && el.hasAttribute('aria-checked')))) {
-                el.click();
-                return;
-            }
-            var label = tag === 'LABEL' ? el : (el.closest && el.closest('label'));
-            if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
-                var ctrl = label.control;
-                if (ctrl.tagName && ctrl.tagName.toUpperCase() === 'INPUT' && (ctrl.type === 'checkbox' || ctrl.type === 'radio')) {
-                    ctrl.click();
-                    return;
-                }
-            }
-            var inputs = el.querySelectorAll && el.querySelectorAll('input[type="checkbox"], input[type="radio"]');
-            if (inputs && inputs.length === 1) {
-                inputs[0].click();
-            }
-        }"#;
-
-/// Fallback for when the coordinate-based CDP click did not toggle the
-/// checkbox/radio state. This mirrors how Playwright dispatches clicks
-/// through the DOM rather than via raw Input.dispatchMouseEvent coordinates.
-///
-/// Uses the same follow-label resolution as `is_element_checked`:
-/// 1. If the element is a native input → `.click()` it directly.
-/// 2. If the element is inside a `<label>` → `.click()` the label's `.control`.
-/// 3. If the element has a nested `<input>` → `.click()` that input.
-/// 4. Otherwise → `.click()` the element itself (handles ARIA role controls).
 async fn js_click_checkbox(
     client: &CdpClient,
     session_id: &str,
@@ -792,13 +770,13 @@ async fn js_click_checkbox(
     )
     .await?;
 
-    let js = CLICK_CHECKBOX_JS;
+    let js = super::element::click_checkbox_js();
 
     client
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: js.to_string(),
+                function_declaration: js,
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use super::client::SANDBOX;
 use super::daemon::session;
 use super::input::{
     key_chord_actions, key_event_actions, key_from_raw, key_text_actions, pointer_click, Origin,
@@ -14,9 +15,12 @@ use super::interact::{act_element, perform_actions, PointerAction};
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
 use crate::native::actions::{raw_key, upload_files, DaemonState};
-use crate::native::element::{not_checkable_error, ELEMENT_CHECKED_JS};
+use crate::native::element::{
+    click_checkbox_js, decide_check_plan, element_check_probe_js, not_checkable_error, CheckPlan,
+    CheckProbe, ELEMENT_CHECKED_JS, ELEMENT_CHECK_CONTROL_JS,
+};
 use crate::native::interaction::{
-    CLEAR_INPUT_JS, CLEAR_VALUE_JS, CLICK_CHECKBOX_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
+    CLEAR_INPUT_JS, CLEAR_VALUE_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
 };
 use crate::native::pointer::MouseButton;
 
@@ -389,54 +393,109 @@ pub async fn select(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     Ok(json!({ "selected": values }))
 }
 
+/// Resolves a target to its canonical checkable control node inside the isolated sandbox.
+async fn resolve_check_control(
+    ff: &FirefoxSession,
+    target: &Target,
+) -> Result<Option<Target>, String> {
+    let resolved = ff
+        .bidi
+        .call_function_on_in_sandbox(
+            &target.context,
+            SANDBOX,
+            ELEMENT_CHECK_CONTROL_JS,
+            target.node_ref(),
+        )
+        .await?;
+    Ok(resolved["sharedId"].as_str().map(|shared_id| Target {
+        context: target.context.clone(),
+        shared_id: shared_id.to_string(),
+    }))
+}
+
+/// Reads checked state, native-input status, and clickability in the isolated sandbox.
+async fn probe_check_control(
+    ff: &FirefoxSession,
+    control: &Target,
+) -> Result<Option<CheckProbe>, String> {
+    let probed = ff
+        .bidi
+        .call_function_on_in_sandbox(
+            &control.context,
+            SANDBOX,
+            &element_check_probe_js(),
+            control.node_ref(),
+        )
+        .await?;
+    if probed.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(CheckProbe {
+        checked: probed
+            .get("checked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        native: probed
+            .get("native")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        clickable: probed
+            .get("clickable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        blocker: None,
+    }))
+}
+
 async fn set_checked(
     state: &mut DaemonState,
     target: &Target,
     selector: &str,
     checked: bool,
 ) -> Result<(), String> {
-    let Some(current) = run(session(state)?, target, ELEMENT_CHECKED_JS, vec![])
-        .await?
-        .and_then(|v| v.as_bool())
-    else {
+    let Some(control) = resolve_check_control(session(state)?, target).await? else {
         return Err(not_checkable_error(selector));
     };
-    if current == checked {
-        return Ok(());
-    }
-    let visible = run(
-        session(state)?,
-        target,
-        "function() { const r = this.getClientRects()[0]; return !!r && r.width > 0 && r.height > 0; }",
-        vec![],
-    )
-    .await?;
-    if visible == Some(json!(true)) {
-        let outcome = act_element(
-            state,
-            target,
-            selector,
-            PointerAction::Check,
-            pointer_click(
-                &Origin::Element(target.shared_id.clone()),
-                MouseButton::Left,
-                1,
-            ),
-            json!({}),
-        )
-        .await?;
-        if outcome.dialog_opened {
-            return Ok(());
+    let probe = probe_check_control(session(state)?, &control).await?;
+    match decide_check_plan(selector, checked, probe, control) {
+        CheckPlan::Reject(err) => Err(err),
+        CheckPlan::AlreadySet => Ok(()),
+        CheckPlan::DomClick(control) => {
+            run(session(state)?, &control, &click_checkbox_js(), vec![]).await?;
+            Ok(())
+        }
+        CheckPlan::Pointer(control) => {
+            let outcome = act_element(
+                state,
+                &control,
+                selector,
+                PointerAction::Check,
+                pointer_click(
+                    &Origin::Element(control.shared_id.clone()),
+                    MouseButton::Left,
+                    1,
+                ),
+                json!({}),
+            )
+            .await?;
+            if outcome.dialog_opened {
+                return Ok(());
+            }
+            let after = session(state)?
+                .bidi
+                .call_function_on_in_sandbox(
+                    &control.context,
+                    SANDBOX,
+                    ELEMENT_CHECKED_JS,
+                    control.node_ref(),
+                )
+                .await?;
+            if after.as_bool() == Some(!checked) {
+                run(session(state)?, &control, &click_checkbox_js(), vec![]).await?;
+            }
+            Ok(())
         }
     }
-    if run(session(state)?, target, ELEMENT_CHECKED_JS, vec![])
-        .await?
-        .and_then(|v| v.as_bool())
-        == Some(!checked)
-    {
-        run(session(state)?, target, CLICK_CHECKBOX_JS, vec![]).await?;
-    }
-    Ok(())
 }
 
 /// Checks a checkbox or radio unless it is already checked.
@@ -538,7 +597,18 @@ mod tests {
                 let js = req["params"]["functionDeclaration"].as_str().unwrap_or("");
                 if js.starts_with("() =>") {
                     script(json!({"type": "node", "sharedId": "node-1"}))
-                } else if js.contains("aria-checked") {
+                } else if js == ELEMENT_CHECK_CONTROL_JS {
+                    script(json!({"type": "node", "sharedId": "checkbox-1"}))
+                } else if js == element_check_probe_js() {
+                    script(json!({
+                        "type": "object",
+                        "value": [
+                            ["checked", {"type": "boolean", "value": checked}],
+                            ["native", {"type": "boolean", "value": true}],
+                            ["clickable", {"type": "boolean", "value": false}],
+                        ]
+                    }))
+                } else if js == ELEMENT_CHECKED_JS {
                     script(json!({"type": "boolean", "value": checked}))
                 } else {
                     script(json!({"type": "undefined"}))
@@ -869,7 +939,15 @@ mod tests {
                 .unwrap(),
             json!({"checked": "#agree"})
         );
-        assert_eq!(calls.lock().unwrap().len(), 5);
+        assert_all(
+            &calls,
+            &[
+                "script.callFunction",
+                "script.callFunction",
+                "script.callFunction",
+                "script.callFunction",
+            ],
+        );
 
         let (ff, _tx, calls) = fake_session_with(checkbox_responder(true)).await;
         let mut state = state_with(ff);
@@ -879,7 +957,14 @@ mod tests {
                 .unwrap(),
             json!({"checked": "#agree"})
         );
-        assert_all(&calls, &["script.callFunction", "script.callFunction"]);
+        assert_all(
+            &calls,
+            &[
+                "script.callFunction",
+                "script.callFunction",
+                "script.callFunction",
+            ],
+        );
 
         let (ff, _tx, calls) = fake_session_with(checkbox_responder(true)).await;
         let mut state = state_with(ff);
@@ -889,7 +974,83 @@ mod tests {
                 .unwrap(),
             json!({"unchecked": "#agree"})
         );
-        assert_eq!(calls.lock().unwrap().len(), 5);
+        assert_all(
+            &calls,
+            &[
+                "script.callFunction",
+                "script.callFunction",
+                "script.callFunction",
+                "script.callFunction",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn check_retargets_label_to_checkbox_before_pointer_input() {
+        let pointer_origins = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let recorded = pointer_origins.clone();
+        let (ff, _tx, calls) = fake_session_with(move |req: &Value| match req["method"].as_str() {
+            Some("script.callFunction") => {
+                let js = req["params"]["functionDeclaration"].as_str().unwrap_or("");
+                if js.starts_with("() =>") {
+                    script(json!({"type": "node", "sharedId": "label-1"}))
+                } else if js == ELEMENT_CHECK_CONTROL_JS {
+                    assert_eq!(req["params"]["target"]["sandbox"], json!(SANDBOX));
+                    script(json!({"type": "node", "sharedId": "checkbox-1"}))
+                } else if js == element_check_probe_js() {
+                    assert_eq!(req["params"]["this"]["sharedId"], json!("checkbox-1"));
+                    assert_eq!(req["params"]["target"]["sandbox"], json!(SANDBOX));
+                    script(json!({
+                        "type": "object",
+                        "value": [
+                            ["checked", {"type": "boolean", "value": false}],
+                            ["native", {"type": "boolean", "value": true}],
+                            ["clickable", {"type": "boolean", "value": true}],
+                        ]
+                    }))
+                } else if js.contains("blockerAt") {
+                    assert_eq!(req["params"]["this"]["sharedId"], json!("checkbox-1"));
+                    script(json!({
+                        "type": "object",
+                        "value": [
+                            ["x", {"type": "number", "value": 10}],
+                            ["y", {"type": "number", "value": 10}],
+                            ["reason", {"type": "null"}],
+                            ["blocker", {"type": "null"}],
+                        ]
+                    }))
+                } else if js == ELEMENT_CHECKED_JS {
+                    script(json!({"type": "boolean", "value": true}))
+                } else {
+                    script(json!({"type": "undefined"}))
+                }
+            }
+            Some("input.performActions") => {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(req["params"]["actions"].clone());
+                json!({})
+            }
+            _ => json!({}),
+        })
+        .await;
+        let mut state = state_with(ff);
+
+        assert_eq!(
+            check(&json!({"selector": "#wrap-label"}), &mut state)
+                .await
+                .unwrap(),
+            json!({"checked": "#wrap-label"})
+        );
+        let actions = pointer_origins.lock().unwrap();
+        assert!(!actions.is_empty(), "{:?}", calls.lock().unwrap());
+        let serialized = serde_json::to_string(&*actions).unwrap();
+        assert!(
+            serialized.contains(r#""x":10.0,"y":10.0"#),
+            "pointerMove must target checkbox-1's prepared coordinates: {serialized}"
+        );
+        assert!(!serialized.contains("label-1"), "{serialized}");
     }
 
     #[tokio::test]
@@ -899,7 +1060,7 @@ mod tests {
                 let js = req["params"]["functionDeclaration"].as_str().unwrap_or("");
                 if js.starts_with("() =>") {
                     script(json!({"type": "node", "sharedId": "node-1"}))
-                } else if js == ELEMENT_CHECKED_JS {
+                } else if js == ELEMENT_CHECK_CONTROL_JS {
                     script(json!({"type": "null"}))
                 } else {
                     script(json!({"type": "undefined"}))
@@ -932,7 +1093,7 @@ mod tests {
                 let js = req["params"]["functionDeclaration"].as_str().unwrap_or("");
                 if js.starts_with("() =>") {
                     script(json!({"type": "node", "sharedId": "node-1"}))
-                } else if js == ELEMENT_CHECKED_JS {
+                } else if js == ELEMENT_CHECK_CONTROL_JS {
                     script(json!({"type": "null"}))
                 } else {
                     script(json!({"type": "undefined"}))
