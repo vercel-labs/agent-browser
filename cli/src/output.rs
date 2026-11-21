@@ -3439,6 +3439,13 @@ Tabs opened with `tab new` or `click --new-tab` inherit the session's user
 agent, headers, HTTP credentials, init scripts, routes, and emulation
 overrides before their first document loads.
 
+A new tab becomes the active tab only when the active tab opens it while an
+input command runs, such as a click on a target=_blank link. A tab that
+appears at any other time stays in the background and the response warning
+names it. Refs belong to
+the tab they were snapshotted on: when the active tab changes, run
+`snapshot` again.
+
 Each session remembers its active tab (bound by CDP target id) and returns
 to it after a daemon restart. With --pin-tab, commands fail with a
 `tab_gone` error instead of falling back to another tab when the bound tab

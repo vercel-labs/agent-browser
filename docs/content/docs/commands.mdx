@@ -334,6 +334,18 @@ agent-browser snapshot          # refs for docs
 agent-browser click @e3         # uses docs's refs
 ```
 
+### Which new tabs are followed
+
+A new tab becomes the active tab only when the active tab opens it while an input command runs: a click, key press, `type`, `fill`, `select`, `check`, mouse action, or `eval`. Clicking a `target=_blank` link, for example, switches to the tab it opens. A popup the page opens by itself during such a command is followed too, because the browser reports the same opener for both.
+
+A tab that appears at any other time is registered in the background: a timer popup, ad, sign-in helper, or chat widget that opens between commands or during `wait`, or a tab a click opens only after the command has returned. The session stays on its tab and its refs stay valid, and the response names the tab in a warning. The warning carries the tab id only; run `tab list` to see its URL:
+
+```text
+New tab t2 opened in the background. Switch to it with `tab t2`.
+```
+
+Whenever the active tab changes, refs from the previous snapshot stop working with `Unknown ref: e2`; run `snapshot` again. When the change was not a tab command, such as following a tab a click opened or returning after the active tab was closed, the response warns ``Active tab is now t2. Refs from the previous tab were cleared; run `snapshot`.`` Sessions started with `--pin-tab` never follow a discovered tab.
+
 ### Discarded tab revival
 
 Browsers discard background tabs to save memory, leaving a tab with no renderer to drive. Switching to a discarded tab reactivates it, which reloads the page and resets its unsaved state; the switch result adds `"revived": true` so the reload is visible rather than silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `"dialogBlocked": true`. Resolve the dialog with `dialog accept` or `dialog dismiss` and the tab keeps its state. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.

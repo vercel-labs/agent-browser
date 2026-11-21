@@ -99,6 +99,8 @@ agent-browser click @e12
 
 Same-document updates preserve refs for surviving DOM elements. Replaced elements and page or iframe document replacements invalidate the corresponding refs. Invalidated IDs are never recycled within the browser session. JSON snapshot responses list refs that disappeared in `removedRefs`. Virtual accessibility nodes have snapshot-local refs.
 
+Refs belong to the tab they were snapshotted on. When the active tab changes, by `tab t2` or by following a tab a click opened, the previous tab's refs stop working and the next action fails with `Unknown ref: e2` until you run `snapshot` on the new active tab.
+
 A ref keeps pointing at its DOM node while that node exists. If the node was replaced, agent-browser falls back to the one element with the same role and name, but only when the ref was unique in its snapshot. When duplicates make the match ambiguous, the action fails without acting. Run `snapshot` again and use a fresh ref.
 
 If a snapshot fails because its scope matches nothing, you can still use refs from the last successful snapshot as long as the document has not changed.

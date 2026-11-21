@@ -2951,13 +2951,10 @@ impl BrowserManager {
         self.pages.iter().any(|p| p.target_id == target_id)
     }
 
-    /// Single decision point for both CDP target drains
-    /// (`Target.attachedToTarget` and `Target.targetCreated`). A tracked
-    /// target only has its metadata refreshed; a new one is appended and
-    /// activated per pin mode: a pinned session never lets a discovered tab
-    /// steal the active tab or pin binding, a legacy session follows it.
-    /// Explicit commands (`tab new`, `window new`, `click --new-tab`) take
-    /// their own `add_page` path. Covered by `test_register_discovered_page_*`.
+    /// Registers a discovered page. It becomes the active tab only when the
+    /// active tab opened it, `follow_opener` is set and the session is not
+    /// pinned. Returns the tab id when the page was left in the background.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_discovered_page(
         &mut self,
         target_id: &str,
@@ -2965,17 +2962,20 @@ impl BrowserManager {
         url: String,
         title: String,
         target_type: String,
-    ) -> bool {
+        opener_id: Option<&str>,
+        follow_opener: bool,
+    ) -> Option<u32> {
         if let Some(p) = self.pages.iter_mut().find(|p| p.target_id == target_id) {
             p.url = url;
             p.title = title;
             p.target_type = target_type;
-            return false;
+            return None;
         }
         let tab_id = self.assign_tab_id();
-        // Pinned sessions never activate a discovered tab (strict no-steal);
-        // legacy sessions follow it, matching pre-pin behavior.
-        let activate = !self.pin_tab;
+        let activate = follow_opener
+            && !self.pin_tab
+            && opener_id.is_some()
+            && opener_id == self.active_target_id().ok();
         self.add_page_with_activation(
             PageInfo {
                 tab_id,
@@ -2988,7 +2988,7 @@ impl BrowserManager {
             },
             activate,
         );
-        true
+        (self.active_target_id().ok() != Some(target_id)).then_some(tab_id)
     }
 
     pub fn page_count(&self) -> usize {
@@ -3716,6 +3716,7 @@ mod tests {
             url: String::new(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(should_track_target(&target));
@@ -3730,6 +3731,7 @@ mod tests {
             url: "chrome://newtab/".to_string(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(!should_track_target(&target));
@@ -3753,6 +3755,7 @@ mod tests {
             url: "https://example.com/popup".to_string(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(update_page_target_info_in_pages(&mut pages, &target));
@@ -4970,14 +4973,41 @@ mod tests {
             "https://popup.example".to_string(),
             String::new(),
             "page".to_string(),
+            Some(TARGET_A),
+            true,
         );
 
-        assert!(newly_added, "an untracked target must be registered");
+        assert_eq!(newly_added, None, "a followed tab is not a background tab");
         assert_eq!(
             mgr.active_target_id().unwrap(),
             TARGET_B,
-            "a non-pin session must follow the newly discovered tab (legacy behavior)"
+            "a non-pin session must follow a tab its active tab opened"
         );
+    }
+
+    #[tokio::test]
+    async fn test_register_discovered_page_stays_put_unless_the_active_tab_opened_it() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://a.example")]).await;
+        for (target, opener, follow_opener) in [
+            ("page-opened", Some(TARGET_A), false),
+            ("other-opener", Some("ELSEWHERE"), true),
+            ("no-opener", None, true),
+        ] {
+            let background = mgr.register_discovered_page(
+                target,
+                target,
+                "https://popup.example".to_string(),
+                String::new(),
+                "page".to_string(),
+                opener,
+                follow_opener,
+            );
+            assert!(
+                background.is_some(),
+                "{target} must be reported as a background tab"
+            );
+            assert_eq!(mgr.active_target_id().unwrap(), TARGET_A, "{target}");
+        }
     }
 
     #[tokio::test]
@@ -4996,9 +5026,14 @@ mod tests {
             "https://foreign.example".to_string(),
             String::new(),
             "page".to_string(),
+            None,
+            false,
         );
 
-        assert!(newly_added, "an untracked target must be registered");
+        assert!(
+            newly_added.is_some(),
+            "an untracked target must be registered"
+        );
         assert_eq!(
             mgr.active_target_id().unwrap(),
             TARGET_A,
@@ -5077,9 +5112,11 @@ mod tests {
             "https://foreign.example".to_string(),
             String::new(),
             "page".to_string(),
+            None,
+            false,
         );
         assert!(
-            newly_added,
+            newly_added.is_some(),
             "the foreign tab is still registered so it shows in `tab list`"
         );
 
@@ -5113,10 +5150,12 @@ mod tests {
             "https://mine.example/updated".to_string(),
             "Updated Title".to_string(),
             "page".to_string(),
+            None,
+            false,
         );
 
         assert!(
-            !newly_added,
+            newly_added.is_none(),
             "an already-tracked target must not be re-added"
         );
         assert_eq!(

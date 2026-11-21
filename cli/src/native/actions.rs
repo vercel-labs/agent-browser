@@ -720,6 +720,8 @@ pub struct DaemonState {
     pub tracked_requests: Vec<TrackedRequest>,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
+    follow_opened_tabs: bool,
+    tab_notices: Vec<String>,
     /// Cross-origin iframe frame_id → dedicated CDP session_id.
     /// Populated by Target.attachedToTarget events from Target.setAutoAttach.
     /// Entries are retained across tab changes because Chrome does not emit a
@@ -957,6 +959,8 @@ impl DaemonState {
             tracked_requests: Vec::new(),
             request_tracking: false,
             active_frame_id: None,
+            follow_opened_tabs: false,
+            tab_notices: Vec::new(),
             iframe_sessions: HashMap::new(),
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
@@ -1405,6 +1409,13 @@ impl DaemonState {
         self.apply_drained_events(drained).await
     }
 
+    fn reset_active_page_scope(&mut self) {
+        self.ref_map.begin_snapshot();
+        self.active_iframe_sessions.clear();
+        self.active_frame_id = None;
+        self.webmcp.clear_invocations();
+    }
+
     async fn refresh_active_iframe_sessions(&mut self) {
         let Some(ref browser) = self.browser else {
             self.active_iframe_sessions.clear();
@@ -1427,7 +1438,34 @@ impl DaemonState {
                 .unwrap_or_default();
     }
 
+    /// Applies drained events. When they moved the session to another tab,
+    /// drops the previous tab's refs and frame scope and queues a warning
+    /// naming the tab the session is on now.
     async fn apply_drained_events(&mut self, drained: DrainedEvents) -> Result<(), String> {
+        let active_target = |state: &Self| {
+            state
+                .browser
+                .as_ref()
+                .and_then(|mgr| mgr.active_target_id().ok())
+                .map(str::to_string)
+        };
+        let previous = active_target(self);
+        let result = self.apply_drained_events_inner(drained).await;
+        let current = active_target(self);
+        if previous != current {
+            self.reset_active_page_scope();
+            if result.is_ok() {
+                self.refresh_active_iframe_sessions().await;
+            }
+            let landed = self.browser.as_ref().and_then(|mgr| mgr.active_tab_id());
+            if let (Some(_), Some(_), Some(tab_id)) = (previous, current, landed) {
+                self.tab_notices.push(tab_notice(tab_id, true));
+            }
+        }
+        result
+    }
+
+    async fn apply_drained_events_inner(&mut self, drained: DrainedEvents) -> Result<(), String> {
         // Popups and externally closed pages can change the active top-level
         // target without changing iframe topology. Refresh after either kind
         // of event so network capture stays scoped to the active page.
@@ -1516,6 +1554,8 @@ impl DaemonState {
             let filter = self.domain_filter.read().await.clone();
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
+            let follow_opener = self.follow_opened_tabs;
+            let mut background_tab = None;
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 bounded_auto_attached_setup("session", page_sid, async {
                     mgr.prepare_domains_pub(page_sid).await?;
@@ -1545,26 +1585,14 @@ impl DaemonState {
                         }
                     }
 
-                    // This handler drains `Target.attachedToTarget` for a
-                    // page that browser-level auto-attach discovered before
-                    // its own `Target.targetCreated` was drained (e.g. a
-                    // human-opened tab, or a JS-opened popup in the shared
-                    // Chrome). Explicit agent commands (`tab new`, `window
-                    // new`, `click --new-tab`) already register their own
-                    // page via `add_page` on their own path before this
-                    // event is ever drained, so this branch never runs for
-                    // agent-initiated tabs. `register_discovered_page` is the
-                    // single decision point shared with the
-                    // `Target.targetCreated` handler below: a pinned session
-                    // never activates a discovered target (that would steal
-                    // the active tab and overwrite its binding); a legacy
-                    // session follows it.
-                    mgr.register_discovered_page(
+                    background_tab = mgr.register_discovered_page(
                         &target_info.target_id,
                         page_sid,
                         page_url,
                         target_info.title.clone(),
                         target_info.target_type.clone(),
+                        target_info.opener_id.as_deref(),
+                        follow_opener,
                     );
 
                     mgr.resume_if_waiting_pub(page_sid).await
@@ -1573,6 +1601,9 @@ impl DaemonState {
             } else {
                 Ok(())
             };
+            if let Some(tab_id) = background_tab {
+                self.tab_notices.push(tab_notice(tab_id, false));
+            }
             match setup_result {
                 Ok(()) => {}
                 // A popup that closed right away; its target is gone.
@@ -1656,6 +1687,8 @@ impl DaemonState {
             let filter = self.domain_filter.read().await.clone();
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
+            let follow_opener = self.follow_opened_tabs;
+            let mut background_tab = None;
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 let target_id = te.target_info.target_id.as_str();
                 bounded_auto_attached_setup("target", target_id, async {
@@ -1697,20 +1730,14 @@ impl DaemonState {
                         }
                     }
 
-                    // Event-discovered target (e.g. a tab the human opened in the
-                    // shared Chrome, or a JS-opened popup): register it via the
-                    // same `register_discovered_page` decision point used by the
-                    // `Target.attachedToTarget` handler above, which activates it
-                    // only for legacy sessions; a pinned session never adopts a
-                    // discovered tab (that steal would also overwrite its
-                    // binding). Explicit commands (`tab new`, `window new`,
-                    // `click --new-tab`) activate via their own paths.
-                    mgr.register_discovered_page(
+                    background_tab = mgr.register_discovered_page(
                         &te.target_info.target_id,
                         &attach.session_id,
                         page_url,
                         te.target_info.title.clone(),
                         te.target_info.target_type.clone(),
+                        te.target_info.opener_id.as_deref(),
+                        follow_opener,
                     );
                     mgr.resume_if_waiting_pub(&attach.session_id).await
                 })
@@ -1718,6 +1745,9 @@ impl DaemonState {
             } else {
                 Ok(())
             };
+            if let Some(tab_id) = background_tab {
+                self.tab_notices.push(tab_notice(tab_id, false));
+            }
             match setup_result {
                 Ok(()) => {}
                 Err(error) if is_session_detached_error(&error) => {
@@ -3114,6 +3144,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
     let outer = state.flow.enter();
     let mut resp = execute_command_inner(cmd, state).await;
+    state.follow_opened_tabs = false;
+    for notice in std::mem::take(&mut state.tab_notices) {
+        append_warning(&mut resp, &notice);
+    }
     if let Some(seq) = state.flow.exit(outer) {
         let ok = resp.get("success") == Some(&json!(true));
         let url = match state.browser.as_ref() {
@@ -3248,6 +3282,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     if let Err(e) = state.drain_cdp_events_background().await {
         return error_response(&id, &super::browser::to_ai_friendly_error(&e));
     }
+    state.follow_opened_tabs = !state.pin_tab && should_follow_opened_tabs(action, cmd);
 
     // After the drain, so late requests from the previous command keep its tag.
     begin_flow_step(action, cmd, state).await;
@@ -4619,10 +4654,7 @@ async fn adopt_replacement_tab(
 ) -> Result<(), String> {
     state.webmcp.clear_page_scope(old_session_id);
     state.webmcp.observations.remove(old_session_id);
-    state.ref_map.begin_snapshot();
-    state.active_iframe_sessions.clear();
-    state.active_frame_id = None;
-    state.webmcp.clear_invocations();
+    state.reset_active_page_scope();
     let session_id = state
         .browser
         .as_ref()
@@ -4667,6 +4699,18 @@ fn attach_action_warning(resp: &mut Value, state: &mut DaemonState) {
 }
 
 /// Add to the response's warning instead of replacing one already set.
+/// Warning for a tab that opened in the background, or that became active
+/// without a tab command. It carries only the daemon-assigned tab id, never
+/// a URL or title, because those are page-controlled text.
+fn tab_notice(tab_id: u32, active: bool) -> String {
+    let tab = super::browser::format_tab_id(tab_id);
+    if active {
+        format!("Active tab is now {tab}. Refs from the previous tab were cleared; run `snapshot`.")
+    } else {
+        format!("New tab {tab} opened in the background. Switch to it with `tab {tab}`.")
+    }
+}
+
 fn append_warning(resp: &mut Value, warning: &str) {
     let merged = match resp.get("warning").and_then(Value::as_str) {
         Some(existing) => format!("{}\n{}", existing, warning),
@@ -9083,10 +9127,7 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         (result, mgr.active_session_id()?.to_string())
     };
 
-    state.ref_map.begin_snapshot();
-    state.active_iframe_sessions.clear();
-    state.active_frame_id = None;
-    state.webmcp.clear_invocations();
+    state.reset_active_page_scope();
 
     apply_session_setup(state, &new_session_id).await?;
     install_network_controls_or_close(state, has_proxy_creds).await?;
@@ -9136,10 +9177,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
     };
     // Clear only after the switch commits, so a failed switch does not strand
     // the user on the old tab with dead refs and frame scope.
-    state.ref_map.begin_snapshot();
-    state.active_iframe_sessions.clear();
-    state.active_frame_id = None;
-    state.webmcp.clear_invocations();
+    state.reset_active_page_scope();
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     install_network_controls_or_close(state, has_proxy_creds).await?;
@@ -11716,6 +11754,61 @@ fn validate_find_subaction(action: &str, cmd: &Value) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Whether the command sends input or script to the page. A tab the active
+/// tab opens while such a command runs is followed, whoever opened it.
+fn should_follow_opened_tabs(action: &str, cmd: &Value) -> bool {
+    if matches!(
+        action,
+        "click"
+            | "dblclick"
+            | "tap"
+            | "press"
+            | "keyboard"
+            | "type"
+            | "fill"
+            | "check"
+            | "uncheck"
+            | "select"
+            | "hover"
+            | "scroll"
+            | "scrollintoview"
+            | "focus"
+            | "clear"
+            | "selectall"
+            | "dispatch"
+            | "setvalue"
+            | "upload"
+            | "evaluate"
+            | "evalhandle"
+            | "mouse"
+            | "input_mouse"
+            | "mousemove"
+            | "mousedown"
+            | "mouseup"
+            | "drag"
+            | "swipe"
+            | "wheel"
+            | "input_keyboard"
+            | "input_touch"
+            | "keydown"
+            | "keyup"
+            | "inserttext"
+            | "multiselect"
+    ) {
+        return true;
+    }
+    if action == "clipboard" {
+        return cmd.get("operation").and_then(Value::as_str) == Some("paste");
+    }
+    FIND_SUBACTION_COMMANDS.contains(&action)
+        && matches!(
+            cmd.get("subaction")
+                .and_then(Value::as_str)
+                .unwrap_or("click"),
+            "click" | "fill" | "check" | "hover"
+        )
 }
 
 async fn execute_subaction(
@@ -18151,6 +18244,7 @@ mod tests {
             url: "https://example.com/".to_string(),
             attached: Some(true),
             browser_context_id: None,
+            opener_id: None,
         }
     }
 
