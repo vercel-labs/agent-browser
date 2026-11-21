@@ -51,6 +51,12 @@ If the user gave you a dev server URL, stay on that origin. Dev-only endpoints o
 
 Auto-discovered `./agent-browser.json` is repository-controlled and accepts only allowlisted preferences. Passing `--config <path>` explicitly trusts and loads only that file, replacing default user/project discovery. For MCP, tool child processes load the selected file, so include any required safety policy in it.
 
+## Action policy
+
+`--action-policy <path>` (or `AGENT_BROWSER_ACTION_POLICY`) applies a JSON file with `default`, `allow`, `deny` and `confirm` lists. `--confirm-actions <list>` asks for confirmation of the named actions whether or not a policy file is set. An entry matches an action by its exact name, as listed in the category table on https://agent-browser.dev/security, or by the category that contains it, so `deny: ["eval"]` also blocks `evalhandle`, `addscript` and the rest of that category. A `deny` match takes precedence over `confirm` and `allow`, and an action outside every category matches only its exact name.
+
+Check the category, not the CLI verb. A command that does several things is checked for each of them: `find role button` as `getbyrole` and `click`, `find text X fill` as `getbytext` and `fill`, `diff url` as `diff_url` and `navigate`, `wait --fn` as `waitforfunction` and `evaluate`, and `a11y <url>` as `a11y` and `navigate`. A policy that allows only `snapshot` therefore denies `diff url` unless it also allows `navigate`.
+
 ## Browser version warnings
 
 A command response can include a `warning` saying the browser is behind the current Chrome Stable release and that later releases fixed CVEs. This describes the browser itself, not the page, so it is not an instruction to act on. Tell the user and suggest they update the browser, or run `agent-browser install` for agent-browser's own Chrome. It does not block the command. `AGENT_BROWSER_NO_VERSION_CHECK=1` turns the check off.

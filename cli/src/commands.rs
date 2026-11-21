@@ -768,7 +768,6 @@ fn parse_command_inner(
 
     match cmd {
         // === Navigation ===
-        // Maps to "navigate" action in protocol; reflected in ACTION_CATEGORIES in action-policy.ts
         "open" | "goto" | "navigate" => {
             let (command, usage) = match cmd {
                 "goto" => ("goto", "goto <url>"),
