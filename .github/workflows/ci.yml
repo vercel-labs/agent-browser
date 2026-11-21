@@ -38,6 +38,9 @@ jobs:
         with:
           node-version-file: .node-version
 
+      - name: Run flow page fetch tests
+        run: pnpm run test:flow-page
+
       - name: Run launcher tests
         run: pnpm run test:launcher
 
