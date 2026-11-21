@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start"
+    "build": "pnpm test && next build",
+    "start": "next start",
+    "test": "node --experimental-test-module-mocks --test test/*.test.mjs"
   },
   "dependencies": {
     "@ai-sdk/react": "^3.0.148",

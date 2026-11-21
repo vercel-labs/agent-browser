@@ -122,36 +122,49 @@ function parseExecError(result: ExecResult): string {
   return "";
 }
 
+const stopSessionAtom = atom(
+  null,
+  async (get, set, { session, force }: { session: string; force: boolean }) => {
+    if (get(closingSessionsAtom).has(session)) return;
+    set(closingSessionsAtom, (previous) => new Set(previous).add(session));
+    let succeeded = false;
+    try {
+      const result = force
+        ? await killSession(session)
+        : await execCommand(sessionArgs(session, "close"));
+      succeeded = result.success;
+      if (succeeded) disposeChat(session);
+    } catch {
+      // A failed request leaves the session available for another close attempt.
+    } finally {
+      if (!succeeded) {
+        set(closingSessionsAtom, (previous) => {
+          const next = new Set(previous);
+          next.delete(session);
+          return next;
+        });
+      }
+    }
+  },
+);
+
 export const closeSessionAtom = atom(null, (get, set, port: number) => {
-  const sessions = get(sessionsAtom);
-  const s = sessions.find((x) => x.port === port)?.session;
-  if (s) {
-    set(closingSessionsAtom, (prev) => new Set(prev).add(s));
-    disposeChat(s);
-    execCommand(sessionArgs(s, "close"));
-  }
+  const session = get(sessionsAtom).find((entry) => entry.port === port)?.session;
+  if (session) return set(stopSessionAtom, { session, force: false });
 });
 
 export const killSessionAtom = atom(null, (get, set, port: number) => {
-  const sessions = get(sessionsAtom);
-  const s = sessions.find((x) => x.port === port)?.session;
-  if (s) {
-    set(closingSessionsAtom, (prev) => new Set(prev).add(s));
-    disposeChat(s);
-    killSession(s);
-  }
+  const session = get(sessionsAtom).find((entry) => entry.port === port)?.session;
+  if (session) return set(stopSessionAtom, { session, force: true });
 });
 
-export const closeAllSessionsAtom = atom(null, (get, set) => {
-  const sessions = get(sessionsAtom);
-  for (const s of sessions) {
-    if (!s.pending && !s.closing) {
-      set(closingSessionsAtom, (prev) => new Set(prev).add(s.session));
-      disposeChat(s.session);
-      execCommand(sessionArgs(s.session, "close"));
-    }
-  }
-});
+export const closeAllSessionsAtom = atom(null, (get, set) =>
+  Promise.all(
+    get(sessionsAtom)
+      .filter((session) => !session.pending && !session.closing)
+      .map((session) => set(stopSessionAtom, { session: session.session, force: false })),
+  ),
+);
 
 export const closeTabAtom = atom(
   null,
