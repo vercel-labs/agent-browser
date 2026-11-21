@@ -3589,21 +3589,36 @@ fn select_args(arguments: &Value) -> Result<LiteralArgs, ProtocolError> {
     Ok((args, Some(1)))
 }
 
-/// The CLI advice names the `--by` flag; over MCP it is the `by` field.
-fn mcp_by_advice(value: Value) -> Value {
-    match value {
-        Value::String(text) => Value::String(
-            text.replace("--by value", "by: \"value\"")
-                .replace("--by label", "by: \"label\""),
-        ),
-        Value::Array(items) => Value::Array(items.into_iter().map(mcp_by_advice).collect()),
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(key, value)| (key, mcp_by_advice(value)))
-                .collect(),
-        ),
-        other => other,
+/// The CLI advice names the `--by` flag; over MCP it is the `by` field. Only
+/// the error message is rewritten; page data such as option labels is not.
+fn mcp_by_advice(mut value: Value) -> Value {
+    let Some(error) = value
+        .pointer("/structuredContent/response/error")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return value;
+    };
+    let advice = error
+        .replace("--by value", "by: \"value\"")
+        .replace("--by label", "by: \"label\"");
+    if advice == error {
+        return value;
     }
+    if let Some(slot) = value.pointer_mut("/structuredContent/response/error") {
+        *slot = Value::String(advice.clone());
+    }
+    if let Some(Value::String(stderr)) = value.pointer_mut("/structuredContent/stderr") {
+        *stderr = stderr.replace(&error, &advice);
+    }
+    if let Some(Value::Array(items)) = value.get_mut("content") {
+        for item in items {
+            if let Some(Value::String(text)) = item.get_mut("text") {
+                *text = text.replace(&error, &advice);
+            }
+        }
+    }
+    value
 }
 
 fn call_scroll(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -7798,11 +7813,39 @@ mod snapshot_delta_schema_tests {
         let value = json!({
             "isError": true,
             "content": [{ "type": "text", "text": "Pass --by value to match option values or --by label to match visible labels." }],
-            "structuredContent": { "response": { "error": "Pass --by value" } }
+            "structuredContent": { "response": { "error": "Pass --by value to match option values or --by label to match visible labels." } }
         });
         let rewritten = mcp_by_advice(value).to_string();
         assert!(!rewritten.contains("--by"));
         assert!(rewritten.contains("by: \\\"value\\\""));
+    }
+
+    #[test]
+    fn select_advice_rewrite_leaves_option_data_alone() {
+        let error = "No option matched [\"x\"]. The select has 1 options. Pass --by value to match option values.";
+        let value = json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": error }],
+            "structuredContent": { "response": {
+                "error": error,
+                "data": { "options": [{ "value": "a", "label": "--by value" }] }
+            } }
+        });
+        let out = mcp_by_advice(value);
+        assert_eq!(
+            out.pointer("/structuredContent/response/data/options/0/label"),
+            Some(&json!("--by value"))
+        );
+        let error = out
+            .pointer("/structuredContent/response/error")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(
+            !error.contains("--by") && error.contains("by: \"value\""),
+            "{error}"
+        );
+        assert!(!out["content"][0]["text"].as_str().unwrap().contains("--by"));
     }
 }
 

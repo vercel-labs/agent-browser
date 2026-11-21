@@ -20615,3 +20615,55 @@ async fn e2e_flow_a_route_limited_by_resource_type_applies_the_same_on_both_tier
     }
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
+
+/// An empty value list matches nothing, so the selection stays as it was.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_with_no_values_changes_nothing() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body>",
+        "<select id='s'><option value='a'>A</option><option value='b' selected>B</option></select>",
+        "<div id='lb' role='listbox'><div role='option' aria-selected='true'>One</div><div role='option'>Two</div></div>",
+        "</body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut failures = Vec::new();
+    for selector in ["#s", "#lb"] {
+        let resp = execute_command(
+            &json!({ "id": "x", "action": "select", "selector": selector, "values": [] }),
+            &mut state,
+        )
+        .await;
+        if resp["success"] == true {
+            failures.push(format!("{selector}: empty values succeeded: {resp}"));
+        }
+    }
+    let native = evaluate_value(&mut state, "document.getElementById('s').value").await;
+    if native != json!("b") {
+        failures.push(format!("native selection changed: {native}"));
+    }
+    let listbox = evaluate_value(
+        &mut state,
+        "document.querySelector('#lb [aria-selected=\"true\"]')?.textContent ?? null",
+    )
+    .await;
+    if listbox != json!("One") {
+        failures.push(format!("listbox selection changed: {listbox}"));
+    }
+
+    let _ = execute_command(&json!({ "id": "z", "action": "close" }), &mut state).await;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

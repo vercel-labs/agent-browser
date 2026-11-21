@@ -1325,6 +1325,9 @@ pub async fn select_option(
                     }
                     wanted.add(matches[0]);
                 }
+                if (wanted.size === 0) {
+                    return { kind: 'not_found_list', n: options.length, options: options.map((o) => ({ value: valueOf(o), label: nameOf(o) })) };
+                }
                 // A click toggles selection in a multi-select listbox, so an option
                 // that is already selected must be left alone.
                 const multi = role === 'listbox' && this.getAttribute('aria-multiselectable') === 'true';
@@ -1372,6 +1375,9 @@ pub async fn select_option(
                     return { kind: 'ambiguous_select', n: candidates.length, value: vals.indexOf(value) };
                 }
                 for (const opt of r.found) wanted.add(opt);
+            }
+            if (wanted.size === 0) {
+                return { kind: 'not_found_select', n: options.length, options: options.map((o) => ({ value: o.value, label: normalize(o.label) })) };
             }
             for (const opt of options) opt.selected = wanted.has(opt);
             this.dispatchEvent(new Event('change', { bubbles: true }));
