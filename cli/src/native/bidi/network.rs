@@ -542,7 +542,7 @@ async fn collect_bodies(ff: &mut FirefoxSession, desired: DataCollectorMode) {
     let params = match desired {
         DataCollectorMode::Off => return,
         DataCollectorMode::RequestsOnly => json!({
-            "dataTypes": ["request"],
+            "dataTypes": ["request", "response"],
             "maxEncodedDataSize": chrome::HAR_MAX_BODY_BYTES,
         }),
         DataCollectorMode::HarAndRequests => json!({
@@ -2166,10 +2166,15 @@ mod tests {
         let calls = payloads.lock().unwrap();
         assert_eq!(calls.len(), 4, "{calls:?}");
         assert_eq!(calls[0].0, "network.addDataCollector");
-        assert_eq!(calls[0].1["dataTypes"], json!(["request"]));
+        assert_eq!(calls[0].1["dataTypes"], json!(["request", "response"]));
+        assert_eq!(
+            calls[0].1["maxEncodedDataSize"],
+            json!(chrome::HAR_MAX_BODY_BYTES)
+        );
         assert_eq!(calls[1].0, "network.removeDataCollector");
         assert_eq!(calls[2].0, "network.addDataCollector");
         assert_eq!(calls[2].1["dataTypes"], json!(["request", "response"]));
+        assert_eq!(calls[2].1["maxEncodedDataSize"], json!(10_000_000));
         assert_eq!(calls[3].0, "network.removeDataCollector");
     }
 }
