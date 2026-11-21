@@ -1070,9 +1070,17 @@ impl BrowserManager {
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url, headers.as_deref().unwrap_or_default()).await?;
-        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        let client = CdpClient::connect_with_headers(&ws_url, headers).await?;
+        Self::attach_cdp(client, ws_url, direct_page).await
+    }
+
+    async fn attach_cdp(
+        client: CdpClient,
+        ws_url: String,
+        direct_page: bool,
+    ) -> Result<Self, String> {
         let mut manager = Self {
-            client,
+            client: Arc::new(client),
             browser_process: None,
             ws_url,
             pages: Vec::new(),
@@ -1124,10 +1132,10 @@ impl BrowserManager {
                 continue;
             };
             let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
-            match tokio::time::timeout(AUTO_CONNECT_WS_VERIFY_TIMEOUT, Self::connect_cdp(&ws_url))
+            match tokio::time::timeout(AUTO_CONNECT_WS_VERIFY_TIMEOUT, CdpClient::connect(&ws_url))
                 .await
             {
-                Ok(Ok(manager)) => return Ok(manager),
+                Ok(Ok(client)) => return Self::attach_cdp(client, ws_url, false).await,
                 Ok(Err(_)) => {}
                 Err(_) => {
                     return Err(format!(
