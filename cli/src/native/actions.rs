@@ -19168,6 +19168,20 @@ mod tests {
         let lifecycle = &resp["data"]["lifecycle"];
         assert_eq!(lifecycle["relaunchedBrowser"], false, "{resp}");
         assert_eq!(lifecycle["launched"], false, "{resp}");
+        let notices = crate::output::settings_notices(&resp["data"]);
+        assert!(
+            notices.iter().any(
+                |line| line.contains("restore-key: old-key \u{2192} new-key")
+                    && line.ends_with("closed browser")
+            ),
+            "{notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .all(|line| !line.contains("relaunched browser")),
+            "{notices:?}"
+        );
     }
 
     /// A command that never launches still applies the restore unit as a

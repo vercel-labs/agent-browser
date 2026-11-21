@@ -849,6 +849,11 @@ fn recording_fps_suffix(data: &serde_json::Value) -> String {
 pub fn settings_notices(data: &serde_json::Value) -> Vec<String> {
     let lifecycle = &data["lifecycle"];
     let settings = &lifecycle["settings"];
+    let launch_effect = if lifecycle["relaunchedBrowser"] == false {
+        "closed browser"
+    } else {
+        "relaunched browser"
+    };
     let show = |value: &serde_json::Value| match value {
         serde_json::Value::Null => "default".to_string(),
         serde_json::Value::String(text) => text.clone(),
@@ -873,7 +878,7 @@ pub fn settings_notices(data: &serde_json::Value) -> Vec<String> {
                         .map(|flag| format!(" ({flag})"))
                         .unwrap_or_default();
                     let effect = if change["effect"] == "relaunch" {
-                        "relaunched browser"
+                        launch_effect
                     } else {
                         "applied"
                     };
