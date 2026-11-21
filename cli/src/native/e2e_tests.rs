@@ -19073,6 +19073,87 @@ async fn e2e_firefox_hidden_checkbox_and_disabled_hover() {
 
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_check_rejects_buttons_under_click_policy() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &format!("{}forms.html", fixture.url)).await;
+    firefox_eval(
+        &mut state,
+        r#"
+        document.body.innerHTML = `
+            <button id="delete">Delete</button>
+            <label id="wrap-label">
+                <input id="agree" type="checkbox">
+                <span>Agree</span>
+                <button id="nested-btn">Nested</button>
+            </label>
+            <button id="aria-switch" role="switch" aria-checked="false">Switch</button>
+            <div id="mat"><input id="mat-input" type="checkbox"><span>Mat</span></div>
+        `;
+        window.__clicks = [];
+        document.querySelector('#delete').addEventListener('click', () => window.__clicks.push('delete'));
+        document.querySelector('#nested-btn').addEventListener('click', () => window.__clicks.push('nested'));
+        document.querySelector('#aria-switch').addEventListener('click', (e) => {
+            const el = e.currentTarget;
+            el.setAttribute('aria-checked', String(el.getAttribute('aria-checked') !== 'true'));
+        });
+        "#,
+    )
+    .await;
+
+    for policy_json in [
+        r#"{"default":"deny","allow":["check","uncheck"],"deny":["click"]}"#,
+        r#"{"default":"deny","allow":["check","uncheck"],"confirm":["click"]}"#,
+    ] {
+        let policy_path = tmp.path().join("policy.json");
+        std::fs::write(&policy_path, policy_json).unwrap();
+        state.policy =
+            Some(crate::native::policy::ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+
+        for selector in ["#delete", "#nested-btn"] {
+            let resp = firefox_act(&mut state, "check", selector, json!({})).await;
+            assert_eq!(resp["success"], false, "{selector}: {resp}");
+            assert!(
+                resp["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("not a checkbox, radio button, or checkable control"),
+                "{selector}: {resp}"
+            );
+        }
+    }
+
+    assert_success(&firefox_act(&mut state, "check", "#agree", json!({})).await);
+    assert_success(&firefox_act(&mut state, "check", "#aria-switch", json!({})).await);
+    assert_success(&firefox_act(&mut state, "check", "#mat", json!({})).await);
+
+    state.policy = None;
+    assert_eq!(firefox_eval(&mut state, "window.__clicks").await, json!([]));
+    assert_eq!(
+        firefox_eval(&mut state, "document.querySelector('#agree').checked").await,
+        json!(true)
+    );
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "document.querySelector('#aria-switch').getAttribute('aria-checked')"
+        )
+        .await,
+        json!("true")
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "document.querySelector('#mat-input').checked").await,
+        json!(true)
+    );
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_html5_drag_drops_payload() {
     required_firefox_binary();
     let tmp = tempfile::tempdir().unwrap();

@@ -1561,43 +1561,66 @@ pub async fn is_element_enabled(
         .unwrap_or(true))
 }
 
+/// Returns the checked state of a native checkbox/radio, checkable ARIA widget,
+/// associated label, or single-checkbox wrapper, or `null` for any other element.
 pub(crate) const ELEMENT_CHECKED_JS: &str = r#"function() {
-                    var el = this;
-                    // Native checkbox/radio input
-                    var tag = el.tagName && el.tagName.toUpperCase();
-                    if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
-                        return el.checked;
-                    }
-                    // ARIA role-based checked state
-                    var role = el.getAttribute && el.getAttribute('role');
-                    var ariaCheckedRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'];
-                    if (role && ariaCheckedRoles.indexOf(role) !== -1) {
-                        return el.getAttribute('aria-checked') === 'true';
-                    }
-                    // Follow label association (Playwright follow-label retarget)
-                    var label = el;
-                    if (tag !== 'LABEL') {
-                        label = el.closest && el.closest('label');
-                    }
-                    if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
-                        var ctrl = label.control;
-                        if (ctrl.type === 'checkbox' || ctrl.type === 'radio') {
-                            return ctrl.checked;
-                        }
-                    }
-                    // Check for nested native input
-                    var input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
-                    if (input) return input.checked;
-                    return false;
-                }"#;
+    var el = this;
+    var tag = el.tagName && el.tagName.toUpperCase();
+    if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+        return el.checked;
+    }
+    var rawRole = el.getAttribute && el.getAttribute('role');
+    var role = rawRole ? rawRole.trim().toLowerCase() : '';
+    var alwaysCheckableRoles = ['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'];
+    if (role && alwaysCheckableRoles.indexOf(role) !== -1) {
+        return el.getAttribute('aria-checked') === 'true';
+    }
+    if ((role === 'option' || role === 'treeitem') && el.hasAttribute && el.hasAttribute('aria-checked')) {
+        return el.getAttribute('aria-checked') === 'true';
+    }
+    var nonCheckableTags = ['BUTTON', 'A', 'SELECT', 'TEXTAREA', 'INPUT', 'SUMMARY'];
+    var nonCheckableRoles = ['button', 'link', 'textbox', 'combobox', 'listbox', 'menuitem', 'searchbox', 'slider', 'spinbutton', 'tab'];
+    if ((tag && nonCheckableTags.indexOf(tag) !== -1) || (role && nonCheckableRoles.indexOf(role) !== -1)) {
+        return null;
+    }
+    var label = tag === 'LABEL' ? el : (el.closest && el.closest('label'));
+    if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
+        var interactive = el.closest && el.closest('button, a[href], select, textarea, summary, [role="button"], [role="link"]');
+        if (interactive && label.contains(interactive)) {
+            return null;
+        }
+        var ctrl = label.control;
+        if (ctrl.tagName && ctrl.tagName.toUpperCase() === 'INPUT' && (ctrl.type === 'checkbox' || ctrl.type === 'radio')) {
+            return ctrl.checked;
+        }
+        return null;
+    }
+    var inputs = el.querySelectorAll && el.querySelectorAll('input[type="checkbox"], input[type="radio"]');
+    if (inputs && inputs.length === 1) {
+        var otherInteractive = el.querySelector('button, a[href], input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), select, textarea, summary, [role="button"], [role="link"]');
+        if (!otherInteractive) {
+            return inputs[0].checked;
+        }
+    }
+    return null;
+}"#;
 
-pub async fn is_element_checked(
+/// Formats the error when `check` or `uncheck` targets a non-checkable element.
+pub(crate) fn not_checkable_error(target: &str) -> String {
+    format!(
+        "Element '{}' is not a checkbox, radio button, or checkable control",
+        target
+    )
+}
+
+/// Evaluates whether the target is checkable and returns its checked state, or `None` if it is not.
+pub async fn element_checked_state(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<bool, String> {
+) -> Result<Option<bool>, String> {
     let (object_id, effective_session_id) = resolve_element_object_id(
         client,
         session_id,
@@ -1607,11 +1630,6 @@ pub async fn is_element_checked(
     )
     .await?;
 
-    // Mirrors Playwright's getChecked() with follow-label retargeting:
-    // 1. If element is a native checkbox/radio input, return .checked
-    // 2. If element has an ARIA checked role, return aria-checked
-    // 3. Follow label → input association (label.control)
-    // 4. Check for nested checkbox/radio input as last resort
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.callFunctionOn",
@@ -1626,11 +1644,25 @@ pub async fn is_element_checked(
         )
         .await?;
 
-    Ok(result
-        .result
-        .value
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false))
+    Ok(result.result.value.and_then(|v| v.as_bool()))
+}
+
+pub async fn is_element_checked(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<bool, String> {
+    Ok(element_checked_state(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?
+    .unwrap_or(false))
 }
 
 pub(crate) const ELEMENT_INNER_TEXT_JS: &str = "function() { return this.innerText || ''; }";

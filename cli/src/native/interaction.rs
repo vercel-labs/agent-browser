@@ -682,19 +682,22 @@ async fn toggle(
     iframe_sessions: &HashMap<String, String>,
     want_checked: bool,
 ) -> Result<ToggleOutcome, String> {
-    use super::element::read_after_action;
+    use super::element::{element_checked_state, not_checkable_error, read_after_action};
     let mut outcome = ToggleOutcome {
         position: None,
         verified: true,
     };
-    let is_checked = super::element::is_element_checked(
+    let Some(is_checked) = element_checked_state(
         client,
         session_id,
         ref_map,
         selector_or_ref,
         iframe_sessions,
     )
-    .await?;
+    .await?
+    else {
+        return Err(not_checkable_error(selector_or_ref));
+    };
     if is_checked == want_checked {
         return Ok(outcome);
     }
@@ -710,12 +713,7 @@ async fn toggle(
     .await?;
     outcome.position = Some(result.position);
 
-    // Verify the click changed the state (Playwright parity: _setChecked re-checks).
-    // If the coordinate-based click missed (e.g. hidden input, overlay), retry
-    // with a JS .click() on the element and its associated input. The click has
-    // already happened, so a document replaced by it ends the verification
-    // without failing the action.
-    let after = read_after_action(super::element::is_element_checked(
+    let after = read_after_action(element_checked_state(
         client,
         session_id,
         ref_map,
@@ -725,7 +723,7 @@ async fn toggle(
     .await?;
     match after {
         None => outcome.verified = false,
-        Some(checked) if checked != want_checked => {
+        Some(Some(checked)) if checked != want_checked => {
             let retried = read_after_action(js_click_checkbox(
                 client,
                 session_id,
@@ -744,25 +742,29 @@ async fn toggle(
 pub(crate) const CLICK_CHECKBOX_JS: &str = r#"function() {
             var el = this;
             var tag = el.tagName && el.tagName.toUpperCase();
-            // 1. Native input — click it directly
             if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
                 el.click();
                 return;
             }
-            // 2. Follow label → control association
+            var rawRole = el.getAttribute && el.getAttribute('role');
+            var role = rawRole ? rawRole.trim().toLowerCase() : '';
+            var alwaysCheckableRoles = ['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'];
+            if (role && (alwaysCheckableRoles.indexOf(role) !== -1 || ((role === 'option' || role === 'treeitem') && el.hasAttribute && el.hasAttribute('aria-checked')))) {
+                el.click();
+                return;
+            }
             var label = tag === 'LABEL' ? el : (el.closest && el.closest('label'));
             if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
-                label.control.click();
-                return;
+                var ctrl = label.control;
+                if (ctrl.tagName && ctrl.tagName.toUpperCase() === 'INPUT' && (ctrl.type === 'checkbox' || ctrl.type === 'radio')) {
+                    ctrl.click();
+                    return;
+                }
             }
-            // 3. Nested native input
-            var input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
-            if (input) {
-                input.click();
-                return;
+            var inputs = el.querySelectorAll && el.querySelectorAll('input[type="checkbox"], input[type="radio"]');
+            if (inputs && inputs.length === 1) {
+                inputs[0].click();
             }
-            // 4. ARIA role control — click the element itself
-            el.click();
         }"#;
 
 /// Fallback for when the coordinate-based CDP click did not toggle the
