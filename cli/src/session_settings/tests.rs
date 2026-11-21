@@ -7,6 +7,15 @@ use super::*;
 use crate::flags::{split_launch_args, try_parse_flags, Flags};
 use crate::test_utils::EnvGuard;
 
+/// A path that is absolute on every platform; a bare `/x` is not on Windows.
+fn absolute_path(name: &str) -> String {
+    std::env::temp_dir()
+        .join(name)
+        .to_str()
+        .expect("temp dir is valid UTF-8")
+        .to_string()
+}
+
 /// Flags with no environment and an empty config file, so nothing is set.
 fn blank_flags() -> Flags {
     let names: Vec<String> = std::env::vars()
@@ -659,16 +668,17 @@ fn timeout_views() {
 
 #[test]
 fn security_view() {
+    let policy = absolute_path("policy.json");
     let r = seeded(&[
         ("AGENT_BROWSER_ALLOWED_DOMAINS", " a.test , ,*.b.test "),
         ("AGENT_BROWSER_CONFIRM_ACTIONS", "click,fill"),
-        ("AGENT_BROWSER_ACTION_POLICY", "/policy.json"),
+        ("AGENT_BROWSER_ACTION_POLICY", policy.as_str()),
     ]);
     assert_eq!(
         r.security(),
         SecurityView {
             allowed_domains: Some(vec!["a.test".into(), "*.b.test".into()]),
-            action_policy_path: Some("/policy.json".into()),
+            action_policy_path: Some(policy.clone()),
             confirm_actions: Some("click,fill".into()),
         }
     );
@@ -711,18 +721,20 @@ fn provider_view_ignores_connection_precedence() {
 
 #[test]
 fn legacy_policy_variable_applies_only_when_the_current_one_is_unset() {
-    let legacy = seeded(&[("AGENT_BROWSER_POLICY", "/old.json")]);
+    let old = absolute_path("old.json");
+    let new = absolute_path("new.json");
+    let legacy = seeded(&[("AGENT_BROWSER_POLICY", old.as_str())]);
     assert_eq!(
         legacy.security().action_policy_path.as_deref(),
-        Some("/old.json")
+        Some(old.as_str())
     );
     let both = seeded(&[
-        ("AGENT_BROWSER_POLICY", "/old.json"),
-        ("AGENT_BROWSER_ACTION_POLICY", "/new.json"),
+        ("AGENT_BROWSER_POLICY", old.as_str()),
+        ("AGENT_BROWSER_ACTION_POLICY", new.as_str()),
     ]);
     assert_eq!(
         both.security().action_policy_path.as_deref(),
-        Some("/new.json")
+        Some(new.as_str())
     );
 }
 

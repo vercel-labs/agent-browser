@@ -3830,7 +3830,7 @@
             "type": "boolean"
           },
           "selector": {
-            "description": "Scope the snapshot to a CSS selector.",
+            "description": "Scope the snapshot to every element matching a CSS selector.",
             "type": "string"
           },
           "session": {
