@@ -1144,7 +1144,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_UPLOAD,
             "Upload files",
-            "Upload files through a file input.",
+            "Upload files through a file input. Relative paths resolve against the working directory of the caller and `~` expands to the home directory. A missing path fails with file_not_found, a target that is not a file input with not_file_input. A directory is accepted for webkitdirectory inputs. With a browser on another machine, a path missing locally only warns.",
             json!({ "selector": selector_schema(), "files": string_array_schema("File paths to upload.") }),
             &["selector", "files"],
         ),
@@ -1383,7 +1383,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_NETWORK_HAR_STOP,
             "HAR stop",
-            "Stop HAR capture.",
+            "Stop HAR capture and save it. Fails with no_har_recording when no recording is active, for example after a daemon restart. A relative path resolves against the working directory of the caller.",
             json!({ "path": { "type": "string" } }),
             &[],
         ),
@@ -1775,8 +1775,8 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DIFF_SNAPSHOT,
             "Diff snapshot",
-            "Diff current snapshot against last or baseline.",
-            json!({ "baseline": { "type": "string" }, "selector": { "type": "string" }, "compact": { "type": "boolean" }, "depth": { "type": "integer" } }),
+            "Diff current snapshot against the last snapshot or a baseline file. Without a baseline the last snapshot's options are reused; an option that differs fails with baseline_mismatch, and no earlier snapshot fails with no_baseline. A missing baseline file fails with file_not_found; a relative baseline path resolves against the working directory of the caller.",
+            json!({ "baseline": { "type": "string" }, "selector": { "type": "string" }, "interactive": { "type": "boolean" }, "compact": { "type": "boolean" }, "urls": { "type": "boolean" }, "depth": { "type": "integer" } }),
             &[],
         ),
         tool(
@@ -1789,7 +1789,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DIFF_URL,
             "Diff URL",
-            "Compare two URLs.",
+            "Compare two URLs. fullPage applies to the screenshot diff and requires screenshot.",
             json!({ "url1": { "type": "string" }, "url2": { "type": "string" }, "screenshot": { "type": "boolean" }, "fullPage": { "type": "boolean" }, "waitUntil": { "type": "string" }, "selector": { "type": "string" }, "compact": { "type": "boolean" }, "depth": { "type": "integer" } }),
             &["url1", "url2"],
         ),
@@ -4238,8 +4238,14 @@ fn call_diff_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push("--selector".to_string());
         args.push(selector);
     }
+    if optional_bool(arguments, "interactive")?.unwrap_or(false) {
+        args.push("--interactive".to_string());
+    }
     if optional_bool(arguments, "compact")?.unwrap_or(false) {
         args.push("--compact".to_string());
+    }
+    if optional_bool(arguments, "urls")?.unwrap_or(false) {
+        args.push("--urls".to_string());
     }
     if let Some(depth) = optional_u64(arguments, "depth")? {
         args.push("--depth".to_string());
@@ -6547,7 +6553,10 @@ mod tests {
         let arguments = json!({ "path": "--capture.har" });
         let parsed = parse(&arguments, har_stop_args(&arguments).unwrap());
         assert_eq!(parsed["action"], "har_stop");
-        assert_eq!(parsed["path"], "--capture.har");
+        assert_eq!(
+            std::path::Path::new(parsed["path"].as_str().unwrap()).file_name(),
+            Some(std::ffi::OsStr::new("--capture.har"))
+        );
 
         let arguments = json!({ "url": "--history" });
         let parsed = parse(&arguments, pushstate_args(&arguments).unwrap());
