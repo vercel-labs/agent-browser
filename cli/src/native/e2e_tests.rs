@@ -4338,7 +4338,7 @@ async fn e2e_scroll_selector_falls_back_to_scrollable_ancestor_and_page() {
         "<div id='inner' style='height:400px'>content</div>",
         "</div>",
         "<div id='reverse' style='height:100px;display:flex;flex-direction:column-reverse;overflow-y:auto'>",
-        "<div style='height:400px'>reverse content</div></div>",
+        "<div style='height:400px;flex-shrink:0'>reverse content</div></div>",
         "<div id='smooth' style='height:100px;overflow:auto;scroll-behavior:smooth'>",
         "<div style='height:400px'>smooth content</div></div>",
         "</body></html>"
