@@ -41,6 +41,19 @@ pub fn session_name_error(name: &str) -> String {
     )
 }
 
+/// Return page headers only when the JSON value is an object of string values.
+pub fn validate_headers(
+    value: &serde_json::Value,
+) -> Result<&serde_json::Map<String, serde_json::Value>, String> {
+    let headers = value
+        .as_object()
+        .ok_or_else(|| "headers must be a JSON object with string values".to_string())?;
+    if !headers.values().all(serde_json::Value::is_string) {
+        return Err("headers must be a JSON object with string values".to_string());
+    }
+    Ok(headers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +83,51 @@ mod tests {
     #[test]
     fn sanitize_session_component_trims_separators() {
         assert_eq!(sanitize_session_component(" --Agent__ "), "agent");
+    }
+
+    #[test]
+    fn headers_validation_accepts_empty_and_string_values() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({ "X-Empty": "" }),
+            serde_json::json!({
+                "x-MiXeD": "value",
+                "Authorization": "Bearer token",
+                "X-Unicode": "你好 🌍"
+            }),
+        ] {
+            assert!(validate_headers(&value).is_ok(), "{value}");
+        }
+    }
+
+    #[test]
+    fn headers_validation_rejects_invalid_shapes_without_echoing_input() {
+        let invalid = [
+            serde_json::json!(null),
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!(1.5),
+            serde_json::json!("VALIDATION_HEADER_SECRET_TOP_LEVEL"),
+            serde_json::json!([]),
+            serde_json::json!([{}]),
+            serde_json::json!({ "VALIDATION_HEADER_SECRET_KEY": null }),
+            serde_json::json!({ "VALIDATION_HEADER_SECRET_KEY": false }),
+            serde_json::json!({ "VALIDATION_HEADER_SECRET_KEY": 1 }),
+            serde_json::json!({ "VALIDATION_HEADER_SECRET_KEY": 1.5 }),
+            serde_json::json!({ "VALIDATION_HEADER_SECRET_KEY": [] }),
+            serde_json::json!({ "VALIDATION_HEADER_SECRET_KEY": {} }),
+            serde_json::json!({
+                "X-Good": "kept",
+                "VALIDATION_HEADER_SECRET_KEY": {
+                    "credential": "VALIDATION_HEADER_SECRET_VALUE"
+                }
+            }),
+        ];
+
+        for value in invalid {
+            let error = validate_headers(&value).unwrap_err();
+            assert_eq!(error, "headers must be a JSON object with string values");
+            assert!(!error.contains("VALIDATION_HEADER_SECRET"));
+        }
     }
 }
