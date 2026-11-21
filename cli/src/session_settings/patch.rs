@@ -7,8 +7,16 @@ use serde_json::{Map, Value};
 
 use crate::flags::Flags;
 
-use super::spec::{redacted, spec, spec_by_name, Effect, Key, Persist, SPECS};
+use super::spec::{redacted, spec, spec_by_name, Effect, Key, Persist, RESTORE_UNIT, SPECS};
 use super::SettingsError;
+
+/// A requested value that does not fit its setting.
+#[derive(Debug, PartialEq)]
+pub struct PatchInvalid {
+    /// The `--json` error type to report it under.
+    pub error_type: &'static str,
+    pub message: String,
+}
 
 /// What an invocation asks for one setting.
 #[derive(Clone, Debug, PartialEq)]
@@ -204,13 +212,56 @@ impl Patch {
         self.changed_in_place.contains(&key)
     }
 
+    /// Splits the restore unit (key, save policy, checks) from the rest. The
+    /// unit applies once, past the policy gates; the rest keeps the patch's
+    /// relaunch and ambient state.
+    pub fn split_restore_unit(&self) -> (Patch, Patch) {
+        let mut rest = self.clone();
+        let mut unit = Patch::default();
+        for key in RESTORE_UNIT {
+            if let Some(requested) = rest.entries.remove(&key) {
+                unit.entries.insert(key, requested);
+            }
+            if rest.changed_in_place.remove(&key) {
+                unit.changed_in_place.insert(key);
+            }
+        }
+        rest.retain_ambient();
+        (rest, unit)
+    }
+
     /// The patch without its launch settings and without a forced relaunch:
-    /// what a command that never launches a browser can apply.
+    /// what a command that never launches a browser can apply. The restore
+    /// unit's save policy and checks are dropped too, because the caller does
+    /// not know which restore key is running; see `without_launch_settings_for`.
     pub fn without_launch_settings(&self) -> Patch {
+        self.without_launch_settings_inner(None)
+    }
+
+    /// Like `without_launch_settings`, for a caller that knows the running
+    /// restore key. The save policy and checks stay when the patch names no
+    /// restore key or the running one; a different key would put them on the
+    /// wrong key, so they are dropped with it.
+    pub fn without_launch_settings_for(&self, running_key: Option<&str>) -> Patch {
+        self.without_launch_settings_inner(Some(running_key))
+    }
+
+    fn without_launch_settings_inner(&self, running_key: Option<Option<&str>>) -> Patch {
         let mut live = self.clone();
         live.relaunch = false;
         live.entries
             .retain(|key, _| spec(*key).effect == Effect::Live);
+        let patch_key = self.value(Key::RestoreKey).and_then(Value::as_str);
+        let applies_to_running_key = match (patch_key, running_key) {
+            (None, Some(_)) => true,
+            (Some(k), Some(running)) => running == Some(k),
+            (_, None) => false,
+        };
+        if !applies_to_running_key {
+            for key in RESTORE_UNIT {
+                live.entries.remove(&key);
+            }
+        }
         live.retain_ambient();
         live
     }
@@ -253,6 +304,23 @@ impl Patch {
 
     pub fn iter(&self) -> impl Iterator<Item = (Key, &Requested)> {
         self.entries.iter().map(|(k, r)| (*k, r))
+    }
+
+    /// Whether every value fits its setting. The CLI calls this before it
+    /// starts a daemon; the daemon applies the same rule to what it receives.
+    pub fn validate(&self) -> Result<(), PatchInvalid> {
+        for (key, requested) in &self.entries {
+            if let Requested::Set(value) = requested {
+                spec(*key)
+                    .shape
+                    .check(value)
+                    .map_err(|(error_type, message)| PatchInvalid {
+                        error_type,
+                        message,
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     /// The `settings` field of a command; `None` when there is nothing to say.
@@ -326,13 +394,11 @@ impl Patch {
                     ));
                 }
                 Requested::Default
-            } else if s.shape.accepts(value) {
-                Requested::Set(value.clone())
             } else {
-                return Err(SettingsError::Invalid(
-                    s.key,
-                    format!("expected {:?}", s.shape),
-                ));
+                s.shape
+                    .check(value)
+                    .map_err(|(_, why)| SettingsError::Invalid(s.key, why))?;
+                Requested::Set(value.clone())
             };
             entries.insert(s.key, requested);
         }
