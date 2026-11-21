@@ -1,6 +1,7 @@
 //! Firefox permission grants: the names the session granted and the origins that hold them.
 
 use std::collections::{BTreeSet, HashSet};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -62,6 +63,21 @@ impl Grants {
             self.held.insert(pair);
         }
         Ok(())
+    }
+
+    /// Takes back every grant and forgets the granted names, so a browser the session does not
+    /// own keeps none of them.
+    pub async fn revoke(&mut self, bidi: &BidiClient, timeout: Duration) {
+        for (origin, name) in self.held.drain() {
+            let _ = bidi
+                .send_timeout(
+                    "permissions.setPermission",
+                    set_permission(&name, "prompt", &origin),
+                    timeout,
+                )
+                .await;
+        }
+        self.names.clear();
     }
 }
 
