@@ -12,8 +12,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agent-browser");
-const CA_A: &str = include_str!("fixtures/tls/ca-a.pem");
-const CA_B: &str = include_str!("fixtures/tls/ca-b.pem");
+const CA_A: &str = include_str!("../fixtures/tls/ca-a.pem");
+const CA_B: &str = include_str!("../fixtures/tls/ca-b.pem");
 
 struct TlsServer {
     port: u16,
@@ -102,14 +102,14 @@ impl TlsServer {
 
     fn a() -> Self {
         Self::new(
-            include_str!("fixtures/tls/server-a.pem"),
-            include_str!("fixtures/tls/server-a.key"),
+            include_str!("../fixtures/tls/server-a.pem"),
+            include_str!("../fixtures/tls/server-a.key"),
         )
     }
     fn b() -> Self {
         Self::new(
-            include_str!("fixtures/tls/server-b.pem"),
-            include_str!("fixtures/tls/server-b.key"),
+            include_str!("../fixtures/tls/server-b.pem"),
+            include_str!("../fixtures/tls/server-b.key"),
         )
     }
     fn url(&self) -> String {
@@ -280,8 +280,8 @@ fn read_trust_survives_a_daemon_restart_until_close() {
 fn trust_preserves_hostname_and_expiry_validation() {
     let a = TlsServer::a();
     let expired = TlsServer::new(
-        include_str!("fixtures/tls/expired.pem"),
-        include_str!("fixtures/tls/server-a.key"),
+        include_str!("../fixtures/tls/expired.pem"),
+        include_str!("../fixtures/tls/server-a.key"),
     );
     let session = Session::new();
     let ca = session.ca("ca.pem", CA_A);
@@ -344,10 +344,10 @@ fn install_rejects_an_invalid_explicit_ca_before_network_or_daemon() {
 #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
 #[test]
 fn install_fetches_manifest_with_explicit_and_native_trust() {
-    let cert = include_str!("fixtures/tls/install.pem");
+    let cert = include_str!("../fixtures/tls/install.pem");
     let proxy = TlsServer::with_response(
         cert,
-        include_str!("fixtures/tls/install.key"),
+        include_str!("../fixtures/tls/install.key"),
         true,
         r#"{"channels":{"Stable":{"version":"0.0.0","downloads":{"chrome":[]}}}}"#,
     );

@@ -50,10 +50,6 @@ windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_F
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 
-[build-dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
 [profile.release]
 opt-level = 3
 lto = true
@@ -64,6 +60,16 @@ strip = true
 inherits = "release"
 lto = "thin"
 codegen-units = 16
+
+[profile.ci-test]
+inherits = "dev"
+debug = "line-tables-only"
+
+[profile.ci-test.package.image]
+opt-level = 3
+
+[profile.ci-test.package.png]
+opt-level = 3
 
 # Keep image processing real-time while application code remains debuggable.
 [profile.dev.package.image]
