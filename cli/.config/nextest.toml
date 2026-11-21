@@ -1,0 +1,3 @@
+[[profile.default.overrides]]
+filter = 'test(e2e_recording)'
+threads-required = "num-test-threads"
