@@ -110,16 +110,51 @@ fn command_is_cdp_url_metadata(cmd: &serde_json::Value) -> bool {
     }
 }
 
+/// Whether the command attaches to an endpoint it names itself (`connect`).
+fn command_names_target(cmd: &serde_json::Value) -> bool {
+    cmd.get("action").and_then(|v| v.as_str()) == Some("launch")
+        && (cmd.get("cdpPort").is_some() || cmd.get("cdpUrl").is_some())
+}
+
+/// The endpoint a `connect` envelope names.
+fn named_endpoint(cmd: &serde_json::Value) -> Option<String> {
+    match (cmd.get("cdpUrl"), cmd.get("cdpPort")) {
+        (Some(url), _) => url.as_str().map(str::to_string),
+        (_, Some(port)) => Some(port.to_string()),
+        _ => None,
+    }
+}
+
 /// The settings patch one command carries. A browserless command never
 /// launches a browser, so CA trust does not apply to it.
 fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings::Patch {
-    let patch = session_settings::Patch::from_flags(flags);
+    let mut patch = session_settings::Patch::from_flags(flags);
+    // `connect` names its endpoint in the launch envelope, so an environment
+    // or config target must not ride along and replace it.
+    if command_names_target(cmd) {
+        patch = patch.without_ambient_connection();
+        // Headers from the environment or config belong to the endpoint they
+        // name, so another endpoint never receives them.
+        let fits = named_endpoint(cmd).is_some_and(|e| flags.default_headers_fit(&e));
+        if !flags.cli_cdp_headers && !fits {
+            patch.remove(session_settings::Key::CdpHeaders);
+        }
+    }
     // Asking for a running browser's CDP URL never launches or relaunches one,
     // so launch settings do not apply to it.
     if command_is_cdp_url_metadata(cmd) {
         return patch.without_launch_settings();
     }
-    let mut patch = patch;
+    // Closing a session applies no allowlist, so one that cannot be used does
+    // not ride along and fail the close.
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("close")
+        && flags
+            .allowed_domains
+            .as_deref()
+            .is_some_and(|d| native::network::ensure_allowed_domains_not_empty(d).is_err())
+    {
+        patch.remove(session_settings::Key::AllowedDomains);
+    }
     if command_is_browserless(cmd) {
         patch.remove(session_settings::Key::CaCert);
         patch.remove(session_settings::Key::ClearCaCert);
@@ -158,12 +193,36 @@ fn response_applied_relaunch(resp: &connection::Response) -> bool {
     .any(|path| data.pointer(path).and_then(|v| v.as_bool()) == Some(true))
 }
 
-/// Checks a `--cdp` value and its headers. The value is either a port number
-/// or a ws, wss, http or https URL.
-fn validate_cdp_flags(flags: &Flags) -> Result<(), String> {
-    let Some(cdp_value) = flags.cdp.as_deref() else {
-        return Ok(());
-    };
+/// Checks the CDP value and headers this invocation will send. The value is
+/// either a port number or a ws, wss, http or https URL.
+fn validate_cdp_flags(flags: &Flags, cmd: &serde_json::Value) -> Result<(), String> {
+    // A default target is checked only when it will be sent: `connect` names
+    // its own endpoint and drops it, and a target on the command line or a
+    // higher-precedence default replaces it.
+    let targets = session_settings::effective_targets(flags);
+    if let Some(cdp_value) = targets
+        .cdp
+        .as_deref()
+        .filter(|_| flags.cli_cdp || !command_names_target(cmd))
+    {
+        validate_cdp_value(cdp_value)?;
+    }
+    // Headers are checked whenever they can be sent: explicit ones always, and
+    // ones from the environment or config only with a CDP endpoint.
+    let patch = command_settings(flags, cmd);
+    if let Some(session_settings::Requested::Set(serde_json::Value::String(raw))) =
+        patch.get(session_settings::Key::CdpHeaders)
+    {
+        let sent = !patch.is_ambient(session_settings::Key::CdpHeaders)
+            || patch.get(session_settings::Key::Cdp).is_some();
+        if sent {
+            parse_cdp_headers(raw)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_cdp_value(cdp_value: &str) -> Result<(), String> {
     let is_url = ["ws://", "wss://", "http://", "https://"]
         .iter()
         .any(|scheme| cdp_value.starts_with(scheme));
@@ -184,9 +243,6 @@ fn validate_cdp_flags(flags: &Flags) -> Result<(), String> {
                 ))
             }
         }
-    }
-    if let Some(raw) = flags.cdp_headers.as_deref() {
-        parse_cdp_headers(raw)?;
     }
     Ok(())
 }
@@ -229,7 +285,23 @@ fn is_valid_restore_save_policy(policy: &str) -> bool {
 }
 
 fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
-    if flags.cdp.is_some() && flags.provider.is_some() {
+    // Only targets that will apply count: a target on the command line wins
+    // over environment and config defaults, and two defaults resolve by
+    // precedence, so neither is a conflict.
+    let targets = session_settings::effective_targets(flags);
+    let cdp = targets.cdp.is_some();
+    let auto_connect = targets.auto_connect;
+    // `-p ""` resets the session and names no provider, so a default target
+    // can still apply after it.
+    let provider_reset = flags.cli_provider
+        && !flags.cli_cdp
+        && (cdp || auto_connect)
+        && targets
+            .provider
+            .as_deref()
+            .is_some_and(|v| v.trim().is_empty());
+    let provider = targets.provider.is_some() && !provider_reset;
+    if cdp && provider {
         return Some("Cannot use --cdp and -p/--provider together");
     }
 
@@ -237,21 +309,21 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
         return Some("Cannot use --auto-connect and --no-auto-connect together");
     }
 
-    if flags.auto_connect && flags.cdp.is_some() {
+    if auto_connect && cdp {
         return Some("Cannot use --auto-connect and --cdp together");
     }
 
-    if flags.auto_connect && flags.provider.is_some() {
+    if auto_connect && provider {
         return Some("Cannot use --auto-connect and -p/--provider together");
     }
 
-    if flags.provider.is_some() && !flags.extensions.is_empty() {
+    if provider && !flags.extensions.is_empty() {
         return Some(
             "Cannot use --extension with -p/--provider (extensions require local browser)",
         );
     }
 
-    if flags.cdp.is_some() && !flags.extensions.is_empty() {
+    if cdp && !flags.extensions.is_empty() {
         return Some("Cannot use --extension with --cdp (extensions require local browser)");
     }
 
@@ -259,17 +331,17 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     // browser agent-browser did not launch. Rejecting (rather than silently
     // ignoring) matches the --extension handling above. `--webgpu false`
     // overrides an env/config-enabled preset for these modes.
-    if flags.webgpu && flags.cdp.is_some() {
+    if flags.webgpu && cdp {
         return Some(
             "Cannot use --webgpu with --cdp (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
         );
     }
-    if flags.webgpu && flags.provider.is_some() {
+    if flags.webgpu && provider {
         return Some(
             "Cannot use --webgpu with -p/--provider (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
         );
     }
-    if flags.webgpu && flags.auto_connect {
+    if flags.webgpu && auto_connect {
         return Some(
             "Cannot use --webgpu with --auto-connect (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
         );
@@ -281,17 +353,17 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     if flags.ca_cert.is_some() && flags.clear_ca_cert {
         return Some("Cannot use --ca-cert with --no-ca-cert");
     }
-    if flags.ca_cert.is_some() && flags.cdp.is_some() {
+    if flags.ca_cert.is_some() && cdp {
         return Some(
             "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)",
         );
     }
-    if flags.ca_cert.is_some() && flags.auto_connect {
+    if flags.ca_cert.is_some() && auto_connect {
         return Some(
             "Cannot use --ca-cert with --auto-connect (--ca-cert requires a locally launched Chromium browser on Linux)",
         );
     }
-    if flags.ca_cert.is_some() && flags.provider.is_some() {
+    if flags.ca_cert.is_some() && provider {
         return Some(
             "Cannot use --ca-cert with -p/--provider (--ca-cert requires a locally launched Chromium browser on Linux)",
         );
@@ -1280,6 +1352,16 @@ fn close_completed(resp: &connection::Response) -> bool {
             == Some(true)
 }
 
+/// Whether the invocation asks to close every session before the `--` marker.
+fn close_all_requested(args: &[String]) -> bool {
+    matches!(
+        args.first().map(|s| s.as_str()),
+        Some("close") | Some("quit") | Some("exit")
+    ) && flags::before_end_of_options(args)
+        .iter()
+        .any(|arg| arg == "--all")
+}
+
 fn run_close_all(flags: &Flags) {
     // walk_daemons auto-cleans stale .pid / .sock / .stream sidecar files and
     // separates out the standalone dashboard. We only want to send `close` to
@@ -1420,6 +1502,48 @@ fn run_close_all(flags: &Flags) {
     }
 }
 
+/// An allowlist from a flag, env var or config file that holds no domain is an
+/// error; an absent one means no containment was requested. The message names
+/// where the empty list came from.
+fn validate_allowed_domains_flag(flags: &Flags, args: &[String]) -> Result<(), String> {
+    if matches!(
+        env::var("AGENT_BROWSER_ALLOWED_DOMAINS"),
+        Err(env::VarError::NotUnicode(_))
+    ) {
+        return Err("AGENT_BROWSER_ALLOWED_DOMAINS: the value is not valid UTF-8".to_string());
+    }
+    let Some(domains) = flags.allowed_domains.as_deref() else {
+        return Ok(());
+    };
+    native::network::ensure_allowed_domains_not_empty(domains).map_err(|error| {
+        let source = if flags::before_end_of_options(args)
+            .iter()
+            .any(|a| a == "--allowed-domains")
+        {
+            "--allowed-domains"
+        } else if env::var_os("AGENT_BROWSER_ALLOWED_DOMAINS").is_some() {
+            "AGENT_BROWSER_ALLOWED_DOMAINS"
+        } else {
+            "allowedDomains in the config file"
+        };
+        format!("{source}: {error}")
+    })
+}
+
+/// Chat runs each tool call as a child CLI that sees only the environment, so
+/// the security flags given to `chat` are passed on that way.
+fn forward_security_globals(flags: &Flags) {
+    if let Some(domains) = flags.allowed_domains.as_deref() {
+        env::set_var("AGENT_BROWSER_ALLOWED_DOMAINS", domains.join(","));
+    }
+    if let Some(policy) = flags.action_policy.as_deref() {
+        env::set_var("AGENT_BROWSER_ACTION_POLICY", policy);
+    }
+    if let Some(actions) = flags.confirm_actions.as_deref() {
+        env::set_var("AGENT_BROWSER_CONFIRM_ACTIONS", actions);
+    }
+}
+
 fn main() {
     // Rust ignores SIGPIPE by default, causing println! to panic on broken pipes.
     // Reset to SIG_DFL so the OS terminates the process cleanly instead.
@@ -1466,6 +1590,10 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
+    let runs_browser = flags::command_runs_browser(&args);
+    if !runs_browser {
+        flags::allow_unusable_security_config();
+    }
     let mut flags = parse_flags(&args);
     if flags.restore_uses_session {
         flags.restore = Some(flags.session.clone());
@@ -1642,14 +1770,20 @@ fn main() {
         return;
     }
 
-    // Handle close --all: close all active sessions
-    if matches!(
-        clean.first().map(|s| s.as_str()),
-        Some("close") | Some("quit") | Some("exit")
-    ) && clean.iter().any(|a| a == "--all")
-    {
-        run_close_all(&flags);
-        return;
+    // Commands that start a browser or apply settings refuse an empty allowlist.
+    // Commands that cannot run a browser only warn. The list itself is left as
+    // given, so anything that does reach a browser still refuses it.
+    if let Err(error) = validate_allowed_domains_flag(&flags, &args) {
+        if !runs_browser {
+            eprintln!("{} {}", color::warning_indicator(), error);
+        } else {
+            if flags.json {
+                print_json_error(error);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), error);
+            }
+            exit(1);
+        }
     }
 
     // Handle chat command
@@ -1659,6 +1793,7 @@ fn main() {
         } else {
             None
         };
+        forward_security_globals(&flags);
         chat::run_chat(&flags, message);
         return;
     }
@@ -1681,6 +1816,11 @@ fn main() {
             exit(1);
         }
     };
+    // Handle close --all: close all active sessions
+    if close_all_requested(&clean) {
+        run_close_all(&flags);
+        return;
+    }
     attach_input_mode(&mut cmd, &flags);
     // Stdin batches are read before launch decisions so a batch of `read`
     // commands is recognized as browserless, like one given as arguments.
@@ -1862,7 +2002,10 @@ fn main() {
         restore_check_text: flags.restore_check_text.as_deref(),
         restore_check_fn: flags.restore_check_fn.as_deref(),
         download_path: flags.download_path.as_deref(),
-        allowed_domains: flags.allowed_domains.as_deref(),
+        allowed_domains: flags
+            .allowed_domains
+            .as_deref()
+            .filter(|d| native::network::ensure_allowed_domains_not_empty(d).is_ok()),
         action_policy: flags.action_policy.as_deref(),
         confirm_actions: flags.confirm_actions.as_deref(),
         engine: flags.engine.as_deref(),
@@ -1899,7 +2042,7 @@ fn main() {
 
     // Reject a bad CDP target before the command runs, even when the daemon
     // is already up, so the user gets an immediate error.
-    if let Err(msg) = validate_cdp_flags(&flags) {
+    if let Err(msg) = validate_cdp_flags(&flags, &cmd) {
         if flags.json {
             print_json_error(&msg);
         } else {
@@ -2194,6 +2337,75 @@ fn batch_result_identity(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn test_validate_allowed_domains_flag_absent_or_real_is_ok() {
+        let mut flags = parse_flags(&[]);
+        flags.allowed_domains = None;
+        assert!(validate_allowed_domains_flag(&flags, &[]).is_ok());
+        flags.allowed_domains = Some(vec!["example.com".to_string()]);
+        assert!(validate_allowed_domains_flag(&flags, &[]).is_ok());
+    }
+
+    #[test]
+    fn test_parsed_empty_allowed_domains_flag_is_rejected() {
+        for value in ["", ",", " ", " , "] {
+            let args = [
+                "open".to_string(),
+                "--allowed-domains".to_string(),
+                value.to_string(),
+            ];
+            let flags = parse_flags(&args);
+            assert_eq!(flags.allowed_domains, Some(Vec::new()), "{value:?}");
+            assert_eq!(
+                validate_allowed_domains_flag(&flags, &args).unwrap_err(),
+                format!(
+                    "--allowed-domains: {}",
+                    native::network::EMPTY_ALLOWED_DOMAINS_ERROR
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn test_chat_forwards_security_flags_through_the_environment() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ]);
+        for name in [
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ] {
+            guard.remove(name);
+        }
+        let mut flags = parse_flags(&[]);
+        flags.allowed_domains = Some(vec!["a.example".into(), "*.b.example".into()]);
+        flags.action_policy = Some("/p.json".into());
+        flags.confirm_actions = Some("click".into());
+        forward_security_globals(&flags);
+        assert_eq!(
+            env::var("AGENT_BROWSER_ALLOWED_DOMAINS").unwrap(),
+            "a.example,*.b.example"
+        );
+        assert_eq!(env::var("AGENT_BROWSER_ACTION_POLICY").unwrap(), "/p.json");
+        assert_eq!(env::var("AGENT_BROWSER_CONFIRM_ACTIONS").unwrap(), "click");
+    }
+
+    #[test]
+    fn test_empty_allowed_domains_error_names_the_env_var() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", " ");
+        let args = ["open".to_string()];
+        let flags = parse_flags(&args);
+        let error = validate_allowed_domains_flag(&flags, &args).unwrap_err();
+        assert!(
+            error.starts_with("AGENT_BROWSER_ALLOWED_DOMAINS: "),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn input_mode_session_setting_preserves_command_override() {
         let args: Vec<String> = ["--input-mode", "smooth", "click", "#button", "--human"]
             .into_iter()
@@ -2208,6 +2420,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn close_all_requested_ignores_marker_after_end_of_options() {
+        let clean = |command: &str| {
+            crate::flags::clean_args(
+                &command
+                    .split_whitespace()
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        assert!(close_all_requested(&clean("close --all")));
+        assert!(close_all_requested(&clean("quit --all")));
+        assert!(close_all_requested(&clean("exit --all")));
+        assert!(!close_all_requested(&clean("close -- --all")));
+        assert!(!close_all_requested(&clean("quit -- --all")));
+        assert!(!close_all_requested(&clean("exit -- --all")));
+        assert!(close_all_requested(&clean("close --all -- --all")));
+    }
 
     #[test]
     fn dashboard_config_comparison_rejects_unknown_or_changed_settings() {
@@ -2290,6 +2522,50 @@ mod tests {
         (command, wire)
     }
 
+    fn settings_with_env_target(args: &[&str]) -> serde_json::Value {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let mut flags = crate::flags::parse_flags(&args);
+        flags.cdp = Some("ws://env.example/cdp".to_string());
+        flags.cdp_headers = Some(r#"{"A":"env"}"#.to_string());
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        command_settings(&flags, &command)
+            .to_wire()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    #[test]
+    fn connect_does_not_carry_an_environment_target() {
+        for target in ["wss://x.example/cdp", "9222"] {
+            let wire = settings_with_env_target(&["connect", target]);
+            assert!(wire.get("cdp").is_none(), "{target}: {wire}");
+            // The environment headers belong to the environment endpoint.
+            assert!(wire.get("cdp-headers").is_none(), "{target}: {wire}");
+            assert!(wire.get("ambient").is_none(), "{target}: {wire}");
+        }
+        let wire = settings_with_env_target(&["connect", "ws://env.example/cdp"]);
+        assert_eq!(wire["cdp-headers"], r#"{"A":"env"}"#, "{wire}");
+    }
+
+    #[test]
+    fn other_commands_carry_the_environment_target_as_ambient() {
+        let wire = settings_with_env_target(&["snapshot"]);
+        assert_eq!(wire["cdp"], "ws://env.example/cdp");
+        assert_eq!(wire["ambient"], serde_json::json!(["cdp", "cdp-headers"]));
+    }
+
+    #[test]
+    fn batch_items_keep_the_environment_target_ambient() {
+        let args: Vec<String> = vec!["snapshot".to_string()];
+        let mut flags = crate::flags::parse_flags(&args);
+        flags.cdp = Some("ws://env.example/cdp".to_string());
+        let command = serde_json::json!({"id": "1", "action": "launch"});
+        let wire = batch_item_settings(&flags, &command, false)
+            .to_wire()
+            .unwrap();
+        assert_eq!(wire["ambient"], serde_json::json!(["cdp"]));
+    }
+
     #[test]
     fn bare_open_is_a_plain_launch_and_its_settings_ride_in_the_patch() {
         let (command, wire) = settings_of(&[
@@ -2329,34 +2605,245 @@ mod tests {
         assert!(wire.get("clear-ca-cert").is_none(), "{wire}");
     }
 
+    fn flags_of(args: &[&str]) -> (Flags, serde_json::Value) {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let flags = crate::flags::parse_flags(&args);
+        let cmd = crate::commands::parse_command(&crate::flags::clean_args(&args), &flags)
+            .unwrap_or_else(|_| serde_json::json!({"action": "url"}));
+        (flags, cmd)
+    }
+
+    /// Flags as parsed with `AGENT_BROWSER_*` values for the connection
+    /// targets, which are session defaults.
+    fn with_defaults(
+        args: &[&str],
+        cdp: Option<&str>,
+        provider: Option<&str>,
+        auto_connect: bool,
+    ) -> (Flags, serde_json::Value) {
+        // Parsing reads the process environment, which other tests mutate.
+        let _env = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_CDP_HEADERS",
+            "AGENT_BROWSER_PROVIDER",
+            "AGENT_BROWSER_AUTO_CONNECT",
+        ]);
+        let (mut flags, cmd) = flags_of(args);
+        if !flags.cli_cdp {
+            flags.cdp = cdp.map(str::to_string).or(flags.cdp);
+        } else {
+            flags.default_cdp = cdp.map(str::to_string);
+        }
+        if !flags.cli_provider {
+            flags.provider = provider.map(str::to_string).or(flags.provider);
+        }
+        if !flags.cli_auto_connect {
+            flags.auto_connect = auto_connect || flags.auto_connect;
+        }
+        (flags, cmd)
+    }
+
+    #[test]
+    fn a_default_provider_replaced_by_cdp_keeps_the_page_load_wait() {
+        let open = |args: &[&str], provider: Option<&str>| {
+            let (flags, _) = with_defaults(args, None, provider, false);
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap()
+        };
+        let cmd = open(&["--cdp", "9222", "open", "example.com"], Some("ios"));
+        assert!(cmd.get("waitUntil").is_none(), "{cmd}");
+        // A provider that applies still skips it, and `-p ""` names none.
+        let cmd = open(&["open", "example.com"], Some("ios"));
+        assert_eq!(cmd["waitUntil"], "none");
+        let cmd = open(&["-p", "", "open", "example.com"], None);
+        assert!(cmd.get("waitUntil").is_none(), "{cmd}");
+    }
+
+    /// The `cdpHeaders` and `settings` headers one `connect` carries.
+    fn connect_headers_of(
+        args: &[&str],
+        env_cdp: Option<&str>,
+        env_headers: Option<&str>,
+    ) -> (Option<serde_json::Value>, Option<String>) {
+        let (mut flags, _) = with_defaults(args, env_cdp, None, false);
+        if !flags.cli_cdp_headers {
+            flags.cdp_headers = env_headers.map(str::to_string);
+        }
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let cmd = crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        let patch = command_settings(&flags, &cmd);
+        let plan = session_settings::Running::defaults().plan(&patch);
+        (cmd.get("cdpHeaders").cloned(), plan.next.cdp_headers())
+    }
+
+    #[test]
+    fn environment_headers_go_only_to_the_endpoint_they_belong_to() {
+        let env = r#"{"X":"env"}"#;
+        // Another endpoint named by `connect` never receives them.
+        let (envelope, settings) =
+            connect_headers_of(&["connect", "9223"], Some("9222"), Some(env));
+        assert_eq!((envelope, settings), (None, None));
+        let (envelope, settings) = connect_headers_of(
+            &["connect", "https://other.example/cdp"],
+            Some("9222"),
+            Some(env),
+        );
+        assert_eq!((envelope, settings), (None, None));
+        // The same endpoint does.
+        let (envelope, settings) =
+            connect_headers_of(&["connect", "9222"], Some("9222"), Some(env));
+        assert_eq!(envelope, Some(serde_json::json!({"X": "env"})));
+        assert_eq!(settings.as_deref(), Some(env));
+        // With no endpoint in the environment they go with the one named.
+        let (envelope, _) = connect_headers_of(&["connect", "9223"], None, Some(env));
+        assert_eq!(envelope, Some(serde_json::json!({"X": "env"})));
+        // Headers on the command line always go with the endpoint named.
+        let (envelope, _) = connect_headers_of(
+            &["connect", "9223", "--cdp-headers", r#"{"Y":"own"}"#],
+            Some("9222"),
+            Some(env),
+        );
+        assert_eq!(envelope, Some(serde_json::json!({"Y": "own"})));
+    }
+
+    #[test]
+    fn environment_headers_do_not_follow_cdp_to_another_endpoint() {
+        let env = r#"{"X":"env"}"#;
+        let patch_of = |args: &[&str], env_cdp: &str| {
+            let (mut flags, _) = with_defaults(args, Some(env_cdp), None, false);
+            flags.cdp_headers = Some(env.to_string());
+            session_settings::Patch::from_flags(&flags)
+        };
+        let headers = |args: &[&str], env_cdp: &str| {
+            let plan = session_settings::Running::defaults().plan(&patch_of(args, env_cdp));
+            plan.next.cdp_headers()
+        };
+        assert_eq!(headers(&["--cdp", "9223", "get", "url"], "9222"), None);
+        assert_eq!(
+            headers(&["--cdp", "9222", "get", "url"], "9222").as_deref(),
+            Some(env)
+        );
+    }
+
     #[test]
     fn cdp_flags_are_validated_before_the_command_runs() {
-        let flags = |args: &[&str]| {
-            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            crate::flags::parse_flags(&args)
+        let check = |args: &[&str]| {
+            let (flags, cmd) = flags_of(args);
+            validate_cdp_flags(&flags, &cmd)
         };
-        assert!(validate_cdp_flags(&flags(&["--cdp", "9222", "get", "url"])).is_ok());
-        assert!(
-            validate_cdp_flags(&flags(&["--cdp", "ws://127.0.0.1:9222/x", "get", "url"])).is_ok()
-        );
+        assert!(check(&["--cdp", "9222", "get", "url"]).is_ok());
+        assert!(check(&["--cdp", "ws://127.0.0.1:9222/x", "get", "url"]).is_ok());
         for (value, message) in [
             ("0", "greater than 0"),
             ("70000", "out of range"),
             ("nope", "not a valid port number or URL"),
         ] {
-            let error = validate_cdp_flags(&flags(&["--cdp", value, "get", "url"])).unwrap_err();
+            let error = check(&["--cdp", value, "get", "url"]).unwrap_err();
             assert!(error.contains(message), "{value}: {error}");
         }
-        let error = validate_cdp_flags(&flags(&[
-            "--cdp",
-            "9222",
-            "--cdp-headers",
-            "[]",
-            "get",
-            "url",
-        ]))
-        .unwrap_err();
+        let error = check(&["--cdp", "9222", "--cdp-headers", "[]", "get", "url"]).unwrap_err();
         assert!(error.contains("JSON object"), "{error}");
+    }
+
+    #[test]
+    fn a_default_cdp_value_is_validated_only_when_it_is_sent() {
+        let invalid = Some("bogus");
+        // Sent with an ordinary command: still rejected.
+        let (flags, cmd) = with_defaults(&["get", "url"], invalid, None, false);
+        assert!(validate_cdp_flags(&flags, &cmd).is_err());
+        // `connect` names its own endpoint and drops the default.
+        let (flags, cmd) = with_defaults(&["connect", "9222"], invalid, None, false);
+        assert!(validate_cdp_flags(&flags, &cmd).is_ok());
+        // A target on the command line replaces it.
+        let (flags, cmd) = with_defaults(&["-p", "ios", "get", "url"], invalid, None, false);
+        assert!(validate_cdp_flags(&flags, &cmd).is_ok());
+        // An explicit value is always checked, even for `connect`.
+        let (flags, cmd) = with_defaults(&["--cdp", "bogus", "connect", "9222"], None, None, false);
+        assert!(validate_cdp_flags(&flags, &cmd).is_err());
+    }
+
+    #[test]
+    fn headers_are_validated_whenever_they_will_be_sent() {
+        let bad = Some("[]".to_string());
+        // Env headers with an env endpoint, for a single command and a batch.
+        for args in [vec!["get", "url"], vec!["batch", "get url"]] {
+            let (mut flags, cmd) = with_defaults(&args, Some("9222"), None, false);
+            flags.cdp_headers = bad.clone();
+            let error = validate_cdp_flags(&flags, &cmd).unwrap_err();
+            assert!(error.contains("JSON object"), "{args:?}: {error}");
+        }
+        // Env headers with no endpoint are dropped, so they are not checked.
+        let (mut flags, cmd) = with_defaults(&["get", "url"], None, None, false);
+        flags.cdp_headers = bad.clone();
+        assert!(validate_cdp_flags(&flags, &cmd).is_ok());
+        // Explicit headers are always checked.
+        let (flags, cmd) = flags_of(&["--cdp-headers", "[]", "get", "url"]);
+        assert!(validate_cdp_flags(&flags, &cmd).is_err());
+        // Env headers with an explicit --cdp are sent.
+        let (mut flags, cmd) = flags_of(&["--cdp", "9222", "get", "url"]);
+        flags.cdp_headers = bad;
+        assert!(validate_cdp_flags(&flags, &cmd).is_err());
+    }
+
+    #[test]
+    fn default_targets_never_conflict_with_each_other_or_with_a_flag() {
+        let error = |args: &[&str], cdp, provider, auto| {
+            let (flags, _) = with_defaults(args, cdp, provider, auto);
+            incompatible_launch_mode_error(&flags)
+        };
+        // A default cdp plus -p, --auto-connect or a blank -p.
+        assert_eq!(
+            error(&["-p", "nope", "get", "url"], Some("9222"), None, false),
+            None
+        );
+        assert_eq!(
+            error(&["-p", "", "get", "url"], Some("9222"), None, false),
+            None
+        );
+        assert_eq!(
+            error(&["--auto-connect", "get", "url"], Some("9222"), None, false),
+            None
+        );
+        // A default provider plus --cdp.
+        assert_eq!(
+            error(&["--cdp", "9222", "get", "url"], None, Some("ios"), false),
+            None
+        );
+        // Two defaults resolve by precedence.
+        assert_eq!(
+            error(&["get", "url"], Some("9222"), Some("ios"), false),
+            None
+        );
+        assert_eq!(error(&["get", "url"], None, Some("ios"), true), None);
+        assert_eq!(error(&["get", "url"], Some("9222"), None, true), None);
+        // Two flags still conflict.
+        assert_eq!(
+            error(
+                &["--cdp", "9222", "-p", "ios", "get", "url"],
+                None,
+                None,
+                false
+            ),
+            Some("Cannot use --cdp and -p/--provider together")
+        );
+        assert_eq!(
+            error(
+                &["--cdp", "9222", "--auto-connect", "get", "url"],
+                None,
+                None,
+                false
+            ),
+            Some("Cannot use --auto-connect and --cdp together")
+        );
+        assert_eq!(
+            error(
+                &["--auto-connect", "-p", "ios", "get", "url"],
+                None,
+                None,
+                false
+            ),
+            Some("Cannot use --auto-connect and -p/--provider together")
+        );
     }
 
     #[test]
@@ -2766,7 +3253,10 @@ mod tests {
         flags.webgpu = false;
         flags.auto_connect = auto_connect;
         flags.cdp = cdp.then(|| "9222".to_string());
+        flags.cli_cdp = cdp;
         flags.provider = provider.then(|| "ios".to_string());
+        flags.cli_provider = provider;
+        flags.cli_auto_connect = auto_connect;
         flags.extensions = if extensions {
             vec!["/tmp/ext".to_string()]
         } else {

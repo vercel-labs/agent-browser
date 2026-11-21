@@ -2,6 +2,8 @@
 
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md. Unknown commands exit with status 1, including when you request command help.
 
+These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`. Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently.
+
 ## Linux dependencies
 
 On Linux, `agent-browser install --with-deps` installs system dependencies with the detected package manager. It runs that package manager directly as root and uses `sudo` for non-root users. If you are not root and `sudo` is unavailable, it reports that root privileges or `sudo` are required.
@@ -47,10 +49,13 @@ agent-browser batch \
   "navigate http://localhost:3000/target"
 ```
 
-Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Keep command-specific options and literal command arguments inside each item:
+Put global flags such as `--init-script` and `--enable` only on the outer batch invocation, never inside an item. Inside an item, `--` separates command flags from literal values only for commands that support `--` as an end-of-options marker. For those commands, put command flags before `--`; a path or selector after `--` is literal. Other commands may treat `--` as data. For example, the item `screenshot body -- --draft.png` passes `--draft.png` as the path.
+
+Batch items cannot run `close --all`, `quit --all`, or `exit --all`; run the command outside the batch instead.
 
 ```bash
 agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
+agent-browser batch "open https://example.com" "screenshot body -- --draft.png"
 ```
 
 `open` with no URL gives you a clean launch so interception rules and cookies can take effect on the *first* real navigation. Pass `--init-script <path>` at launch to install a script before navigation. Use this flow for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
@@ -64,12 +69,14 @@ agent-browser snapshot            # Full accessibility tree
 agent-browser snapshot -i         # Interactive elements only (recommended)
 agent-browser snapshot -c         # Compact output
 agent-browser snapshot -d 3       # Limit depth to 3
-agent-browser snapshot -s "#main" # Scope to CSS selector
+agent-browser snapshot -s "#main" # Scope to every match of a CSS selector
 agent-browser snapshot --delta     # Full state once, then bounded structural deltas
 agent-browser snapshot --delta --full # Force full state and refresh baseline
 ```
 
 Delta history is per tab and option set. Responses are `full`, `unchanged`, or `delta`; URL changes or large deltas return full state. For a delta, apply `changes` (`add`, `remove`, `replace`) to ref metadata. Split the previous tree on newlines, splice `treeChange.lines` at zero-based `startLine`, replacing `deleteCount` lines, then join with newlines. Apply both parts to `baseRevision` before advancing to `revision`; use `--full` if the baseline is unavailable.
+
+A ref is tied to the document it was issued in. After a page load or an iframe navigation or removal (a click, script or redirect), using that ref fails with `Ref @eN is from a document that is no longer loaded`; snapshot again. A snapshot taken while the document is being replaced fails with `The document changed while the snapshot was being captured`; run it again. Refs survive same-document changes such as `pushState` and DOM updates.
 
 ## Interactions (use @refs from snapshot)
 
@@ -149,6 +156,7 @@ agent-browser screenshot path.png # Save to specific path
 agent-browser screenshot --full   # Full page
 agent-browser screenshot --if-changed # Recommended: skip unchanged images to save tokens
 agent-browser screenshot --threshold 0.01 # Ignore changes affecting at most 1% of pixels
+agent-browser screenshot body -- --draft.png # Literal path starting with -
 agent-browser pdf output.pdf      # Save as PDF
 ```
 
@@ -233,9 +241,9 @@ An action policy or `--confirm-actions` rule for `click`, `fill`, `check`, `hove
 ## Browser Settings
 
 ```bash
-agent-browser set viewport 1920 1080          # Set viewport size
+agent-browser set viewport 1920 1080          # Set viewport size (kept across relaunches and new tabs)
 agent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher res screenshots)
-agent-browser set device "iPhone 14"          # Emulate device
+agent-browser set device "iPhone 14"          # Emulate a device: viewport, user agent and touch input (touch events exist after the next navigation)
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
 agent-browser set offline on                  # Toggle offline mode
 agent-browser set headers '{"X-Key":"v"}'     # Extra HTTP headers

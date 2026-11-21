@@ -17,6 +17,9 @@ use super::cdp::types::*;
 use super::element::{resolve_element_object_id, RefMap};
 use super::tab_binding;
 
+/// `navigator.maxTouchPoints` reported while touch emulation is enabled.
+pub const TOUCH_POINTS: u32 = 5;
+
 // ---------------------------------------------------------------------------
 // Launch validation
 // ---------------------------------------------------------------------------
@@ -2412,8 +2415,13 @@ impl BrowserManager {
             )
             .await?;
 
-        // Screencast captures the actual content area, not the emulated CSS
-        // viewport, so resize the content area to match.
+        self.sync_contents_size(width, height).await;
+        Ok(())
+    }
+
+    /// Screencast captures the actual content area, not the emulated CSS
+    /// viewport, so resize the content area to match.
+    pub async fn sync_contents_size(&self, width: i32, height: i32) {
         if let Ok(target_id) = self.active_target_id() {
             if let Ok(window_info) = self
                 .client
@@ -2443,8 +2451,6 @@ impl BrowserManager {
                 }
             }
         }
-
-        Ok(())
     }
 
     pub async fn set_user_agent(&self, user_agent: &str) -> Result<(), String> {
