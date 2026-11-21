@@ -109,6 +109,10 @@ agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
 ```
 
+On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
+
+`type` focuses the element without clearing its current value. Printable characters are inserted as text; Enter, Tab, and line breaks use key events. Use `fill` to replace the current value.
+
 For `fill` and `type`, put options before the optional `--` marker. Text after the marker is literal, including values that look like flags. For example, `agent-browser fill @e2 -- --json` fills with `--json`, and `agent-browser type @e2 --clear --delay 10 -- --clear` clears the field, then types `--clear`. MCP `agent_browser_fill` and `agent_browser_type` pass typed `text` values literally, so they do not need the marker.
 
 MCP tools pass typed values literally where they are emitted as positionals (`fill` and `type` text, `select` values, `press` and `keyboard` text, `auth save` and `auth login` names and credential values, `webmcp invoke` tool names, `webmcp result` invocation ids, `plugin run` names and request types, and the other covered commands; `frameId` for `webmcp invoke` is still refused when it starts with `-`). In every other free-form field (for example storage, cookie, credential and wait values, and option values), MCP refuses a value that equals a global CLI token or has the form `--<global>=...`, such as `-v`, `-q`, `-p`, `--help`, `--session` or `--json=1`, because the CLI could read it as a global flag. Examples: `wait_for_text "--help"`, `storage_set` with value `-v`, `cookies_set` with value `-q`, `set_credentials` with password `-p`, `find` with `action: "fill"` and text `--json`, and `chat "--help"`. There is no workaround for those fields yet; use `agent_browser_fill` for flag-shaped text input. Carrying such values as data in every field is a planned follow-up.
@@ -116,6 +120,8 @@ MCP tools pass typed values literally where they are emitted as positionals (`fi
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
+
+A click or dblclick result includes `dialogOpened: true` when a page dialog interrupts the action. On Firefox, this also applies to `tap` and `drag`; an interrupted drag returns `dragged: false`. Resolve the dialog before sending the next page action.
 
 `--button` presses `left` (default), `right`, `middle`, `back`, or `forward`; a right click fires the page's `contextmenu` event and a middle click fires `auxclick`. `--modifiers` holds `alt`, `control` (alias `ctrl`), `meta` (aliases `cmd`, `command`), and `shift` during the click, joined by a comma or a plus, such as `control,shift`. Flags go before or after the selector, unknown flags are rejected, and `--new-tab` cannot be combined with `--button` or `--modifiers`. `dblclick` takes `--button`, `--modifiers`, and `--human`, follows the session input mode, and sends two full clicks, so the page receives `click`, `click`, `dblclick`. On macOS, `control` click opens the context menu, so use `meta` for a click that opens a link in a new tab; on Windows and Linux that key is `control`.
 
@@ -231,6 +237,8 @@ agent-browser find first ".item" click
 agent-browser find last ".item" click
 agent-browser find nth 2 "a" hover
 ```
+
+An action policy or `--confirm-actions` rule for `click`, `fill`, `check`, `hover`, or `gettext` also applies to the `find` action that runs it (`text` counts as `gettext`).
 
 ## Browser Settings
 

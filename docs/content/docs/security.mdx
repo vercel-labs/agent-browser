@@ -190,6 +190,8 @@ export AGENT_BROWSER_CONTENT_BOUNDARIES=1
 
 Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`.
 
+A command's error and warning, and the output of `dialog status`, are wrapped the same way in text output, because they can quote page text such as the id of an element covering a click target or the message of an open dialog.
+
 In `--json` mode, boundary metadata is injected into the JSON response as a `_boundary` object containing `nonce` and `origin` fields, allowing orchestrators to verify provenance programmatically:
 
 ```json
@@ -261,6 +263,8 @@ Example policy (restrictive):
 ```
 
 A missing or invalid policy file blocks every command until it is fixed (`close --all` can still shut the daemon down); an empty `allow` list falls back to `default`.
+
+A `find` command is checked as two actions: its locator (`getbyrole`, `getbytext`, `getbylabel`, `getbyplaceholder`, `getbyalttext`, `getbytitle`, `getbytestid`, or `nth`) and the action it runs on the match (`click`, `fill`, `check`, `hover`, or `gettext` for `text`). A policy that denies `click` therefore also denies `find role button click`. A command that loads a URL before it reads the page is checked as `navigate` too: `a11y <url>`, `vitals <url>`, and `diff url`. `--confirm-actions` applies the same rules.
 
 <table>
   <thead>

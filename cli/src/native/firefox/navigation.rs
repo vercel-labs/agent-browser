@@ -92,16 +92,14 @@ pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, St
     let budget = std::time::Duration::from_millis(state.default_timeout_ms);
     daemon::reset_page(state);
     let ff = daemon::session(state)?;
-    let context = ff.contexts.active().to_string();
+    let context = ff.contexts.active_tab().to_string();
     let mut params = params;
     params["context"] = json!(context);
-    let landed = tokio::time::timeout(
-        budget,
-        ff.race_prompt(ff.bidi.send_without_deadline(method, params)),
-    )
-    .await
-    .map_err(|_| load_state_timeout_error(waited, budget))?
-    .map_err(|error| format!("{failure} failed: {error}"))?;
+    let sent = ff.race_prompt(&context, ff.bidi.send_without_deadline(method, params));
+    let landed = tokio::time::timeout(budget, sent)
+        .await
+        .map_err(|_| load_state_timeout_error(waited, budget))?
+        .map_err(|error| format!("{failure} failed: {error}"))?;
     let (url, prompt) = match landed {
         Some(result) => (landed_url(&result, ff.url().await, &requested), false),
         None => (ff.url().await.unwrap_or(requested), true),
@@ -213,7 +211,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .refs
-            .insert(("ctx-active".into(), "node".into()), 7);
+            .insert(("ctx-active".into(), "node".into(), "doc".into()), 7);
         state.active_frame_id = Some("frame".into());
 
         let landing = load(
@@ -246,10 +244,11 @@ mod tests {
     /// gives up, and the failure must name the load timeout rather than the client's own.
     #[tokio::test(start_paused = true)]
     async fn a_load_past_the_client_default_reports_the_load_timeout() {
-        let (ff, _events, _calls) = crate::native::firefox::session::tests::fake_session_ignoring(
-            "browsingContext.navigate",
-        )
-        .await;
+        let (ff, _events, _calls) =
+            crate::native::firefox::session::tests::fake_session_with_replies(|v| {
+                (v["method"] != "browsingContext.navigate").then(|| json!({}))
+            })
+            .await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.default_timeout_ms = 60_000;

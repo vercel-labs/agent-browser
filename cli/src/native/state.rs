@@ -97,7 +97,7 @@ fn collect_frame_origins(tree: &Value, origins: &mut HashSet<String>) {
 }
 
 /// Parse the JS-evaluated origin storage data into an OriginStorage struct.
-fn parse_origin_storage(data: &Value) -> Option<OriginStorage> {
+pub(crate) fn parse_origin_storage(data: &Value) -> Option<OriginStorage> {
     if !data.is_object() {
         return None;
     }
