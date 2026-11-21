@@ -656,6 +656,38 @@ const OBSCURA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const CDP_PORT_WAIT: Duration = Duration::from_secs(2);
 const CDP_PORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+async fn prepare_session_domains(client: &CdpClient, session_id: &str) -> Result<(), String> {
+    client
+        .send_command_no_params("Page.enable", Some(session_id))
+        .await?;
+    client
+        .send_command_no_params("Runtime.enable", Some(session_id))
+        .await?;
+    client
+        .send_command_no_params("Network.enable", Some(session_id))
+        .await?;
+    let _ = client
+        .send_command_no_params("WebMCP.enable", Some(session_id))
+        .await;
+    // Enable auto-attach for cross-origin iframe support.
+    // flatten: true gives each iframe its own session_id.
+    // waitForDebuggerOnStart keeps child targets paused until the daemon
+    // installs any required network controls and explicitly resumes them.
+    // Ignored on engines that don't support it (e.g. Lightpanda).
+    let _ = client
+        .send_command(
+            "Target.setAutoAttach",
+            Some(json!({
+                "autoAttach": true,
+                "waitForDebuggerOnStart": true,
+                "flatten": true
+            })),
+            Some(session_id),
+        )
+        .await;
+    Ok(())
+}
+
 impl BrowserManager {
     #[cfg(test)]
     pub(super) fn owns_obscura_process(&self) -> bool {
@@ -1073,37 +1105,18 @@ impl BrowserManager {
     }
 
     async fn prepare_domains(&self, session_id: &str) -> Result<(), String> {
-        self.client
-            .send_command_no_params("Page.enable", Some(session_id))
-            .await?;
-        self.client
-            .send_command_no_params("Runtime.enable", Some(session_id))
-            .await?;
-        self.client
-            .send_command_no_params("Network.enable", Some(session_id))
-            .await?;
-        let _ = self
-            .client
-            .send_command_no_params("WebMCP.enable", Some(session_id))
-            .await;
-        // Enable auto-attach for cross-origin iframe support.
-        // flatten: true gives each iframe its own session_id.
-        // waitForDebuggerOnStart keeps child targets paused until the daemon
-        // installs any required network controls and explicitly resumes them.
-        // Ignored on engines that don't support it (e.g. Lightpanda).
-        let _ = self
-            .client
-            .send_command(
-                "Target.setAutoAttach",
-                Some(json!({
-                    "autoAttach": true,
-                    "waitForDebuggerOnStart": true,
-                    "flatten": true
-                })),
-                Some(session_id),
-            )
-            .await;
-        Ok(())
+        prepare_session_domains(&self.client, session_id).await
+    }
+
+    /// Enable a popup's domains without holding the command loop. A page whose first navigation
+    /// has not committed (a link to a server that never answers) leaves `Page.enable` unanswered
+    /// until the CDP timeout; awaiting it inline held every later command on the daemon.
+    pub fn prepare_domains_detached(&self, session_id: &str) {
+        let client = self.client.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            let _ = prepare_session_domains(&client, &session_id).await;
+        });
     }
 
     /// Whether the tab's renderer answers a renderer-bound command within
@@ -2726,7 +2739,21 @@ impl BrowserManager {
     }
 
     pub fn update_page_target_info(&mut self, target: &TargetInfo) -> bool {
-        update_page_target_info_in_pages(&mut self.pages, target)
+        // A popup registered before its first document committed has an empty URL and was left in
+        // the background (see `register_discovered_page`); follow it once it commits.
+        let committed = (!self.pin_tab && !target.url.is_empty())
+            .then(|| {
+                self.pages
+                    .iter()
+                    .position(|p| p.target_id == target.target_id && p.url.is_empty())
+            })
+            .flatten();
+        let updated = update_page_target_info_in_pages(&mut self.pages, target);
+        if let Some(index) = committed {
+            self.active_page_index = index;
+            self.bind_active_target();
+        }
+        updated
     }
 
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
@@ -2768,8 +2795,10 @@ impl BrowserManager {
         }
         let tab_id = self.assign_tab_id();
         // Pinned sessions never activate a discovered tab (strict no-steal);
-        // legacy sessions follow it, matching pre-pin behavior.
-        let activate = !self.pin_tab;
+        // legacy sessions follow it, matching pre-pin behavior, once it has a document: a popup
+        // whose first navigation has not committed (empty URL) answers no command, so the opener
+        // stays active until `update_page_target_info` sees it commit.
+        let activate = !self.pin_tab && !url.is_empty();
         self.add_page_with_activation(
             PageInfo {
                 tab_id,
@@ -4701,6 +4730,56 @@ mod tests {
             mgr.bound_target_is_gone(),
             "ensure_page must not clear tab_gone"
         );
+    }
+
+    /// A popup whose first navigation has not committed answers no command, so the opener stays
+    /// active until the popup reports a URL. Force-red: activate on an empty URL, or drop the
+    /// follow in `update_page_target_info`, and one of the two assertions fails.
+    #[tokio::test]
+    async fn test_uncommitted_popup_stays_in_background_until_it_commits() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.register_discovered_page(
+            TARGET_B,
+            "session-b",
+            String::new(),
+            String::new(),
+            "page".to_string(),
+        );
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
+        assert_eq!(mgr.tab_list().len(), 2);
+
+        mgr.update_page_target_info(&TargetInfo {
+            target_id: TARGET_B.to_string(),
+            target_type: "page".to_string(),
+            title: String::new(),
+            url: "https://popup.example".to_string(),
+            attached: None,
+            browser_context_id: None,
+        });
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_B);
+    }
+
+    /// A pinned session never follows a popup, committed or not.
+    #[tokio::test]
+    async fn test_committed_popup_does_not_steal_pinned_tab() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.set_pin_tab(true);
+        mgr.register_discovered_page(
+            TARGET_B,
+            "session-b",
+            String::new(),
+            String::new(),
+            "page".to_string(),
+        );
+        mgr.update_page_target_info(&TargetInfo {
+            target_id: TARGET_B.to_string(),
+            target_type: "page".to_string(),
+            title: String::new(),
+            url: "https://popup.example".to_string(),
+            attached: None,
+            browser_context_id: None,
+        });
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
     }
 
     /// A legacy (non-pin) session follows an event-discovered tab; no-steal is

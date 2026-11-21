@@ -1475,14 +1475,14 @@ impl DaemonState {
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 bounded_auto_attached_setup("session", page_sid, async {
-                    mgr.prepare_domains_pub(page_sid).await?;
+                    mgr.prepare_domains_detached(page_sid);
                     if controls_active {
                         install_network_controls_for_session(
                             &mgr.client,
                             page_sid,
                             filter.as_ref(),
                             has_proxy_creds,
-                            false,
+                            true,
                         )
                         .await?;
                     }
@@ -1627,14 +1627,14 @@ impl DaemonState {
                             None,
                         )
                         .await?;
-                    mgr.prepare_domains_pub(&attach.session_id).await?;
+                    mgr.prepare_domains_detached(&attach.session_id);
                     if controls_active {
                         install_network_controls_for_session(
                             &mgr.client,
                             &attach.session_id,
                             filter.as_ref(),
                             has_proxy_creds,
-                            false,
+                            true,
                         )
                         .await?;
                     }
@@ -4418,18 +4418,18 @@ fn log_detached_during_setup(kind: &str, error: &str) {
     }
 }
 
+/// Enable an auto-attached target's domains. The commands are queued, not awaited: on a target
+/// still paused before its first document (a popup whose page never answers) `Page.enable` is
+/// unanswered, and awaiting it kept the network controls, and the resume that follows them, from
+/// ever being installed (30 s per command).
 async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> Result<(), String> {
+    for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
+        client
+            .send_command_no_wait(method, None, Some(session_id))
+            .await?;
+    }
     client
-        .send_command_no_params("Page.enable", Some(session_id))
-        .await?;
-    client
-        .send_command_no_params("Runtime.enable", Some(session_id))
-        .await?;
-    client
-        .send_command_no_params("Network.enable", Some(session_id))
-        .await?;
-    let _ = client
-        .send_command(
+        .send_command_no_wait(
             "Target.setAutoAttach",
             Some(json!({
                 "autoAttach": true,
@@ -4438,8 +4438,7 @@ async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> 
             })),
             Some(session_id),
         )
-        .await;
-    Ok(())
+        .await
 }
 
 fn target_is_worker_like(target: &TargetInfo) -> bool {
@@ -18558,43 +18557,20 @@ mod tests {
         }
     }
 
-    /// Every child session the drain prepares is bounded, so one that never
+    /// Every child session the drain prepares and awaits is bounded, so one that never
     /// answers and never reports a detach holds the drain (and with it every
     /// queued command) for the setup bound, not the 30 s CDP timeout of each
-    /// command it sends.
+    /// command it sends. Popup pages are not awaited at all, see
+    /// `silent_popup_does_not_hold_the_drain`.
     #[tokio::test]
     async fn silent_session_setup_is_bounded() {
-        let cases: Vec<(&str, DrainedEvents)> = vec![
-            (
-                "iframe",
-                DrainedEvents {
-                    attached_iframe_sessions: vec![(
-                        "F-SILENT".to_string(),
-                        "S-SILENT".to_string(),
-                    )],
-                    ..DrainedEvents::default()
-                },
-            ),
-            (
-                "attached page",
-                DrainedEvents {
-                    attached_page_sessions: vec![(
-                        setup_test_target("T-SILENT", "page"),
-                        "S-SILENT".to_string(),
-                    )],
-                    ..DrainedEvents::default()
-                },
-            ),
-            (
-                "discovered page",
-                DrainedEvents {
-                    new_targets: vec![TargetCreatedEvent {
-                        target_info: setup_test_target("T-SILENT", "page"),
-                    }],
-                    ..DrainedEvents::default()
-                },
-            ),
-        ];
+        let cases: Vec<(&str, DrainedEvents)> = vec![(
+            "iframe",
+            DrainedEvents {
+                attached_iframe_sessions: vec![("F-SILENT".to_string(), "S-SILENT".to_string())],
+                ..DrainedEvents::default()
+            },
+        )];
 
         for (name, drained) in cases {
             let (url, _) = spawn_session_setup_cdp_server("S-SILENT").await;
@@ -18622,6 +18598,59 @@ mod tests {
                 elapsed >= AUTO_ATTACHED_SETUP_TIMEOUT,
                 "{name}: gave up after {elapsed:?}"
             );
+        }
+    }
+
+    /// A popup whose first navigation has not committed answers no `Page` command, so the drain
+    /// queues its domains instead of awaiting them: it registers the popup, resumes it, and
+    /// returns at once instead of holding every command for the setup bound.
+    #[tokio::test]
+    async fn silent_popup_does_not_hold_the_drain() {
+        let cases: Vec<(&str, DrainedEvents)> = vec![
+            (
+                "attached page",
+                DrainedEvents {
+                    attached_page_sessions: vec![(
+                        setup_test_target("T-SILENT", "page"),
+                        "S-SILENT".to_string(),
+                    )],
+                    ..DrainedEvents::default()
+                },
+            ),
+            (
+                "discovered page",
+                DrainedEvents {
+                    new_targets: vec![TargetCreatedEvent {
+                        target_info: setup_test_target("T-SILENT", "page"),
+                    }],
+                    ..DrainedEvents::default()
+                },
+            ),
+        ];
+
+        for (name, drained) in cases {
+            let (url, resumed) = spawn_session_setup_cdp_server("S-SILENT").await;
+            let mut state = DaemonState::new();
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.apply_drained_events(drained),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the drain must not wait for the popup"));
+
+            assert_eq!(result, Ok(()), "{name}");
+            let mgr = state.browser.as_ref().expect(name);
+            assert_eq!(mgr.page_count(), 1, "{name}: the popup is registered");
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !resumed.lock().unwrap().contains(&"S-SILENT".to_string()) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the popup must be resumed"));
         }
     }
 
@@ -18659,34 +18688,21 @@ mod tests {
         assert!(resumed.iter().all(|sid| sid == "S-LIVE"), "{resumed:?}");
     }
 
-    /// A live frame or page can throw from the injected domain filter with
+    /// A live frame can throw from the injected domain filter with
     /// any message, including Chrome's text for a missing session. That is a
     /// failure to install the filter, not a detach, so the browser still
     /// closes instead of leaving the target running without its controls.
+    /// A popup paused before its first document is not covered: its filter
+    /// commands are queued ahead of the resume and their answers are not awaited.
     #[tokio::test]
     async fn page_thrown_detach_text_still_fails_network_controls_closed() {
-        let cases: Vec<(&str, DrainedEvents)> = vec![
-            (
-                "iframe",
-                DrainedEvents {
-                    attached_iframe_sessions: vec![(
-                        "F-THROWS".to_string(),
-                        "S-THROWS".to_string(),
-                    )],
-                    ..DrainedEvents::default()
-                },
-            ),
-            (
-                "attached page",
-                DrainedEvents {
-                    attached_page_sessions: vec![(
-                        setup_test_target("T-THROWS", "page"),
-                        "S-THROWS".to_string(),
-                    )],
-                    ..DrainedEvents::default()
-                },
-            ),
-        ];
+        let cases: Vec<(&str, DrainedEvents)> = vec![(
+            "iframe",
+            DrainedEvents {
+                attached_iframe_sessions: vec![("F-THROWS".to_string(), "S-THROWS".to_string())],
+                ..DrainedEvents::default()
+            },
+        )];
 
         for (name, drained) in cases {
             let (url, resumed) = spawn_session_setup_cdp_server("S-THROWS").await;
