@@ -298,7 +298,12 @@ pub async fn set_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, viewport(width, height, scale)).await?;
     session(state)?.emulation.write().unwrap().viewport = Some((width, height, scale));
-    state.viewport = Some((width as i32, height as i32, scale, false));
+    state.session_setup.viewport = Some(crate::native::actions::ViewportSetup {
+        width: width as i32,
+        height: height as i32,
+        device_scale_factor: scale,
+        mobile: false,
+    });
     if let Some(ref server) = state.stream_server {
         server.set_viewport(width as u32, height as u32).await;
         server
@@ -528,7 +533,13 @@ mod tests {
     #[tokio::test]
     async fn mobile_emulation_is_rejected_without_commands_or_state_changes() {
         let (mut state, calls) = session_state().await;
-        state.viewport = Some((800, 600, 1.5, false));
+        let expected_viewport = Some(crate::native::actions::ViewportSetup {
+            width: 800,
+            height: 600,
+            device_scale_factor: 1.5,
+            mobile: false,
+        });
+        state.session_setup.viewport = expected_viewport;
         let ff = state.firefox.as_mut().unwrap();
         ff.emulation.write().unwrap().viewport = Some((800, 600, 1.5));
         ff.emulation.write().unwrap().user_agent = Some("Desktop Agent".to_string());
@@ -540,7 +551,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.contains("mobile viewport emulation"));
-        assert_eq!(state.viewport, Some((800, 600, 1.5, false)));
+        assert_eq!(state.session_setup.viewport, expected_viewport);
         assert_eq!(
             state
                 .firefox
@@ -560,7 +571,7 @@ mod tests {
         assert!(error.contains("set device"));
         assert!(error.contains("set viewport"));
         assert!(error.contains("--user-agent") && error.contains("AGENT_BROWSER_USER_AGENT"));
-        assert_eq!(state.viewport, Some((800, 600, 1.5, false)));
+        assert_eq!(state.session_setup.viewport, expected_viewport);
         assert_eq!(
             state
                 .firefox

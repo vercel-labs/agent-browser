@@ -14,7 +14,7 @@ use super::interact::{act_element, perform_actions, PointerAction};
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
 use crate::native::actions::{raw_key, upload_files, DaemonState};
-use crate::native::element::ELEMENT_CHECKED_JS;
+use crate::native::element::{not_checkable_error, ELEMENT_CHECKED_JS};
 use crate::native::interaction::{
     CLEAR_INPUT_JS, CLEAR_VALUE_JS, CLICK_CHECKBOX_JS, FOCUS_JS, SELECT_ALL_JS, SELECT_OPTION_JS,
 };
@@ -394,7 +394,13 @@ async fn set_checked(
     selector: &str,
     checked: bool,
 ) -> Result<(), String> {
-    if run(session(state)?, target, ELEMENT_CHECKED_JS, vec![]).await? != Some(json!(!checked)) {
+    let Some(current) = run(session(state)?, target, ELEMENT_CHECKED_JS, vec![])
+        .await?
+        .and_then(|v| v.as_bool())
+    else {
+        return Err(not_checkable_error(selector));
+    };
+    if current == checked {
         return Ok(());
     }
     let visible = run(
@@ -418,7 +424,11 @@ async fn set_checked(
             return Ok(());
         }
     }
-    if run(session(state)?, target, ELEMENT_CHECKED_JS, vec![]).await? == Some(json!(!checked)) {
+    if run(session(state)?, target, ELEMENT_CHECKED_JS, vec![])
+        .await?
+        .and_then(|v| v.as_bool())
+        == Some(!checked)
+    {
         run(session(state)?, target, CLICK_CHECKBOX_JS, vec![]).await?;
     }
     Ok(())
@@ -875,6 +885,86 @@ mod tests {
             json!({"unchecked": "#agree"})
         );
         assert_eq!(calls.lock().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn check_and_uncheck_reject_non_checkable_elements_without_clicking() {
+        let non_checkable = |req: &Value| match req["method"].as_str() {
+            Some("script.callFunction") => {
+                let js = req["params"]["functionDeclaration"].as_str().unwrap_or("");
+                if js.starts_with("() =>") {
+                    script(json!({"type": "node", "sharedId": "node-1"}))
+                } else if js == ELEMENT_CHECKED_JS {
+                    script(json!({"type": "null"}))
+                } else {
+                    script(json!({"type": "undefined"}))
+                }
+            }
+            _ => json!({}),
+        };
+
+        for (action, run_action) in [("check", true), ("uncheck", false)] {
+            let (ff, _tx, calls) = fake_session_with(non_checkable).await;
+            let mut state = state_with(ff);
+            let cmd = json!({"selector": "#delete"});
+            let err = if run_action {
+                check(&cmd, &mut state).await.unwrap_err()
+            } else {
+                uncheck(&cmd, &mut state).await.unwrap_err()
+            };
+            assert!(
+                err.contains("not a checkbox, radio button, or checkable control"),
+                "{action}: {err}"
+            );
+            assert_all(&calls, &["script.callFunction", "script.callFunction"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_allowing_check_cannot_activate_non_checkable_target() {
+        let non_checkable = |req: &Value| match req["method"].as_str() {
+            Some("script.callFunction") => {
+                let js = req["params"]["functionDeclaration"].as_str().unwrap_or("");
+                if js.starts_with("() =>") {
+                    script(json!({"type": "node", "sharedId": "node-1"}))
+                } else if js == ELEMENT_CHECKED_JS {
+                    script(json!({"type": "null"}))
+                } else {
+                    script(json!({"type": "undefined"}))
+                }
+            }
+            _ => json!({}),
+        };
+
+        for policy_json in [
+            r#"{"default":"deny","allow":["check"],"deny":["click"]}"#,
+            r#"{"default":"deny","allow":["check"],"confirm":["click"]}"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let policy_path = dir.path().join("policy.json");
+            std::fs::write(&policy_path, policy_json).unwrap();
+            let (ff, _tx, calls) = fake_session_with(non_checkable).await;
+            let mut state = state_with(ff);
+            state.engine = "firefox".to_string();
+            state.policy = Some(
+                crate::native::policy::ActionPolicy::load(policy_path.to_str().unwrap()).unwrap(),
+            );
+
+            let resp = crate::native::actions::execute_command(
+                &json!({"id": "1", "action": "check", "selector": "#delete"}),
+                &mut state,
+            )
+            .await;
+            assert_eq!(resp["success"], false, "{policy_json}: {resp}");
+            assert!(
+                resp["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("not a checkbox, radio button, or checkable control"),
+                "{policy_json}: {resp}"
+            );
+            assert_all(&calls, &["script.callFunction", "script.callFunction"]);
+        }
     }
 
     #[tokio::test]

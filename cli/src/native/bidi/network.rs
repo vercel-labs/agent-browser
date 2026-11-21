@@ -32,7 +32,7 @@ fn is_blocked(url: &str, resource_type: &str, filter: Option<&DomainFilter>) -> 
     let Some(filter) = filter else {
         return false;
     };
-    if filter.allowed_domains.is_empty() || url == "about:blank" {
+    if url == "about:blank" {
         return false;
     }
     let Ok(parsed) = url::Url::parse(url) else {
