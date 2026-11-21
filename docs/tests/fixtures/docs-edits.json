@@ -70,6 +70,14 @@
         "to": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser click <sel> --button right # Right-click (fires contextmenu) agent-browser click <sel> --modifiers control,shift # Hold keys during the click agent-browser dblclick <sel> # Double-click agent-browser dblclick <sel> --modifiers shift # Double-click with Shift held"
       },
       {
+        "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
+        "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+      },
+      {
+        "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
+        "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to agent-browser webmcp list --json. If a description does not show the arguments, fetch the schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+      },
+      {
         "from": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)",
         "to": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2); kept across relaunches and new tabs"
       },
@@ -392,6 +400,36 @@
       {
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
+      },
+      {
+        "from": "it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json`, then calls `webmcp invoke` with the same `--frame`.",
+        "to": "it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json` when the announced description does not show the arguments, then calls `webmcp invoke` with the same `--frame`."
+      },
+      {
+        "from": "it fetches a tool's input schema with webmcp list <tool> --frame <frame-id> --json, then calls webmcp invoke with the same --frame.",
+        "to": "it fetches a tool's input schema with webmcp list <tool> --frame <frame-id> --json when the announced description does not show the arguments, then calls webmcp invoke with the same --frame."
+      }
+    ],
+    "/webmcp": [
+      {
+        "from": "Automatic summaries are limited to 16 tools and 4 KiB of JSON, with descriptions shortened to 160 bytes plus a truncation marker.",
+        "to": "Catalogs of up to four tools list full descriptions when they fit in 4 KiB of JSON. Larger catalogs are limited to 16 tools and 4 KiB, with descriptions shortened to 160 bytes plus a truncation marker, and the announcement says how many tools are listed."
+      },
+      {
+        "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
+        "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+      },
+      {
+        "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
+        "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to agent-browser webmcp list --json. If a description does not show the arguments, fetch the schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+      },
+      {
+        "from": "they fetch the selected tool's schema with `webmcp list <tool> --frame <frame-id> --json` and invoke it with the same `--frame`.",
+        "to": "they use an announced tool directly, fetch its schema with `webmcp list <tool> --frame <frame-id> --json` when the description does not show the arguments, and invoke it with the same `--frame`."
+      },
+      {
+        "from": "they fetch the selected tool's schema with webmcp list <tool> --frame <frame-id> --json and invoke it with the same --frame.",
+        "to": "they use an announced tool directly, fetch its schema with webmcp list <tool> --frame <frame-id> --json when the description does not show the arguments, and invoke it with the same --frame."
       }
     ],
     "/native-mode": [
@@ -418,6 +456,16 @@
       {
         "from": "Browser clients must load from localhost, 127.0.0.1, ::1 or file://. Any other origin gets a 403 on the upgrade and needs a proxy.",
         "to": "Browser clients are checked by the Origin and Host headers of the upgrade. The Origin must have the same host and port as the Host the client connected to, and that host must be localhost, 127.0.0.1 or [::1] (the server itself listens on 127.0.0.1). A page on another port, a file:// page (browsers send Origin: null) and any other origin get a 403 on the upgrade. A custom viewer works when its page and the WebSocket share one authority, for example behind a reverse proxy that forwards the original Host; a proxy that rewrites Host to the stream address fails the check. Clients that send no Origin header, such as a server-side WebSocket client, are not restricted."
+      }
+    ],
+    "/diffing": [
+      {
+        "from": "Without `--baseline`, the command automatically compares against the most recent snapshot taken in the current session.",
+        "to": "Without `--baseline`, the command automatically compares against the most recent snapshot taken on this tab."
+      },
+      {
+        "from": "Without --baseline, the command automatically compares against the most recent snapshot taken in the current session.",
+        "to": "Without --baseline, the command automatically compares against the most recent snapshot taken on this tab."
       }
     ]
   },
