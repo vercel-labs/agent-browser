@@ -1,3 +1,5 @@
+import { getDashboardApiPath } from "@/lib/dashboard-routes";
+
 export interface ExecResult {
   success: boolean;
   exit_code: number | null;
@@ -7,7 +9,7 @@ export interface ExecResult {
 
 export async function execCommand(args: string[]): Promise<ExecResult> {
   try {
-    const resp = await fetch("/api/exec", {
+    const resp = await fetch(getDashboardApiPath("/api/exec"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ args }),
@@ -29,7 +31,7 @@ export function sessionArgs(session: string, ...args: string[]): string[] {
 
 export async function killSession(session: string): Promise<{ success: boolean; killed_pid?: number }> {
   try {
-    const resp = await fetch("/api/kill", {
+    const resp = await fetch(getDashboardApiPath("/api/kill"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session }),
