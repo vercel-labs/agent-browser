@@ -62,6 +62,8 @@ agent-browser open https://app.example.com/dashboard
 
 This works for any site, including those with complex OAuth flows, SSO, or 2FA, as long as Chrome already has valid session cookies.
 
+> **Device-bound sessions:** some sites bind sign-in to the device with Device Bound Session Credentials (DBSC). Google sign-in does this by default in Chrome on macOS and Windows. Replaying those cookies in a second browser can make the site end the session, which signs the user out of their own Chrome. Do not import a Google session, or any site that signs the user out after an import, from the user's everyday browser. Sign in inside a dedicated `--profile <path>` instead. `--profile <name>` never copies device-bound sessions, `state save` leaves bound cookies out of the file, and `state load` will not overwrite a cookie that the target browser's bound sessions own. Both list skipped cookies under `skippedDeviceBoundCookies`.
+
 Saved localStorage and sessionStorage are written through Chrome DevTools, not page JavaScript, and only while the page is on the saved origin. If an origin redirects elsewhere or fails to load, its storage is skipped, the rest still loads, and `state load` lists it under `skippedOrigins`. For `--state` and `--restore` at launch, `session info` lists it under `restoreSkippedOrigins`.
 
 > **Security note:** State files contain session tokens in plaintext. Add them to `.gitignore`, delete when no longer needed, and set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest. See [Security Best Practices](#security-best-practices).

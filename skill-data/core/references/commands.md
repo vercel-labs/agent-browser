@@ -457,7 +457,7 @@ A `browser.provider` plugin that returns `directPage: true` connects to a page s
 ## State Management
 
 ```bash
-agent-browser state save auth.json    # Save cookies, storage, auth state
+agent-browser state save auth.json    # Save cookies, storage, auth state (device-bound cookies are left out)
 agent-browser state load auth.json    # Restore saved state
 ```
 

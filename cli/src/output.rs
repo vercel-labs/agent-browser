@@ -1919,11 +1919,14 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                     color::success_indicator(),
                     color::green(path)
                 ),
-                "state_save" => println!(
-                    "{} State saved to {}",
-                    color::success_indicator(),
-                    color::green(path)
-                ),
+                "state_save" => {
+                    println!(
+                        "{} State saved to {}",
+                        color::success_indicator(),
+                        color::green(path)
+                    );
+                    print_skipped_bound_cookies(data);
+                }
                 "state_load" => {
                     if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
                         println!("{}", note);
@@ -1942,6 +1945,7 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                             );
                         }
                     }
+                    print_skipped_bound_cookies(data);
                 }
                 // video_start and other commands that provide a path with a note
                 "video_start" => {
@@ -3879,9 +3883,11 @@ Unknown flags are rejected. To pass a path or filename that starts with `-`,
 put flags before `--`; values after `--` are positional.
 
 Operations:
-  save <path>                        Save current state to file
+  save <path>                        Save current state to file (device-bound
+                                     cookies are left out and listed)
   load <path>                        Load state from file (origins that redirect
-                                     elsewhere are skipped and listed)
+                                     elsewhere are skipped and listed, and cookies
+                                     owned by a device-bound session are kept)
   list                               List saved state files
   show <filename>                    Show state summary
   rename <old-name> <new-name>       Rename state file
@@ -4392,7 +4398,8 @@ Usage: agent-browser profiles
 
 Lists all Chrome profiles found in your Chrome user data directory, showing
 the directory name and display name for each profile. Use the directory name
-with --profile to launch Chrome with that profile's login state.
+with --profile to launch Chrome with that profile's login state. Device-bound
+sessions (such as Google sign-in on macOS and Windows) are not copied.
 
 Global Options:
   --json               Output as JSON
@@ -4400,7 +4407,7 @@ Global Options:
 Examples:
   agent-browser profiles
   agent-browser profiles --json
-  agent-browser --profile Default open https://gmail.com
+  agent-browser --profile Default open https://app.example.com
 "##
         }
 
@@ -5140,7 +5147,7 @@ Examples:
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode
-  agent-browser --profile Default open gmail.com        # Reuse Chrome login state
+  agent-browser --profile Default open example.com      # Reuse Chrome login state
   agent-browser --profile ~/.myapp open example.com    # Persistent custom profile
   agent-browser profiles                               # List available Chrome profiles
   SESSION="$(agent-browser session id --scope worktree --prefix myapp)"
@@ -5261,6 +5268,21 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
 
 pub fn print_version() {
     println!("agent-browser {}", env!("CARGO_PKG_VERSION"));
+}
+
+/// Prints the device-bound cookies that `state save` or `state load` left
+/// out, one warning line per cookie.
+fn print_skipped_bound_cookies(data: &serde_json::Value) {
+    let skipped = data
+        .get("skippedDeviceBoundCookies")
+        .and_then(|v| v.as_array());
+    for cookie in skipped.into_iter().flatten().filter_map(|v| v.as_str()) {
+        println!(
+            "{} Skipped device-bound cookie {} (bound to the browser that signed in)",
+            color::warning_indicator(),
+            cookie
+        );
+    }
 }
 
 #[cfg(test)]
