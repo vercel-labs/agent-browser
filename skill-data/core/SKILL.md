@@ -29,7 +29,7 @@ agent-browser click @e3         # 3. Act on refs from the snapshot
 agent-browser snapshot -i       # 4. Re-snapshot after any page change
 ```
 
-Refs stay valid for elements that survive a same-document update. Take a fresh snapshot after navigation or to observe page changes.
+Refs stay valid for elements that survive a same-document update. A ref used after the page navigated to a new document, including a navigation caused by a click, fails with a "no longer loaded" error. Take a fresh snapshot after navigation or to observe page changes.
 
 Prefer snapshots. Take a screenshot only when the user asks for one, or for something the DOM cannot represent, such as a canvas. Never screenshot to check whether an element exists or the page finished loading. If the snapshot is missing an element you expect, the page is usually still loading: wait for it (`wait --text "<text you expect>"` or `wait @eN`, see [Waiting](#waiting)) and snapshot again. A snapshot is faster and uses far fewer tokens.
 
@@ -249,6 +249,8 @@ Iframes are inlined in the snapshot, so their refs work directly. To scope a sna
 Run `agent-browser doctor` before anything else when a command fails unexpectedly, such as `Unknown command`, `Failed to connect`, a stale daemon, a version mismatch after `upgrade`, or missing Chrome. `doctor --fix` also runs destructive repairs.
 
 - **"Ref not found" or "Element not found: @eN"**: the page changed. Snapshot again and use the new refs.
+- **"Ref @eN is from a document that is no longer loaded"**: the page navigated, or the iframe the ref lives in navigated or was removed, after the snapshot, so nothing ran. Snapshot again.
+- **"The document changed while the snapshot was being captured"**: the page navigated, or the frame was removed, during the snapshot, so it returned no refs. Run the snapshot again.
 - **"Stale ref ... cannot be recovered"**: the element was replaced and duplicates make the match ambiguous, so nothing ran. Snapshot again.
 - **`page_wedged`**: the page stopped responding. When agent-browser launched the browser and the tab times out twice in a row, it is replaced by a blank one, so navigate again and snapshot. With `--cdp` or `--auto-connect`, or when policy gates `tab_new` or `tab_close`, the tab is left alone; close it or switch tabs.
 - **"Target closed: CDP session ... detached"**: the tab closed while the command ran, for example a script called `window.close()`. Run `agent-browser tab`, switch to a remaining tab, and snapshot.

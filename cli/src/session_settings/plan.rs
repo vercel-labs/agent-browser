@@ -148,13 +148,51 @@ impl Running {
     /// - a key the patch does not name never produces a change;
     /// - a value equal to the running one (or to the default when nothing is
     ///   running) is free: no change, no notice, no relaunch;
-    /// - setting one connection target displaces the other targets.
+    /// - setting one connection target displaces the other targets;
+    /// - an ambient connection entry applies only to a session with no target.
     pub fn plan(&self, patch: &Patch) -> Plan {
         let mut next = self.clone();
         let mut changes: Vec<Change> = Vec::new();
         let mut ignored: Vec<Change> = Vec::new();
 
-        for (key, requested) in patch.iter() {
+        // Connection entries from the environment or config are session
+        // defaults: they apply after the explicit ones, and only to a session
+        // that has no target by then. Headers are credentials of an endpoint,
+        // so they resolve after every target, and only for an endpoint this
+        // command sends or one the session already runs.
+        let mut ambient_open: Option<bool> = None;
+        let ambient_headers = |key: &Key| *key == Key::CdpHeaders;
+        let ordered = patch
+            .iter()
+            .filter(|(key, _)| !patch.is_ambient(*key) && !ambient_headers(key))
+            .chain(
+                patch
+                    .iter()
+                    .filter(|(key, _)| patch.is_ambient(*key) && !ambient_headers(key)),
+            )
+            .chain(patch.iter().filter(|(key, _)| ambient_headers(key)));
+        for (key, requested) in ordered {
+            if ambient_headers(&key) {
+                // Headers go to the endpoint the invocation names, and to no
+                // other. When that endpoint was skipped because the session
+                // stays on another one, headers for it are dropped rather than
+                // sent to the endpoint that remains. Headers named by no
+                // endpoint update the attached one when they were given on the
+                // command line; headers from the environment or config have
+                // none to belong to.
+                let send = match patch.get(Key::Cdp) {
+                    Some(Requested::Set(endpoint)) => next.get(Key::Cdp) == Some(endpoint),
+                    Some(Requested::Default) => false,
+                    None => !patch.is_ambient(Key::CdpHeaders),
+                };
+                if !send {
+                    continue;
+                }
+            } else if patch.is_ambient(key)
+                && !*ambient_open.get_or_insert_with(|| next.connection() == Connection::Local)
+            {
+                continue;
+            }
             match requested {
                 Requested::Set(value) if key == Key::ClearCaCert => {
                     // A one-shot: drops the CA trust that is in effect.
@@ -170,9 +208,15 @@ impl Running {
                     }
                 }
                 Requested::Set(value) => {
-                    if self.effective(key).as_ref() == Some(value)
-                        && !patch.is_changed_in_place(key)
-                    {
+                    // A default is checked against the session as this patch
+                    // left it: a reset earlier in the patch may have cleared
+                    // the running value, and the default then applies again.
+                    let current = if patch.is_ambient(key) {
+                        next.effective(key)
+                    } else {
+                        self.effective(key)
+                    };
+                    if current.as_ref() == Some(value) && !patch.is_changed_in_place(key) {
                         continue;
                     }
                     let external_firefox = key == Key::Engine && value.as_str() == Some("firefox");
