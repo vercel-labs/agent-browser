@@ -6818,7 +6818,9 @@ async fn apply_settings_patch(
         if keys.contains(&Key::ClearCaCert) {
             keys.push(Key::CaCert);
         }
-        keys.extend(plan.ignored.iter().map(|change| change.key));
+        if plan.relaunch {
+            keys.extend(plan.ignored.iter().map(|change| change.key));
+        }
         if !keys.is_empty() || plan.relaunch {
             Some(PendingSettings {
                 keys,
