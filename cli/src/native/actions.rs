@@ -629,6 +629,8 @@ pub struct DaemonState {
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
+    /// CDP modifier bits currently held through `keydown` actions.
+    held_keyboard_modifiers: i32,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
     snapshot_revisions: HashMap<String, SnapshotRevision>,
     screenshot_observations: HashMap<(String, String), ScreenshotObservation>,
@@ -851,6 +853,7 @@ impl DaemonState {
             webdriver_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
+            held_keyboard_modifiers: 0,
             snapshot_revisions: HashMap::new(),
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
@@ -975,6 +978,7 @@ impl DaemonState {
 
     fn reset_input_state(&mut self) {
         self.mouse_state = MouseState::default();
+        self.held_keyboard_modifiers = 0;
     }
 
     /// Create state with an optional stream client slot and server instance
@@ -7624,6 +7628,8 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     // Parse modifier+key chords like "Control+a", "Shift+Enter", "Control+Shift+a"
     let (actual_key, modifiers) = parse_key_chord(key);
+    let modifiers = Some(modifiers.unwrap_or_default() | state.held_keyboard_modifiers)
+        .filter(|mask| *mask != 0);
 
     interaction::press_key_with_modifiers(&mgr.client, &session_id, &actual_key, modifiers).await?;
     Ok(json!({ "pressed": key }))
@@ -15544,7 +15550,7 @@ async fn handle_input_touch(cmd: &Value, state: &DaemonState) -> Result<Value, S
     Ok(json!({ "dispatched": event_type }))
 }
 
-async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let key = cmd
@@ -15552,17 +15558,22 @@ async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
+    let held_keyboard_modifiers =
+        state.held_keyboard_modifiers | Modifiers::bit(key).unwrap_or_default();
+    let modifiers = (held_keyboard_modifiers != 0).then_some(held_keyboard_modifiers);
+    let mut params = json!({ "type": "keyDown", "key": key });
+    if let Some(modifiers) = modifiers {
+        params["modifiers"] = json!(modifiers);
+    }
+
     mgr.client
-        .send_command(
-            "Input.dispatchKeyEvent",
-            Some(json!({ "type": "keyDown", "key": key })),
-            Some(&session_id),
-        )
+        .send_command("Input.dispatchKeyEvent", Some(params), Some(&session_id))
         .await?;
+    state.held_keyboard_modifiers = held_keyboard_modifiers;
     Ok(json!({ "keydown": key }))
 }
 
-async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_keyup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let key = cmd
@@ -15570,13 +15581,18 @@ async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String>
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
+    let held_keyboard_modifiers =
+        state.held_keyboard_modifiers & !Modifiers::bit(key).unwrap_or_default();
+    let modifiers = (held_keyboard_modifiers != 0).then_some(held_keyboard_modifiers);
+    let mut params = json!({ "type": "keyUp", "key": key });
+    if let Some(modifiers) = modifiers {
+        params["modifiers"] = json!(modifiers);
+    }
+
     mgr.client
-        .send_command(
-            "Input.dispatchKeyEvent",
-            Some(json!({ "type": "keyUp", "key": key })),
-            Some(&session_id),
-        )
+        .send_command("Input.dispatchKeyEvent", Some(params), Some(&session_id))
         .await?;
+    state.held_keyboard_modifiers = held_keyboard_modifiers;
     Ok(json!({ "keyup": key }))
 }
 
