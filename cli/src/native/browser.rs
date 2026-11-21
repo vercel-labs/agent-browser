@@ -462,7 +462,7 @@ enum LifecycleWaitError {
 }
 
 /// Error returned when a load-state wait exceeds the caller's timeout budget.
-fn load_state_timeout_error(wait_until: WaitUntil, timeout: Duration) -> String {
+pub(crate) fn load_state_timeout_error(wait_until: WaitUntil, timeout: Duration) -> String {
     format!(
         "Timed out after {}ms waiting for load state '{}'",
         timeout.as_millis(),
@@ -704,7 +704,7 @@ impl BrowserManager {
             }
             _ => {
                 return Err(format!(
-                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, obscura",
+                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, obscura, firefox",
                     engine
                 ));
             }

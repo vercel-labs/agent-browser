@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Firefox adapter probe</title></head>
+<body>
+<h1>Firefox probe</h1>
+<input id="name" aria-label="Name">
+<button id="go" onclick="document.title = 'Hello ' + document.getElementById('name').value">Go</button>
+<div id="list"><button onclick="document.title = 'clicked-first'">First</button><button onclick="document.title = 'clicked-second'">Second</button></div>
+<button id="ask" onclick="document.title = confirm('Proceed?') ? 'confirmed' : 'cancelled'">Ask</button>
+<button id="alert" onclick="alert('Heads up')">Alert</button>
+<a id="dl" href="/download.txt" download>Download file</a>
+<div id="host"></div>
+<iframe src="__OTHER__/frame.html" title="Other origin"></iframe>
+<script>
+document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML =
+  '<button id="inner">Shadow button</button>';
+document.getElementById('host').shadowRoot.getElementById('inner').onclick = function () {
+  document.title = 'shadow-clicked';
+};
+window.addEventListener('message', function (e) { document.title = e.data; });
+function runWorker(url) {
+  var src = "fetch('" + url + "', { mode: 'no-cors' }).then(function () { postMessage('ok'); }, function () { postMessage('blocked'); });";
+  var worker = new Worker(URL.createObjectURL(new Blob([src])));
+  return new Promise(function (resolve) {
+    worker.onmessage = function (e) { resolve(e.data); };
+    setTimeout(function () { resolve('timeout'); }, 5000);
+  });
+}
+function runSocket(url) {
+  return new Promise(function (resolve) {
+    var socket = new WebSocket(url);
+    socket.onopen = function () { resolve('open'); };
+    socket.onerror = function () { resolve('error'); };
+    socket.onclose = function () { resolve('closed'); };
+    setTimeout(function () { resolve('timeout'); }, 5000);
+  });
+}
+</script>
+</body>
+</html>
