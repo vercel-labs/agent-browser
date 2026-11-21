@@ -18947,7 +18947,7 @@ mod tests {
                 "restore-check-text": null,
                 "restore-check-fn": null
             }),
-            false,
+            true,
         )
         .await
         .unwrap();
@@ -18970,7 +18970,7 @@ mod tests {
         apply_wire(
             &mut state,
             json!({ "restore-key": "same-key", "restore-check-text": "Dashboard" }),
-            false,
+            true,
         )
         .await
         .unwrap();

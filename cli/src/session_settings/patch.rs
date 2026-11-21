@@ -230,13 +230,21 @@ impl Patch {
         (rest, unit)
     }
 
-    /// The patch without its launch settings and without a forced relaunch:
-    /// what a command that never launches a browser can apply.
+    /// The patch without its launch settings (the restore unit included) and
+    /// without a forced relaunch: what a command that never launches a browser
+    /// can apply.
     pub fn without_launch_settings(&self) -> Patch {
         let mut live = self.clone();
         live.relaunch = false;
         live.entries
             .retain(|key, _| spec(*key).effect == Effect::Live);
+        // The save policy and checks belong to the restore key; without it
+        // they would apply to the key already running.
+        for key in RESTORE_UNIT {
+            if key != Key::RestoreKey {
+                live.entries.remove(&key);
+            }
+        }
         live.retain_ambient();
         live
     }

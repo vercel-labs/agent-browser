@@ -3210,6 +3210,22 @@ mod tests {
     }
 
     #[test]
+    fn test_cdp_url_metadata_drops_the_whole_restore_unit() {
+        let flags = restore_flags(&[
+            "--restore-save",
+            "never",
+            "--restore-check-url",
+            "**/dashboard",
+        ]);
+        let cmd = json!({ "action": "cdp_url" });
+        assert!(command_is_cdp_url_metadata(&cmd));
+        let patch = command_settings(&flags, &cmd);
+        for key in session_settings::RESTORE_UNIT {
+            assert!(patch.get(key).is_none(), "{key:?} must not ride along");
+        }
+    }
+
+    #[test]
     fn test_restore_settings_send_defaults_and_clear_checks() {
         let wire = command_settings(&restore_flags(&[]), &json!({ "action": "navigate" }))
             .to_wire()

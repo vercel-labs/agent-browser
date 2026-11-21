@@ -1313,6 +1313,21 @@ fn a_patch_without_launch_settings_keeps_only_live_ones() {
 }
 
 #[test]
+fn a_patch_without_launch_settings_drops_the_restore_unit_with_its_key() {
+    let patch = patch_of(&[
+        is(Key::RestoreKey, json!("k")),
+        is(Key::RestoreSave, json!("never")),
+        is(Key::RestoreCheckUrl, json!("**/x")),
+        is(Key::DefaultTimeout, json!(5000)),
+    ]);
+    let live = patch.without_launch_settings();
+    for key in RESTORE_UNIT {
+        assert!(live.get(key).is_none(), "{key:?}");
+    }
+    assert!(live.get(Key::DefaultTimeout).is_some());
+}
+
+#[test]
 fn local_only_settings_are_ignored_for_external_sessions() {
     for target in [
         (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
