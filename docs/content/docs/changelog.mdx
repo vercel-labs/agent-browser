@@ -3,6 +3,31 @@ title: "Changelog"
 navTitle: "Changelog"
 ---
 
+## v0.43.0
+
+<p className="text-[#888] text-sm">November 12, 2026</p>
+
+### New Features
+
+- Added **snapshot hints** for controls whose accessible name is empty or shared with another ref in the same snapshot. The hint follows the ref and lists the control's icon, image file, `data-testid`, `name` or `id`, and the text of the nearest row or list item (#2578)
+- Added a **Modern Web Guidance skill** that retrieves Chrome's guidance for a task and checks the built page in agent-browser (#2577)
+
+### Bug Fixes
+
+- Fixed **commands on closed tabs** waiting for the timeout. A command whose tab closes before Chrome answers now fails with `Target closed: CDP session <id> detached` (#2576)
+- Fixed **recordings with an emulated device scale**, which now capture at full density by switching to screenshots when a screencast frame is below the page's scale (#2572)
+
+### Improvements
+
+- Native binaries now ship as **per-platform packages**, so an install downloads only the binary for the host platform, and the global command links to it when install scripts are blocked (#2150)
+- **Snapshots of large pages** parse the accessibility tree once, so they finish sooner (#2509)
+
+### Documentation
+
+- Added a **Modern Web Guidance** guide to the docs (#2546, #2573, #2575)
+
+---
+
 ## v0.42.0
 
 <p className="text-[#888] text-sm">November 9, 2026</p>
