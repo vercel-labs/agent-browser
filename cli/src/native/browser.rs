@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
-use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
+use super::cdp::chrome::{
+    auto_connect_cdp, get_chrome_user_data_dirs, launch_chrome, read_devtools_active_port,
+    ChromeProcess, LaunchOptions, AUTO_CONNECT_WS_VERIFY_TIMEOUT,
+};
 use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::discovery::discover_cdp_url_with_headers;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
@@ -1114,7 +1117,26 @@ impl BrowserManager {
         Ok(manager)
     }
 
+    /// Chrome prompts once per connection, so keep the first one instead of probing it.
     pub async fn connect_auto() -> Result<Self, String> {
+        for dir in get_chrome_user_data_dirs() {
+            let Some((port, ws_path)) = read_devtools_active_port(&dir) else {
+                continue;
+            };
+            let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
+            match tokio::time::timeout(AUTO_CONNECT_WS_VERIFY_TIMEOUT, Self::connect_cdp(&ws_url))
+                .await
+            {
+                Ok(Ok(manager)) => return Ok(manager),
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    return Err(format!(
+                        "Chrome is waiting for remote-debugging approval on port {}. Approve the prompt in Chrome and retry.",
+                        port
+                    ));
+                }
+            }
+        }
         let ws_url = auto_connect_cdp().await?;
         Self::connect_cdp(&ws_url).await
     }
@@ -6096,5 +6118,26 @@ mod tests {
             0,
             "cancelled connect-time probes left orphaned CDP requests in the pending map"
         );
+    }
+
+    /// The mock accepts only one connection, as Chrome approves one per prompt.
+    #[tokio::test]
+    async fn test_connect_auto_uses_one_connection() {
+        let (url, _activations) = start_mock_cdp_connect(vec![("ALIVE", true)], false).await;
+        let url = url::Url::parse(&url).unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let env = crate::test_utils::EnvGuard::new(&["HOME", "LOCALAPPDATA"]);
+        env.set("HOME", home.path().to_str().unwrap());
+        env.set("LOCALAPPDATA", home.path().to_str().unwrap());
+        let dir = get_chrome_user_data_dirs().remove(0);
+        std::fs::create_dir_all(&dir).unwrap();
+        let active_port = format!("{}\n{}\n", url.port().unwrap(), url.path());
+        std::fs::write(dir.join("DevToolsActivePort"), active_port).unwrap();
+
+        let mgr = tokio::time::timeout(Duration::from_secs(15), BrowserManager::connect_auto())
+            .await
+            .expect("connect must not hang")
+            .expect("connect should attach without a second connection");
+        assert_eq!(mgr.pages.len(), 1);
     }
 }
