@@ -70,6 +70,10 @@
         "to": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser click <sel> --button right # Right-click (fires contextmenu) agent-browser click <sel> --modifiers control,shift # Hold keys during the click agent-browser dblclick <sel> # Double-click agent-browser dblclick <sel> --modifiers shift # Double-click with Shift held"
       },
       {
+        "from": "agent-browser select <sel> <val>      # Select dropdown by value or visible label",
+        "to": "agent-browser select <sel> <val> [--by value|label]  # Select dropdown by value or visible label"
+      },
+      {
         "from": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)",
         "to": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2); kept across relaunches and new tabs"
       },

@@ -1586,9 +1586,12 @@ pub async fn is_element_checked(
                         return el.checked;
                     }
                     // ARIA role-based checked state
-                    var role = el.getAttribute && el.getAttribute('role');
                     var ariaCheckedRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'];
-                    if (role && ariaCheckedRoles.indexOf(role) !== -1) {
+                    var role = ((el.getAttribute && el.getAttribute('role')) || '').split(/\s+/).filter(function(r) { return ariaCheckedRoles.indexOf(r) !== -1; })[0];
+                    if (role) {
+                        if ((role === 'option' || role === 'treeitem') && !el.hasAttribute('aria-checked')) {
+                            return el.getAttribute('aria-selected') === 'true';
+                        }
                         return el.getAttribute('aria-checked') === 'true';
                     }
                     // Follow label association (Playwright follow-label retarget)

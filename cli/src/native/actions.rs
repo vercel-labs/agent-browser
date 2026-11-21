@@ -631,6 +631,8 @@ pub struct DaemonState {
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
     snapshot_revisions: HashMap<String, SnapshotRevision>,
+    /// Structured `data` for the failure of the command being run.
+    error_data: Option<Value>,
     screenshot_observations: HashMap<(String, String), ScreenshotObservation>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
@@ -852,6 +854,7 @@ impl DaemonState {
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
+            error_data: None,
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
                 // A stored empty list predates rejection and restores as no
@@ -3134,6 +3137,7 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
 }
 
 async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
+    state.error_data = None;
     state.pending_action_warning = None;
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
@@ -3797,6 +3801,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
     attach_tab_gone_data(&mut resp, state);
+    if let Some(data) = state.error_data.take() {
+        if resp.get("success").and_then(Value::as_bool) == Some(false) && resp.get("data").is_none()
+        {
+            resp["data"] = data;
+        }
+    }
     attach_flow_stop(&mut resp, state);
     attach_action_warning(&mut resp, state);
     if resp.get("success").and_then(Value::as_bool) == Some(false) {
@@ -7574,16 +7584,29 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::fill(
+    let outcome = Box::pin(interaction::fill(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         value,
         &state.iframe_sessions,
-    )
+    ))
     .await?;
-    Ok(json!({ "filled": selector }))
+    Ok(form_outcome_data(
+        state,
+        json!({ "filled": selector }),
+        outcome.warning,
+    ))
+}
+
+/// Queues a form action's warning on the out-of-band channel and returns the
+/// response data unchanged.
+fn form_outcome_data(state: &mut DaemonState, data: Value, warning: Option<String>) -> Value {
+    if let Some(warning) = warning {
+        state.push_action_warning(&warning);
+    }
+    data
 }
 
 async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7600,7 +7623,7 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     let delay = cmd.get("delay").and_then(|v| v.as_u64());
 
-    interaction::type_text(
+    let outcome = Box::pin(interaction::type_text(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7609,9 +7632,13 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         clear,
         delay,
         &state.iframe_sessions,
-    )
+    ))
     .await?;
-    Ok(json!({ "typed": text }))
+    Ok(form_outcome_data(
+        state,
+        json!({ "typed": text }),
+        outcome.warning,
+    ))
 }
 
 async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7724,6 +7751,16 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "scrolled": true }))
 }
 
+/// The optional `by` field restricts `select` matching to option values or
+/// visible labels.
+fn select_by(cmd: &Value) -> Result<Option<&str>, String> {
+    match cmd.get("by") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(by)) if by == "value" || by == "label" => Ok(Some(by.as_str())),
+        Some(_) => Err("'by' must be 'value' or 'label'".to_string()),
+    }
+}
+
 async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -7745,24 +7782,45 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .unwrap_or_default(),
     };
 
-    interaction::select_option(
+    let by = select_by(cmd)?;
+
+    let outcome = interaction::select_option(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &values,
+        by,
         &state.iframe_sessions,
     )
-    .await?;
+    .await;
+    if let Err(e) = outcome {
+        state.error_data = e.options.map(|options| json!({ "options": options }));
+        return Err(e.message);
+    }
     Ok(json!({ "selected": values }))
 }
 
-/// Response of a check or uncheck; an unverified toggle carries a warning.
-fn toggle_response(state: &mut DaemonState, key: &str, selector: &str, verified: bool) -> Value {
-    if !verified {
-        state.push_action_warning(super::element::STATE_NOT_VERIFIED);
+/// Response of a check or uncheck; an unverified or unchanged toggle queues a
+/// warning.
+fn toggle_response(
+    state: &mut DaemonState,
+    key: &str,
+    selector: &str,
+    outcome: &interaction::ToggleOutcome,
+) -> Value {
+    let mut notes = Vec::new();
+    if !outcome.verified {
+        notes.push(super::element::STATE_NOT_VERIFIED.to_string());
     }
-    json!({ key: selector })
+    if let Some(warning) = &outcome.warning {
+        notes.push(warning.clone());
+    }
+    form_outcome_data(
+        state,
+        json!({ key: selector }),
+        (!notes.is_empty()).then(|| notes.join("\n")),
+    )
 }
 
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7787,12 +7845,7 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(toggle_response(
-        state,
-        "checked",
-        selector,
-        outcome.verified,
-    ))
+    Ok(toggle_response(state, "checked", selector, &outcome))
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7817,12 +7870,7 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(toggle_response(
-        state,
-        "unchecked",
-        selector,
-        outcome.verified,
-    ))
+    Ok(toggle_response(state, "unchecked", selector, &outcome))
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -11461,16 +11509,20 @@ async fn execute_subaction(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'value' for fill subaction")?;
-            interaction::fill(
+            let outcome = Box::pin(interaction::fill(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
                 selector,
                 value,
                 &state.iframe_sessions,
-            )
+            ))
             .await?;
-            Ok(json!({ "filled": selector }))
+            Ok(form_outcome_data(
+                state,
+                json!({ "filled": selector }),
+                outcome.warning,
+            ))
         }
         "check" => {
             let outcome = interaction::check(
@@ -11487,12 +11539,7 @@ async fn execute_subaction(
                     cursor.record(position.0, position.1, state.mouse_state.buttons);
                 }
             }
-            Ok(toggle_response(
-                state,
-                "checked",
-                selector,
-                outcome.verified,
-            ))
+            Ok(toggle_response(state, "checked", selector, &outcome))
         }
         "hover" => {
             let position = interaction::hover(
@@ -12359,7 +12406,9 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
         })
         .unwrap_or_default();
 
+    let by = select_by(cmd)?;
     let values_json = serde_json::to_string(&values).unwrap_or("[]".to_string());
+    let by_json = serde_json::to_string(&by).unwrap_or("null".to_string());
     // A locator miss returns a sentinel instead of throwing, so it is detected in
     // Rust and normalized to the anchored "No element found: ..." shape. A thrown
     // error surfaces as "Evaluation error: ...", which is_locator_miss skips, and
@@ -12369,14 +12418,30 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
             const select = document.querySelector({sel});
             if (!select) return {{ __ab_miss: true }};
             const vals = {vals};
+            if (!(select instanceof HTMLSelectElement)) {{
+                return {{ kind: 'multi_not_select' }};
+            }}
+            if (select.matches(':disabled')) {{
+                return {{ kind: 'multi_disabled' }};
+            }}
+            if (vals.length > 1 && !select.multiple) {{
+                return {{ kind: 'not_multiple' }};
+            }}
+            const by = {by};
+            const keyOf = (o) => (by === 'label' ? o.label.trim() : o.value);
+            const missing = vals.map((v, i) => i).filter((i) => !Array.from(select.options).some((o) => keyOf(o) === vals[i]));
+            if (missing.length > 0) {{
+                return {{ kind: 'multi_not_found', missing, n: select.options.length }};
+            }}
             for (const opt of select.options) {{
-                opt.selected = vals.includes(opt.value);
+                opt.selected = vals.includes(keyOf(opt));
             }}
             select.dispatchEvent(new Event('change', {{ bubbles: true }}));
             return {{ selected: Array.from(select.selectedOptions).map(o => o.value) }};
         }})()"#,
         sel = serde_json::to_string(selector).unwrap_or_default(),
         vals = values_json,
+        by = by_json,
     );
 
     let result = mgr.evaluate(&js, None).await?;
@@ -12386,6 +12451,12 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
         .unwrap_or(false)
     {
         return Err(format!("No element found: {selector}"));
+    }
+    if let Some((code, message)) = interaction::select_failure(&result, &values, by) {
+        return Err(match code {
+            Some(code) => interaction::form_error(code, message),
+            None => message,
+        });
     }
     let selected = result.get("selected").cloned().unwrap_or_else(|| json!([]));
     Ok(json!({ "selected": selected }))
@@ -15981,6 +16052,8 @@ fn error_response(id: &str, error: &str) -> Value {
         resp["code"] = json!("tab_gone");
     } else if error.starts_with(super::browser::PAGE_WEDGED_PREFIX) {
         resp["code"] = json!("page_wedged");
+    } else if let Some(code) = interaction::form_error_code(error) {
+        resp["code"] = json!(code);
     } else if let Some((code, _)) = error.split_once(": ") {
         if code.starts_with("webmcp_") {
             resp["code"] = json!(code);
@@ -16346,17 +16419,42 @@ mod tests {
     #[test]
     fn unverified_toggle_warns_once_and_verified_does_not() {
         let mut state = DaemonState::new();
-        let data = toggle_response(&mut state, "checked", "#c", false);
+        let data = toggle_response(
+            &mut state,
+            "checked",
+            "#c",
+            &interaction::ToggleOutcome {
+                verified: false,
+                ..Default::default()
+            },
+        );
         assert_eq!(data["checked"], "#c");
         assert!(data.get("postActionWarning").is_none());
         let mut resp = success_response("1", data);
         attach_action_warning(&mut resp, &mut state);
         assert_eq!(resp["warning"], super::super::element::STATE_NOT_VERIFIED);
+        let data = form_outcome_data(
+            &mut state,
+            json!({ "filled": "#f" }),
+            Some("value_mismatch".to_string()),
+        );
+        assert!(data.get("postActionWarning").is_none());
+        let mut resp = success_response("1b", data);
+        attach_action_warning(&mut resp, &mut state);
+        assert_eq!(resp["warning"], "value_mismatch");
         let mut next = success_response("2", json!({}));
         attach_action_warning(&mut next, &mut state);
         assert!(next.get("warning").is_none());
 
-        let data = toggle_response(&mut state, "unchecked", "#c", true);
+        let data = toggle_response(
+            &mut state,
+            "unchecked",
+            "#c",
+            &interaction::ToggleOutcome {
+                verified: true,
+                ..Default::default()
+            },
+        );
         let mut resp = success_response("3", data);
         attach_action_warning(&mut resp, &mut state);
         assert!(resp.get("warning").is_none());
@@ -23135,7 +23233,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "agent-browser-har-stop-{}.har",
             unix_timestamp_millis()
         ));
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         state.har_entries.push(HarEntry {
             request_id: "req-3".to_string(),
             wall_time: 1773576000.0,
@@ -23169,7 +23267,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         )
         .await;
 
-        assert_eq!(result["success"], true);
+        assert_eq!(result["success"], true, "{result}");
         assert_eq!(result["data"]["requestCount"], 1);
         let _ = fs::remove_file(path);
     }

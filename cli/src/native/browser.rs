@@ -238,6 +238,9 @@ fn active_page_index_after_add(
 
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
+    if super::interaction::form_error_code(error).is_some() {
+        return error.to_string();
+    }
     let lower = error.to_lowercase();
     // Classify a genuine locator miss first: its anchored shape ("No element
     // found: ...") echoes the selector/name, which may itself contain a word like
