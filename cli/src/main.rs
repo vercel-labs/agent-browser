@@ -1723,6 +1723,8 @@ fn main() {
         clean.first().map(|s| s.as_str()),
         Some("plugin") | Some("plugins")
     ) {
+        let mut clean = clean;
+        commands::strip_operand_marker(&mut clean);
         plugins::run_plugin_command(&clean, &flags.plugins, flags.json);
         return;
     }

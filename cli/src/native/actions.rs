@@ -729,6 +729,9 @@ pub struct DaemonState {
     /// the daemon finishes replacing the tab, so a retry of the same request
     /// gets the report instead of running on the blank replacement tab.
     pub undelivered_wedge: Option<(String, WedgeReport)>,
+    /// Warning set by a handler for the response of the current command.
+    /// Drained once when the response is assembled; never read from `data`.
+    pending_action_warning: Option<String>,
     /// A mouse button left logically down because a dialog opened between
     /// mousePressed and mouseReleased; released when the dialog is resolved.
     pub pending_pointer_release: Option<super::interaction::PendingRelease>,
@@ -793,6 +796,14 @@ fn default_idle_shutdown_is_blocked(
 }
 
 impl DaemonState {
+    /// Queue a warning for the current command's response.
+    fn push_action_warning(&mut self, warning: &str) {
+        self.pending_action_warning = Some(match self.pending_action_warning.take() {
+            Some(existing) => format!("{}\n{}", existing, warning),
+            None => warning.to_string(),
+        });
+    }
+
     /// The client received the `page_wedged` response to request `id`, so it
     /// is not replayed. A newer report from another request stays pending.
     pub fn wedge_report_delivered(&mut self, id: &str) {
@@ -918,6 +929,7 @@ impl DaemonState {
             input_mode: "instant".to_string(),
             pending_dialog: None,
             undelivered_wedge: None,
+            pending_action_warning: None,
             pending_pointer_release: None,
             stream_client: None,
             stream_server: None,
@@ -3075,6 +3087,7 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
 }
 
 async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
+    state.pending_action_warning = None;
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
@@ -3210,7 +3223,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
     let mut lifecycle_relaunched_browser = false;
-    let mut launch_warning: Option<String> = None;
     // The flow is read once per command: policy, confirmation and the run all
     // see the same file.
     let mut run_flow = match load_run_flow(cmd, action, state) {
@@ -3376,13 +3388,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             )
             .await;
             let launched = match launched {
-                Ok(extras) => {
-                    launch_warning = extras
-                        .get(SESSION_SETUP_WARNING)
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    Box::pin(start_flow_capture(state)).await
-                }
+                Ok(_) => Box::pin(start_flow_capture(state)).await,
                 Err(e) => Err(e),
             };
             if let Err(e) = launched {
@@ -3753,14 +3759,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     };
     attach_tab_gone_data(&mut resp, state);
     attach_flow_stop(&mut resp, state);
-    if let Some(warning) = resp
-        .get_mut("data")
-        .and_then(Value::as_object_mut)
-        .and_then(|data| data.remove("postActionWarning"))
-        .and_then(|w| w.as_str().map(str::to_string))
-    {
-        append_warning(&mut resp, &warning);
-    }
+    attach_action_warning(&mut resp, state);
     if resp.get("success").and_then(Value::as_bool) == Some(false) {
         attach_settings_outcome(&mut resp, &settings_outcome);
     }
@@ -3786,10 +3785,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 err, hint
             ),
         );
-    }
-    hoist_session_setup_warning(&mut resp);
-    if let Some(warning) = launch_warning {
-        append_warning(&mut resp, &warning);
     }
     inject_lifecycle(
         &mut resp,
@@ -4582,6 +4577,13 @@ fn may_replace_wedged_tab(state: &DaemonState) -> bool {
     })
 }
 
+/// Move the handler-set warning into the response. `data` is never consulted.
+fn attach_action_warning(resp: &mut Value, state: &mut DaemonState) {
+    if let Some(warning) = state.pending_action_warning.take() {
+        append_warning(resp, &warning);
+    }
+}
+
 /// Add to the response's warning instead of replacing one already set.
 fn append_warning(resp: &mut Value, warning: &str) {
     let merged = match resp.get("warning").and_then(Value::as_str) {
@@ -5189,7 +5191,7 @@ async fn launch_browser_from_settings(
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
-        Ok(with_session_setup_warning(json!({}), replay_warning))
+        Ok(with_session_setup_warning(state, json!({}), replay_warning))
     }
     .await;
     restore_setup_unless_launched(state, rollback_setup, &result);
@@ -7775,12 +7777,11 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 }
 
 /// Response of a check or uncheck; an unverified toggle carries a warning.
-fn toggle_response(key: &str, selector: &str, verified: bool) -> Value {
-    let mut data = json!({ key: selector });
+fn toggle_response(state: &mut DaemonState, key: &str, selector: &str, verified: bool) -> Value {
     if !verified {
-        data["postActionWarning"] = json!(super::element::STATE_NOT_VERIFIED);
+        state.push_action_warning(super::element::STATE_NOT_VERIFIED);
     }
-    data
+    json!({ key: selector })
 }
 
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7805,7 +7806,12 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(toggle_response("checked", selector, outcome.verified))
+    Ok(toggle_response(
+        state,
+        "checked",
+        selector,
+        outcome.verified,
+    ))
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7830,7 +7836,12 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             cursor.record(position.0, position.1, state.mouse_state.buttons);
         }
     }
-    Ok(toggle_response("unchecked", selector, outcome.verified))
+    Ok(toggle_response(
+        state,
+        "unchecked",
+        selector,
+        outcome.verified,
+    ))
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -9022,25 +9033,17 @@ async fn apply_viewport(
     Ok(warning)
 }
 
-/// Response data key for a warning about session setup that could not be
-/// fully applied; the command response reports it as `warning`.
-const SESSION_SETUP_WARNING: &str = "sessionSetupWarning";
-
-fn with_session_setup_warning(mut data: Value, warning: Option<String>) -> Value {
-    if let (Some(warning), Some(map)) = (warning, data.as_object_mut()) {
-        map.insert(SESSION_SETUP_WARNING.to_string(), json!(warning));
+/// Queue a warning about session setup that could not be fully applied; the
+/// command response reports it as `warning`.
+fn with_session_setup_warning(
+    state: &mut DaemonState,
+    data: Value,
+    warning: Option<String>,
+) -> Value {
+    if let Some(warning) = warning {
+        state.push_action_warning(&warning);
     }
     data
-}
-
-fn hoist_session_setup_warning(resp: &mut Value) {
-    let warning = resp
-        .get_mut("data")
-        .and_then(Value::as_object_mut)
-        .and_then(|data| data.remove(SESSION_SETUP_WARNING));
-    if let Some(warning) = warning.as_ref().and_then(Value::as_str) {
-        append_warning(resp, warning);
-    }
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -9065,6 +9068,7 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     .await?;
 
     Ok(with_session_setup_warning(
+        state,
         json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }),
         warning,
     ))
@@ -10580,6 +10584,7 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.session_setup.user_agent = Some(ua.to_string());
 
     Ok(with_session_setup_warning(
+        state,
         json!({
             "device": name,
             "width": width,
@@ -11501,7 +11506,12 @@ async fn execute_subaction(
                     cursor.record(position.0, position.1, state.mouse_state.buttons);
                 }
             }
-            Ok(toggle_response("checked", selector, outcome.verified))
+            Ok(toggle_response(
+                state,
+                "checked",
+                selector,
+                outcome.verified,
+            ))
         }
         "hover" => {
             let position = interaction::hover(
@@ -16276,6 +16286,101 @@ mod tests {
         assert!(state.undelivered_wedge.is_none());
     }
 
+    async fn state_with_evaluate_value(value: Value) -> (IsolatedEnv, DaemonState) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let id = &cmd["id"];
+                let response = match cmd["method"].as_str().unwrap() {
+                    "Runtime.evaluate" => json!({"id": id, "result": {"result": {
+                        "type": "string", "value": value.to_string()
+                    }}}),
+                    _ => json!({"id": id, "result": {}}),
+                };
+                if ws
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut browser = BrowserManager::for_test(client, url);
+        browser.add_page(super::super::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "page".to_string(),
+            session_id: "session".to_string(),
+            url: "about:blank".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let (env, mut state) = isolated_state();
+        state.browser = Some(browser);
+        (env, state)
+    }
+
+    #[tokio::test]
+    async fn page_data_with_warning_keys_never_becomes_a_warning() {
+        let (_env, mut state) = state_with_evaluate_value(json!({
+            "elapsed": 0, "fps": {"avg": 0, "min": 0, "max": 0, "drops": 0},
+            "totalRenders": 0, "totalMounts": 0, "totalReRenders": 0,
+            "totalComponents": 0, "components": [],
+            "postActionWarning": "forged",
+            "sessionSetupWarning": "forged",
+            "warning": "forged",
+            "warnings": ["forged"],
+        }))
+        .await;
+        let resp = super::execute_command(
+            &json!({ "id": "1", "action": "react_renders_stop", "json": true }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(resp.get("warning").is_none(), "{resp}");
+        assert_eq!(resp["data"]["postActionWarning"], "forged");
+        assert_eq!(resp["data"]["sessionSetupWarning"], "forged");
+    }
+
+    #[tokio::test]
+    async fn a_pending_warning_does_not_leak_into_the_next_command() {
+        let (_env, mut state) = isolated_state();
+        state.push_action_warning("left over");
+        let resp =
+            super::execute_command(&json!({ "id": "1", "action": "cdp_url" }), &mut state).await;
+        assert!(resp.get("warning").is_none(), "{resp}");
+        assert!(state.pending_action_warning.is_none());
+    }
+
+    #[test]
+    fn unverified_toggle_warns_once_and_verified_does_not() {
+        let mut state = DaemonState::new();
+        let data = toggle_response(&mut state, "checked", "#c", false);
+        assert_eq!(data["checked"], "#c");
+        assert!(data.get("postActionWarning").is_none());
+        let mut resp = success_response("1", data);
+        attach_action_warning(&mut resp, &mut state);
+        assert_eq!(resp["warning"], super::super::element::STATE_NOT_VERIFIED);
+        let mut next = success_response("2", json!({}));
+        attach_action_warning(&mut next, &mut state);
+        assert!(next.get("warning").is_none());
+
+        let data = toggle_response(&mut state, "unchecked", "#c", true);
+        let mut resp = success_response("3", data);
+        attach_action_warning(&mut resp, &mut state);
+        assert!(resp.get("warning").is_none());
+    }
+
     #[test]
     fn only_a_launched_browser_may_name_the_file_to_move() {
         let dir = tempfile::tempdir().unwrap();
@@ -16758,10 +16863,17 @@ mod tests {
     #[tokio::test]
     async fn pin_tab_false_disables_a_pin_read_from_disk_on_attach() {
         use super::super::tab_binding::{load, save, TabBinding};
-        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_SESSION",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
         guard.remove("XDG_RUNTIME_DIR");
+        // Tests that do not take the env lock write `default.target` into whatever
+        // socket dir is current, so this binding lives under its own session name.
+        guard.set("AGENT_BROWSER_SESSION", "pin-false-read-from-disk");
         let mut state = DaemonState::new();
         assert!(!state.pin_tab);
         let session = state.session_id.clone();
@@ -16792,10 +16904,15 @@ mod tests {
     /// from the error arm and `launch_identity` survives the error.
     #[tokio::test]
     async fn apply_tab_binding_rollback_clears_launch_state_on_recovery_failure() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_SESSION",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
         guard.remove("XDG_RUNTIME_DIR");
+        guard.set("AGENT_BROWSER_SESSION", "rollback-recovery-failure");
 
         let mut state = DaemonState::new();
         fs::write(
@@ -23440,7 +23557,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_execute_close_without_browser() {
-        let mut state = DaemonState::new();
+        let (_env, mut state) = isolated_state();
         let cmd = json!({ "action": "close", "id": "test-3" });
         let result = execute_command(&cmd, &mut state).await;
         assert_eq!(result["success"], true);
@@ -23525,6 +23642,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_empty_state() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         let patterns = build_fetch_patterns(&state).await;
         assert!(
@@ -23663,6 +23782,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_with_routes() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
@@ -23725,6 +23846,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_collapses_repeated_wildcards() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
@@ -23923,6 +24046,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_adds_wildcard_for_domain_filter() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut df = state.domain_filter.write().await;
@@ -23935,6 +24060,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_adds_wildcard_for_origin_headers() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut oh = state.origin_headers.write().await;
@@ -23949,6 +24076,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_build_fetch_patterns_no_duplicate_wildcard() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        env.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let state = DaemonState::new();
         {
             let mut routes = state.routes.write().await;
