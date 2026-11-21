@@ -111,6 +111,10 @@ agent-browser upload @e1 file.pdf # Upload files
 
 On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
 
+Firefox cancels an HTTP auth challenge that the session has no credentials for, so the page loads the server's 401 response instead of waiting on a browser prompt. Run `set credentials` before you open the page.
+
+Snapshots list controls inside closed shadow roots, but Firefox cannot act on them, so a command that uses such a ref fails. Pointer commands inside an iframe that has a CSS transform can miss their target.
+
 `type` focuses the element without clearing its current value. Printable characters are inserted as text; Enter, Tab, and line breaks use key events. Use `fill` to replace the current value.
 
 For `fill` and `type`, put options before the optional `--` marker. Text after the marker is literal, including values that look like flags. For example, `agent-browser fill @e2 -- --json` fills with `--json`, and `agent-browser type @e2 --clear --delay 10 -- --clear` clears the field, then types `--clear`. MCP `agent_browser_fill` and `agent_browser_type` pass typed `text` values literally, so they do not need the marker.

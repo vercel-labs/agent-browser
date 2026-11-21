@@ -61,6 +61,40 @@ pub struct ScreenshotOptions {
     pub output_dir: Option<String>,
 }
 
+/// Reads the image format from `format`, then `type`, defaulting to png.
+pub(crate) fn screenshot_format(cmd: &Value) -> String {
+    cmd.get("format")
+        .or_else(|| cmd.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("png")
+        .to_string()
+}
+
+/// Builds `ScreenshotOptions` from a screenshot command.
+pub(crate) fn screenshot_options(cmd: &Value) -> ScreenshotOptions {
+    ScreenshotOptions {
+        selector: cmd
+            .get("selector")
+            .and_then(Value::as_str)
+            .map(String::from),
+        path: cmd.get("path").and_then(Value::as_str).map(String::from),
+        full_page: cmd
+            .get("fullPage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        format: screenshot_format(cmd),
+        quality: cmd.get("quality").and_then(Value::as_i64).map(|q| q as i32),
+        annotate: cmd
+            .get("annotate")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        output_dir: cmd
+            .get("screenshotDir")
+            .and_then(Value::as_str)
+            .map(String::from),
+    }
+}
+
 impl Default for ScreenshotOptions {
     fn default() -> Self {
         Self {

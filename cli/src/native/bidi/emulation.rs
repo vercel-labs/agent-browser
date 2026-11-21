@@ -1,8 +1,8 @@
 use serde_json::{json, Map, Value};
 
-use super::bidi::BidiClient;
+use super::client::BidiClient;
 use super::daemon::session;
-use super::rdp::RdpClient;
+use super::firefox_devtools::RdpClient;
 use super::session::FirefoxSession;
 use crate::native::actions::{DaemonState, EmulatedMedia};
 
@@ -306,6 +306,9 @@ pub async fn set_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     });
     if let Some(ref server) = state.stream_server {
         server.set_viewport(width as u32, height as u32).await;
+        server
+            .broadcast_status(true, false, width as u32, height as u32, "firefox")
+            .await;
     }
     Ok(json!({
         "width": width,
@@ -419,10 +422,46 @@ fn parse_media(cmd: &Value) -> EmulatedMedia {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session, fake_session_with_rdp};
-    use crate::native::firefox::tabs;
+    use std::sync::Arc;
 
-    async fn session_state() -> (DaemonState, crate::native::firefox::session::tests::Calls) {
+    use crate::native::bidi::session::tests::{fake_session, fake_session_with_rdp};
+    use crate::native::bidi::tabs;
+    use crate::native::stream::{IdleActivity, StreamServer};
+    use futures_util::StreamExt;
+
+    fn media_with_feature(name: &str, value: &str) -> EmulatedMedia {
+        EmulatedMedia {
+            media: None,
+            features: vec![(name.to_string(), value.to_string())],
+        }
+    }
+
+    #[test]
+    fn color_scheme_dark_maps_to_color_scheme_simulation() {
+        let config = validate_media(&media_with_feature("prefers-color-scheme", "dark")).unwrap();
+        assert_eq!(config["colorSchemeSimulation"], "dark");
+    }
+
+    #[test]
+    fn reduced_motion_lists_supported_features() {
+        let error = validate_media(&media_with_feature("prefers-reduced-motion", "reduce"))
+            .expect_err("reduced motion is not supported");
+        assert!(error.contains("prefers-reduced-motion"));
+        assert!(error.contains("prefers-color-scheme"));
+    }
+
+    #[test]
+    fn offline_toggles_network_conditions() {
+        let (method, params) = offline(true);
+        assert_eq!(method, "emulation.setNetworkConditions");
+        assert_eq!(params["networkConditions"]["type"], "offline");
+
+        let (method, params) = offline(false);
+        assert_eq!(method, "emulation.setNetworkConditions");
+        assert!(params["networkConditions"].is_null());
+    }
+
+    async fn session_state() -> (DaemonState, crate::native::bidi::session::tests::Calls) {
         let (ff, _, calls) = fake_session().await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
@@ -432,6 +471,26 @@ mod tests {
     #[tokio::test]
     async fn viewport_routes_to_bidi_and_returns_the_chrome_shape() {
         let (mut state, calls) = session_state().await;
+        let (server, _) = StreamServer::start_without_client(
+            0,
+            "viewport-test".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .unwrap();
+        let server = Arc::new(server);
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/", server.port()))
+                .await
+                .unwrap();
+        let initial = client.next().await.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&initial).unwrap()["type"],
+            "status"
+        );
+        state.stream_server = Some(Arc::clone(&server));
+
         let result = set_viewport(
             &json!({"width": 800, "height": 600, "deviceScaleFactor": 2.0}),
             &mut state,
@@ -458,6 +517,17 @@ mod tests {
                 .viewport,
             Some((800, 600, 2.0))
         );
+        let status = tokio::time::timeout(std::time::Duration::from_secs(1), client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap();
+        let status: Value = serde_json::from_str(&status).unwrap();
+        assert_eq!(status["viewportWidth"], 800);
+        assert_eq!(status["viewportHeight"], 600);
+        server.shutdown().await;
     }
 
     #[tokio::test]

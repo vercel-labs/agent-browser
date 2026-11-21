@@ -285,6 +285,24 @@ async fn collect_storage_in_target(
     Ok(results)
 }
 
+/// Page function that collects the current origin's localStorage and sessionStorage.
+pub(crate) const ORIGIN_STORAGE_JS: &str = r#"() => {
+    const result = { origin: location.origin, localStorage: [], sessionStorage: [] };
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            result.localStorage.push({ name: key, value: localStorage.getItem(key) });
+        }
+    } catch(e) {}
+    try {
+        for (let i = 0; i < sessionStorage.length; i++) {
+            const key = sessionStorage.key(i);
+            result.sessionStorage.push({ name: key, value: sessionStorage.getItem(key) });
+        }
+    } catch(e) {}
+    return result;
+}"#;
+
 pub async fn save_state(
     client: &CdpClient,
     session_id: &str,
@@ -295,22 +313,7 @@ pub async fn save_state(
 ) -> Result<String, String> {
     let cookies = cookies::get_all_cookies(client, session_id).await?;
 
-    let origin_js = r#"(() => {
-        const result = { origin: location.origin, localStorage: [], sessionStorage: [] };
-        try {
-            for (let i = 0; i < localStorage.length; i++) {
-                const key = localStorage.key(i);
-                result.localStorage.push({ name: key, value: localStorage.getItem(key) });
-            }
-        } catch(e) {}
-        try {
-            for (let i = 0; i < sessionStorage.length; i++) {
-                const key = sessionStorage.key(i);
-                result.sessionStorage.push({ name: key, value: sessionStorage.getItem(key) });
-            }
-        } catch(e) {}
-        return result;
-    })()"#;
+    let origin_js = format!("({ORIGIN_STORAGE_JS})()");
 
     // Merge visited origins with current frame tree origins
     let mut all_origins = visited_origins.clone();
@@ -327,7 +330,7 @@ pub async fn save_state(
     let mut origins = Vec::new();
     let mut current_origin = String::new();
 
-    if let Some(storage) = eval_origin_storage(client, session_id, origin_js).await {
+    if let Some(storage) = eval_origin_storage(client, session_id, &origin_js).await {
         current_origin = storage.origin.clone();
         if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
             origins.push(storage);
@@ -339,7 +342,7 @@ pub async fn save_state(
     if !all_origins.is_empty() {
         let remaining: Vec<String> = all_origins.into_iter().collect();
         if let Ok(temp_origins) =
-            collect_storage_via_temp_target(client, &remaining, origin_js).await
+            collect_storage_via_temp_target(client, &remaining, &origin_js).await
         {
             origins.extend(temp_origins);
         }
@@ -418,6 +421,7 @@ pub(crate) fn auto_state_paths(
     Ok((candidate_path, final_path))
 }
 
+/// Validates a fully written candidate state file, then swaps it in for the last good file, rolling back on failure.
 pub(crate) fn promote_auto_state_candidate(
     candidate_path: &str,
     final_path: &Path,
@@ -705,13 +709,16 @@ pub fn state_clear(path: Option<&str>) -> Result<Value, String> {
         return Ok(json!({ "deleted": p }));
     }
 
-    let dir = get_sessions_dir();
+    clear_state_files(&get_sessions_dir())
+}
+
+fn clear_state_files(dir: &Path) -> Result<Value, String> {
     if !dir.exists() {
         return Ok(json!({ "deleted": 0 }));
     }
 
     let mut count = 0;
-    if let Ok(entries) = fs::read_dir(&dir) {
+    if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if is_state_file(&path) {
@@ -779,7 +786,7 @@ pub fn state_rename(old_path: &str, new_name: &str) -> Result<Value, String> {
     }))
 }
 
-fn encrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn encrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
     let mut hasher = Sha256::new();
     hasher.update(key_str.as_bytes());
     let key_bytes = hasher.finalize();
@@ -1011,18 +1018,14 @@ mod tests {
 
     #[test]
     fn test_state_clear_removes_transactional_backups() {
-        let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
         let dir = tempfile::tempdir().unwrap();
-        guard.set("HOME", dir.path().to_str().unwrap());
-        guard.remove("AGENT_BROWSER_NAMESPACE");
-
-        let sessions = get_sessions_dir();
+        let sessions = dir.path().join("sessions");
         fs::create_dir_all(&sessions).unwrap();
         fs::write(sessions.join("auth-test.json"), "{}").unwrap();
         fs::write(sessions.join("auth-test.json.previous"), "{}").unwrap();
         fs::write(sessions.join("auth-test.json.enc.previous"), "encrypted").unwrap();
 
-        let result = state_clear(None).unwrap();
+        let result = clear_state_files(&sessions).unwrap();
 
         assert_eq!(result["deleted"], 3);
         assert!(!sessions.join("auth-test.json").exists());

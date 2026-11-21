@@ -1,5 +1,3 @@
-//! A running Firefox: the owned process, both protocol clients and per-session state.
-
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,15 +7,16 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 
-use super::bidi::{remote_to_json, unserializable, BidiClient, Events};
+use super::client::{remote_to_json, unserializable, BidiClient, Events};
 use super::contexts::{Contexts, Removed};
 use super::emulation::{self, Settings as EmulationSettings};
-use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
-use super::permissions;
-use super::process::{
+use super::firefox::{
     check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess, NONCE_PREF,
 };
-use super::rdp::RdpClient;
+use super::firefox_devtools::RdpClient;
+use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
+use super::permissions;
+use super::types::UserPromptOpened;
 use crate::native::actions::{EmulatedMedia, PendingDialog};
 use crate::native::cdp::chrome::LaunchOptions;
 
@@ -62,7 +61,7 @@ impl DataCollectorState {
     }
 }
 
-/** One launched Firefox. Dropping it kills the process tree and deletes the profile. */
+/// One launched Firefox. Dropping it kills the process tree and deletes the profile.
 pub struct FirefoxSession {
     process: Option<FirefoxProcess>,
     pub headless: bool,
@@ -92,8 +91,9 @@ pub struct FirefoxSession {
     pub intercepting: bool,
     /// Unfinished requests mapped to their reported browsing contexts.
     pub inflight: HashMap<String, Option<String>>,
-    _dispatcher: Option<AbortOnDrop>,
+    /// Origins of pages this session navigated to, kept so state saves still cover them after the tab moves on.
     pub visited_origins: HashSet<String>,
+    _dispatcher: Option<AbortOnDrop>,
     /// Version Firefox reported when the session opened, used for HAR browser metadata.
     pub browser_version: String,
 }
@@ -279,11 +279,11 @@ impl FirefoxSession {
             permissions,
             download_dir: options.download_path.clone(),
             data_collector: DataCollectorState::Off,
-            visited_origins: HashSet::new(),
             events,
             net,
             intercepting: false,
             inflight: HashMap::new(),
+            visited_origins: HashSet::new(),
             _dispatcher: dispatcher,
             browser_version,
         };
@@ -667,6 +667,11 @@ impl FirefoxSession {
     }
 }
 
+/// True when a dialog with this owner context would block the tab `top_context`.
+pub(crate) fn dialog_blocks_tab(owner_context: Option<&str>, top_context: &str) -> bool {
+    owner_context.is_none_or(|context| context == top_context)
+}
+
 /// Whether Firefox already accepted a prompt or the daemon will automatically accept it.
 pub(crate) fn auto_handles_prompt(params: &Value, auto_dialog: bool) -> bool {
     params["handler"] == "accept"
@@ -686,15 +691,17 @@ fn apply_event(
     let p = &e["params"];
     match e["method"].as_str() {
         Some("browsingContext.userPromptOpened") if !auto_handles_prompt(p, auto_dialog) => {
-            let context = p["context"].as_str();
+            let prompt: UserPromptOpened = serde_json::from_value(p.clone()).unwrap_or_default();
             *dialog = Some(PendingDialog {
-                dialog_type: p["type"].as_str().unwrap_or("alert").to_string(),
-                message: p["message"].as_str().unwrap_or("").to_string(),
+                dialog_type: prompt.kind.unwrap_or_else(|| "alert".to_string()),
+                message: prompt.message,
                 url: String::new(),
-                default_prompt: p["defaultValue"].as_str().map(String::from),
-                session_id: context.map(String::from),
-                owner_context: context
+                default_prompt: prompt.default_value,
+                owner_context: prompt
+                    .context
+                    .as_deref()
                     .map(|context| contexts.tab_of(context).unwrap_or(context).to_string()),
+                session_id: prompt.context,
             });
         }
         Some("browsingContext.userPromptClosed")
@@ -1018,7 +1025,7 @@ pub(crate) mod tests {
     /// to the nonce read, so the real check decides the outcome.
     #[cfg(unix)]
     async fn open_fake_devtools(reply: Value) -> Result<Value, String> {
-        use super::super::rdp::tests::{get, put};
+        use super::super::firefox_devtools::tests::{get, put};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s");
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -1083,7 +1090,7 @@ pub(crate) mod tests {
         tx.send(json!({"type":"event", "method":"browsingContext.domContentLoaded", "params":{"url":"https://child-event.example/"}})).unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                crate::native::firefox::network::drain(&mut state).await;
+                crate::native::bidi::network::drain(&mut state).await;
                 if state
                     .firefox
                     .as_ref()
@@ -1108,7 +1115,7 @@ pub(crate) mod tests {
         tx.send(json!({"type":"event", "method":"browsingContext.contextDestroyed", "params":{"context":"ctx-active", "parent":null}})).unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                crate::native::firefox::network::drain(&mut state).await;
+                crate::native::bidi::network::drain(&mut state).await;
                 if state.firefox.as_ref().unwrap().contexts.active() == "survivor" {
                     break;
                 }
@@ -1130,7 +1137,7 @@ pub(crate) mod tests {
         tx.send(json!({"type":"event", "method":"browsingContext.contextCreated", "params":{"context":"third", "parent":null}})).unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                crate::native::firefox::network::drain(&mut state).await;
+                crate::native::bidi::network::drain(&mut state).await;
                 if state
                     .firefox
                     .as_ref()

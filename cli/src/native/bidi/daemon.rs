@@ -22,7 +22,7 @@ pub fn reset_page(state: &mut DaemonState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::bidi::session::tests::fake_session;
     use serde_json::json;
 
     #[tokio::test]

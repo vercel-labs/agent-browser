@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::bidi::SANDBOX;
+use super::client::SANDBOX;
 use super::daemon::session;
 use super::input::{
     key_chord_actions, key_event_actions, key_from_raw, key_text_actions, pointer_click, Origin,
@@ -14,7 +14,7 @@ use super::input::{
 use super::interact::{act_element, perform_actions, PointerAction};
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
-use crate::native::actions::{raw_key, DaemonState};
+use crate::native::actions::{raw_key, upload_files, DaemonState};
 use crate::native::element::{
     click_checkbox_js, decide_check_plan, element_check_probe_js, not_checkable_error, CheckPlan,
     CheckProbe, ELEMENT_CHECKED_JS, ELEMENT_CHECK_CONTROL_JS,
@@ -236,23 +236,6 @@ fn select_values(cmd: &Value) -> Vec<String> {
             .map(|value| vec![value.to_string()])
             .unwrap_or_default(),
     }
-}
-
-fn upload_files(cmd: &Value) -> Vec<String> {
-    cmd.get("files")
-        .and_then(Value::as_array)
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .or_else(|| {
-            cmd.get("file")
-                .and_then(Value::as_str)
-                .map(|file| vec![file.to_string()])
-        })
-        .unwrap_or_default()
 }
 
 fn absolute_files(files: &[String]) -> Vec<String> {
@@ -561,7 +544,7 @@ pub async fn upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session, fake_session_with, Calls};
+    use crate::native::bidi::session::tests::{fake_session, fake_session_with, Calls};
 
     fn state_with(ff: FirefoxSession) -> DaemonState {
         let mut state = DaemonState::new();
@@ -655,6 +638,51 @@ mod tests {
         assert!(paths[0].ends_with("fixture.txt"));
         assert!(Path::new(&files[1]).is_absolute(), "{}", files[1]);
         assert_eq!(paths[1], absolute);
+    }
+
+    #[tokio::test]
+    async fn insert_text_scripts_the_literal_text_without_key_events() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let (ff, _tx, calls) = fake_session_with(move |req| {
+            if req["method"] == "script.callFunction" {
+                log.lock().unwrap().push(req["params"].clone());
+                if req["params"]["functionDeclaration"] == FOCUSED_FRAME_CONTEXT_JS {
+                    return json!({"type": "success", "result": {"type": "null"}});
+                }
+            }
+            json!({"type": "success", "result": {"type": "string", "value": "ok"}})
+        })
+        .await;
+        let mut state = state_with(ff);
+
+        inserttext(&json!({"text": "a\n\tb"}), &mut state)
+            .await
+            .unwrap();
+        keyboard(
+            &json!({"subaction": "insertText", "text": "c\nd"}),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), ["script.callFunction"; 4]);
+        let params: Vec<_> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p["functionDeclaration"] != FOCUSED_FRAME_CONTEXT_JS)
+            .cloned()
+            .collect();
+        assert_eq!(params.len(), 2);
+        assert_eq!(
+            params[0]["arguments"][0],
+            json!({"type": "string", "value": "a\n\tb"})
+        );
+        assert_eq!(
+            params[1]["arguments"][0],
+            json!({"type": "string", "value": "c\nd"})
+        );
     }
 
     #[tokio::test]

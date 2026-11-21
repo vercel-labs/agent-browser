@@ -1,5 +1,3 @@
-//! Firefox DevTools (remote debugging) protocol client: `<len>:<json>` frames.
-
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,7 +12,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 type Pending = Arc<Mutex<HashMap<String, VecDeque<(u64, oneshot::Sender<Value>)>>>>;
 
-/** A connected DevTools protocol session; clones share the same connection. */
+/// A connected DevTools protocol session; clones share the same connection.
 #[derive(Clone)]
 pub struct RdpClient {
     writer: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,

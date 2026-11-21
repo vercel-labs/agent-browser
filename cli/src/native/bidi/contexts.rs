@@ -44,18 +44,26 @@ pub struct Contexts {
     owned_user_contexts: HashSet<String>,
 }
 
+impl Default for Contexts {
+    fn default() -> Self {
+        Self {
+            nodes: HashMap::new(),
+            active: String::new(),
+            next_tab: 1,
+            owned_user_contexts: HashSet::new(),
+        }
+    }
+}
+
 impl Contexts {
     /// Builds the registry from a full `browsingContext.getTree` reply with its first tab active.
     pub fn from_tree(tree: &Value) -> Result<Self, String> {
-        let active = tree["contexts"][0]["context"]
-            .as_str()
-            .ok_or("Firefox reported no browsing context")?
-            .to_string();
         let mut contexts = Self {
-            nodes: HashMap::new(),
-            active,
-            next_tab: 1,
-            owned_user_contexts: HashSet::new(),
+            active: tree["contexts"][0]["context"]
+                .as_str()
+                .ok_or("Firefox reported no browsing context")?
+                .to_string(),
+            ..Self::default()
         };
         contexts.sync(tree);
         Ok(contexts)

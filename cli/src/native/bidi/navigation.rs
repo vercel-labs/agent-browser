@@ -211,7 +211,7 @@ pub(super) fn neterror_message(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::bidi::session::tests::fake_session;
 
     #[test]
     fn neterror_url_becomes_chromes_message() {
@@ -332,9 +332,9 @@ mod tests {
     /// gives up, and the failure must name the load timeout rather than the client's own.
     #[tokio::test(start_paused = true)]
     async fn a_load_past_the_client_default_reports_the_load_timeout() {
-        use crate::native::firefox::session::tests::FakeReply;
+        use crate::native::bidi::session::tests::FakeReply;
         let (ff, _events, _calls) =
-            crate::native::firefox::session::tests::fake_session_with_replies(|cmd: &Value| {
+            crate::native::bidi::session::tests::fake_session_with_replies(|cmd: &Value| {
                 if cmd["method"] == "browsingContext.navigate" {
                     FakeReply::Silent
                 } else {
@@ -366,7 +366,7 @@ mod tests {
     async fn reload_and_history_report_the_url_of_the_tab() {
         let tree = json!({"contexts": [{"context": "ctx-active", "url": "https://tab.example/"}]});
         let (ff, _events, calls) =
-            crate::native::firefox::session::tests::fake_session_with_trees(vec![tree]).await;
+            crate::native::bidi::session::tests::fake_session_with_trees(vec![tree]).await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
 
