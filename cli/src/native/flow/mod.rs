@@ -1571,31 +1571,31 @@ pub fn apply_shape(body: Value, shape: &Shape) -> Value {
         return body;
     };
     let total = items.len();
-    let mut kept: Vec<Value> = items
-        .iter()
-        .filter(|item| {
-            shape.filters.iter().all(|(path, needle)| {
-                lookup(item, path)
-                    .map(|v| as_text(v).to_lowercase().contains(needle.as_str()))
-                    .unwrap_or(false)
-            })
+    let mut matched = 0usize;
+    let mut kept = Vec::new();
+    for item in items.iter().filter(|item| {
+        shape.filters.iter().all(|(path, needle)| {
+            lookup(item, path)
+                .map(|v| as_text(v).to_lowercase().contains(needle.as_str()))
+                .unwrap_or(false)
         })
-        .map(|item| {
-            if shape.fields.is_empty() {
-                return item.clone();
-            }
+    }) {
+        matched += 1;
+        // Count every match, but only clone the values the caller requested.
+        if shape.limit.is_some_and(|limit| kept.len() >= limit) {
+            continue;
+        }
+        if shape.fields.is_empty() {
+            kept.push(item.clone());
+        } else {
             let mut out = Map::new();
             for f in &shape.fields {
                 if let Some(v) = lookup(item, f) {
                     out.insert(f.clone(), v.clone());
                 }
             }
-            Value::Object(out)
-        })
-        .collect();
-    let matched = kept.len();
-    if let Some(limit) = shape.limit {
-        kept.truncate(limit);
+            kept.push(Value::Object(out));
+        }
     }
     json!({ "list": key, "total": total, "matched": matched, "items": kept })
 }
@@ -3741,6 +3741,68 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("{{keyword}}"));
+    }
+
+    #[test]
+    fn shaping_limits_output_without_losing_the_total_match_count() {
+        let body = json!([
+            { "id": 1, "owner": { "name": "first" }, "state": "ready" },
+            { "id": 2, "owner": { "name": "skip" }, "state": "pending" },
+            { "id": 3, "owner": { "name": "last" }, "state": "ready" }
+        ]);
+        for fields in [vec![], vec!["owner.name".to_string()]] {
+            for limit in [Some(0), Some(1), Some(10), None] {
+                let shape = Shape {
+                    filters: vec![("state".to_string(), "ready".to_string())],
+                    fields: fields.clone(),
+                    limit,
+                };
+                let result = apply_shape(body.clone(), &shape);
+                assert_eq!(result["total"], 3);
+                assert_eq!(result["matched"], 2);
+                let count = limit.unwrap_or(2).min(2);
+                assert_eq!(result["items"].as_array().unwrap().len(), count);
+                if count > 0 {
+                    assert_eq!(
+                        result["items"][0],
+                        if fields.is_empty() {
+                            body[0].clone()
+                        } else {
+                            json!({ "owner.name": "first" })
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_shaping_a_small_limit_from_large_results() {
+        let shape = Shape {
+            filters: vec![("state".to_string(), "ready".to_string())],
+            fields: vec!["payload".to_string()],
+            limit: Some(10),
+        };
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..5 {
+            let payload = "x".repeat(1024);
+            let body = Value::Array(
+                (0..20_000)
+                    .map(|i| json!({ "id": i, "state": if i % 2 == 0 { "ready" } else { "pending" }, "payload": payload }))
+                    .collect(),
+            );
+            let start = Instant::now();
+            let output = apply_shape(body, &shape);
+            elapsed += start.elapsed();
+            assert_eq!(output["matched"], 10_000);
+            assert_eq!(output["items"].as_array().unwrap().len(), 10);
+            std::hint::black_box(output);
+        }
+        println!(
+            "bench_shaping_a_small_limit_from_large_results: iters=5 rows=20000 limit=10 elapsed_ms={:.2}",
+            elapsed.as_secs_f64() * 1000.0
+        );
     }
 
     #[test]
