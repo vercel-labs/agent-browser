@@ -3624,7 +3624,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     };
 
     if let Some(patch) = settings_patch.as_ref() {
-        if !(launches && launch_plan.is_some()) {
+        if !needs_launch && action != "launch" && !(launches && launch_plan.is_some()) {
             match apply_settings_patch(state, patch, SettingsPass::InPlace).await {
                 Ok(outcome) => settings_outcome.absorb_in_place(outcome),
                 Err(e) => {
@@ -3638,8 +3638,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if !skip_launch {
         if needs_launch {
-            // Past the policy gates: the launch settings take effect now.
-            if let (Some(patch), Some(_)) = (launch_patch.as_ref(), launch_plan.as_ref()) {
+            if let Some(patch) = launch_patch.as_ref() {
                 match apply_settings_patch(state, patch, SettingsPass::Launch).await {
                     Ok(outcome) => settings_outcome.absorb(outcome),
                     Err(e) => {
@@ -6548,10 +6547,9 @@ impl SettingsOutcome {
         self.awaiting_engine.clear();
         let names: Vec<&str> = keys.iter().map(|key| spec(*key).name).collect();
         for change in &mut self.changes {
-            if change["effect"] == "relaunch"
-                && change["option"]
-                    .as_str()
-                    .is_some_and(|o| names.contains(&o))
+            if change["option"]
+                .as_str()
+                .is_some_and(|o| names.contains(&o))
             {
                 change["applied"] = json!(false);
             }
@@ -6802,37 +6800,50 @@ async fn apply_settings_patch(
     let touched: Vec<Key> = plan.changes.iter().map(|change| change.key).collect();
     let was = |key: Key| touched.contains(&key);
 
-    let pending = if plan.relaunch {
+    let browser_is_live = state.firefox.as_mut().is_some_and(|ff| !ff.has_exited())
+        || state
+            .browser
+            .as_mut()
+            .is_some_and(|mgr| !mgr.has_process_exited())
+        || state.webdriver_backend.is_some();
+    let will_launch = launches && (plan.relaunch || !browser_is_live);
+
+    let pending = if will_launch {
         let mut keys: Vec<Key> = plan
             .changes
             .iter()
-            .filter(|change| change.effect == Effect::Launch)
+            .filter(|change| change.effect == Effect::Launch || change.in_place)
             .map(|change| change.key)
             .collect();
         if keys.contains(&Key::ClearCaCert) {
             keys.push(Key::CaCert);
         }
-        // Values dropped because the session went external come back with it.
         keys.extend(plan.ignored.iter().map(|change| change.key));
-        Some(PendingSettings {
-            keys,
-            before: state.settings.clone(),
-            proxy_credentials: state.proxy_credentials.read().await.clone(),
-            filter: state.domain_filter.read().await.clone(),
-            ca_cert: state.effective_ca_cert.clone(),
-            attached: state.attached_target.clone(),
-            cdp_headers: state.cdp_headers.clone(),
-        })
+        if !keys.is_empty() || plan.relaunch {
+            Some(PendingSettings {
+                keys,
+                before: state.settings.clone(),
+                proxy_credentials: state.proxy_credentials.read().await.clone(),
+                filter: state.domain_filter.read().await.clone(),
+                ca_cert: state.effective_ca_cert.clone(),
+                attached: state.attached_target.clone(),
+                cdp_headers: state.cdp_headers.clone(),
+            })
+        } else {
+            None
+        }
     } else {
         None
     };
     let awaiting_engine = plan.awaiting_engine.clone();
     let (next, relaunch) = (plan.next, plan.relaunch);
 
-    if !relaunch {
+    if !will_launch {
         if let Some(ff) = state.firefox.as_mut() {
-            ff.apply_attached_settings(&next.launch_options(), &touched)
-                .await?;
+            if !ff.has_exited() {
+                ff.apply_attached_settings(&next.launch_options(), &touched)
+                    .await?;
+            }
         }
     }
 
@@ -27616,6 +27627,113 @@ mod firefox_routing_tests {
                 .unwrap()
                 .allowed_domains,
             vec!["blocked.test".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_attached_firefox_reattaches_when_in_place_settings_change() {
+        let _guard = clean_env();
+        let (bidi_url, _tx, _calls, messages) =
+            bidi::session::tests::fake_bidi_with(|v: &Value| match v["method"].as_str() {
+                Some("session.new") => json!({"capabilities": {"browserVersion": "150.0"}}),
+                Some("browsingContext.getTree") => json!({"contexts": [
+                    {"context": "ctx-1", "url": "https://a.example/", "userContext": "default"},
+                    {"context": "ctx-2", "url": "https://b.example/", "userContext": "default"},
+                ]}),
+                Some("script.callFunction") => {
+                    json!({"type": "success", "result": {"type": "number", "value": 7}})
+                }
+                Some("script.evaluate") => {
+                    json!({"type": "success", "result": {"type": "string", "value": "Reattached"}})
+                }
+                _ => json!({}),
+            })
+            .await;
+        let devtools_port = match bidi::session::tests::fake_devtools().await {
+            bidi::firefox::DevtoolsEndpoint::Tcp { port, .. } => port,
+            bidi::firefox::DevtoolsEndpoint::Unix(_) => unreachable!(),
+        };
+        let target = format!("{bidi_url}/session?devtools={devtools_port}");
+
+        let mut state = DaemonState::new();
+        state.engine = "firefox".to_string();
+        state.settings.set(Key::Engine, json!("firefox"));
+        state.settings.set(Key::Cdp, json!(target.clone()));
+        state.attached_target = Some(AttachedTarget::Firefox(target));
+        state.firefox = Some(bidi::session::tests::fake_session_dead().await);
+
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "title",
+                "settings": {
+                    "user-agent": "ReattachedAgent/1.0",
+                    "download-path": "/tmp/reattached-downloads"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(resp["data"]["title"], "Reattached");
+        assert_eq!(
+            state.settings.get(Key::UserAgent),
+            Some(&json!("ReattachedAgent/1.0"))
+        );
+        assert_eq!(
+            state.settings.get(Key::DownloadPath),
+            Some(&json!("/tmp/reattached-downloads"))
+        );
+
+        let ua_overrides: Vec<Value> = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m["method"] == "emulation.setUserAgentOverride")
+            .map(|m| m["params"].clone())
+            .collect();
+        assert_eq!(ua_overrides.len(), 2, "{ua_overrides:?}");
+        assert!(messages.lock().unwrap().iter().any(|m| {
+            m["method"] == "browser.setDownloadBehavior"
+                && m["params"]["downloadBehavior"]["destinationFolder"]
+                    == "/tmp/reattached-downloads"
+        }));
+
+        let unreachable = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            format!("ws://127.0.0.1:{port}/session?devtools={port}")
+        };
+        state.settings.set(Key::Cdp, json!(unreachable.clone()));
+        state.attached_target = Some(AttachedTarget::Firefox(unreachable));
+        state.firefox = Some(bidi::session::tests::fake_session_dead().await);
+
+        let failed = execute_command(
+            &json!({
+                "id": "2",
+                "action": "title",
+                "settings": {
+                    "user-agent": "ShouldRollback/2.0",
+                    "download-path": "/tmp/rollback-downloads"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(failed["success"], false, "{failed}");
+        let error = failed["error"].as_str().unwrap_or("");
+        assert!(
+            !error.contains("BiDi connection closed"),
+            "must try re-attaching instead of writing to dead session: {error}"
+        );
+        assert_eq!(
+            state.settings.get(Key::UserAgent),
+            Some(&json!("ReattachedAgent/1.0"))
+        );
+        assert_eq!(
+            state.settings.get(Key::DownloadPath),
+            Some(&json!("/tmp/reattached-downloads"))
         );
     }
 }
