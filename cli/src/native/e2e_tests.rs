@@ -4336,7 +4336,12 @@ async fn e2e_scroll_selector_falls_back_to_scrollable_ancestor_and_page() {
         "data:text/html,<html><body style='height:3000px'>",
         "<div id='outer' style='height:100px;overflow:auto'>",
         "<div id='inner' style='height:400px'>content</div>",
-        "</div></body></html>"
+        "</div>",
+        "<div id='reverse' style='height:100px;display:flex;flex-direction:column-reverse;overflow-y:auto'>",
+        "<div style='height:400px'>reverse content</div></div>",
+        "<div id='smooth' style='height:100px;overflow:auto;scroll-behavior:smooth'>",
+        "<div style='height:400px'>smooth content</div></div>",
+        "</body></html>"
     );
     let resp = execute_command(
         &json!({ "id": "2", "action": "navigate", "url": html }),
@@ -4398,6 +4403,92 @@ async fn e2e_scroll_selector_falls_back_to_scrollable_ancestor_and_page() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["scrolled"], false);
     assert_eq!(get_data(&resp)["y"], 0.0);
+
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "scroll", "selector": "#reverse", "y": -50 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["scrolled"], true);
+    assert_eq!(get_data(&resp)["y"], -50.0);
+    assert_eq!(get_data(&resp)["in"], "#reverse");
+    assert_evaluate(
+        &mut state,
+        "11",
+        "document.querySelector('#reverse').scrollTop",
+        json!(-50),
+    )
+    .await;
+
+    let resp = execute_command(
+        &json!({ "id": "12", "action": "scroll", "selector": "#smooth", "y": 50 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["scrolled"], true);
+    assert_eq!(get_data(&resp)["y"], 50.0);
+    assert_eq!(get_data(&resp)["in"], "#smooth");
+    assert_evaluate(
+        &mut state,
+        "13",
+        "document.querySelector('#smooth').scrollTop",
+        json!(50),
+    )
+    .await;
+
+    let body_scroll_url = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(
+            "<!doctype html><html style='height:100%;overflow:hidden'><body style='margin:0;height:100px;overflow:auto'><div style='height:1000px'></div></body></html>"
+        )
+    );
+    let resp = execute_command(
+        &json!({ "id": "14", "action": "navigate", "url": body_scroll_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "15", "action": "scroll", "selector": "body", "y": 50 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["scrolled"], true);
+    assert_eq!(get_data(&resp)["y"], 50.0);
+    assert_eq!(get_data(&resp)["in"], "body");
+    assert_evaluate(&mut state, "16", "document.body.scrollTop", json!(50)).await;
+
+    let iframe_url = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(
+            "<!doctype html><iframe id='frame' srcdoc='<!doctype html><body style=\"height:2000px\"><div style=\"height:3000px\"></div></body>'></iframe>"
+        )
+    );
+    let resp = execute_command(
+        &json!({ "id": "17", "action": "navigate", "url": iframe_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "18", "action": "frame", "selector": "#frame" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "19", "action": "scroll", "selector": "body", "y": 60 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["scrolled"], true);
+    assert_eq!(get_data(&resp)["y"], 60.0);
+    assert_eq!(get_data(&resp)["in"], "page");
+    assert_evaluate(&mut state, "20", "window.scrollY", json!(60)).await;
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

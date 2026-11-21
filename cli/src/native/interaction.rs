@@ -399,24 +399,28 @@ pub async fn scroll(
         let (object_id, effective_session_id) =
             resolve_element_object_id(client, session_id, ref_map, sel, iframe_sessions).await?;
         let js = r#"function(dx, dy) {
-            const page = document.scrollingElement;
-            const isPageElement = (el) => el === document.body || el === document.documentElement || el === page;
+            const doc = this.ownerDocument;
+            const view = doc.defaultView;
+            const page = doc.scrollingElement;
+            const isPageElement = (el) => el === page;
             const canMove = (el, axis, delta) => {
                 if (!el || isPageElement(el) || delta === 0) return false;
-                const style = getComputedStyle(el);
+                const style = view.getComputedStyle(el);
                 const overflow = axis === 'x' ? style.overflowX : style.overflowY;
                 if (overflow === 'visible' || overflow === 'clip') return false;
                 const max = axis === 'x' ? el.scrollWidth - el.clientWidth : el.scrollHeight - el.clientHeight;
                 if (max <= 0) return false;
                 const position = axis === 'x' ? el.scrollLeft : el.scrollTop;
-                const minPosition = axis === 'x' && style.direction === 'rtl' ? -max : 0;
-                const maxPosition = axis === 'x' && style.direction === 'rtl' ? 0 : max;
+                const reverseColumn = axis === 'y' && style.flexDirection === 'column-reverse';
+                const negativePosition = (axis === 'x' && style.direction === 'rtl') || reverseColumn;
+                const minPosition = negativePosition ? -max : 0;
+                const maxPosition = negativePosition ? 0 : max;
                 const next = Math.max(minPosition, Math.min(maxPosition, position + delta));
                 return next !== position;
             };
             const describe = (el) => el.id ? `#${el.id}` : el.tagName.toLowerCase();
             const targetFor = (axis, delta) => {
-                for (let el = this; el && el !== document.documentElement; el = el.parentElement) {
+                for (let el = this; el && el !== doc.documentElement; el = el.parentElement) {
                     if (canMove(el, axis, delta)) return el;
                 }
                 return page;
@@ -425,17 +429,15 @@ pub async fn scroll(
                 if (delta === 0) return { moved: 0, target: null };
                 const target = targetFor(axis, delta);
                 const before = target === page
-                    ? (axis === 'x' ? window.scrollX : window.scrollY)
+                    ? (axis === 'x' ? view.scrollX : view.scrollY)
                     : (axis === 'x' ? target.scrollLeft : target.scrollTop);
                 if (target === page) {
-                    window.scrollBy({ left: axis === 'x' ? delta : 0, top: axis === 'y' ? delta : 0, behavior: 'instant' });
-                } else if (axis === 'x') {
-                    target.scrollLeft += delta;
+                    view.scrollBy({ left: axis === 'x' ? delta : 0, top: axis === 'y' ? delta : 0, behavior: 'instant' });
                 } else {
-                    target.scrollTop += delta;
+                    target.scrollBy({ left: axis === 'x' ? delta : 0, top: axis === 'y' ? delta : 0, behavior: 'instant' });
                 }
                 const after = target === page
-                    ? (axis === 'x' ? window.scrollX : window.scrollY)
+                    ? (axis === 'x' ? view.scrollX : view.scrollY)
                     : (axis === 'x' ? target.scrollLeft : target.scrollTop);
                 return { moved: after - before, target: target === page ? 'page' : describe(target) };
             };
@@ -479,11 +481,11 @@ pub async fn scroll(
                 .unwrap_or("scroll failed: script error");
             return Err(msg.to_string());
         }
-        return result
+        result
             .get("result")
             .and_then(|r| r.get("value"))
             .cloned()
-            .ok_or_else(|| "scroll failed: missing result".to_string());
+            .ok_or_else(|| "scroll failed: missing result".to_string())
     } else {
         let js = format!(
             "(() => {{ const beforeX = window.scrollX; const beforeY = window.scrollY; window.scrollBy({{ left: {}, top: {}, behavior: 'instant' }}); return {{ x: window.scrollX - beforeX, y: window.scrollY - beforeY, in: 'page' }}; }})()",
@@ -500,11 +502,11 @@ pub async fn scroll(
                 Some(session_id),
             )
             .await?;
-        return result
+        result
             .get("result")
             .and_then(|r| r.get("value"))
             .cloned()
-            .ok_or_else(|| "scroll failed: missing result".to_string());
+            .ok_or_else(|| "scroll failed: missing result".to_string())
     }
 }
 
