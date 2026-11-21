@@ -19620,6 +19620,22 @@ async fn restore_fixture_page() -> (String, tokio::task::JoinHandle<()>) {
     (url, server)
 }
 
+/// The command the CLI sends for `args`: parsed flags, parsed command and the
+/// settings patch it carries.
+fn cli_command(id: &str, args: &[&str]) -> Value {
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let mut flags = crate::flags::parse_flags(&args);
+    if flags.restore_uses_session {
+        flags.restore = Some(flags.session.clone());
+    }
+    let mut cmd = crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+    cmd["id"] = json!(id);
+    if let Some(wire) = crate::command_settings(&flags, &cmd).to_wire() {
+        cmd["settings"] = wire;
+    }
+    cmd
+}
+
 /// What every state file saved under `restore_key` holds.
 fn saved_restore_states(restore_key: &str) -> String {
     let sessions = super::state::get_sessions_dir();
@@ -19763,23 +19779,24 @@ async fn e2e_restore_key_switch_does_not_check_the_old_browser_against_the_new_c
 #[tokio::test]
 #[ignore]
 async fn e2e_close_honors_the_restore_save_policy_it_carries() {
-    for (name, settings) in [
-        ("close-never", json!({ "restore-save": "never" })),
+    for (name, close_args) in [
+        ("close-never", vec!["--restore-save", "never", "close"]),
         (
             "close-never-same",
-            json!({ "restore-key": "close-never-same", "restore-save": "never" }),
+            vec![
+                "--restore=close-never-same",
+                "--restore-save",
+                "never",
+                "close",
+            ],
         ),
     ] {
         let (_env, _home) = isolated_restore_env();
         let (page, server) = restore_fixture_page().await;
         let mut state = DaemonState::new();
+        let restore = format!("--restore={name}");
         assert_success(
-            &execute_command(
-                &json!({ "id": "1", "action": "navigate", "url": page,
-                         "settings": { "restore-key": name } }),
-                &mut state,
-            )
-            .await,
+            &execute_command(&cli_command("1", &[&restore, "open", &page]), &mut state).await,
         );
         assert_success(
             &execute_command(
@@ -19788,13 +19805,7 @@ async fn e2e_close_honors_the_restore_save_policy_it_carries() {
             )
             .await,
         );
-        assert_success(
-            &execute_command(
-                &json!({ "id": "3", "action": "close", "settings": settings }),
-                &mut state,
-            )
-            .await,
-        );
+        assert_success(&execute_command(&cli_command("3", &close_args), &mut state).await);
         server.abort();
 
         assert!(

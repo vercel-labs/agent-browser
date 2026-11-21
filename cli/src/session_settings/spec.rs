@@ -368,7 +368,11 @@ fn read_restore_key(f: &Flags) -> Option<Requested> {
     restore_key(f).map(|k| Requested::Set(Value::from(k)))
 }
 fn read_restore_save(f: &Flags) -> Option<Requested> {
-    restore_key(f).map(|_| Requested::Set(Value::from(f.restore_save.as_deref().unwrap_or("auto"))))
+    match (restore_key(f), f.restore_save.as_deref()) {
+        (_, Some(policy)) => Some(Requested::Set(Value::from(policy))),
+        (Some(_), None) => Some(Requested::Set(Value::from("auto"))),
+        (None, None) => None,
+    }
 }
 /// Restore checks travel with a restore key; an unset check is an explicit
 /// clear so a later check does not outlive its key.

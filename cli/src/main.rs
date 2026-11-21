@@ -3243,6 +3243,41 @@ mod tests {
     }
 
     #[test]
+    fn test_restore_save_rides_the_settings_patch_without_a_restore_key() {
+        let without_key = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let mut flags = parse_flags(&args);
+            flags.restore = None;
+            flags.session_name = None;
+            let cmd = crate::commands::parse_command(&clean_args(&args), &flags).unwrap();
+            command_settings(&flags, &cmd)
+        };
+        let patch = without_key(&["--restore-save", "never", "close"]);
+        assert_eq!(
+            patch.value(session_settings::Key::RestoreKey),
+            None,
+            "{patch:?}"
+        );
+        assert_eq!(
+            patch.value(session_settings::Key::RestoreSave),
+            Some(&json!("never")),
+            "{patch:?}"
+        );
+        for check in [
+            session_settings::Key::RestoreCheckUrl,
+            session_settings::Key::RestoreCheckText,
+            session_settings::Key::RestoreCheckFn,
+        ] {
+            assert!(patch.get(check).is_none(), "{check:?}: {patch:?}");
+        }
+        let patch = without_key(&["close"]);
+        assert!(
+            patch.get(session_settings::Key::RestoreSave).is_none(),
+            "{patch:?}"
+        );
+    }
+
+    #[test]
     fn test_invalid_restore_save_is_rejected_without_a_restore_key() {
         let args: Vec<String> = ["--restore-save", "sometimes", "state", "list"]
             .iter()
