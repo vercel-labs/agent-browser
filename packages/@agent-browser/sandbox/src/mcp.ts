@@ -68,6 +68,8 @@ export async function connectAgentBrowserMcp(
   options: ConnectAgentBrowserMcpOptions = {},
 ): Promise<AgentBrowserMcpClient> {
   const encoder = new TextEncoder();
+  const encode = (message: Record<string, unknown>) =>
+    encoder.encode(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
   const writer = process.stdin.getWriter();
   const reader = process.stdout.getReader();
   const pending = new Map<number, Pending>();
@@ -82,7 +84,17 @@ export async function connectAgentBrowserMcp(
   const reading = (async () => {
     for await (const line of readLines(reader)) {
       const message = parseMessage(line);
-      if (message === undefined || typeof message.id !== "number") continue;
+      if (message === undefined) continue;
+      if (typeof message.method === "string") {
+        if (message.jsonrpc === "2.0" && (typeof message.id === "string" || typeof message.id === "number")) {
+          const response = message.method === "ping"
+            ? { id: message.id, result: {} }
+            : { id: message.id, error: { code: -32601, message: "Method not found" } };
+          writer.write(encode(response)).catch((error: unknown) => failAll(toError(error)));
+        }
+        continue;
+      }
+      if (typeof message.id !== "number") continue;
       const entry = pending.get(message.id);
       if (entry === undefined) continue;
       if (message.error !== undefined) entry.reject(new AgentBrowserMcpError(message.error));
@@ -91,9 +103,6 @@ export async function connectAgentBrowserMcp(
     failAll(new Error("agent-browser mcp closed its output."));
   })();
   reading.catch((error: unknown) => failAll(toError(error)));
-
-  const encode = (message: Record<string, unknown>) =>
-    encoder.encode(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 
   function request<T>(
     method: string,
@@ -221,6 +230,8 @@ async function* readLines(reader: ReadableStreamDefaultReader<Uint8Array>): Asyn
 interface JsonRpcMessage {
   readonly error?: { readonly code: number; readonly message: string; readonly data?: unknown };
   readonly id?: unknown;
+  readonly jsonrpc?: unknown;
+  readonly method?: unknown;
   readonly result?: unknown;
 }
 

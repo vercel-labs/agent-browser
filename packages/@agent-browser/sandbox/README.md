@@ -51,6 +51,8 @@ await sandbox.stop();
 
 `timeout` applies to each request and has no default. For another runtime, pass a process with `stdin` and `stdout` streams to `connectAgentBrowserMcp` from `@agent-browser/sandbox`.
 
+The client answers server `ping` requests and returns a method-not-found error for unsupported server requests. Server request IDs are independent of client request IDs.
+
 ## MCP tool catalog
 
 `@agent-browser/sandbox/mcp-tools.json` lists every `agent-browser mcp` tool with its title, description, input schema, annotations, and startup profiles, generated from the CLI of the same version. Use it to build tools for runtimes that cannot run `tools/list`, and call them with `agent-browser mcp call <tool> '<json>'`. Run `pnpm mcp-tools:sync` after changing MCP tools; a Rust test fails while the file is out of date.
