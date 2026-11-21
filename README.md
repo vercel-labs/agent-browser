@@ -97,6 +97,8 @@ Run `agent-browser --help` for the full list, or `agent-browser <command> --help
 | Observe | `stream`, `dashboard` | [Streaming](https://agent-browser.dev/streaming), [Dashboard](https://agent-browser.dev/dashboard) |
 | Setup | `install`, `upgrade`, `doctor`, `connect`, `close` | [Installation](https://agent-browser.dev/installation) |
 
+`get attr` prints the attribute value. A missing attribute prints `null`. An empty attribute prints a blank line. `--json` reports `"value": null` or `"value": ""`.
+
 Flags, environment variables, and `agent-browser.json` are documented in [Configuration](https://agent-browser.dev/configuration).
 
 ## Platforms
