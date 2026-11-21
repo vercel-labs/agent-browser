@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agent-browser": {
+      "command": "node",
+      "args": [
+        "C:/Users/HP/engineering/agent-browser/bin/agent-browser.js",
+        "mcp"
+      ]
+    }
+  }
+}
