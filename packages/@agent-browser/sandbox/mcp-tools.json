@@ -350,14 +350,8 @@
             "type": "boolean"
           },
           "modifiers": {
-            "description": "Modifier keys held during the click.",
+            "description": "Modifier keys held during the click: alt, control, meta, shift. Aliases ctrl, cmd and command, any case, and lists such as ctrl+shift are accepted.",
             "items": {
-              "enum": [
-                "alt",
-                "control",
-                "meta",
-                "shift"
-              ],
               "type": "string"
             },
             "minItems": 1,
@@ -797,14 +791,8 @@
             "type": "boolean"
           },
           "modifiers": {
-            "description": "Modifier keys held during the click.",
+            "description": "Modifier keys held during the click: alt, control, meta, shift. Aliases ctrl, cmd and command, any case, and lists such as ctrl+shift are accepted.",
             "items": {
-              "enum": [
-                "alt",
-                "control",
-                "meta",
-                "shift"
-              ],
               "type": "string"
             },
             "minItems": 1,
@@ -990,7 +978,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Diff current snapshot against last or baseline.",
+      "description": "Diff current snapshot against the last snapshot or a baseline file. Without a baseline the last snapshot's options are reused; an option that differs fails with baseline_mismatch, and no earlier snapshot fails with no_baseline. A missing baseline file fails with file_not_found; a relative baseline path resolves against the working directory of the caller.",
       "inputSchema": {
         "properties": {
           "baseline": {
@@ -1002,12 +990,18 @@
           "depth": {
             "type": "integer"
           },
+          "interactive": {
+            "type": "boolean"
+          },
           "selector": {
             "type": "string"
           },
           "session": {
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
+          },
+          "urls": {
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -1023,7 +1017,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Compare two URLs.",
+      "description": "Compare two URLs. fullPage applies to the screenshot diff and requires screenshot.",
       "inputSchema": {
         "properties": {
           "compact": {
@@ -2314,7 +2308,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Stop HAR capture.",
+      "description": "Stop HAR capture and save it. Fails with no_har_recording when no recording is active, for example after a daemon restart. A relative path resolves against the working directory of the caller.",
       "inputSchema": {
         "properties": {
           "path": {
@@ -3790,7 +3784,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref. A capture that fails, such as a selector that matches nothing, leaves the previous refs in place while the document is unchanged.",
+      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, or that a ref is from a document that is no longer loaded, take a new snapshot and use a fresh ref. A snapshot that reports the document changed while it was being captured should be taken again. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref. A capture that fails, such as a selector that matches nothing, leaves the previous refs in place while the document is unchanged.",
       "inputSchema": {
         "properties": {
           "compact": {
@@ -3824,7 +3818,7 @@
             "type": "boolean"
           },
           "selector": {
-            "description": "Scope the snapshot to a CSS selector.",
+            "description": "Scope the snapshot to every element matching a CSS selector.",
             "type": "string"
           },
           "session": {
@@ -4614,7 +4608,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Upload files through a file input.",
+      "description": "Upload files through a file input. Relative paths resolve against the working directory of the caller and `~` expands to the home directory. A missing path fails with file_not_found, a target that is not a file input with not_file_input. A directory is accepted for webkitdirectory inputs. With a browser on another machine, a path missing locally only warns.",
       "inputSchema": {
         "properties": {
           "files": {
