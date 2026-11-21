@@ -460,14 +460,21 @@ pub fn validate_state_file(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+pub struct StorageRestoreFailure {
+    pub origin: String,
+    pub reason: &'static str,
+}
+
 /// Restore cookies and per-origin storage from a state file.
 ///
-/// Storage is written through CDP DOMStorage, so no page script sees the values and Chrome only accepts the write when a frame is at the saved origin. Origins that redirect elsewhere or fail to load are skipped and returned.
+/// Write storage through CDP DOMStorage rather than page scripts. Report failed
+/// writes by origin while continuing to restore the rest of the file.
 pub async fn load_state(
     client: &CdpClient,
     session_id: &str,
     path: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<StorageRestoreFailure>, String> {
     let json_str = read_state_json(path)?;
 
     let state: StorageState =
@@ -487,11 +494,11 @@ pub async fn load_state(
         if origin.local_storage.is_empty() && origin.session_storage.is_empty() {
             continue;
         }
-        if restore_origin_storage(client, session_id, origin)
-            .await
-            .is_err()
-        {
-            skipped.push(origin.origin.clone());
+        if let Err(reason) = restore_origin_storage(client, session_id, origin).await {
+            skipped.push(StorageRestoreFailure {
+                origin: origin.origin.clone(),
+                reason,
+            });
         }
     }
 
@@ -502,20 +509,28 @@ async fn restore_origin_storage(
     client: &CdpClient,
     session_id: &str,
     origin: &OriginStorage,
-) -> Result<(), String> {
+) -> Result<(), &'static str> {
     let security_origin = url::Url::parse(&origin.origin)
         .ok()
         .map(|u| u.origin())
         .filter(|o| o.is_tuple())
         .map(|o| o.ascii_serialization())
         .unwrap_or_else(|| origin.origin.trim_end_matches('/').to_string());
-    client
+    let navigation = client
         .send_command(
             "Page.navigate",
             Some(json!({ "url": format!("{}/", security_origin) })),
             Some(session_id),
         )
-        .await?;
+        .await
+        .map_err(|_| "Could not navigate to the saved origin")?;
+    if navigation
+        .get("errorText")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return Err("Could not navigate to the saved origin");
+    }
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     let entries = origin
@@ -537,7 +552,18 @@ async fn restore_origin_storage(
                 })),
                 Some(session_id),
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                // Report the failure without forwarding browser-supplied text,
+                // which may include storage values.
+                if error.ends_with(" 'DOMStorage.setDOMStorageItem' wasn't found") {
+                    "Browser does not support CDP DOMStorage.setDOMStorageItem"
+                } else if error.contains("Frame not found for the given") {
+                    "No frame at the saved origin"
+                } else {
+                    "Could not write storage through CDP DOMStorage.setDOMStorageItem"
+                }
+            })?;
     }
     Ok(())
 }
