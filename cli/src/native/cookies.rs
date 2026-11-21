@@ -32,7 +32,7 @@ pub async fn get_all_cookies(client: &CdpClient, session_id: &str) -> Result<Vec
     let cookies: Vec<Cookie> = result
         .get("cookies")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
+        .ok_or_else(|| "Browser returned incomplete cookie data".to_string())?;
 
     Ok(cookies)
 }
