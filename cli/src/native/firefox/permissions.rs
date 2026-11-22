@@ -65,6 +65,17 @@ impl Grants {
     }
 }
 
+fn collect_context_urls(urls: &mut Vec<String>, contexts: &[Value]) {
+    for context in contexts {
+        if let Some(url) = context["url"].as_str() {
+            urls.push(url.to_string());
+        }
+        if let Some(children) = context["children"].as_array() {
+            collect_context_urls(urls, children);
+        }
+    }
+}
+
 /// Grants the requested permissions to the open tabs and to every origin a tab loads later.
 /// Requests are intercepted from here on, so a document request waits until its origin holds them.
 pub async fn grant(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -82,22 +93,16 @@ pub async fn grant(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         return Ok(json!({ "granted": names }));
     }
     let ff = session(state)?;
-    let tree = ff
-        .bidi
-        .send("browsingContext.getTree", json!({ "maxDepth": 0 }))
-        .await?;
-    let urls: Vec<String> = tree["contexts"]
-        .as_array()
-        .map(|contexts| {
-            contexts
-                .iter()
-                .filter_map(|context| context["url"].as_str())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
+
     super::network::ensure_intercept(ff).await?;
     let mut grants = ff.permissions.lock().await;
+
+    let tree = ff.bidi.send("browsingContext.getTree", json!({})).await?;
+    let mut urls = Vec::new();
+    if let Some(contexts) = tree["contexts"].as_array() {
+        collect_context_urls(&mut urls, contexts);
+    }
+
     grants.grant(&ff.bidi, &names, &urls).await?;
     Ok(json!({ "granted": names }))
 }
@@ -185,11 +190,61 @@ mod tests {
         assert_eq!(
             calls.lock().unwrap().clone(),
             vec![
-                "browsingContext.getTree",
                 "network.addIntercept",
+                "browsingContext.getTree",
                 "permissions.setPermission"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn nested_iframe_origins_are_granted_recursively() {
+        let sent: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+        let log = sent.clone();
+        let (ff, _, calls) = fake_session_with_replies(move |v: &Value| {
+            log.lock().unwrap().push(v.clone());
+            if v["method"] == "browsingContext.getTree" {
+                assert_eq!(v["params"], json!({}));
+                return FakeReply::Result(json!({"contexts": [{
+                    "context": "ctx-top",
+                    "url": "https://top.example/page",
+                    "children": [{
+                        "context": "ctx-frame",
+                        "url": "about:blank",
+                        "children": [{"context":"ctx-nested", "url":"https://nested.example/inner"}]
+                    }]
+                }, {"context":"ctx-second", "url":"https://nested.example:443/duplicate"}]}));
+            }
+            FakeReply::Result(json!({}))
+        })
+        .await;
+        let mut state = state_with(ff);
+
+        grant(&json!({"permissions": ["geolocation"]}), &mut state)
+            .await
+            .unwrap();
+
+        let methods = calls.lock().unwrap().clone();
+        assert_eq!(methods[0], "network.addIntercept");
+        assert_eq!(methods[1], "browsingContext.getTree");
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|m| *m == "permissions.setPermission")
+                .count(),
+            3
+        );
+
+        let messages = sent.lock().unwrap().clone();
+        let granted: Vec<&Value> = set_permission_calls(&messages)
+            .into_iter()
+            .filter(|m| m["params"]["state"] == "granted")
+            .collect();
+        let origins: Vec<_> = granted
+            .iter()
+            .map(|m| m["params"]["origin"].as_str().unwrap())
+            .collect();
+        assert_eq!(origins, ["https://top.example", "https://nested.example"]);
     }
 
     #[tokio::test]

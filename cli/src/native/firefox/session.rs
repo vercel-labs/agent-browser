@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 
 use super::bidi::{remote_to_json, unserializable, BidiClient, Events};
 use super::contexts::{Contexts, Removed};
-use super::emulation::{self, Settings as EmulationSettings};
+use super::emulation::{self, Emulation, Settings as EmulationSettings};
 use super::interact::closed_prompt_owns_hold;
 use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
 use super::permissions;
@@ -19,7 +19,7 @@ use super::process::{
     check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess, NONCE_PREF,
 };
 use super::rdp::RdpClient;
-use crate::native::actions::{EmulatedMedia, PendingDialog};
+use crate::native::actions::PendingDialog;
 use crate::native::cdp::chrome::LaunchOptions;
 use crate::native::interaction::PendingRelease;
 
@@ -84,7 +84,7 @@ pub struct FirefoxSession {
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
     pub shadow_ids: std::collections::HashSet<i64>,
     /// Emulation applied to the active tab and replayed onto new tabs.
-    pub emulation: Arc<std::sync::RwLock<EmulationSettings>>,
+    pub emulation: Arc<Emulation>,
     /// Permissions the session granted, given to each origin as its tabs load it.
     pub permissions: Arc<tokio::sync::Mutex<permissions::Grants>>,
     /// Launch download directory, restored after `download` redirects it.
@@ -186,6 +186,7 @@ impl FirefoxSession {
         options: &LaunchOptions,
         net: NetContext,
         auto_dialog: bool,
+        emulation_settings: EmulationSettings,
     ) -> Result<Self, String> {
         let path = find_firefox(options.executable_path.as_deref())?;
         let (headless, download) = (options.headless, options.download_path.clone());
@@ -249,17 +250,7 @@ impl FirefoxSession {
             .await?;
 
         let tree = bidi.send("browsingContext.getTree", json!({})).await?;
-        let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
-            viewport: options
-                .viewport_size
-                .map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
-            user_agent: options.user_agent.clone(),
-            media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
-                media: None,
-                features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
-            }),
-            ..EmulationSettings::default()
-        }));
+        let emulation = Arc::new(Emulation::new(emulation_settings));
         let permissions = Arc::new(tokio::sync::Mutex::new(permissions::Grants::default()));
         let dispatcher = Some(super::network::spawn_dispatcher(
             bidi.clone(),
@@ -296,6 +287,9 @@ impl FirefoxSession {
         };
         if let Some(contexts) = tree["contexts"].as_array() {
             session.record_context_origins(contexts);
+        }
+        if session.net.needs_request_intercept().await {
+            super::network::ensure_intercept(&mut session).await?;
         }
         emulation::apply_to_context(&session, session.contexts.active()).await?;
         Ok(session)
@@ -479,6 +473,7 @@ impl FirefoxSession {
 
     fn forget(&mut self, removed: Removed, dialog: &mut Option<PendingDialog>) -> bool {
         let gone = &removed.contexts;
+        self.emulation.forget_viewports(gone);
         let stale_ids: HashSet<i64> = self
             .refs
             .iter()

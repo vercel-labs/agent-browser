@@ -20562,7 +20562,7 @@ async fn e2e_firefox_networkidle_is_scoped_to_the_active_tab() {
     let pending = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut buf = [0; 4096];
-        stream.read(&mut buf).await.unwrap();
+        assert!(stream.read(&mut buf).await.unwrap() > 0);
         let _ = started.send(());
         while stream.read(&mut buf).await.unwrap_or(0) != 0 {}
     });
@@ -21573,6 +21573,179 @@ async fn e2e_firefox_permissions_follow_navigation() {
         Some(false),
         "{unsupported}"
     );
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_permissions_cover_a_loaded_cross_origin_frame() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    let frame_url = format!("{}/frame.html", fixture.other);
+    let load_frame = format!(
+        r#"new Promise(resolve => {{
+        const iframe = document.createElement('iframe');
+        iframe.id = 'permission-frame';
+        iframe.allow = 'geolocation';
+        iframe.src = {frame_url:?};
+        iframe.addEventListener('load', () => resolve(true), {{ once: true }});
+        document.body.append(iframe);
+    }})"#
+    );
+    assert_eq!(firefox_eval(&mut state, &load_frame).await, json!(true));
+    assert_success(&firefox_act(&mut state, "frame", "#permission-frame", json!({})).await);
+    assert_eq!(
+        firefox_eval(&mut state, "location.origin").await,
+        json!(fixture.other)
+    );
+    let query = "navigator.permissions.query({name:'geolocation'}).then(p => p.state)";
+    assert_eq!(firefox_eval(&mut state, query).await, json!("prompt"));
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({
+                "id": "grant", "action": "permissions", "permissions": ["geolocation"],
+            }),
+        )
+        .await,
+    );
+    assert_eq!(firefox_eval(&mut state, query).await, json!("granted"));
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_relaunch_keeps_session_setup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({"userAgent":"initial agent"})).await;
+    for command in [
+        json!({"id":"viewport", "action":"viewport", "width":800, "height":600, "deviceScaleFactor":1.5}),
+        json!({"id":"ua", "action":"useragent", "userAgent":"runtime agent"}),
+        json!({"id":"timezone", "action":"timezone", "timezoneId":"Asia/Tokyo"}),
+        json!({"id":"locale", "action":"locale", "locale":"fr-FR"}),
+        json!({"id":"media", "action":"set_media", "colorScheme":"dark"}),
+        json!({"id":"offline", "action":"offline", "offline":true}),
+        json!({"id":"headers", "action":"headers", "headers":{"X-Global":"example"}}),
+    ] {
+        assert_success(&firefox_command(&mut state, command).await);
+    }
+
+    let forced = json!({"id":"relaunch", "action":"evaluate", "script":"true", "settings":{"relaunch":true}});
+    let previous = state.firefox.as_ref().unwrap().bidi.clone();
+    assert_success(&firefox_command(&mut state, forced.clone()).await);
+    assert!(!Arc::ptr_eq(
+        &previous,
+        &state.firefox.as_ref().unwrap().bidi
+    ));
+    assert_eq!(firefox_eval(&mut state, "[innerWidth, innerHeight, devicePixelRatio, navigator.userAgent, Intl.DateTimeFormat().resolvedOptions().timeZone, Intl.NumberFormat().resolvedOptions().locale, matchMedia('(prefers-color-scheme: dark)').matches, navigator.onLine]").await,
+        json!([800, 600, 1.5, "runtime agent", "Asia/Tokyo", "fr-FR", true, false]));
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"online", "action":"offline", "offline":false}),
+        )
+        .await,
+    );
+    firefox_open(&mut state, &fixture.url).await;
+    let headers = "fetch('/echo', {cache:'no-store'}).then(r => r.json()).then(({headers}) => {const values = Object.fromEntries(Object.entries(headers).map(([k,v]) => [k.toLowerCase(),v])); return [values['x-global'] ?? null, values.authorization ?? null]})";
+    assert_eq!(
+        firefox_eval(&mut state, headers).await,
+        json!(["example", null])
+    );
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"creds", "action":"credentials", "username":"user", "password":"secret"}),
+        )
+        .await,
+    );
+    let previous = state.firefox.as_ref().unwrap().bidi.clone();
+    let implicit = firefox_command(&mut state, json!({"id":"new-flags", "action":"launch", "userAgent":"new launch agent", "colorScheme":"light"})).await;
+    assert_success(&implicit);
+    assert!(!Arc::ptr_eq(
+        &previous,
+        &state.firefox.as_ref().unwrap().bidi
+    ));
+    firefox_open(&mut state, &fixture.url).await;
+    assert_eq!(
+        firefox_eval(&mut state, headers).await,
+        json!([null, "Basic dXNlcjpzZWNyZXQ="])
+    );
+    assert_eq!(firefox_eval(&mut state, "[innerWidth, navigator.userAgent, matchMedia('(prefers-color-scheme: light)').matches, navigator.onLine]").await, json!([800, "new launch agent", true, true]));
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"clear", "action":"headers", "headers":{}}),
+        )
+        .await,
+    );
+    let previous = state.firefox.as_ref().unwrap().bidi.clone();
+    assert_success(&firefox_command(&mut state, forced).await);
+    assert!(!Arc::ptr_eq(
+        &previous,
+        &state.firefox.as_ref().unwrap().bidi
+    ));
+    firefox_open(&mut state, &fixture.url).await;
+    assert_eq!(firefox_eval(&mut state, headers).await, json!([null, null]));
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_window_viewport_stays_local() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({
+                "id":"baseline", "action":"viewport", "width":800, "height":600,
+            }),
+        )
+        .await,
+    );
+    let window = firefox_command(
+        &mut state,
+        json!({
+            "id":"window", "action":"window_new", "viewport":{"width":1000, "height":700},
+        }),
+    )
+    .await;
+    assert_success(&window);
+    let window_id = get_data(&window)["tabId"].as_str().unwrap();
+    let viewport = "[innerWidth, innerHeight]";
+    assert_eq!(firefox_eval(&mut state, viewport).await, json!([1000, 700]));
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"original", "action":"tab_switch", "tabId":"t1"}),
+        )
+        .await,
+    );
+    assert_eq!(firefox_eval(&mut state, viewport).await, json!([800, 600]));
+    assert_success(&firefox_command(&mut state, json!({"id":"new-tab", "action":"tab_new"})).await);
+    assert_eq!(firefox_eval(&mut state, viewport).await, json!([800, 600]));
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"back-to-window", "action":"tab_switch", "tabId":window_id}),
+        )
+        .await,
+    );
+    assert_eq!(firefox_eval(&mut state, viewport).await, json!([1000, 700]));
     firefox_close(&mut state).await;
 }
 

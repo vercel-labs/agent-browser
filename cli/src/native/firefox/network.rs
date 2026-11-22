@@ -150,14 +150,23 @@ pub struct NetContext {
 
 impl NetContext {
     /// Shares the daemon's routes, domain filter, origin headers and proxy credentials.
-    pub fn from_state(state: &DaemonState) -> Self {
+    pub fn from_state(state: &DaemonState, headers: HashMap<String, String>) -> Self {
         Self {
             routes: state.routes.clone(),
             domain_filter: state.domain_filter.clone(),
             origin_headers: state.origin_headers.clone(),
             proxy_credentials: state.proxy_credentials.clone(),
+            headers: Arc::new(RwLock::new(headers)),
             ..Self::default()
         }
+    }
+
+    pub(super) async fn needs_request_intercept(&self) -> bool {
+        self.domain_filter.read().await.is_some()
+            || self.proxy_credentials.read().await.is_some()
+            || !self.routes.read().await.is_empty()
+            || !self.origin_headers.read().await.is_empty()
+            || !self.headers.read().await.is_empty()
     }
 }
 
@@ -301,7 +310,7 @@ pub fn spawn_dispatcher(
     bidi: Arc<BidiClient>,
     net: NetContext,
     mut events: DispatchEvents,
-    emulation: Arc<std::sync::RwLock<super::emulation::Settings>>,
+    emulation: Arc<super::emulation::Emulation>,
     permissions: Arc<Mutex<super::permissions::Grants>>,
 ) -> AbortOnDrop {
     AbortOnDrop(tokio::spawn(async move {
@@ -331,10 +340,9 @@ pub fn spawn_dispatcher(
             };
             if e["method"] == "browsingContext.contextCreated" && e["params"]["parent"].is_null() {
                 if let Some(context) = e["params"]["context"].as_str() {
-                    let settings = emulation.read().unwrap().clone();
                     let jar = e["params"]["userContext"].as_str().unwrap_or("default");
                     if let Err(error) =
-                        super::emulation::apply_overrides(&bidi, &settings, context, jar).await
+                        super::emulation::apply_overrides(&bidi, &emulation, context, jar).await
                     {
                         eprintln!(
                             "Warning: failed to apply Firefox emulation to {context}: {error}"
@@ -875,10 +883,11 @@ async fn set_headers(
 ) -> Result<Value, String> {
     let ff = session(state)?;
     let any = !headers.is_empty();
-    *ff.net.headers.write().await = headers;
     if any {
         ensure_intercept(ff).await?;
     }
+    *ff.net.headers.write().await = headers.clone();
+    state.session_setup.extra_headers = any.then_some(headers);
     Ok(json!({ "set": true }))
 }
 
@@ -1689,7 +1698,7 @@ mod tests {
     async fn dispatcher_resolves_each_blocked_request_once() {
         let (mut ff, tx, calls) = fake_session().await;
         ff.contexts.record(&json!({"context": "popup"}));
-        ff.emulation.write().unwrap().user_agent = Some("Popup Agent".to_string());
+        ff.emulation.settings.write().unwrap().user_agent = Some("Popup Agent".to_string());
         let net = NetContext::default();
         *net.domain_filter.write().await = Some(DomainFilter::new("allowed.example"));
         let _dispatcher = spawn_dispatcher(

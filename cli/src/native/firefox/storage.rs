@@ -918,15 +918,24 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].local_storage[0].name, "token");
+        assert!(ff.net.blank_contexts.read().await.is_empty());
         let requests = requests.lock().unwrap();
         let provided = requests
             .iter()
             .find(|request| request["method"] == "network.provideResponse")
             .unwrap();
         assert_eq!(provided["params"]["request"], "req-1");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request["method"] == "network.addIntercept")
+                .count(),
+            1
+        );
         assert!(requests
             .iter()
-            .any(|request| request["method"] == "network.removeIntercept"));
+            .any(|request| request["method"] == "browsingContext.close"
+                && request["params"]["context"] == "ctx-temp"));
     }
 
     #[tokio::test]

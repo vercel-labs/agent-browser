@@ -490,6 +490,7 @@ pub struct InitScriptSetup {
 /// to tell a relaunch that changes them from one that does not.
 #[derive(Debug, Default, Clone, PartialEq)]
 struct LaunchSeed {
+    owned_firefox: bool,
     user_agent: Option<String>,
     emulated_media: Option<EmulatedMedia>,
     /// The window-sizing launch arguments in effect.
@@ -555,6 +556,7 @@ impl SessionSetup {
         });
         Self {
             launch_seed: LaunchSeed {
+                owned_firefox: false,
                 user_agent: user_agent.clone(),
                 emulated_media: emulated_media.clone(),
                 window_sizing: window_sizing_args(&options.args),
@@ -563,6 +565,25 @@ impl SessionSetup {
             emulated_media,
             ..Self::default()
         }
+    }
+
+    fn for_owned_firefox_launch(&self, options: &LaunchOptions) -> Self {
+        let mut launch = Self::from_launch_options(options);
+        launch.launch_seed.owned_firefox = true;
+        let mut setup = if self.launch_seed.owned_firefox {
+            self.clone().carried_into_relaunch(launch)
+        } else {
+            launch
+        };
+        if let Some((width, height)) = options.viewport_size {
+            setup.viewport = Some(ViewportSetup {
+                width: width as i32,
+                height: height as i32,
+                device_scale_factor: 1.0,
+                mobile: false,
+            });
+        }
+        setup
     }
 
     /// The setup for a relaunched browser: what was set at runtime, with the
@@ -5217,11 +5238,6 @@ async fn launch_browser_from_settings(
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
     state.plugin_init_scripts.clear();
 
-    // Use the stream server's viewport dimensions for --window-size so the
-    // content area matches the desired viewport from the start.
-    if let Some(ref server) = state.stream_server {
-        options.viewport_size = Some(server.viewport().await);
-    }
     let engine = state.settings.engine();
     let connection = state.settings.connection();
     let cdp = match &connection {
@@ -5243,6 +5259,9 @@ async fn launch_browser_from_settings(
     let contained = state.domain_filter.read().await.is_some();
     if engine.as_deref() == Some("firefox") {
         return Box::pin(launch_firefox(state, options, &plugins, strict_state)).await;
+    }
+    if let Some(ref server) = state.stream_server {
+        options.viewport_size = Some(server.viewport().await);
     }
     options.restrict_webrtc = contained;
     // Extract storage_state before options is moved into BrowserManager::launch.
@@ -6230,16 +6249,14 @@ async fn launch_firefox(
     let storage_state = options.storage_state.clone();
     state.ref_map.invalidate_all_documents();
     state.reset_input_state();
-    let net = firefox::network::NetContext::from_state(state);
-    let mut session =
-        firefox::session::FirefoxSession::launch(&options, net, state.auto_dialog).await?;
-    if contained
-        || state.proxy_credentials.read().await.is_some()
-        || !state.routes.read().await.is_empty()
-        || !state.origin_headers.read().await.is_empty()
-    {
-        firefox::network::ensure_intercept(&mut session).await?;
-    }
+    let setup = state.session_setup.for_owned_firefox_launch(&options);
+    let net = firefox::network::NetContext::from_state(
+        state,
+        setup.extra_headers.clone().unwrap_or_default(),
+    );
+    let session =
+        firefox::session::FirefoxSession::launch(&options, net, state.auto_dialog, (&setup).into())
+            .await?;
     state.engine = "firefox".to_string();
     write_engine_file(&state.session_id, &state.engine);
     state.launch_identity = Some(state.settings.launch_identity());
@@ -6247,6 +6264,7 @@ async fn launch_firefox(
     state.start_dialog_handler();
     try_auto_restore_state(state).await;
     load_storage_state_for_launch(state, &storage_state, strict_state).await?;
+    state.session_setup = setup;
     Ok(json!({}))
 }
 
@@ -18996,6 +19014,52 @@ mod tests {
         state.session_setup.timezone = Some("Asia/Tokyo".to_string());
         state.touch_sessions.insert("S-OLD".to_string());
         (env, state)
+    }
+
+    #[tokio::test]
+    async fn firefox_relaunch_preserves_runtime_setup_unless_launch_defaults_change() {
+        let (_env, mut state) = seeded_state();
+        let previous = LaunchOptions {
+            user_agent: Some("launch agent".into()),
+            color_scheme: Some("light".into()),
+            ..LaunchOptions::default()
+        };
+        state.session_setup = SessionSetup::default().for_owned_firefox_launch(&previous);
+        state.session_setup.user_agent = Some("runtime agent".into());
+        state.session_setup.emulated_media = Some(EmulatedMedia {
+            media: Some("print".into()),
+            features: vec![],
+        });
+        state.session_setup.timezone = Some("Asia/Tokyo".into());
+        state.session_setup.viewport = Some(viewport(800, 600, false));
+        let unchanged = state.session_setup.for_owned_firefox_launch(&previous);
+        assert_eq!(unchanged.user_agent.as_deref(), Some("runtime agent"));
+        assert_eq!(
+            unchanged.emulated_media.unwrap().media.as_deref(),
+            Some("print")
+        );
+
+        let changed = LaunchOptions {
+            user_agent: Some("new launch agent".into()),
+            color_scheme: Some("dark".into()),
+            executable_path: Some("/nonexistent/agent-browser-firefox".into()),
+            ..previous
+        };
+        let staged = state.session_setup.for_owned_firefox_launch(&changed);
+        assert_eq!(staged.user_agent.as_deref(), Some("new launch agent"));
+        assert_eq!(
+            staged.emulated_media.unwrap().features,
+            vec![("prefers-color-scheme".into(), "dark".into())]
+        );
+        assert_eq!(staged.timezone.as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(staged.viewport, Some(viewport(800, 600, false)));
+
+        let before = format!("{:?}", state.session_setup);
+        let error = launch_firefox(&mut state, changed, &[], false)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+        assert_eq!(format!("{:?}", state.session_setup), before);
     }
 
     #[tokio::test]

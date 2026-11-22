@@ -18,7 +18,7 @@ mod spec;
 mod store;
 
 pub use patch::{effective_targets, Patch, Requested};
-pub use proxy::parse_proxy;
+pub use proxy::{parse_proxy, ParsedProxy};
 #[cfg(test)]
 pub use running::resolve_idle_timeout;
 pub use running::SecurityView;

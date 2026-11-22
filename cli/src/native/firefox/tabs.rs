@@ -277,7 +277,7 @@ pub async fn window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let (context, tab_id) = created?;
     activate(state, &context).await?;
     if let Some(viewport) = cmd.get("viewport") {
-        super::emulation::set_viewport(viewport, state).await?;
+        super::emulation::set_context_viewport(viewport, state, &context).await?;
     }
     let total = tab_count(session(state)?).await?;
 

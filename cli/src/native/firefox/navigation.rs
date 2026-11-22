@@ -379,7 +379,6 @@ async fn wait_history_events(
 }
 
 /// Turns an `about:neterror?e=...&d=...` URL into the message Firefox shows for the failure.
-
 pub(super) fn neterror_message(url: &str) -> Option<String> {
     if !url.starts_with("about:neterror") {
         return None;
@@ -408,7 +407,9 @@ pub(super) fn neterror_message(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::firefox::session::tests::{
+        fake_session, fake_session_with_replies, FakeReply,
+    };
 
     #[test]
     fn neterror_url_becomes_chromes_message() {
@@ -440,7 +441,17 @@ mod tests {
     /// The allowlist is checked here for every URL a caller loads, so no caller repeats the rule.
     #[tokio::test]
     async fn a_foreign_allowlist_refuses_urls_it_does_not_allow() {
-        let (ff, _events, calls) = fake_session().await;
+        let (ff, _events, calls) = fake_session_with_replies(|request| {
+            if request["method"] == "browsingContext.traverseHistory" {
+                FakeReply::Error {
+                    error: "no such history entry",
+                    message: "no earlier document",
+                }
+            } else {
+                FakeReply::Result(json!({}))
+            }
+        })
+        .await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         *state.domain_filter.write().await =
