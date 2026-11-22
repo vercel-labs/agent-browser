@@ -244,11 +244,18 @@ async fn expand_scroll_containers(client: &CdpClient, session_id: &str) -> bool 
             var vh = window.innerHeight;
             if (!root || !vh || root.scrollHeight > vh + 1) return false;
             var scrollers = [];
+            // Growing a container reflows the page, which can clamp the scroll
+            // offset of any element, so every offset is recorded, not only
+            // those of the containers that grow.
+            var scrolled = [];
             var walk = function (node) {{
                 var els = node.querySelectorAll('*');
                 for (var i = 0; i < els.length; i++) {{
                     var el = els[i];
                     if (el.shadowRoot) walk(el.shadowRoot);
+                    if (el.scrollTop || el.scrollLeft) {{
+                        scrolled.push([el, el.scrollTop, el.scrollLeft]);
+                    }}
                     if (el === document.documentElement || el === document.body) continue;
                     if (el.clientHeight < vh / 2 || el.scrollHeight <= el.clientHeight + 1) continue;
                     var oy = getComputedStyle(el).overflowY;
@@ -264,8 +271,6 @@ async fn expand_scroll_containers(client: &CdpClient, session_id: &str) -> bool 
                     var cs = getComputedStyle(el);
                     state = {{
                         style: el.getAttribute('style'),
-                        top: el.scrollTop,
-                        left: el.scrollLeft,
                         height: cs.boxSizing === 'border-box' ? el.offsetHeight : parseFloat(cs.height) || 0,
                         extra: 0,
                         clips: cs.overflowX !== 'visible' || cs.overflowY !== 'visible',
@@ -321,10 +326,10 @@ async fn expand_scroll_containers(client: &CdpClient, session_id: &str) -> bool 
                     el.style.cssText = state.style;
                     el.setAttribute('style', state.style);
                 }});
-                saved.forEach(function (state, el) {{
-                    el.scrollTop = state.top;
-                    el.scrollLeft = state.left;
-                }});
+                for (var i = 0; i < scrolled.length; i++) {{
+                    scrolled[i][0].scrollTop = scrolled[i][1];
+                    scrolled[i][0].scrollLeft = scrolled[i][2];
+                }}
             }};
             return true;
         }})()"#,
