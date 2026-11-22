@@ -70,7 +70,7 @@ export default browser({
   installSystemDependencies: true, // apt/dnf Chromium libraries during auto-install
 
   // Session & runtime
-  session: undefined, // fixed session name; defaults to one derived from the sandbox id
+  session: undefined, // fixed session name; defaults to "<sessionPrefix>-default", one per sandbox
   sessionPrefix: "eve", // prefix for the derived session name
   binary: "agent-browser", // binary name or path inside the sandbox
   proxy: undefined, // proxy server URL
@@ -157,7 +157,7 @@ export default disableTool();
 
 ## How it works
 
-Each tool runs `agent-browser mcp call <tool> '<arguments>'` inside the sandbox from `ctx.getSandbox()`, using an isolated browser session named after the sandbox id, and returns the `data` payload of the CLI response. Every call is its own short-lived process, so nothing outlives the tool call; the browser and its state live in the session daemon inside the sandbox. The extension sets `session`, `allowedDomains`, and the CA options from its config and hides them from the model. If the sandbox runs a different agent-browser minor version than this package, tools fail with an install hint instead of sending arguments the CLI may not accept.
+Each tool runs `agent-browser mcp call <tool> '<arguments>'` inside the sandbox from `ctx.getSandbox()`, using the browser session from the `session` option, which defaults to `<sessionPrefix>-default` (`eve-default` out of the box), and returns the `data` payload of the CLI response. Every call is its own short-lived process, so nothing outlives the tool call; the browser and its state live in the session daemon inside the sandbox. The extension sets `session`, `allowedDomains`, and the CA options from its config and hides them from the model. If the sandbox runs a different agent-browser minor version than this package, tools fail with an install hint instead of sending arguments the CLI may not accept.
 
 ## Example
 

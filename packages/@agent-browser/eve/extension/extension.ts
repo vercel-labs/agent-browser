@@ -27,7 +27,7 @@ export default defineExtension({
     maxOutputChars: z.number().int().positive().optional(),
     /** Proxy server URL used by the browser. */
     proxy: z.string().optional(),
-    /** Fixed agent-browser session name. Defaults to one derived from the eve sandbox id. */
+    /** Fixed agent-browser session name. Defaults to `<sessionPrefix>-default`, one session per sandbox. */
     session: z.string().optional(),
     /** Prefix for the derived per-sandbox session name. */
     sessionPrefix: z.string().default("eve"),
