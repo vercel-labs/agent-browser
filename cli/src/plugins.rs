@@ -268,6 +268,14 @@ async fn invoke_plugin_process(
                 .unwrap_or("plugin returned success=false");
             return Err(format!("Plugin '{}' failed: {}", plugin.name, error));
         }
+        if let Some(user_message) = response
+            .get("userMessage")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Err(format!("Plugin '{}' failed: {}", plugin.name, user_message));
+        }
         return Err(format!("Plugin '{}' returned success=false", plugin.name));
     }
 
@@ -1208,6 +1216,85 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":false,"error":"secr
         let plugins = vec![PluginConfig {
             name: "mock".to_string(),
             command: plugin_path.to_string_lossy().to_string(),
+            capabilities: vec![CAPABILITY_CREDENTIAL_READ.to_string()],
+            ..PluginConfig::default()
+        }];
+
+        let err = resolve_credential_with_plugins(
+            "mock",
+            &plugins,
+            CredentialResolveRequest {
+                profile_name: "example",
+                item_ref: Some("Example"),
+                url: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("success=false"));
+        assert!(!err.contains("secret-token-value"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn credential_plugin_user_message_is_shown_on_core_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("mock-user-message-credential-plugin");
+        std::fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":false,"error":"secret-token-value","userMessage":"the vault is locked"}'
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let plugins = vec![PluginConfig {
+            name: "mock".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            capabilities: vec![CAPABILITY_CREDENTIAL_READ.to_string()],
+            ..PluginConfig::default()
+        }];
+
+        let err = resolve_credential_with_plugins(
+            "mock",
+            &plugins,
+            CredentialResolveRequest {
+                profile_name: "example",
+                item_ref: Some("Example"),
+                url: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("the vault is locked"));
+        assert!(!err.contains("secret-token-value"));
+        assert!(!err.contains("success=false"));
+
+        // A blank userMessage falls back to the generic redacted message.
+        let blank_path = dir.path().join("mock-blank-user-message-plugin");
+        std::fs::write(
+            &blank_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":false,"error":"secret-token-value","userMessage":"   "}'
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&blank_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&blank_path, perms).unwrap();
+
+        let plugins = vec![PluginConfig {
+            name: "mock".to_string(),
+            command: blank_path.to_string_lossy().to_string(),
             capabilities: vec![CAPABILITY_CREDENTIAL_READ.to_string()],
             ..PluginConfig::default()
         }];
