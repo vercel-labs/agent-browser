@@ -24,8 +24,6 @@ export function useDashboardConfigSync() {
       .then((config: DashboardConfig | null) => {
         if (config) setConfig(config);
       })
-      .catch(() => {
-        // Without a config the UI hides chat and creates Chrome sessions.
-      });
+      .catch(() => {});
   }, [setConfig]);
 }

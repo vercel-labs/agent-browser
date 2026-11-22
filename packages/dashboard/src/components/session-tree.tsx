@@ -391,13 +391,13 @@ export function SessionTree() {
 
   const handleCreateSubmit = useCallback(async () => {
     const name = newSessionName.trim();
-    if (!name || creating) return;
+    if (!name || !selectedBrowser || creating) return;
     setCreating(true);
     setCreateError("");
     const error = await dispatchCreateSession({
       name,
-      engine: selectedBrowser?.engine ?? "chrome",
-      provider: selectedBrowser?.provider,
+      engine: selectedBrowser.engine ?? "chrome",
+      provider: selectedBrowser.provider,
     });
     setCreating(false);
     if (error) {
@@ -544,7 +544,7 @@ export function SessionTree() {
             <Button
               size="sm"
               onClick={handleCreateSubmit}
-              disabled={!newSessionName.trim() || creating}
+              disabled={!newSessionName.trim() || !selectedBrowser || creating}
             >
               {creating && <Loader2 className="size-3 animate-spin" />}
               {creating ? "Creating..." : "Create"}
