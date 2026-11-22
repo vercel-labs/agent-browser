@@ -558,16 +558,21 @@ pub async fn load_state(
     Ok(skipped)
 }
 
+/// Returns the serialized tuple origin for a saved origin, or `None` when it has none.
+pub(crate) fn canonical_origin(origin: &str) -> Option<String> {
+    url::Url::parse(origin)
+        .ok()
+        .map(|u| u.origin())
+        .filter(|o| o.is_tuple())
+        .map(|o| o.ascii_serialization())
+}
+
 async fn restore_origin_storage(
     client: &CdpClient,
     session_id: &str,
     origin: &OriginStorage,
 ) -> Result<(), String> {
-    let security_origin = url::Url::parse(&origin.origin)
-        .ok()
-        .map(|u| u.origin())
-        .filter(|o| o.is_tuple())
-        .map(|o| o.ascii_serialization())
+    let security_origin = canonical_origin(&origin.origin)
         .unwrap_or_else(|| origin.origin.trim_end_matches('/').to_string());
     client
         .send_command(
@@ -1119,6 +1124,29 @@ mod tests {
     fn test_dispatch_state_command_returns_none_for_unknown() {
         let cmd = serde_json::json!({ "action": "navigate" });
         assert!(dispatch_state_command(&cmd).is_none());
+    }
+
+    #[test]
+    fn canonical_origin_normalizes_saved_origins() {
+        assert_eq!(
+            canonical_origin("https://Example.COM:443/app/").as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            canonical_origin("http://example.com:80").as_deref(),
+            Some("http://example.com")
+        );
+        assert_eq!(
+            canonical_origin("https://example.com/").as_deref(),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn canonical_origin_rejects_non_tuple_origins() {
+        assert_eq!(canonical_origin("null"), None);
+        assert_eq!(canonical_origin("file:///tmp/page/"), None);
+        assert_eq!(canonical_origin("not a url/"), None);
     }
 
     #[test]

@@ -1385,8 +1385,10 @@ impl DaemonState {
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
         self.drain_firefox_events();
         if let Some(ff) = self.firefox.as_mut() {
+            let reconciled = ff.reconcile_event_loss(&mut self.pending_dialog).await?;
+            let recovered = ff.recover_active_context().await?;
             ff.release_unused_user_contexts().await;
-            if ff.recover_active_context().await? {
+            if reconciled || recovered {
                 firefox::daemon::reset_page(self);
             }
         }

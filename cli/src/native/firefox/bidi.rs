@@ -3,16 +3,95 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+const BUFFERED_EVENT_CAPACITY: usize = 65_536;
+const BUFFERED_EVENT_BYTES: [usize; 2] = [64 << 20, 8 << 20];
+
+pub(crate) const SANDBOX: &str = "agent-browser";
+
+#[derive(Debug)]
+pub(crate) struct BidiError {
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl From<String> for BidiError {
+    fn from(message: String) -> Self {
+        Self {
+            code: None,
+            message,
+        }
+    }
+}
+
+impl fmt::Display for BidiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.code {
+            Some(code) => write!(f, "{code}: {}", self.message),
+            None => f.write_str(&self.message),
+        }
+    }
+}
+
+type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, BidiError>>>>>;
+
+struct PendingCommand<'a> {
+    pending: &'a Pending,
+    id: u64,
+}
+
+impl Drop for PendingCommand<'_> {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
+type EventPredicate = fn(&Value) -> bool;
+
+struct Subscriber {
+    tx: mpsc::Sender<(Value, usize)>,
+    queued_bytes: Arc<[AtomicUsize; 2]>,
+    lost: Arc<AtomicBool>,
+    predicate: Option<EventPredicate>,
+}
+
+pub(crate) struct Events {
+    rx: mpsc::Receiver<(Value, usize)>,
+    queued_bytes: Arc<[AtomicUsize; 2]>,
+    lost: Arc<AtomicBool>,
+}
+
+impl Events {
+    pub(crate) async fn recv(&mut self) -> Option<Value> {
+        self.rx.recv().await.map(|queued| self.release(queued))
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Result<Value, mpsc::error::TryRecvError> {
+        self.rx.try_recv().map(|queued| self.release(queued))
+    }
+
+    pub(crate) fn has_lost_events(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    fn release(&self, (event, size): (Value, usize)) -> Value {
+        self.queued_bytes[event_class(&event)].fetch_sub(size, Ordering::Relaxed);
+        event
+    }
+}
+
+fn event_class(event: &Value) -> usize {
+    usize::from(event["method"] == "log.entryAdded")
+}
 type WsSink = futures_util::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Message,
@@ -22,7 +101,9 @@ type WsSink = futures_util::stream::SplitSink<
 pub struct BidiClient {
     sink: tokio::sync::Mutex<WsSink>,
     pending: Pending,
-    events: broadcast::Sender<Value>,
+    buffered_events: Arc<Mutex<Vec<Subscriber>>>,
+    lost_events: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
     next_id: AtomicU64,
     pub(crate) reader: tokio::task::JoinHandle<()>,
 }
@@ -46,8 +127,15 @@ impl BidiClient {
             .map_err(|e| format!("BiDi connect failed: {e}"))?;
         let (sink, mut stream) = ws.split();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let (events, _) = broadcast::channel(1024);
-        let (p, ev) = (pending.clone(), events.clone());
+        let buffered_events = Arc::new(Mutex::new(Vec::<Subscriber>::new()));
+        let lost_events = Arc::new(AtomicBool::new(false));
+        let closed = Arc::new(AtomicBool::new(false));
+        let (p, subscribers, lost, reader_closed) = (
+            pending.clone(),
+            buffered_events.clone(),
+            lost_events.clone(),
+            closed.clone(),
+        );
         let reader = tokio::spawn(async move {
             while let Some(Ok(msg)) = stream.next().await {
                 let Message::Text(text) = msg else { continue };
@@ -56,7 +144,31 @@ impl BidiClient {
                 };
                 match v["type"].as_str() {
                     Some("event") => {
-                        let _ = ev.send(v);
+                        let size = text.len();
+                        let class = event_class(&v);
+                        subscribers.lock().unwrap().retain(|subscriber| {
+                            if subscriber.tx.is_closed() {
+                                return false;
+                            }
+                            if subscriber.predicate.is_some_and(|matches| !matches(&v)) {
+                                return true;
+                            }
+                            let queued = &subscriber.queued_bytes[class];
+                            let fits = queued.fetch_add(size, Ordering::Relaxed) + size
+                                <= BUFFERED_EVENT_BYTES[class];
+                            if fits && subscriber.tx.try_send((v.clone(), size)).is_ok() {
+                                return true;
+                            }
+                            queued.fetch_sub(size, Ordering::Relaxed);
+                            if subscriber.tx.is_closed() {
+                                return false;
+                            }
+                            if class == 0 {
+                                lost.store(true, Ordering::Release);
+                                subscriber.lost.store(true, Ordering::Release);
+                            }
+                            class != 0 || subscriber.predicate.is_none()
+                        });
                     }
                     Some(kind @ ("success" | "error")) => {
                         let Some(tx) = v["id"]
@@ -68,34 +180,78 @@ impl BidiClient {
                         let _ = tx.send(if kind == "success" {
                             Ok(v["result"].clone())
                         } else {
-                            Err(format!(
-                                "{}: {}",
-                                v["error"].as_str().unwrap_or("unknown error"),
-                                v["message"].as_str().unwrap_or("")
-                            ))
+                            let code = v["error"].as_str().map(str::to_string);
+                            let message = v["message"].as_str().unwrap_or("");
+                            Err(BidiError {
+                                message: if code.is_some() {
+                                    message.to_string()
+                                } else {
+                                    format!("unknown error: {message}")
+                                },
+                                code,
+                            })
                         });
                     }
                     _ => {}
                 }
             }
+            reader_closed.store(true, Ordering::Release);
             p.lock().unwrap().clear();
+            subscribers.lock().unwrap().clear();
         });
         Ok(Self {
             sink: tokio::sync::Mutex::new(sink),
             pending,
-            events,
+            buffered_events,
+            lost_events,
+            closed,
             next_id: AtomicU64::new(1),
             reader,
         })
     }
 
-    /// Subscribes to BiDi events (`type: event` messages).
-    pub fn subscribe(&self) -> broadcast::Receiver<Value> {
-        self.events.subscribe()
+    pub fn take_event_loss(&self) -> bool {
+        self.lost_events.swap(false, Ordering::AcqRel)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn subscribe_buffered(&self) -> Events {
+        self.subscribe_events(None)
+    }
+
+    /// Subscribes to matching events. A non-log overflow closes the subscription.
+    pub(crate) fn subscribe_matching(&self, predicate: fn(&Value) -> bool) -> Events {
+        self.subscribe_events(Some(predicate))
+    }
+
+    fn subscribe_events(&self, predicate: Option<EventPredicate>) -> Events {
+        let (tx, rx) = mpsc::channel(BUFFERED_EVENT_CAPACITY);
+        let queued_bytes = Arc::<[AtomicUsize; 2]>::default();
+        let lost = Arc::new(AtomicBool::new(false));
+        let mut subscribers = self.buffered_events.lock().unwrap();
+        if !self.closed.load(Ordering::Acquire) {
+            subscribers.push(Subscriber {
+                tx,
+                queued_bytes: queued_bytes.clone(),
+                lost: lost.clone(),
+                predicate,
+            });
+        }
+        Events {
+            rx,
+            queued_bytes,
+            lost,
+        }
     }
 
     /// Sends a command with the default 30s timeout and returns its `result`.
     pub async fn send(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.send_raw(method, params)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub(crate) async fn send_raw(&self, method: &str, params: Value) -> Result<Value, BidiError> {
         self.send_with_deadline(method, params, Some(DEFAULT_TIMEOUT))
             .await
     }
@@ -107,7 +263,9 @@ impl BidiClient {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, String> {
-        self.send_with_deadline(method, params, Some(timeout)).await
+        self.send_with_deadline(method, params, Some(timeout))
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Sends a command and waits for its reply, leaving the deadline to the caller.
@@ -118,6 +276,16 @@ impl BidiClient {
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
+        self.send_without_deadline_raw(method, params)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub(crate) async fn send_without_deadline_raw(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, BidiError> {
         self.send_with_deadline(method, params, None).await
     }
 
@@ -126,32 +294,33 @@ impl BidiClient {
         method: &str,
         params: Value,
         deadline: Option<Duration>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, BidiError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
-        if self.reader.is_finished() {
-            self.pending.lock().unwrap().remove(&id);
-            return Err("BiDi connection closed".to_string());
+        let _command = PendingCommand {
+            pending: &self.pending,
+            id,
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err("BiDi connection closed".to_string().into());
         }
         let body = json!({"id": id, "method": method, "params": params}).to_string();
-        if let Err(e) = self.sink.lock().await.send(Message::Text(body)).await {
-            self.pending.lock().unwrap().remove(&id);
-            return Err(format!("BiDi send failed: {e}"));
-        }
-        let Some(deadline) = deadline else {
-            return match rx.await {
-                Ok(result) => result,
-                Err(_) => Err("BiDi connection closed".to_string()),
-            };
+        self.sink
+            .lock()
+            .await
+            .send(Message::Text(body))
+            .await
+            .map_err(|e| format!("BiDi send failed: {e}"))?;
+        let reply = async {
+            rx.await
+                .map_err(|_| BidiError::from("BiDi connection closed".to_string()))?
         };
-        match tokio::time::timeout(deadline, rx).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(_)) => Err("BiDi connection closed".to_string()),
-            Err(_) => {
-                self.pending.lock().unwrap().remove(&id);
-                Err(format!("BiDi command {method} timed out"))
-            }
+        match deadline {
+            Some(deadline) => tokio::time::timeout(deadline, reply)
+                .await
+                .map_err(|_| format!("BiDi command {method} timed out"))?,
+            None => reply.await,
         }
     }
 
@@ -308,7 +477,7 @@ mod tests {
             .unwrap();
         });
         let c = BidiClient::connect(&url).await.unwrap();
-        let mut ev = c.subscribe();
+        let mut ev = c.subscribe_buffered();
         let r = c.send("a.b", json!({})).await.unwrap();
         assert_eq!(r, json!({}));
         assert_eq!(ev.recv().await.unwrap()["method"], "x.y");
@@ -330,6 +499,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.contains("timed out"), "{e}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_sent_command_releases_its_pending_reply() {
+        let (url, listener) = mock().await;
+        let (received, confirmed) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = socket.next().await.unwrap().unwrap();
+            received.send(()).unwrap();
+            let _ = socket.next().await;
+        });
+        let client = BidiClient::connect(&url).await.unwrap();
+        let mut command = Box::pin(client.send_without_deadline_raw("test.pending", json!({})));
+        tokio::select! {
+            result = &mut command => panic!("unexpected reply: {result:?}"),
+            got = confirmed => got.unwrap(),
+        }
+        assert_eq!(client.pending.lock().unwrap().len(), 1);
+        drop(command);
+        assert!(client.pending.lock().unwrap().is_empty());
         server.abort();
     }
 
