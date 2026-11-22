@@ -1128,6 +1128,17 @@ fn handle_html_tag(raw: &str, out: &mut String, in_pre: &mut bool) {
         "p" | "div" | "section" | "article" | "main" | "header" | "footer" | "nav"
         | "blockquote" | "table" | "tr" | "ul" | "ol" => out.push_str("\n\n"),
         "li" => out.push_str("\n- "),
+        // Cells of one row are separate values: joining them would read `$10`
+        // and `1` as `$101`. A row's first cell opens the line and later ones
+        // follow a separator, whatever whitespace sits between the tags.
+        "td" | "th" if !*in_pre => {
+            while out.ends_with([' ', '\t']) {
+                out.pop();
+            }
+            if !out.rsplit('\n').next().unwrap_or("").trim().is_empty() {
+                out.push_str(" | ");
+            }
+        }
         "h1" => out.push_str("\n\n# "),
         "h2" => out.push_str("\n\n## "),
         "h3" => out.push_str("\n\n### "),
@@ -1286,6 +1297,27 @@ mod tests {
         assert!(text.contains("Home"));
         assert!(text.contains("# agent-browser"));
         assert!(text.contains("Browser automation CLI."));
+    }
+
+    #[test]
+    fn html_to_markdownish_separates_table_cells() {
+        let html = r#"<table>
+<thead><tr><th>Plan</th><th>Price</th><th>Seats</th></tr></thead>
+<tbody>
+<tr><td>Basic</td><td>$10</td><td>1</td></tr>
+<tr><td>Team</td><td>$30</td><td>5</td></tr>
+<td>Only</td>
+</tbody>
+</table>"#;
+        let text = html_to_markdownish(html);
+        assert!(text.contains("Plan | Price | Seats"), "{text}");
+        assert!(text.contains("Basic | $10 | 1"), "{text}");
+        assert!(text.contains("Team | $30 | 5"), "{text}");
+        // Adjacent cells must not fuse into one number.
+        assert!(!text.contains("$101"), "{text}");
+        // A row starts with its first cell, not with a separator.
+        assert!(!text.lines().any(|line| line.starts_with("|")), "{text}");
+        assert!(text.lines().any(|line| line.trim() == "Only"), "{text}");
     }
 
     #[test]
