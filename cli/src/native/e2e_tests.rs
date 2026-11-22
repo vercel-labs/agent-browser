@@ -17880,6 +17880,7 @@ fn firefox_serve(
 ) -> tokio::task::JoinHandle<()> {
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
+        let mut slow_requests = 0usize;
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 4096];
@@ -17944,6 +17945,30 @@ fn firefox_serve(
                         "application/json",
                         "Access-Control-Allow-Origin: *\r\n",
                         json!({ "headers": headers }).to_string(),
+                    )
+                }
+                "/history/a" | "/history/b" => (
+                    "text/html; charset=utf-8",
+                    "",
+                    include_str!("test_fixtures/firefox_history.html").to_string(),
+                ),
+                "/slow" => {
+                    slow_requests += 1;
+                    (
+                        "text/html; charset=utf-8",
+                        "Cache-Control: no-store\r\n",
+                        include_str!("test_fixtures/firefox_history.html")
+                            .replace("</head>", r#"<script src="/slow.js"></script></head>"#),
+                    )
+                }
+                "/slow.js" => {
+                    if slow_requests > 1 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+                    }
+                    (
+                        "application/javascript",
+                        "Cache-Control: no-store\r\n",
+                        String::new(),
                     )
                 }
                 "/api" => ("text/plain", "", "real".to_string()),
@@ -18279,6 +18304,102 @@ async fn firefox_act(state: &mut DaemonState, action: &str, selector: &str, extr
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
     firefox_command(state, request).await
+}
+
+/// Runs a history action and asserts it reports the expected URL.
+async fn firefox_history_step(state: &mut DaemonState, action: &str, expected: &str) {
+    let resp = firefox_command(state, json!({ "id": action, "action": action })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], expected, "{action}");
+}
+
+fn firefox_data_url(html: &str) -> String {
+    format!("data:text/html;base64,{}", STANDARD.encode(html))
+}
+
+const SCALED_FRAME_STYLE: &str =
+    "position:fixed;left:100px;top:50px;width:200px;height:200px;box-sizing:border-box;border:10px solid #333;padding:10px;transform:scale(2);transform-origin:0 0";
+const SCALED_FRAME_COVER: &str = "position:fixed;left:150px;top:100px;width:20px;height:20px";
+const REFLOW_FRAME_STYLE: &str =
+    "position:fixed;left:20px;top:20px;width:600px;height:400px;border:0";
+
+async fn firefox_ok(state: &mut DaemonState, command: Value) {
+    assert_success(&firefox_command(state, command).await);
+}
+
+async fn firefox_below_fold(state: &mut DaemonState, frame: &str) {
+    assert!(
+        firefox_eval(
+            state,
+            "document.getElementById('target').getBoundingClientRect().top > innerHeight"
+        )
+        .await
+        .as_bool()
+        .unwrap_or(false),
+        "the {frame} target must start below the fold"
+    );
+}
+
+fn firefox_frame_page(style: &str, cover: &str, child: &str) -> String {
+    r#"<!doctype html><html><head><style>html,body{margin:0}</style></head><body><iframe id='frame' src='__CHILD__' style='__STYLE__'></iframe><div id='cover' style='__COVER__'></div></body></html>"#
+        .replace("__CHILD__", &firefox_data_url(child))
+        .replace("__STYLE__", style)
+        .replace("__COVER__", cover)
+}
+
+fn firefox_reflow_page(pad: u32, label: &str) -> String {
+    const PAGE: &str = r#"<!doctype html><html><head><style>html,body{margin:0;overflow-anchor:none}</style></head><body>
+<div id='pad' style='height:__PAD__px'>pad</div>
+<button id='target' style='display:block;width:200px;height:80px;border:0'>__LABEL__</button>
+<div style='height:__PAD__px'></div>
+<script>
+window.clicks = [];
+window.targetClicks = 0;
+window.padClicks = 0;
+window.moved = false;
+window.armed = false;
+document.addEventListener('click', event => clicks.push(event.target.id || event.target.tagName.toLowerCase()), true);
+document.getElementById('pad').addEventListener('click', () => padClicks++);
+document.getElementById('target').addEventListener('click', () => targetClicks++);
+window.rescroll = () => new Promise(resolve => {
+  scrollTo(0, 0);
+  requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+});
+window.arm = () => {
+  window.addEventListener('scroll', () => {
+    if (!window.armed) return;
+    window.armed = false;
+    requestAnimationFrame(() => {
+      const target = document.getElementById('target');
+      const before = target.getBoundingClientRect().top;
+      const banner = document.createElement('div');
+      banner.style.height = '240px';
+      document.body.insertBefore(banner, document.getElementById('pad'));
+      window.moved = Math.abs(target.getBoundingClientRect().top - before) > 100;
+    });
+  }, { passive: true });
+  window.armed = true;
+};
+</script>
+</body></html>"#;
+    PAGE.replace("__PAD__", &pad.to_string())
+        .replace("__LABEL__", label)
+}
+
+async fn firefox_scaled_frame_box(state: &mut DaemonState) -> Value {
+    firefox_eval(
+        state,
+        "(() => { const frame = document.querySelector('iframe'); const rect = frame.getBoundingClientRect(); let quad = null; if (typeof frame.getBoxQuads === 'function') { try { quad = frame.getBoxQuads().map(quad => [quad.p1.x, quad.p1.y, quad.p2.x, quad.p2.y, quad.p3.x, quad.p3.y]); } catch (error) { quad = String(error); } } return { api: typeof frame.getBoxQuads, x: rect.x, y: rect.y, scale: frame.offsetWidth > 0 ? rect.width / frame.offsetWidth : 1, quad: quad }; })()",
+    )
+    .await
+}
+
+async fn firefox_assert_reflow_hit(state: &mut DaemonState, frame: &str) {
+    assert_eq!(
+        firefox_eval(state, "[moved, targetClicks, padClicks, clicks]").await,
+        json!([true, 1, 0, ["target"]]),
+        "the {frame} must reflow after the scroll and click the moved target"
+    );
 }
 
 async fn firefox_close(state: &mut DaemonState) {
@@ -18901,27 +19022,85 @@ async fn e2e_firefox_history_and_reload_land_on_the_traversed_document() {
     let _env = firefox_test_environment(tmp.path());
     _env.set("HOME", home.path().to_str().unwrap());
     let fixture = firefox_fixture().await;
-    let second = format!("{}/page", fixture.other);
+    let first = format!("{}history/a", fixture.url);
+    let second = format!("{}history/b", fixture.url);
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
-    firefox_open(&mut state, &fixture.url).await;
-    firefox_open(&mut state, &second).await;
+    for action in ["back", "forward"] {
+        firefox_history_step(&mut state, action, "about:blank").await;
+    }
 
-    for (action, expected) in [
-        ("back", fixture.url.clone()),
-        ("forward", second.clone()),
-        ("reload", second.clone()),
-    ] {
-        let resp = firefox_command(&mut state, json!({ "id": action, "action": action })).await;
-        assert_success(&resp);
-        assert_eq!(get_data(&resp)["url"], expected, "{action}");
+    firefox_open(&mut state, &first).await;
+    firefox_eval(&mut state, "window.__doc = 'a'; true").await;
+    firefox_open(&mut state, &second).await;
+    firefox_eval(&mut state, "window.__doc = 'b'; true").await;
+    firefox_history_step(&mut state, "back", &first).await;
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "window.__doc === 'a' && window.__historyPageshow === true"
+        )
+        .await,
+        json!(true)
+    );
+    firefox_history_step(&mut state, "forward", &second).await;
+    assert_eq!(firefox_eval(&mut state, "window.__doc").await, json!("b"));
+
+    firefox_history_step(&mut state, "reload", &second).await;
+    assert_eq!(
+        firefox_eval(&mut state, "typeof window.__doc === 'undefined'").await,
+        json!(true)
+    );
+    firefox_eval(
+        &mut state,
+        "window.__doc = 'same'; history.pushState({ step: 1 }, ''); history.pushState({ step: 2 }, ''); true",
+    )
+    .await;
+    firefox_history_step(&mut state, "back", &second).await;
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "[history.state && history.state.step, window.__doc]"
+        )
+        .await,
+        json!([1, "same"])
+    );
+    firefox_history_step(&mut state, "back", &second).await;
+    assert_eq!(
+        firefox_eval(&mut state, "[history.state, window.__doc]").await,
+        json!([null, "same"])
+    );
+    for step in [1, 2] {
+        firefox_history_step(&mut state, "forward", &second).await;
         assert_eq!(
-            firefox_command(&mut state, json!({ "id": "url", "action": "url" })).await["data"]
-                ["url"],
-            expected,
-            "{action} leaves the tab on the same document"
+            firefox_eval(&mut state, "history.state.step").await,
+            json!(step)
         );
     }
+    firefox_history_step(&mut state, "forward", &second).await;
+    assert_eq!(
+        firefox_eval(&mut state, "history.state.step").await,
+        json!(2)
+    );
+
+    let slow = format!("{}slow", fixture.url);
+    firefox_open(&mut state, &slow).await;
+    firefox_eval(&mut state, "window.__doc = 'slow'; true").await;
+    firefox_open(&mut state, &second).await;
+    let started = tokio::time::Instant::now();
+    let back = firefox_command(&mut state, json!({ "id": "back", "action": "back" })).await;
+    let elapsed = started.elapsed();
+    assert_success(&back);
+    assert_eq!(get_data(&back)["url"], slow);
+    assert!(
+        elapsed >= tokio::time::Duration::from_millis(900),
+        "{elapsed:?}"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "typeof window.__doc === 'undefined'").await,
+        json!(true)
+    );
+
     firefox_close(&mut state).await;
 }
 
@@ -19062,7 +19241,7 @@ async fn e2e_firefox_frame_mouse_uses_local_coordinates() {
         ])
     );
     assert_success(&firefox_command(&mut state, json!({"id":"main", "action":"mainframe"})).await);
-    firefox_eval(&mut state, &format!("new Promise(resolve => {{ document.body.innerHTML = '<iframe id=other style=\"position:fixed;left:150px;top:100px;width:300px;height:250px;border:10px solid\" src=\"{}/frame.html\"></iframe>'; document.querySelector('#other').onload = () => resolve(true); }})", fixture.other)).await;
+    firefox_eval(&mut state, &format!("new Promise(resolve => {{ document.body.innerHTML = '<iframe id=other style=\"position:fixed;left:150px;top:100px;width:300px;height:250px;border:10px solid;transform:scale(1.5);transform-origin:0 0\" src=\"{}/frame.html\"></iframe>'; document.querySelector('#other').onload = () => resolve(true); }})", fixture.other)).await;
     assert_success(&firefox_act(&mut state, "frame", "#other", json!({})).await);
     firefox_eval(&mut state, "document.body.innerHTML='<button id=target style=width:100px;height:100px>Target</button>'; window.events=[]; for (const t of ['mousedown','mouseup','wheel']) document.addEventListener(t, e => { events.push([t,e.clientX,e.clientY,e.target.id]); if (t === 'wheel') e.preventDefault(); }, {passive:false}); true").await;
     assert_success(&firefox_act(&mut state, "hover", "#target", json!({})).await);
@@ -19081,6 +19260,251 @@ async fn e2e_firefox_frame_mouse_uses_local_coordinates() {
             ["wheel", 58, 58, "target"]
         ])
     );
+
+    firefox_ok(&mut state, json!({ "id": "main", "action": "mainframe" })).await;
+    firefox_eval(
+        &mut state,
+        &format!(
+            "new Promise(resolve => {{ document.body.style.margin='0'; document.body.innerHTML = '<iframe id=frame style=\"{SCALED_FRAME_STYLE}\" src=\"{}/frame.html\"></iframe><div id=cover style=\"{SCALED_FRAME_COVER}\"></div>'; document.querySelector('#frame').onload = () => resolve(true); }})",
+            fixture.other
+        ),
+    )
+    .await;
+    let frame_box = firefox_scaled_frame_box(&mut state).await;
+    let api = frame_box["api"].as_str().unwrap_or("");
+    let origin = (
+        frame_box["x"].as_f64().unwrap_or(f64::NAN),
+        frame_box["y"].as_f64().unwrap_or(f64::NAN),
+    );
+    let scale = frame_box["scale"].as_f64().unwrap_or(f64::NAN);
+    assert!(
+        (api == "function" || api == "undefined")
+            && (origin.0 - 100.0).abs() <= 0.5
+            && (origin.1 - 50.0).abs() <= 0.5
+            && (scale - 2.0).abs() <= 0.01,
+        "the rect fallback must report the frame's scaled box at (100, 50): {frame_box}"
+    );
+    if api == "function" {
+        let quad = &frame_box["quad"][0];
+        assert!(
+            quad.is_array()
+                && (quad[0].as_f64().unwrap_or(f64::NAN) - origin.0).abs() <= 0.5
+                && (quad[1].as_f64().unwrap_or(f64::NAN) - origin.1).abs() <= 0.5,
+            "getBoxQuads must report the origin the rect fallback reports: {frame_box}"
+        );
+    }
+
+    assert_success(&firefox_act(&mut state, "frame", "#frame", json!({})).await);
+    firefox_eval(
+        &mut state,
+        "document.documentElement.style.margin='0'; document.body.style.margin='0'; document.body.innerHTML='<button id=target style=\"position:absolute;left:0;top:0;width:80px;height:80px;border:0\">Target</button><button id=ghost style=\"position:absolute;left:80px;top:80px;width:80px;height:80px;border:0\">Ghost</button>'; window.events=[]; for (const type of ['mousedown','mouseup','wheel']) document.addEventListener(type, event => { events.push([type, Math.round(event.clientX), Math.round(event.clientY), event.target.id || event.target.tagName.toLowerCase()]); if (type === 'wheel') event.preventDefault(); }, { passive: false }); window.clicks=[]; for (const button of document.querySelectorAll('button')) button.onclick = () => clicks.push(button.id); true",
+    )
+    .await;
+    firefox_ok(&mut state, json!({ "id": "main", "action": "mainframe" })).await;
+
+    let visible = (origin.0 + scale * 60.0, origin.1 + scale * 60.0);
+    firefox_ok(
+        &mut state,
+        json!({ "id": "move", "action": "mousemove", "x": visible.0, "y": visible.1 }),
+    )
+    .await;
+    assert_success(&firefox_act(&mut state, "frame", "#frame", json!({})).await);
+    firefox_eval(&mut state, "events = []; true").await;
+    for command in [
+        json!({ "id": "down", "action": "mousedown" }),
+        json!({ "id": "up", "action": "mouseup" }),
+        json!({ "id": "wheel", "action": "wheel", "deltaY": 10 }),
+    ] {
+        assert_success(&firefox_command(&mut state, command).await);
+    }
+    assert_eq!(
+        firefox_eval(&mut state, "events").await,
+        json!([
+            ["mousedown", 40, 40, "target"],
+            ["mouseup", 40, 40, "target"],
+            ["wheel", 40, 40, "target"]
+        ]),
+        "coordinate-less input must land in the scaled frame's own coordinates"
+    );
+
+    firefox_eval(&mut state, "clicks = []; true").await;
+    let target = firefox_ref(&mut state, "Target").await;
+    let blocked = firefox_act(&mut state, "click", &target, json!({})).await;
+    assert_eq!(
+        firefox_eval(&mut state, "clicks").await,
+        json!(["target"]),
+        "a cover over the unscaled point must not refuse a click through a scaled frame: {blocked}"
+    );
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_reflow_after_scroll_clicks_the_moved_target() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+
+    firefox_open(
+        &mut state,
+        &firefox_data_url(&firefox_reflow_page(1400, "Target")),
+    )
+    .await;
+
+    let target = firefox_ref(&mut state, "Target").await;
+    firefox_eval(&mut state, "rescroll()").await;
+    firefox_eval(&mut state, "arm(); true").await;
+    firefox_below_fold(&mut state, "page").await;
+
+    assert_success(&firefox_act(&mut state, "click", &target, json!({})).await);
+    firefox_assert_reflow_hit(&mut state, "page").await;
+
+    firefox_open(
+        &mut state,
+        &firefox_data_url(&firefox_frame_page(
+            REFLOW_FRAME_STYLE,
+            "display:none",
+            &firefox_reflow_page(900, "Inner target"),
+        )),
+    )
+    .await;
+    assert_success(&firefox_act(&mut state, "frame", "#frame", json!({})).await);
+    let inner = firefox_ref(&mut state, "Inner target").await;
+    firefox_eval(&mut state, "rescroll()").await;
+    firefox_eval(&mut state, "arm(); true").await;
+    firefox_below_fold(&mut state, "frame").await;
+
+    assert_success(&firefox_act(&mut state, "click", &inner, json!({})).await);
+    firefox_assert_reflow_hit(&mut state, "frame").await;
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_two_finger_swipe_releases_every_touch_pointer() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+
+    let page = r#"<!doctype html><html><head><style>html,body{margin:0;height:100%}</style></head><body>
+<script>
+window.log = [];
+window.open = 0;
+window.down = 0;
+window.up = 0;
+window.moves = 0;
+const touching = event => event.pointerType === 'touch';
+const note = (kind, event) => {
+  log.push([kind, Math.round(event.clientX), Math.round(event.clientY)]);
+  if (kind === 'down') { open++; down++; } else { open--; up++; }
+};
+document.addEventListener('pointerdown', event => { if (touching(event)) note('down', event); });
+document.addEventListener('pointerup', event => { if (touching(event)) note('up', event); });
+document.addEventListener('pointercancel', event => { if (touching(event)) note('cancel', event); });
+document.addEventListener('pointermove', event => { if (touching(event) && event.buttons) moves++; });
+</script>
+</body></html>"#;
+    firefox_open(&mut state, &firefox_data_url(page)).await;
+
+    firefox_ok(
+        &mut state,
+        json!({ "id": "finger-start", "action": "input_touch", "type": "touchStart", "touchPoints": [{ "x": 200, "y": 300 }, { "x": 260, "y": 300 }] }),
+    )
+    .await;
+    assert_eq!(
+        firefox_eval(&mut state, "[open, down]").await,
+        json!([2, 2]),
+        "two fingers must be down"
+    );
+
+    firefox_ok(
+        &mut state,
+        json!({ "id": "finger-swipe", "action": "swipe", "startX": 200, "startY": 420, "endX": 80, "endY": 420 }),
+    )
+    .await;
+    let log = firefox_eval(&mut state, "log").await;
+    let last = log
+        .as_array()
+        .and_then(|rows| rows.last())
+        .cloned()
+        .unwrap_or(json!(null));
+    assert!(
+        last[0] == json!("up") && last[1].as_f64().unwrap_or(f64::NAN) <= 90.0,
+        "the swipe must release its own pointer at its end point: {log}"
+    );
+    assert!(
+        firefox_eval(&mut state, "moves")
+            .await
+            .as_f64()
+            .unwrap_or(0.0)
+            >= 2.0,
+        "the swipe must move the pointer: {log}"
+    );
+
+    firefox_ok(
+        &mut state,
+        json!({ "id": "finger-end", "action": "input_touch", "type": "touchEnd" }),
+    )
+    .await;
+    let log = firefox_eval(&mut state, "log").await;
+    assert_eq!(
+        firefox_eval(&mut state, "[open, down - up]").await,
+        json!([0, 0]),
+        "every finger must be released: {log}"
+    );
+
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_scaled_frame_annotation_geometry() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+
+    let child = r#"<!doctype html><html><head><style>html,body{margin:0;height:100%}</style></head><body>
+<button id='note' style='position:absolute;left:20px;top:30px;width:60px;height:40px;border:0'>Note</button>
+</body></html>"#;
+    firefox_open(
+        &mut state,
+        &firefox_data_url(&firefox_frame_page(
+            SCALED_FRAME_STYLE,
+            "display:none",
+            child,
+        )),
+    )
+    .await;
+    assert_success(&firefox_act(&mut state, "frame", "#frame", json!({})).await);
+
+    let path = tmp.path().join("scaled-annotated.png");
+    let shot = firefox_command(
+        &mut state,
+        json!({ "id": "annotated", "action": "screenshot", "annotate": true, "path": path }),
+    )
+    .await;
+    assert_success(&shot);
+    let annotations = get_data(&shot)["annotations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let note = annotations
+        .iter()
+        .find(|annotation| annotation["name"] == "Note")
+        .cloned()
+        .unwrap_or(json!(null));
+    assert_eq!(
+        note["box"],
+        json!({ "x": 180, "y": 150, "width": 120, "height": 80 }),
+        "{note}"
+    );
+    assert!(std::fs::metadata(path).unwrap().len() > 0);
     firefox_close(&mut state).await;
 }
 
@@ -20544,6 +20968,95 @@ async fn e2e_firefox_frame_dialog_does_not_block_new_tab() {
 
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_vanished_prompt_releases_the_held_button() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "document.body.innerHTML = '<button id=ask>Ask</button>'; window.ups = 0; window.answered = null; document.addEventListener('mouseup', () => ups++); document.getElementById('ask').onmousedown = () => { window.answered = confirm('Proceed?'); }; true",
+    )
+    .await;
+
+    let ask = firefox_ref(&mut state, "Ask").await;
+    let resp = firefox_act(&mut state, "click", &ask, json!({})).await;
+    assert_eq!(get_data(&resp)["dialogOpened"], true, "{resp}");
+    assert!(
+        state.mouse_state.buttons != 0 && state.pending_pointer_release.is_some(),
+        "the click keeps its button down and defers the pointer-up while the prompt is open"
+    );
+
+    let context = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|dialog| dialog.session_id.clone())
+        .expect("the prompt must name the context that opened it");
+    state
+        .firefox
+        .as_ref()
+        .expect("Firefox must be running")
+        .bidi
+        .send(
+            "browsingContext.handleUserPrompt",
+            json!({ "context": context, "accept": false }),
+        )
+        .await
+        .expect("the prompt must be dismissible over BiDi");
+
+    let late = firefox_command(
+        &mut state,
+        json!({ "id": "late", "action": "dialog", "response": "dismiss" }),
+    )
+    .await;
+    assert_eq!(
+        (
+            late["success"].clone(),
+            state.mouse_state.buttons,
+            state.pending_pointer_release.is_some()
+        ),
+        (json!(false), 0, false),
+        "a prompt that vanished before the daemon dismissed it must still release the held button: {late}"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "[answered, ups > 0]").await,
+        json!([false, true]),
+        "the page must resume and receive the deferred pointer-up"
+    );
+
+    let ask = firefox_ref(&mut state, "Ask").await;
+    let resp = firefox_act(&mut state, "click", &ask, json!({})).await;
+    assert_eq!(get_data(&resp)["dialogOpened"], true, "{resp}");
+    let prompt_tab = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|dialog| dialog.owner_context.clone())
+        .expect("the prompt must name its tab");
+    assert_success(&firefox_command(&mut state, json!({ "id": "tab", "action": "tab_new" })).await);
+    firefox_ok(
+        &mut state,
+        json!({ "id": "close", "action": "tab_close", "tabId": prompt_tab }),
+    )
+    .await;
+    let tabs = firefox_command(&mut state, json!({ "id": "tabs", "action": "tab_list" })).await;
+    assert_success(&tabs);
+    assert_eq!(
+        get_data(&tabs)["tabs"].as_array().map(Vec::len),
+        Some(1),
+        "{tabs}"
+    );
+    assert!(
+        state.pending_dialog.is_none(),
+        "destroying the tab that opened the prompt must drop the pending prompt"
+    );
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_smoke_full_page_annotations() {
     required_firefox_binary();
     let tmp = tempfile::tempdir().unwrap();
@@ -20940,7 +21453,7 @@ async fn e2e_firefox_networkidle_is_scoped_to_the_active_tab() {
     let pending = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut buf = [0; 4096];
-        stream.read(&mut buf).await.unwrap();
+        assert!(stream.read(&mut buf).await.unwrap() > 0);
         let _ = started.send(());
         while stream.read(&mut buf).await.unwrap_or(0) != 0 {}
     });
@@ -22175,6 +22688,179 @@ async fn e2e_firefox_permissions_follow_navigation() {
 
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_permissions_cover_a_loaded_cross_origin_frame() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    let frame_url = format!("{}/frame.html", fixture.other);
+    let load_frame = format!(
+        r#"new Promise(resolve => {{
+        const iframe = document.createElement('iframe');
+        iframe.id = 'permission-frame';
+        iframe.allow = 'geolocation';
+        iframe.src = {frame_url:?};
+        iframe.addEventListener('load', () => resolve(true), {{ once: true }});
+        document.body.append(iframe);
+    }})"#
+    );
+    assert_eq!(firefox_eval(&mut state, &load_frame).await, json!(true));
+    assert_success(&firefox_act(&mut state, "frame", "#permission-frame", json!({})).await);
+    assert_eq!(
+        firefox_eval(&mut state, "location.origin").await,
+        json!(fixture.other)
+    );
+    let query = "navigator.permissions.query({name:'geolocation'}).then(p => p.state)";
+    assert_eq!(firefox_eval(&mut state, query).await, json!("prompt"));
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({
+                "id": "grant", "action": "permissions", "permissions": ["geolocation"],
+            }),
+        )
+        .await,
+    );
+    assert_eq!(firefox_eval(&mut state, query).await, json!("granted"));
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_relaunch_keeps_session_setup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({"userAgent":"initial agent"})).await;
+    for command in [
+        json!({"id":"viewport", "action":"viewport", "width":800, "height":600, "deviceScaleFactor":1.5}),
+        json!({"id":"ua", "action":"useragent", "userAgent":"runtime agent"}),
+        json!({"id":"timezone", "action":"timezone", "timezoneId":"Asia/Tokyo"}),
+        json!({"id":"locale", "action":"locale", "locale":"fr-FR"}),
+        json!({"id":"media", "action":"set_media", "colorScheme":"dark"}),
+        json!({"id":"offline", "action":"offline", "offline":true}),
+        json!({"id":"headers", "action":"headers", "headers":{"X-Global":"example"}}),
+    ] {
+        assert_success(&firefox_command(&mut state, command).await);
+    }
+
+    let forced = json!({"id":"relaunch", "action":"evaluate", "script":"true", "settings":{"relaunch":true}});
+    let previous = state.firefox.as_ref().unwrap().bidi.clone();
+    assert_success(&firefox_command(&mut state, forced.clone()).await);
+    assert!(!Arc::ptr_eq(
+        &previous,
+        &state.firefox.as_ref().unwrap().bidi
+    ));
+    assert_eq!(firefox_eval(&mut state, "[innerWidth, innerHeight, devicePixelRatio, navigator.userAgent, Intl.DateTimeFormat().resolvedOptions().timeZone, Intl.NumberFormat().resolvedOptions().locale, matchMedia('(prefers-color-scheme: dark)').matches, navigator.onLine]").await,
+        json!([800, 600, 1.5, "runtime agent", "Asia/Tokyo", "fr-FR", true, false]));
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"online", "action":"offline", "offline":false}),
+        )
+        .await,
+    );
+    firefox_open(&mut state, &fixture.url).await;
+    let headers = "fetch('/echo', {cache:'no-store'}).then(r => r.json()).then(({headers}) => {const values = Object.fromEntries(Object.entries(headers).map(([k,v]) => [k.toLowerCase(),v])); return [values['x-global'] ?? null, values.authorization ?? null]})";
+    assert_eq!(
+        firefox_eval(&mut state, headers).await,
+        json!(["example", null])
+    );
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"creds", "action":"credentials", "username":"user", "password":"secret"}),
+        )
+        .await,
+    );
+    let previous = state.firefox.as_ref().unwrap().bidi.clone();
+    let implicit = firefox_command(&mut state, json!({"id":"new-flags", "action":"launch", "userAgent":"new launch agent", "colorScheme":"light"})).await;
+    assert_success(&implicit);
+    assert!(!Arc::ptr_eq(
+        &previous,
+        &state.firefox.as_ref().unwrap().bidi
+    ));
+    firefox_open(&mut state, &fixture.url).await;
+    assert_eq!(
+        firefox_eval(&mut state, headers).await,
+        json!([null, "Basic dXNlcjpzZWNyZXQ="])
+    );
+    assert_eq!(firefox_eval(&mut state, "[innerWidth, navigator.userAgent, matchMedia('(prefers-color-scheme: light)').matches, navigator.onLine]").await, json!([800, "new launch agent", true, true]));
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"clear", "action":"headers", "headers":{}}),
+        )
+        .await,
+    );
+    let previous = state.firefox.as_ref().unwrap().bidi.clone();
+    assert_success(&firefox_command(&mut state, forced).await);
+    assert!(!Arc::ptr_eq(
+        &previous,
+        &state.firefox.as_ref().unwrap().bidi
+    ));
+    firefox_open(&mut state, &fixture.url).await;
+    assert_eq!(firefox_eval(&mut state, headers).await, json!([null, null]));
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_window_viewport_stays_local() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({
+                "id":"baseline", "action":"viewport", "width":800, "height":600,
+            }),
+        )
+        .await,
+    );
+    let window = firefox_command(
+        &mut state,
+        json!({
+            "id":"window", "action":"window_new", "viewport":{"width":1000, "height":700},
+        }),
+    )
+    .await;
+    assert_success(&window);
+    let window_id = get_data(&window)["tabId"].as_str().unwrap();
+    let viewport = "[innerWidth, innerHeight]";
+    assert_eq!(firefox_eval(&mut state, viewport).await, json!([1000, 700]));
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"original", "action":"tab_switch", "tabId":"t1"}),
+        )
+        .await,
+    );
+    assert_eq!(firefox_eval(&mut state, viewport).await, json!([800, 600]));
+    assert_success(&firefox_command(&mut state, json!({"id":"new-tab", "action":"tab_new"})).await);
+    assert_eq!(firefox_eval(&mut state, viewport).await, json!([800, 600]));
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id":"back-to-window", "action":"tab_switch", "tabId":window_id}),
+        )
+        .await,
+    );
+    assert_eq!(firefox_eval(&mut state, viewport).await, json!([1000, 700]));
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_full_page_screenshot_larger_than_64mb() {
     required_firefox_binary();
     let tmp = tempfile::tempdir().unwrap();
@@ -22882,6 +23568,9 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
     ))
     .await;
 
+    let saved_redirect_origin = format!("{redirect_origin}/");
+    let saved_hook_origin = format!("{hook_origin}/");
+
     let state_path = tmp.path().join("state.json");
     std::fs::write(
         &state_path,
@@ -22889,12 +23578,12 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
             "cookies": [],
             "origins": [
                 {
-                    "origin": redirect_origin,
+                    "origin": saved_redirect_origin.clone(),
                     "localStorage": [{ "name": "redirect-token", "value": "redirect-secret" }],
                     "sessionStorage": [{ "name": "redirect-session", "value": "redirect-secret" }]
                 },
                 {
-                    "origin": hook_origin,
+                    "origin": saved_hook_origin.clone(),
                     "localStorage": [{ "name": "hook-token", "value": "hook-secret" }],
                     "sessionStorage": [{ "name": "hook-session", "value": "hook-secret" }]
                 }
@@ -22912,7 +23601,10 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
     )
     .await;
     assert_success(&load);
-    assert_eq!(get_data(&load)["skippedOrigins"], json!([redirect_origin]));
+    assert_eq!(
+        get_data(&load)["skippedOrigins"],
+        json!([saved_redirect_origin])
+    );
 
     assert_eq!(
         firefox_eval(&mut state, "window.__captured.length").await,

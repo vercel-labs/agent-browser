@@ -52,7 +52,7 @@ pub(crate) fn full_flags() -> Flags {
     f.enable = vec!["react-devtools".to_string()];
     f.profile = Some("/profile".to_string());
     f.state = Some("/state.json".to_string());
-    f.proxy = Some("http://user:pw@proxy.example:8080".to_string());
+    f.proxy = Some(parse_proxy("http://user:pw@proxy.example:8080"));
     f.proxy_bypass = Some("localhost".to_string());
     f.args = Some("--no-first-run,--window-size=1280,720".to_string());
     f.user_agent = Some("ua/1".to_string());
@@ -199,7 +199,7 @@ fn every_value_has_the_shape_its_row_declares() {
 fn patch_carries_every_daemon_options_field() {
     let f = full_flags();
     let p = Patch::from_flags(&f);
-    let parsed = parse_proxy(f.proxy.as_deref().unwrap());
+    let parsed = f.proxy.as_ref().unwrap();
 
     assert_eq!(set(&p, Key::Headed), json!(true)); // headed
     assert_eq!(set(&p, Key::Debug), json!(true)); // debug
@@ -212,10 +212,16 @@ fn patch_carries_every_daemon_options_field() {
         json!(split_launch_args(f.args.as_deref().unwrap()))
     ); // args
     assert_eq!(set(&p, Key::UserAgent), json!("ua/1")); // user_agent
-    assert_eq!(set(&p, Key::Proxy), json!(parsed.server)); // proxy
+    assert_eq!(set(&p, Key::Proxy), json!(parsed.server.as_str()));
     assert_eq!(set(&p, Key::ProxyBypass), json!("localhost")); // proxy_bypass
-    assert_eq!(set(&p, Key::ProxyUsername), json!("user")); // proxy_username
-    assert_eq!(set(&p, Key::ProxyPassword), json!("pw")); // proxy_password
+    assert_eq!(
+        set(&p, Key::ProxyUsername),
+        json!(parsed.username.as_ref().unwrap().as_str())
+    );
+    assert_eq!(
+        set(&p, Key::ProxyPassword),
+        json!(parsed.password.as_ref().unwrap().as_str())
+    );
     assert_eq!(set(&p, Key::IgnoreHttpsErrors), json!(true)); // ignore_https_errors
     assert_eq!(set(&p, Key::AllowFileAccess), json!(true)); // allow_file_access
     assert_eq!(set(&p, Key::HideScrollbars), json!(false)); // hide_scrollbars
@@ -305,11 +311,76 @@ fn patch_carries_every_launch_envelope_field() {
 #[test]
 fn proxy_without_credentials_sets_no_credentials() {
     let mut f = blank_flags();
-    f.proxy = Some("socks5://proxy.example:1080".to_string());
+    f.proxy = Some(parse_proxy("socks5://proxy.example:1080"));
     let p = Patch::from_flags(&f);
     assert_eq!(set(&p, Key::Proxy), json!("socks5://proxy.example:1080"));
-    assert!(p.get(Key::ProxyUsername).is_none());
-    assert!(p.get(Key::ProxyPassword).is_none());
+    assert_eq!(p.get(Key::ProxyUsername), Some(&Requested::Default));
+    assert_eq!(p.get(Key::ProxyPassword), Some(&Requested::Default));
+}
+
+#[test]
+fn proxy_credentials_follow_the_effective_proxy_source() {
+    let keys = [
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_USERNAME",
+        "AGENT_BROWSER_PROXY_PASSWORD",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    let env = EnvGuard::new(&keys);
+    for key in keys {
+        env.remove(key);
+    }
+    env.set("AGENT_BROWSER_PROXY_USERNAME", "ambient-user");
+    env.set("AGENT_BROWSER_PROXY_PASSWORD", "ambient-password");
+    env.set("HTTP_PROXY", "http://standard:8080");
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("proxy.json");
+    let parsed = |args: &[&str]| {
+        let mut argv = vec![
+            "--config".to_string(),
+            config.to_string_lossy().into_owned(),
+        ];
+        argv.extend(args.iter().map(|arg| arg.to_string()));
+        let flags = try_parse_flags(&argv).unwrap();
+        let patch = Patch::from_flags(&flags);
+        let wire = patch.to_wire().unwrap();
+        let wire = Patch::from_wire(Some(&wire)).unwrap();
+        Running::defaults().plan(&wire).next.launch_options()
+    };
+    let check = |options: crate::native::cdp::chrome::LaunchOptions, server, username, password| {
+        assert_eq!(options.proxy.as_deref(), Some(server));
+        assert_eq!(options.proxy_username.as_deref(), username);
+        assert_eq!(options.proxy_password.as_deref(), password);
+    };
+    std::fs::write(&config, "{}").unwrap();
+    check(parsed(&[]), "http://standard:8080", None, None);
+    std::fs::write(&config, r#"{"proxy":"http://configured:8080"}"#).unwrap();
+    check(
+        parsed(&[]),
+        "http://configured:8080",
+        Some("ambient-user"),
+        Some("ambient-password"),
+    );
+    env.set("AGENT_BROWSER_PROXY", "http://env:8080");
+    check(
+        parsed(&[]),
+        "http://env:8080",
+        Some("ambient-user"),
+        Some("ambient-password"),
+    );
+    check(
+        parsed(&["--proxy", "http://different:8080"]),
+        "http://different:8080",
+        None,
+        None,
+    );
+    env.set("AGENT_BROWSER_PROXY", "http://inline-user@env:8080");
+    check(parsed(&[]), "http://env:8080", Some("inline-user"), None);
 }
 
 #[test]
@@ -827,7 +898,7 @@ fn debug_output_never_contains_secrets() {
     assert!(out.contains("proxy.example"));
 
     let mut f = full_flags();
-    f.proxy = Some("http://user:hunter2@proxy.example:8080".to_string());
+    f.proxy = Some(parse_proxy("http://user:hunter2@proxy.example:8080"));
     f.cdp_headers = Some(r#"{"Authorization":"Bearer s3cret"}"#.to_string());
     let patch = format!("{:?}", Patch::from_flags(&f));
     for secret in ["hunter2", "s3cret"] {
@@ -1097,7 +1168,7 @@ fn changing_proxy_drops_only_inherited_credentials() {
             Some("new-password"),
         ),
     ] {
-        flags.proxy = Some(proxy.to_string());
+        flags.proxy = Some(parse_proxy(proxy));
         let patch = Patch::from_flags(&flags);
         let wire = patch.to_wire().unwrap();
         let patch = Patch::from_wire(Some(&wire)).unwrap();

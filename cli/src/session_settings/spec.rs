@@ -209,8 +209,8 @@ fn read_extensions(f: &Flags) -> Option<Requested> {
 }
 fn read_proxy(f: &Flags) -> Option<Requested> {
     f.proxy
-        .as_deref()
-        .map(|p| Requested::Set(Value::from(parse_proxy(p).server)))
+        .as_ref()
+        .map(|p| Requested::Set(Value::from(p.server.as_str())))
 }
 fn read_proxy_bypass(f: &Flags) -> Option<Requested> {
     match f.proxy_bypass.as_deref() {
@@ -222,16 +222,18 @@ fn read_proxy_bypass(f: &Flags) -> Option<Requested> {
     }
 }
 fn read_proxy_username(f: &Flags) -> Option<Requested> {
-    f.proxy
-        .as_deref()
-        .and_then(|p| parse_proxy(p).username)
-        .map(|u| Requested::Set(Value::from(u)))
+    let proxy = f.proxy.as_ref()?;
+    match proxy.username.as_deref() {
+        Some(u) => Some(Requested::Set(Value::from(u))),
+        None => Some(Requested::Default),
+    }
 }
 fn read_proxy_password(f: &Flags) -> Option<Requested> {
-    f.proxy
-        .as_deref()
-        .and_then(|p| parse_proxy(p).password)
-        .map(|p| Requested::Set(Value::from(p)))
+    let proxy = f.proxy.as_ref()?;
+    match proxy.password.as_deref() {
+        Some(p) => Some(Requested::Set(Value::from(p))),
+        None => Some(Requested::Default),
+    }
 }
 fn read_user_agent(f: &Flags) -> Option<Requested> {
     string(&f.user_agent)
