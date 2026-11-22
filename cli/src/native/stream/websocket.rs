@@ -16,6 +16,7 @@ use crate::native::cdp::client::CdpClient;
 
 use super::http::handle_http_request;
 use super::origin::is_allowed_ws_upgrade;
+use super::FirefoxTabs;
 use super::{timestamp_ms, IdleActivity, StreamFrame};
 
 /// Highest per-client frame rate a client may request via the `config` message.
@@ -141,6 +142,7 @@ pub(super) async fn accept_loop(
     viewport_width: Arc<Mutex<u32>>,
     viewport_height: Arc<Mutex<u32>>,
     last_tabs: Arc<RwLock<Vec<Value>>>,
+    firefox_tabs: Arc<FirefoxTabs>,
     last_engine: Arc<RwLock<String>>,
     recording: Arc<Mutex<bool>>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -177,6 +179,7 @@ pub(super) async fn accept_loop(
                 let vw = viewport_width.clone();
                 let vh = viewport_height.clone();
                 let lt = last_tabs.clone();
+                let ft = firefox_tabs.clone();
                 let le = last_engine.clone();
                 let rec = recording.clone();
                 let shutdown_rx = shutdown_rx.clone();
@@ -198,6 +201,7 @@ pub(super) async fn accept_loop(
                         vw,
                         vh,
                         lt,
+                        ft,
                         le,
                         rec,
                         shutdown_rx,
@@ -239,6 +243,7 @@ async fn handle_connection(
     viewport_width: Arc<Mutex<u32>>,
     viewport_height: Arc<Mutex<u32>>,
     last_tabs: Arc<RwLock<Vec<Value>>>,
+    firefox_tabs: Arc<FirefoxTabs>,
     last_engine: Arc<RwLock<String>>,
     recording: Arc<Mutex<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -276,7 +281,16 @@ async fn handle_connection(
         )
         .await;
     } else {
-        handle_http_request(stream, &buf[..n], &last_tabs, &last_engine, &session_name).await;
+        handle_http_request(
+            stream,
+            &buf[..n],
+            &last_tabs,
+            &last_engine,
+            &client_count,
+            &firefox_tabs,
+            &session_name,
+        )
+        .await;
     }
 }
 
