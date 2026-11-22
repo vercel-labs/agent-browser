@@ -139,7 +139,7 @@ fn set_permission(name: &str, state: &str, origin: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::network::spawn_dispatcher;
+    use crate::native::firefox::network::{spawn_dispatcher, subscribe_dispatcher};
     use crate::native::firefox::session::tests::{
         fake_session, fake_session_with_rdp, fake_session_with_replies, FakeReply,
     };
@@ -292,7 +292,7 @@ mod tests {
         let _dispatcher = spawn_dispatcher(
             bidi.clone(),
             crate::native::firefox::network::NetContext::default(),
-            bidi.subscribe_buffered(),
+            subscribe_dispatcher(&bidi),
             ff.emulation.clone(),
             ff.permissions.clone(),
         );

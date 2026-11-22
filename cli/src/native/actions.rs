@@ -1010,6 +1010,7 @@ impl DaemonState {
 
     fn reset_input_state(&mut self) {
         self.mouse_state = MouseState::default();
+        self.pending_pointer_release = None;
     }
 
     /// Rejects a navigation to a URL outside the allowed domains; `about:blank` stays reachable.
@@ -1405,16 +1406,65 @@ impl DaemonState {
         recording::stop_recording_task(&mut self.recording_state).await
     }
 
+    pub(crate) fn drain_firefox_events(&mut self) {
+        let (held, active_changed) = {
+            let (firefox, dialog, hold) = (
+                &mut self.firefox,
+                &mut self.pending_dialog,
+                &mut self.pending_pointer_release,
+            );
+            let held = hold.as_ref().map(|release| release.button);
+            let active_changed = firefox
+                .as_mut()
+                .is_some_and(|ff| ff.drain_events_with(dialog, hold));
+            (held, active_changed)
+        };
+        if active_changed {
+            self.ref_map.invalidate_all_documents();
+            self.active_iframe_sessions.clear();
+            self.active_frame_id = None;
+        }
+        if let Some(button) = held.filter(|_| self.pending_pointer_release.is_none()) {
+            self.mouse_state.buttons &= !button.mask();
+        }
+    }
+
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
         firefox::network::drain(self).await;
+        let held = self
+            .pending_pointer_release
+            .as_ref()
+            .map(|release| release.button);
         if let Some(ff) = self.firefox.as_mut() {
+            let reconciled = ff
+                .reconcile_event_loss(&mut self.pending_dialog, &mut self.pending_pointer_release)
+                .await?;
             ff.release_unused_user_contexts().await;
-            if ff.recover_lost_events(&mut self.pending_dialog).await? {
+            if reconciled {
                 firefox::daemon::reset_page(self);
             }
         }
+        if let Some(button) = held.filter(|_| self.pending_pointer_release.is_none()) {
+            self.mouse_state.buttons &= !button.mask();
+        }
         let drained = self.drain_cdp_events();
-        self.apply_drained_events(drained).await
+        let applied = self.apply_drained_events(drained).await;
+        self.reconcile_pending_release().await;
+        applied
+    }
+
+    /// Releases the button a Firefox dialog left held once the browser reports the prompt that
+    /// opened mid-press is gone, and drops a hold whose tab is gone instead.
+    pub(crate) async fn reconcile_pending_release(&mut self) {
+        let (firefox, dialog, hold, buttons) = (
+            &self.firefox,
+            self.pending_dialog.as_ref(),
+            &mut self.pending_pointer_release,
+            &mut self.mouse_state.buttons,
+        );
+        if let Some(ff) = firefox.as_ref() {
+            firefox::interact::release_pending(ff, dialog, hold, buttons).await;
+        }
     }
 
     /// Records a HAR entry while enforcing `HAR_MAX_ENTRIES`, URL/header size caps, and the
@@ -3735,7 +3785,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     let mut result = match action {
-        _ if firefox_routed => Box::pin(firefox::actions::execute(action, cmd, state)).await,
+        _ if firefox_routed => {
+            let result = Box::pin(firefox::actions::execute(action, cmd, state)).await;
+            if action == "tab_close" {
+                state.reconcile_pending_release().await;
+            }
+            result
+        }
         "launch" => {
             let applied = match launch_patch.as_ref() {
                 Some(patch) => apply_settings_patch(state, patch, true)
@@ -21595,12 +21651,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         state.mouse_state.x = 12.0;
         state.mouse_state.y = 34.0;
         state.mouse_state.buttons = 1;
+        state.pending_pointer_release = Some(crate::native::interaction::PendingRelease {
+            session_id: "session".into(),
+            owner_tab: None,
+            blocked: true,
+            owner_position: (12.0, 34.0),
+            x: 12.0,
+            y: 34.0,
+            button: crate::native::pointer::MouseButton::Left,
+            click_count: 1,
+            modifiers: crate::native::pointer::Modifiers::default(),
+        });
 
         state.reset_input_state();
 
         assert_eq!(state.mouse_state.x, 0.0);
         assert_eq!(state.mouse_state.y, 0.0);
         assert_eq!(state.mouse_state.buttons, 0);
+        assert!(state.pending_pointer_release.is_none());
     }
 
     #[test]
