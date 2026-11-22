@@ -78,10 +78,16 @@ export function buildAgentBrowserArgv(
   if (options.session !== undefined && options.session.length > 0) {
     argv.push("--session", options.session);
   }
-  argv.push(...args);
-  if (options.json !== false && !argv.includes("--json")) {
+  // The CLI treats everything after `--` as literal text, so `--json` has to go
+  // before the marker, and a `--json` after it is a value rather than the flag.
+  const endOfOptions = args.indexOf("--");
+  const beforeMarker = endOfOptions === -1 ? args : args.slice(0, endOfOptions);
+  const afterMarker = endOfOptions === -1 ? [] : args.slice(endOfOptions);
+  argv.push(...beforeMarker);
+  if (options.json !== false && !beforeMarker.includes("--json")) {
     argv.push("--json");
   }
+  argv.push(...afterMarker);
   return argv;
 }
 

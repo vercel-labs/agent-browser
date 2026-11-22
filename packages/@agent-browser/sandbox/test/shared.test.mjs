@@ -41,6 +41,56 @@ test("builds argv with session and json by default", () => {
   ]);
 });
 
+test("keeps --json ahead of the end-of-options marker", () => {
+  assert.deepEqual(buildAgentBrowserArgv(["fill", "#q", "--", "hello"], { session: "s1" }), [
+    "--session",
+    "s1",
+    "fill",
+    "#q",
+    "--json",
+    "--",
+    "hello",
+  ]);
+
+  assert.deepEqual(buildAgentBrowserArgv(["type", "#q", "--clear", "--", "-1 + 2"]), [
+    "type",
+    "#q",
+    "--clear",
+    "--json",
+    "--",
+    "-1 + 2",
+  ]);
+
+  // Text after the marker that happens to be "--json" is a value, not the flag.
+  assert.deepEqual(buildAgentBrowserArgv(["fill", "#q", "--", "--json"]), [
+    "fill",
+    "#q",
+    "--json",
+    "--",
+    "--json",
+  ]);
+
+  assert.deepEqual(buildAgentBrowserArgv(["fill", "#q", "--json", "--", "hello"]), [
+    "fill",
+    "#q",
+    "--json",
+    "--",
+    "hello",
+  ]);
+
+  assert.deepEqual(buildAgentBrowserArgv(["fill", "#q", "--", "hello"], { json: false }), [
+    "fill",
+    "#q",
+    "--",
+    "hello",
+  ]);
+
+  assert.equal(
+    buildShellCommand(["fill", "#q", "--", "hello"], { session: "s1" }),
+    "agent-browser --session s1 fill '#q' --json -- hello",
+  );
+});
+
 test("quotes shell args and builds commands", () => {
   assert.equal(quoteShellArg("simple"), "simple");
   assert.equal(quoteShellArg("hello world"), "'hello world'");
