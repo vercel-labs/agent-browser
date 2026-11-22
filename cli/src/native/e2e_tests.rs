@@ -17858,6 +17858,7 @@ impl Drop for FirefoxFixture {
 
 fn firefox_serve(listener: tokio::net::TcpListener, other: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut slow_requests = 0usize;
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 4096];
@@ -17890,6 +17891,30 @@ fn firefox_serve(listener: tokio::net::TcpListener, other: String) -> tokio::tas
                     "",
                     include_str!("test_fixtures/html5_drag_probe.html").to_string(),
                 ),
+                "/history/a" | "/history/b" => (
+                    "text/html; charset=utf-8",
+                    "",
+                    include_str!("test_fixtures/firefox_history.html").to_string(),
+                ),
+                "/slow" => {
+                    slow_requests += 1;
+                    (
+                        "text/html; charset=utf-8",
+                        "Cache-Control: no-store\r\n",
+                        include_str!("test_fixtures/firefox_history.html")
+                            .replace("</head>", r#"<script src="/slow.js"></script></head>"#),
+                    )
+                }
+                "/slow.js" => {
+                    if slow_requests > 1 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+                    }
+                    (
+                        "application/javascript",
+                        "Cache-Control: no-store\r\n",
+                        String::new(),
+                    )
+                }
                 "/api" => ("text/plain", "", "real".to_string()),
                 "/download.txt" => (
                     "text/plain",
@@ -18175,6 +18200,13 @@ async fn firefox_act(state: &mut DaemonState, action: &str, selector: &str, extr
     firefox_command(state, request).await
 }
 
+/// Runs a history action and asserts it reports the expected URL.
+async fn firefox_history_step(state: &mut DaemonState, action: &str, expected: &str) {
+    let resp = firefox_command(state, json!({ "id": action, "action": action })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], expected, "{action}");
+}
+
 async fn firefox_close(state: &mut DaemonState) {
     let resp = firefox_command(state, json!({ "id": "close", "action": "close" })).await;
     assert_success(&resp);
@@ -18341,27 +18373,85 @@ async fn e2e_firefox_history_and_reload_land_on_the_traversed_document() {
     let _env = firefox_test_environment(tmp.path());
     _env.set("HOME", home.path().to_str().unwrap());
     let fixture = firefox_fixture().await;
-    let second = format!("{}/page", fixture.other);
+    let first = format!("{}history/a", fixture.url);
+    let second = format!("{}history/b", fixture.url);
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
-    firefox_open(&mut state, &fixture.url).await;
-    firefox_open(&mut state, &second).await;
+    for action in ["back", "forward"] {
+        firefox_history_step(&mut state, action, "about:blank").await;
+    }
 
-    for (action, expected) in [
-        ("back", fixture.url.clone()),
-        ("forward", second.clone()),
-        ("reload", second.clone()),
-    ] {
-        let resp = firefox_command(&mut state, json!({ "id": action, "action": action })).await;
-        assert_success(&resp);
-        assert_eq!(get_data(&resp)["url"], expected, "{action}");
+    firefox_open(&mut state, &first).await;
+    firefox_eval(&mut state, "window.__doc = 'a'; true").await;
+    firefox_open(&mut state, &second).await;
+    firefox_eval(&mut state, "window.__doc = 'b'; true").await;
+    firefox_history_step(&mut state, "back", &first).await;
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "window.__doc === 'a' && window.__historyPageshow === true"
+        )
+        .await,
+        json!(true)
+    );
+    firefox_history_step(&mut state, "forward", &second).await;
+    assert_eq!(firefox_eval(&mut state, "window.__doc").await, json!("b"));
+
+    firefox_history_step(&mut state, "reload", &second).await;
+    assert_eq!(
+        firefox_eval(&mut state, "typeof window.__doc === 'undefined'").await,
+        json!(true)
+    );
+    firefox_eval(
+        &mut state,
+        "window.__doc = 'same'; history.pushState({ step: 1 }, ''); history.pushState({ step: 2 }, ''); true",
+    )
+    .await;
+    firefox_history_step(&mut state, "back", &second).await;
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "[history.state && history.state.step, window.__doc]"
+        )
+        .await,
+        json!([1, "same"])
+    );
+    firefox_history_step(&mut state, "back", &second).await;
+    assert_eq!(
+        firefox_eval(&mut state, "[history.state, window.__doc]").await,
+        json!([null, "same"])
+    );
+    for step in [1, 2] {
+        firefox_history_step(&mut state, "forward", &second).await;
         assert_eq!(
-            firefox_command(&mut state, json!({ "id": "url", "action": "url" })).await["data"]
-                ["url"],
-            expected,
-            "{action} leaves the tab on the same document"
+            firefox_eval(&mut state, "history.state.step").await,
+            json!(step)
         );
     }
+    firefox_history_step(&mut state, "forward", &second).await;
+    assert_eq!(
+        firefox_eval(&mut state, "history.state.step").await,
+        json!(2)
+    );
+
+    let slow = format!("{}slow", fixture.url);
+    firefox_open(&mut state, &slow).await;
+    firefox_eval(&mut state, "window.__doc = 'slow'; true").await;
+    firefox_open(&mut state, &second).await;
+    let started = tokio::time::Instant::now();
+    let back = firefox_command(&mut state, json!({ "id": "back", "action": "back" })).await;
+    let elapsed = started.elapsed();
+    assert_success(&back);
+    assert_eq!(get_data(&back)["url"], slow);
+    assert!(
+        elapsed >= tokio::time::Duration::from_millis(900),
+        "{elapsed:?}"
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "typeof window.__doc === 'undefined'").await,
+        json!(true)
+    );
+
     firefox_close(&mut state).await;
 }
 
@@ -20577,6 +20667,9 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
     ))
     .await;
 
+    let saved_redirect_origin = format!("{redirect_origin}/");
+    let saved_hook_origin = format!("{hook_origin}/");
+
     let state_path = tmp.path().join("state.json");
     std::fs::write(
         &state_path,
@@ -20584,12 +20677,12 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
             "cookies": [],
             "origins": [
                 {
-                    "origin": redirect_origin,
+                    "origin": saved_redirect_origin.clone(),
                     "localStorage": [{ "name": "redirect-token", "value": "redirect-secret" }],
                     "sessionStorage": [{ "name": "redirect-session", "value": "redirect-secret" }]
                 },
                 {
-                    "origin": hook_origin,
+                    "origin": saved_hook_origin.clone(),
                     "localStorage": [{ "name": "hook-token", "value": "hook-secret" }],
                     "sessionStorage": [{ "name": "hook-session", "value": "hook-secret" }]
                 }
@@ -20607,7 +20700,10 @@ async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirec
     )
     .await;
     assert_success(&load);
-    assert_eq!(get_data(&load)["skippedOrigins"], json!([redirect_origin]));
+    assert_eq!(
+        get_data(&load)["skippedOrigins"],
+        json!([saved_redirect_origin])
+    );
 
     assert_eq!(
         firefox_eval(&mut state, "window.__captured.length").await,
