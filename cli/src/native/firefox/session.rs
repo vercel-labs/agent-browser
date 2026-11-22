@@ -11,12 +11,14 @@ use tokio::sync::Notify;
 
 use super::bidi::{remote_to_json, unserializable, BidiClient, Events};
 use super::contexts::{Contexts, Removed};
+use super::interact::closed_prompt_owns_hold;
 use super::process::{
     check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess, NONCE_PREF,
 };
 use super::rdp::RdpClient;
 use crate::native::actions::PendingDialog;
 use crate::native::cdp::chrome::LaunchOptions;
+use crate::native::interaction::PendingRelease;
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(10);
@@ -45,8 +47,7 @@ pub struct FirefoxSession {
     pub refs: HashMap<(String, String, String), i64>,
     pub next_node_id: i64,
     pub frames: Option<super::snapshot::FrameWatch>,
-    /// Touch points of the active touch sequence, released by a later `input_touch` end.
-    pub touches: Vec<(f64, f64)>,
+    pub touches: HashMap<String, usize>,
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
     pub shadow_ids: std::collections::HashSet<i64>,
     pub visited_origins: HashSet<String>,
@@ -189,7 +190,7 @@ impl FirefoxSession {
             refs: HashMap::new(),
             next_node_id: 0,
             frames: None,
-            touches: Vec::new(),
+            touches: HashMap::new(),
             shadow_ids: Default::default(),
             visited_origins: HashSet::new(),
             events,
@@ -295,10 +296,21 @@ impl FirefoxSession {
     }
 
     /// Applies buffered BiDi events and returns whether the active context changed.
+    #[cfg(test)]
     pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> bool {
+        self.drain_events_with(dialog, &mut None)
+    }
+
+    /// Applies buffered BiDi events, also letting them unblock or retire a held pointer release.
+    pub fn drain_events_with(
+        &mut self,
+        dialog: &mut Option<PendingDialog>,
+        release: &mut Option<PendingRelease>,
+    ) -> bool {
         let mut active_changed = false;
         while let Ok(e) = self.events.try_recv() {
             let removed = self.contexts.apply(&e);
+            forget_release(&removed, release);
             active_changed |= self.forget(removed, dialog);
             if matches!(
                 e["method"].as_str(),
@@ -311,6 +323,7 @@ impl FirefoxSession {
             apply_event(
                 &e,
                 dialog,
+                release,
                 &self.contexts,
                 self.auto_dialog.load(Ordering::Acquire),
             );
@@ -322,8 +335,8 @@ impl FirefoxSession {
     }
 
     /// Forgets a browsing context that is gone and everything nested in it: element refs,
-    /// shadow ids and any prompt they owned. Returns true when the active context was
-    /// among them, which the registry then replaces.
+    /// shadow ids, held touch points and any prompt they owned. Returns true when the active
+    /// context was among them, which the registry then replaces.
     pub fn forget_context(&mut self, context: &str, dialog: &mut Option<PendingDialog>) -> bool {
         let removed = self.contexts.remove(context);
         self.forget(removed, dialog)
@@ -339,6 +352,7 @@ impl FirefoxSession {
             .collect();
         self.refs.retain(|(id, _, _), _| !gone.contains(id));
         self.shadow_ids.retain(|id| !stale_ids.contains(id));
+        self.touches.retain(|context, _| !gone.contains(context));
         if dialog.as_ref().is_some_and(|d| {
             [&d.owner_context, &d.session_id]
                 .into_iter()
@@ -359,11 +373,12 @@ impl FirefoxSession {
         self.shadow_ids.clear();
     }
 
-    /// Re-reads the context tree after lost events so refs and prompts follow what is still there.
-    /// Returns true whenever events were lost, which makes the caller reset page state.
+    /// Re-reads the context tree after lost events so refs, prompts and held releases follow what
+    /// is still there. Returns true whenever events were lost, which makes the caller reset page state.
     pub async fn reconcile_event_loss(
         &mut self,
         dialog: &mut Option<PendingDialog>,
+        release: &mut Option<PendingRelease>,
     ) -> Result<bool, String> {
         if !self.bidi.take_event_loss() {
             return Ok(false);
@@ -380,6 +395,7 @@ impl FirefoxSession {
         if self.contexts.tab_of(&active).is_some() {
             self.contexts.activate(&active);
         }
+        forget_release(&removed, release);
         self.forget(removed, dialog);
         Ok(true)
     }
@@ -623,9 +639,23 @@ pub(crate) fn auto_handles_prompt(params: &Value, auto_dialog: bool) -> bool {
             ))
 }
 
+/// Retires a hold whose tab left the tree, and unblocks one whose own context is gone so the next
+/// release goes to the tab that is still there.
+fn forget_release(removed: &Removed, release: &mut Option<PendingRelease>) {
+    let Some(hold) = release.as_mut() else {
+        return;
+    };
+    if hold.tab_removed(&removed.contexts) {
+        *release = None;
+    } else if hold.context_removed(&removed.contexts) {
+        hold.blocked = false;
+    }
+}
+
 fn apply_event(
     e: &Value,
     dialog: &mut Option<PendingDialog>,
+    release: &mut Option<PendingRelease>,
     contexts: &Contexts,
     auto_dialog: bool,
 ) {
@@ -643,10 +673,17 @@ fn apply_event(
                     .map(|context| contexts.tab_of(context).unwrap_or(context).to_string()),
             });
         }
-        Some("browsingContext.userPromptClosed")
-            if dialog.as_ref().and_then(|d| d.session_id.as_deref()) == p["context"].as_str() =>
-        {
-            *dialog = None;
+        Some("browsingContext.userPromptClosed") => {
+            let closed = p["context"].as_str().unwrap_or_default();
+            let tracked = dialog.as_ref().and_then(|d| d.session_id.as_deref());
+            if let Some(hold) = release.as_mut() {
+                if closed_prompt_owns_hold(contexts, hold, closed, tracked) {
+                    hold.blocked = false;
+                }
+            }
+            if tracked == p["context"].as_str() {
+                *dialog = None;
+            }
         }
         _ => {}
     }
@@ -790,7 +827,7 @@ pub(crate) mod tests {
             refs: HashMap::new(),
             next_node_id: 0,
             frames: None,
-            touches: Vec::new(),
+            touches: HashMap::new(),
             shadow_ids: Default::default(),
             visited_origins: HashSet::new(),
             events,
@@ -938,17 +975,17 @@ pub(crate) mod tests {
         )
         .unwrap();
         let open = json!({"method":"browsingContext.userPromptOpened","params":{"context":"frame","type":"confirm","message":"sure?"}});
-        apply_event(&open, &mut d, &contexts, false);
+        apply_event(&open, &mut d, &mut None, &contexts, false);
         assert_eq!(d.as_ref().unwrap().dialog_type, "confirm");
         assert_eq!(d.as_ref().unwrap().session_id.as_deref(), Some("frame"));
         assert_eq!(d.as_ref().unwrap().owner_context.as_deref(), Some("top"));
         let other =
             json!({"method":"browsingContext.userPromptClosed","params":{"context":"other"}});
-        apply_event(&other, &mut d, &contexts, false);
+        apply_event(&other, &mut d, &mut None, &contexts, false);
         assert!(d.is_some());
         let close =
             json!({"method":"browsingContext.userPromptClosed","params":{"context":"frame"}});
-        apply_event(&close, &mut d, &contexts, false);
+        apply_event(&close, &mut d, &mut None, &contexts, false);
         assert!(d.is_none());
     }
 
@@ -964,6 +1001,7 @@ pub(crate) mod tests {
                             "context": "ctx-active", "type": kind, "handler": handler
                         }}),
                         &mut dialog,
+                        &mut None,
                         &active_only(),
                         enabled,
                     );
@@ -1109,7 +1147,10 @@ pub(crate) mod tests {
                 .count()
         };
         let before = trees(&calls);
-        assert!(session.reconcile_event_loss(&mut None).await.unwrap());
+        assert!(session
+            .reconcile_event_loss(&mut None, &mut None)
+            .await
+            .unwrap());
         assert_eq!(trees(&calls), before + 1);
         assert_eq!(session.contexts.active(), "ctx-active");
         assert!(session.contexts.tab("popup").is_some());

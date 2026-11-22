@@ -6,6 +6,7 @@ pub mod capture;
 pub mod contexts;
 pub mod daemon;
 pub mod forms;
+pub mod frame_transform;
 pub mod input;
 pub mod interact;
 pub mod navigation;
