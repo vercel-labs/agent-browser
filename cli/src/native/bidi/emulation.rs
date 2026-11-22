@@ -1,23 +1,76 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::RwLock;
+
 use serde_json::{json, Map, Value};
 
 use super::client::BidiClient;
 use super::daemon::session;
 use super::firefox_devtools::RdpClient;
 use super::session::FirefoxSession;
-use crate::native::actions::{DaemonState, EmulatedMedia};
+use crate::native::actions::{DaemonState, EmulatedMedia, SessionSetup, ViewportSetup};
+
+type Viewport = (i64, i64, f64);
 
 pub(crate) type Command = (&'static str, Value);
 
 /// Emulation applied to the cookie jar of the active tab, so a tab a page opens has it too.
 #[derive(Debug, Default, Clone)]
 pub struct Settings {
-    pub viewport: Option<(i64, i64, f64)>,
+    pub viewport: Option<Viewport>,
+    window_viewports: HashMap<String, Viewport>,
     pub user_agent: Option<String>,
     pub locale: Option<String>,
     pub timezone: Option<String>,
     pub geolocation: Option<(f64, f64, Option<f64>)>,
     pub offline: Option<bool>,
     pub media: Option<EmulatedMedia>,
+}
+
+impl From<&SessionSetup> for Settings {
+    fn from(setup: &SessionSetup) -> Self {
+        Self {
+            viewport: setup.viewport.map(|viewport| {
+                (
+                    i64::from(viewport.width),
+                    i64::from(viewport.height),
+                    viewport.device_scale_factor,
+                )
+            }),
+            user_agent: setup.user_agent.clone(),
+            locale: setup.locale.clone(),
+            timezone: setup.timezone.clone(),
+            geolocation: setup.geolocation,
+            offline: setup.offline,
+            media: setup.emulated_media.clone(),
+            ..Self::default()
+        }
+    }
+}
+
+/// Holds live emulation and serializes viewport writes from commands and context events.
+#[derive(Default)]
+pub struct Emulation {
+    pub(super) settings: RwLock<Settings>,
+    viewport_gate: tokio::sync::Mutex<()>,
+}
+
+impl Emulation {
+    pub(super) fn new(settings: Settings) -> Self {
+        Self {
+            settings: RwLock::new(settings),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn forget_viewports(&self, contexts: &HashSet<String>) {
+        if !contexts.is_empty() {
+            self.settings
+                .write()
+                .unwrap()
+                .window_viewports
+                .retain(|context, _| !contexts.contains(context));
+        }
+    }
 }
 
 /// Maps a viewport size and device pixel ratio to `browsingContext.setViewport`.
@@ -137,22 +190,16 @@ fn media_config(media: &EmulatedMedia) -> Result<Value, String> {
 
 /// Sends an emulation command for the cookie jar `context` belongs to.
 async fn send_scoped(ff: &FirefoxSession, context: &str, command: Command) -> Result<(), String> {
-    send_scoped_bidi(&ff.bidi, context, ff.contexts.jar(context), command).await
+    send_scoped_bidi(&ff.bidi, ff.contexts.jar(context), command).await
 }
 
-/// Scopes an override to a whole cookie jar, so a tab a page opens there has it before its first
-/// request. A viewport stays with the one tab it sizes.
+/// Scopes an override to a whole cookie jar so a new tab inherits it before its first request.
 async fn send_scoped_bidi(
     bidi: &BidiClient,
-    context: &str,
     user_context: &str,
     (method, mut params): Command,
 ) -> Result<(), String> {
-    if method == "browsingContext.setViewport" {
-        params["context"] = json!(context);
-    } else {
-        params["userContexts"] = json!([user_context]);
-    }
+    params["userContexts"] = json!([user_context]);
     bidi.send(method, params).await.map(|_| ())
 }
 
@@ -243,9 +290,9 @@ async fn update_tab_configuration(
 /// Replays every stored setting onto `context` as it becomes the active tab, including the
 /// print simulation Firefox only accepts for the selected tab.
 pub async fn apply_to_context(ff: &FirefoxSession, context: &str) -> Result<(), String> {
-    let settings = ff.emulation.read().unwrap().clone();
-    apply_overrides(&ff.bidi, &settings, context, ff.contexts.jar(context)).await?;
-    if let Some(ref media) = settings.media {
+    apply_overrides(&ff.bidi, &ff.emulation, context, ff.contexts.jar(context)).await?;
+    let media = ff.emulation.settings.read().unwrap().media.clone();
+    if let Some(ref media) = media {
         apply_media(&ff.bidi, &ff.rdp, context, &media_config(media)?).await?;
     }
     Ok(())
@@ -255,14 +302,24 @@ pub async fn apply_to_context(ff: &FirefoxSession, context: &str) -> Result<(), 
 /// The media configuration is left to `apply_to_context`.
 pub(crate) async fn apply_overrides(
     bidi: &BidiClient,
-    settings: &Settings,
+    emulation: &Emulation,
     context: &str,
     user_context: &str,
 ) -> Result<(), String> {
+    let settings = {
+        let _gate = emulation.viewport_gate.lock().await;
+        let settings = emulation.settings.read().unwrap().clone();
+        if let Some(size) = settings
+            .window_viewports
+            .get(context)
+            .copied()
+            .or(settings.viewport)
+        {
+            send_viewport(bidi, context, size).await?;
+        }
+        settings
+    };
     let mut commands = Vec::new();
-    if let Some((width, height, ratio)) = settings.viewport {
-        commands.push(viewport(width, height, ratio));
-    }
     if let Some(ref user_agent) = settings.user_agent {
         commands.push(self::user_agent(user_agent));
     }
@@ -279,33 +336,60 @@ pub(crate) async fn apply_overrides(
         commands.push(self::offline(offline));
     }
     for command in commands {
-        send_scoped_bidi(bidi, context, user_context, command).await?;
+        send_scoped_bidi(bidi, user_context, command).await?;
     }
     Ok(())
 }
 
-/// Sets a desktop viewport and returns Chrome's `viewport` result shape.
-pub async fn set_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+fn parse_viewport(cmd: &Value) -> Result<Viewport, String> {
+    if cmd.get("mobile").and_then(Value::as_bool).unwrap_or(false) {
+        return Err("Firefox does not support mobile viewport emulation".to_string());
+    }
     let width = cmd.get("width").and_then(Value::as_i64).unwrap_or(1280);
     let height = cmd.get("height").and_then(Value::as_i64).unwrap_or(720);
     let scale = cmd
         .get("deviceScaleFactor")
         .and_then(Value::as_f64)
         .unwrap_or(1.0);
-    if cmd.get("mobile").and_then(Value::as_bool).unwrap_or(false) {
-        return Err("Firefox does not support mobile viewport emulation".to_string());
+    Ok((width, height, scale))
+}
+
+async fn send_viewport(
+    bidi: &BidiClient,
+    context: &str,
+    (width, height, scale): Viewport,
+) -> Result<(), String> {
+    let (method, mut params) = viewport(width, height, scale);
+    params["context"] = json!(context);
+    bidi.send(method, params).await.map(|_| ())
+}
+
+async fn update_stream_viewport(state: &DaemonState, (width, height, _): Viewport) {
+    if let Some(ref server) = state.stream_server {
+        server.set_viewport(width as u32, height as u32).await;
     }
-    let context = session(state)?.contexts.active_tab().to_string();
-    send_scoped(session(state)?, &context, viewport(width, height, scale)).await?;
-    session(state)?.emulation.write().unwrap().viewport = Some((width, height, scale));
-    state.session_setup.viewport = Some(crate::native::actions::ViewportSetup {
+}
+
+/// Sets a desktop viewport and remembers it for new tabs and owned Firefox relaunches.
+pub async fn set_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let size @ (width, height, scale) = parse_viewport(cmd)?;
+    {
+        let ff = session(state)?;
+        let context = ff.contexts.active_tab();
+        let _gate = ff.emulation.viewport_gate.lock().await;
+        send_viewport(&ff.bidi, context, size).await?;
+        let mut settings = ff.emulation.settings.write().unwrap();
+        settings.viewport = Some(size);
+        settings.window_viewports.remove(context);
+    }
+    state.session_setup.viewport = Some(ViewportSetup {
         width: width as i32,
         height: height as i32,
         device_scale_factor: scale,
         mobile: false,
     });
+    update_stream_viewport(state, size).await;
     if let Some(ref server) = state.stream_server {
-        server.set_viewport(width as u32, height as u32).await;
         server
             .broadcast_status(true, false, width as u32, height as u32, "firefox")
             .await;
@@ -318,6 +402,28 @@ pub async fn set_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     }))
 }
 
+/// Sizes one window context without changing the viewport inherited by other contexts.
+pub async fn set_context_viewport(
+    cmd: &Value,
+    state: &mut DaemonState,
+    context: &str,
+) -> Result<(), String> {
+    let size = parse_viewport(cmd)?;
+    {
+        let ff = session(state)?;
+        let _gate = ff.emulation.viewport_gate.lock().await;
+        send_viewport(&ff.bidi, context, size).await?;
+        ff.emulation
+            .settings
+            .write()
+            .unwrap()
+            .window_viewports
+            .insert(context.to_string(), size);
+    }
+    update_stream_viewport(state, size).await;
+    Ok(())
+}
+
 /// Overrides the user agent for the active tab and any tab opened later.
 pub async fn set_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let user_agent = cmd
@@ -326,7 +432,13 @@ pub async fn set_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         .ok_or("Missing 'userAgent' parameter")?;
     let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::user_agent(user_agent)).await?;
-    session(state)?.emulation.write().unwrap().user_agent = Some(user_agent.to_string());
+    session(state)?
+        .emulation
+        .settings
+        .write()
+        .unwrap()
+        .user_agent = Some(user_agent.to_string());
+    state.session_setup.user_agent = Some(user_agent.to_string());
     Ok(json!({ "userAgent": user_agent }))
 }
 
@@ -338,7 +450,8 @@ pub async fn set_locale(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .ok_or("Missing 'locale' parameter")?;
     let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::locale(locale)).await?;
-    session(state)?.emulation.write().unwrap().locale = Some(locale.to_string());
+    session(state)?.emulation.settings.write().unwrap().locale = Some(locale.to_string());
+    state.session_setup.locale = Some(locale.to_string());
     Ok(json!({ "locale": locale }))
 }
 
@@ -351,7 +464,8 @@ pub async fn set_timezone(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .ok_or("Missing 'timezoneId' parameter")?;
     let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::timezone(timezone)).await?;
-    session(state)?.emulation.write().unwrap().timezone = Some(timezone.to_string());
+    session(state)?.emulation.settings.write().unwrap().timezone = Some(timezone.to_string());
+    state.session_setup.timezone = Some(timezone.to_string());
     Ok(json!({ "timezoneId": timezone }))
 }
 
@@ -373,7 +487,13 @@ pub async fn set_geolocation(cmd: &Value, state: &mut DaemonState) -> Result<Val
         geolocation(latitude, longitude, accuracy),
     )
     .await?;
-    session(state)?.emulation.write().unwrap().geolocation = Some((latitude, longitude, accuracy));
+    session(state)?
+        .emulation
+        .settings
+        .write()
+        .unwrap()
+        .geolocation = Some((latitude, longitude, accuracy));
+    state.session_setup.geolocation = Some((latitude, longitude, accuracy));
     Ok(json!({ "latitude": latitude, "longitude": longitude }))
 }
 
@@ -382,7 +502,8 @@ pub async fn set_offline(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let offline = cmd.get("offline").and_then(Value::as_bool).unwrap_or(true);
     let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::offline(offline)).await?;
-    session(state)?.emulation.write().unwrap().offline = Some(offline);
+    session(state)?.emulation.settings.write().unwrap().offline = Some(offline);
+    state.session_setup.offline = offline.then_some(true);
     Ok(json!({ "offline": offline }))
 }
 
@@ -395,7 +516,8 @@ pub async fn set_media(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         let context = ff.contexts.active_tab().to_string();
         apply_media(&ff.bidi, &ff.rdp, &context, &config).await?;
     }
-    session(state)?.emulation.write().unwrap().media = Some(media);
+    session(state)?.emulation.settings.write().unwrap().media = Some(media.clone());
+    state.session_setup.emulated_media = Some(media);
     Ok(json!({ "set": true }))
 }
 
@@ -512,6 +634,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .emulation
+                .settings
                 .read()
                 .unwrap()
                 .viewport,
@@ -531,6 +654,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn firefox_window_viewport_survives_late_context_events_and_tab_switches() {
+        use super::super::network::{spawn_dispatcher, subscribe_dispatcher};
+        use super::super::session::tests::{fake_session_with, Messages};
+
+        let messages = Messages::default();
+        let seen = messages.clone();
+        let (ff, tx, _) = fake_session_with(move |request| {
+            seen.lock().unwrap().push(request.clone());
+            match request["method"].as_str() {
+                Some("browser.createUserContext") => json!({"userContext": "jar-window"}),
+                Some("browsingContext.create") => json!({"context": "ctx-window"}),
+                Some("browsingContext.getTree") => json!({"contexts": [
+                    {"context": "ctx-active", "userContext": "default"},
+                    {"context": "ctx-window", "userContext": "jar-window"},
+                ]}),
+                _ => json!({}),
+            }
+        })
+        .await;
+        let _dispatcher = spawn_dispatcher(
+            ff.bidi.clone(),
+            ff.net.clone(),
+            subscribe_dispatcher(&ff.bidi),
+            ff.emulation.clone(),
+            ff.permissions.clone(),
+        );
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        set_viewport(&json!({"width": 800, "height": 600}), &mut state)
+            .await
+            .unwrap();
+        tabs::window_new(
+            &json!({"viewport": {"width": 1000, "height": 700}}),
+            &mut state,
+        )
+        .await
+        .unwrap();
+        let widths = || {
+            messages
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|message| message["method"] == "browsingContext.setViewport")
+                .map(|message| {
+                    (
+                        message["params"]["context"].as_str().unwrap().to_owned(),
+                        message["params"]["viewport"]["width"].as_i64().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = widths().len();
+        tx.send(
+            json!({"type":"event", "method":"browsingContext.contextCreated",
+            "params":{"context":"ctx-window", "parent":null, "userContext":"jar-window"}}),
+        )
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while widths().len() == before {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for tab in ["t1", "t2"] {
+            tabs::tab_switch(&json!({"tabId": tab}), &mut state)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            &widths()[before..],
+            &[
+                ("ctx-window".into(), 1000),
+                ("ctx-active".into(), 800),
+                ("ctx-window".into(), 1000)
+            ],
+        );
+        assert_eq!(state.session_setup.viewport.unwrap().width, 800);
+
+        set_viewport(&json!({"width": 900, "height": 600}), &mut state)
+            .await
+            .unwrap();
+        let ff = state.firefox.as_mut().unwrap();
+        assert!(ff
+            .emulation
+            .settings
+            .read()
+            .unwrap()
+            .window_viewports
+            .is_empty());
+        assert_eq!(state.session_setup.viewport.unwrap().width, 900);
+    }
+
+    #[tokio::test]
     async fn mobile_emulation_is_rejected_without_commands_or_state_changes() {
         let (mut state, calls) = session_state().await;
         let expected_viewport = Some(crate::native::actions::ViewportSetup {
@@ -541,8 +758,8 @@ mod tests {
         });
         state.session_setup.viewport = expected_viewport;
         let ff = state.firefox.as_mut().unwrap();
-        ff.emulation.write().unwrap().viewport = Some((800, 600, 1.5));
-        ff.emulation.write().unwrap().user_agent = Some("Desktop Agent".to_string());
+        ff.emulation.settings.write().unwrap().viewport = Some((800, 600, 1.5));
+        ff.emulation.settings.write().unwrap().user_agent = Some("Desktop Agent".to_string());
 
         let error = set_viewport(
             &json!({"width": 375, "height": 812, "deviceScaleFactor": 3.0, "mobile": true}),
@@ -558,6 +775,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .emulation
+                .settings
                 .read()
                 .unwrap()
                 .viewport,
@@ -578,6 +796,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .emulation
+                .settings
                 .read()
                 .unwrap()
                 .viewport,
@@ -589,6 +808,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .emulation
+                .settings
                 .read()
                 .unwrap()
                 .user_agent
@@ -711,6 +931,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .emulation
+                .settings
                 .read()
                 .unwrap()
                 .media
@@ -725,6 +946,119 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn firefox_runtime_setup_replays_controls_on_a_fresh_session() {
+        use super::super::network::{self, NetContext};
+        use std::sync::Arc;
+
+        let (ff, _, _, _, _) = fake_session_with_rdp().await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        set_viewport(
+            &json!({"width": 800, "height": 600, "deviceScaleFactor": 1.5}),
+            &mut state,
+        )
+        .await
+        .unwrap();
+        set_user_agent(&json!({"userAgent":"Runtime agent"}), &mut state)
+            .await
+            .unwrap();
+        set_locale(&json!({"locale":"fr-FR"}), &mut state)
+            .await
+            .unwrap();
+        set_timezone(&json!({"timezoneId":"Asia/Tokyo"}), &mut state)
+            .await
+            .unwrap();
+        set_geolocation(
+            &json!({"latitude":12.0,"longitude":34.0,"accuracy":2.0}),
+            &mut state,
+        )
+        .await
+        .unwrap();
+        set_offline(&json!({"offline":true}), &mut state)
+            .await
+            .unwrap();
+        set_media(&json!({"media":"print"}), &mut state)
+            .await
+            .unwrap();
+        network::headers(&json!({"headers":{"x-example":"sample"}}), &mut state)
+            .await
+            .unwrap();
+        let replay_net = |state: &DaemonState| {
+            NetContext::from_state(
+                state,
+                state
+                    .session_setup
+                    .extra_headers
+                    .clone()
+                    .unwrap_or_default(),
+            )
+        };
+        let header_net = replay_net(&state);
+        assert!(header_net.needs_request_intercept().await);
+        assert_eq!(
+            header_net.headers.read().await.get("x-example").unwrap(),
+            "sample"
+        );
+
+        network::credentials(&json!({"username":"user","password":"secret"}), &mut state)
+            .await
+            .unwrap();
+        let credential_net = replay_net(&state);
+        assert_eq!(
+            *credential_net.headers.read().await,
+            HashMap::from([("Authorization".into(), "Basic dXNlcjpzZWNyZXQ=".into())])
+        );
+        network::headers(&json!({"headers":{}}), &mut state)
+            .await
+            .unwrap();
+        assert!(!replay_net(&state).needs_request_intercept().await);
+
+        let (mut next, _, _, bidi, rdp) = fake_session_with_rdp().await;
+        next.emulation = Arc::new(Emulation::new((&state.session_setup).into()));
+        apply_to_context(&next, "ctx-active").await.unwrap();
+        let bidi = bidi.lock().unwrap();
+        for (method, key, value) in [
+            (
+                "browsingContext.setViewport",
+                "devicePixelRatio",
+                json!(1.5),
+            ),
+            (
+                "emulation.setUserAgentOverride",
+                "userAgent",
+                json!("Runtime agent"),
+            ),
+            ("emulation.setLocaleOverride", "locale", json!("fr-FR")),
+            (
+                "emulation.setTimezoneOverride",
+                "timezone",
+                json!("Asia/Tokyo"),
+            ),
+            (
+                "emulation.setGeolocationOverride",
+                "coordinates",
+                json!({"latitude":12.0,"longitude":34.0,"accuracy":2.0}),
+            ),
+            (
+                "emulation.setNetworkConditions",
+                "networkConditions",
+                json!({"type":"offline"}),
+            ),
+        ] {
+            assert!(
+                bidi.iter()
+                    .any(|request| request["method"] == method && request["params"][key] == value),
+                "{method}: {bidi:?}"
+            );
+        }
+        assert!(rdp
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["configuration"]["printSimulationEnabled"] == true));
     }
 
     #[tokio::test]

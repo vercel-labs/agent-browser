@@ -68,12 +68,26 @@ struct Shot {
     height: u32,
 }
 
+/// The browsing-context events the live view acts on, so page logs and network traffic cannot
+/// crowd them out of the subscription.
+fn live_view_event(event: &Value) -> bool {
+    matches!(
+        event["method"].as_str(),
+        Some(
+            "browsingContext.contextCreated"
+                | "browsingContext.contextDestroyed"
+                | "browsingContext.userPromptOpened"
+                | "browsingContext.userPromptClosed"
+        )
+    )
+}
+
 /// Publishes frames, viewport, tabs and dialog state for the dashboard, and only while one is connected.
 async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<FirefoxLive>>) {
     let Some(mut live) = target.borrow_and_update().clone() else {
         return;
     };
-    let mut events = live.bidi.subscribe_buffered();
+    let mut events = live.bidi.subscribe_matching(live_view_event);
     let mut prompts = HashSet::<String>::new();
     let mut frame: Option<tokio::task::JoinHandle<Option<Shot>>> = None;
     let mut listing: Option<tokio::task::JoinHandle<Option<Vec<Value>>>> = None;

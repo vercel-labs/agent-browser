@@ -490,6 +490,7 @@ pub struct InitScriptSetup {
 /// to tell a relaunch that changes them from one that does not.
 #[derive(Debug, Default, Clone, PartialEq)]
 struct LaunchSeed {
+    owned_firefox: bool,
     user_agent: Option<String>,
     emulated_media: Option<EmulatedMedia>,
     /// The window-sizing launch arguments in effect.
@@ -555,6 +556,7 @@ impl SessionSetup {
         });
         Self {
             launch_seed: LaunchSeed {
+                owned_firefox: false,
                 user_agent: user_agent.clone(),
                 emulated_media: emulated_media.clone(),
                 window_sizing: window_sizing_args(&options.args),
@@ -563,6 +565,25 @@ impl SessionSetup {
             emulated_media,
             ..Self::default()
         }
+    }
+
+    fn for_owned_firefox_launch(&self, options: &LaunchOptions) -> Self {
+        let mut launch = Self::from_launch_options(options);
+        launch.launch_seed.owned_firefox = true;
+        let mut setup = if self.launch_seed.owned_firefox {
+            self.clone().carried_into_relaunch(launch)
+        } else {
+            launch
+        };
+        if let Some((width, height)) = options.viewport_size {
+            setup.viewport = Some(ViewportSetup {
+                width: width as i32,
+                height: height as i32,
+                device_scale_factor: 1.0,
+                mobile: false,
+            });
+        }
+        setup
     }
 
     /// The setup for a relaunched browser: what was set at runtime, with the
@@ -1012,6 +1033,7 @@ impl DaemonState {
 
     fn reset_input_state(&mut self) {
         self.mouse_state = MouseState::default();
+        self.pending_pointer_release = None;
     }
 
     /// Rejects a navigation to a URL outside the allowed domains; `about:blank` stays reachable.
@@ -1437,15 +1459,46 @@ impl DaemonState {
         recording::stop_recording_task(&mut self.recording_state).await
     }
 
+    pub(crate) fn drain_firefox_events(&mut self) -> bool {
+        let (held, active_changed) = {
+            let (firefox, dialog, hold) = (
+                &mut self.firefox,
+                &mut self.pending_dialog,
+                &mut self.pending_pointer_release,
+            );
+            let held = hold.as_ref().map(|release| release.button);
+            let active_changed = firefox
+                .as_mut()
+                .is_some_and(|ff| ff.drain_events_with(dialog, hold));
+            (held, active_changed)
+        };
+        if active_changed {
+            self.ref_map.invalidate_all_documents();
+            self.active_iframe_sessions.clear();
+            self.active_frame_id = None;
+        }
+        if let Some(button) = held.filter(|_| self.pending_pointer_release.is_none()) {
+            self.mouse_state.buttons &= !button.mask();
+        }
+        active_changed
+    }
+
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
         let previous_firefox_context = self
             .firefox
             .as_ref()
             .map(|ff| ff.contexts.active_tab().to_string());
         let firefox_tabs_changed = bidi::network::drain(self).await;
+        let held = self
+            .pending_pointer_release
+            .as_ref()
+            .map(|release| release.button);
         if let Some(ff) = self.firefox.as_mut() {
+            let reconciled = ff
+                .reconcile_event_loss(&mut self.pending_dialog, &mut self.pending_pointer_release)
+                .await?;
             ff.release_unused_user_contexts().await;
-            if ff.recover_lost_events(&mut self.pending_dialog).await? {
+            if reconciled {
                 bidi::daemon::reset_page(self);
             }
         }
@@ -1460,8 +1513,27 @@ impl DaemonState {
         } else if firefox_tabs_changed {
             self.notify_firefox_tabs();
         }
+        if let Some(button) = held.filter(|_| self.pending_pointer_release.is_none()) {
+            self.mouse_state.buttons &= !button.mask();
+        }
         let drained = self.drain_cdp_events();
-        self.apply_drained_events(drained).await
+        let applied = self.apply_drained_events(drained).await;
+        self.reconcile_pending_release().await;
+        applied
+    }
+
+    /// Releases the button a Firefox dialog left held once the browser reports the prompt that
+    /// opened mid-press is gone, and drops a hold whose tab is gone instead.
+    pub(crate) async fn reconcile_pending_release(&mut self) {
+        let (firefox, dialog, hold, buttons) = (
+            &self.firefox,
+            self.pending_dialog.as_ref(),
+            &mut self.pending_pointer_release,
+            &mut self.mouse_state.buttons,
+        );
+        if let Some(ff) = firefox.as_ref() {
+            bidi::interact::release_pending(ff, dialog, hold, buttons).await;
+        }
     }
 
     /// Records a HAR entry while enforcing `HAR_MAX_ENTRIES`, URL/header size caps, and the
@@ -3797,6 +3869,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             {
                 state.update_stream_client().await;
             }
+            if action == "tab_close" {
+                state.reconcile_pending_release().await;
+            }
             result
         }
         "launch" => {
@@ -5228,11 +5303,6 @@ async fn launch_browser_from_settings(
     }
     state.plugin_init_scripts.clear();
 
-    // Use the stream server's viewport dimensions for --window-size so the
-    // content area matches the desired viewport from the start.
-    if let Some(ref server) = state.stream_server {
-        options.viewport_size = Some(server.viewport().await);
-    }
     let engine = state.settings.engine();
     let connection = state.settings.connection();
     let cdp = match &connection {
@@ -5254,6 +5324,9 @@ async fn launch_browser_from_settings(
     let contained = state.domain_filter.read().await.is_some();
     if engine.as_deref() == Some("firefox") {
         return Box::pin(launch_firefox(state, options, &plugins, strict_state)).await;
+    }
+    if let Some(ref server) = state.stream_server {
+        options.viewport_size = Some(server.viewport().await);
     }
     options.restrict_webrtc = contained;
     // Extract storage_state before options is moved into BrowserManager::launch.
@@ -6252,9 +6325,14 @@ async fn launch_firefox(
     let storage_state = options.storage_state.clone();
     state.ref_map.invalidate_all_documents();
     state.reset_input_state();
-    let net = bidi::network::NetContext::from_state(state);
+    let setup = state.session_setup.for_owned_firefox_launch(&options);
+    let net = bidi::network::NetContext::from_state(
+        state,
+        setup.extra_headers.clone().unwrap_or_default(),
+    );
     let mut session =
-        bidi::session::FirefoxSession::launch(&options, net, state.auto_dialog).await?;
+        bidi::session::FirefoxSession::launch(&options, net, state.auto_dialog, (&setup).into())
+            .await?;
     if contained
         || state.proxy_credentials.read().await.is_some()
         || !state.routes.read().await.is_empty()
@@ -6270,6 +6348,7 @@ async fn launch_firefox(
     state.update_stream_client().await;
     try_auto_restore_state(state).await;
     load_storage_state_for_launch(state, &storage_state, strict_state).await?;
+    state.session_setup = setup;
     Ok(json!({}))
 }
 
@@ -19062,6 +19141,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn firefox_relaunch_preserves_runtime_setup_unless_launch_defaults_change() {
+        let (_env, mut state) = seeded_state();
+        let previous = LaunchOptions {
+            user_agent: Some("launch agent".into()),
+            color_scheme: Some("light".into()),
+            ..LaunchOptions::default()
+        };
+        state.session_setup = SessionSetup::default().for_owned_firefox_launch(&previous);
+        state.session_setup.user_agent = Some("runtime agent".into());
+        state.session_setup.emulated_media = Some(EmulatedMedia {
+            media: Some("print".into()),
+            features: vec![],
+        });
+        state.session_setup.timezone = Some("Asia/Tokyo".into());
+        state.session_setup.viewport = Some(viewport(800, 600, false));
+        let unchanged = state.session_setup.for_owned_firefox_launch(&previous);
+        assert_eq!(unchanged.user_agent.as_deref(), Some("runtime agent"));
+        assert_eq!(
+            unchanged.emulated_media.unwrap().media.as_deref(),
+            Some("print")
+        );
+
+        let changed = LaunchOptions {
+            user_agent: Some("new launch agent".into()),
+            color_scheme: Some("dark".into()),
+            executable_path: Some("/nonexistent/agent-browser-firefox".into()),
+            ..previous
+        };
+        let staged = state.session_setup.for_owned_firefox_launch(&changed);
+        assert_eq!(staged.user_agent.as_deref(), Some("new launch agent"));
+        assert_eq!(
+            staged.emulated_media.unwrap().features,
+            vec![("prefers-color-scheme".into(), "dark".into())]
+        );
+        assert_eq!(staged.timezone.as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(staged.viewport, Some(viewport(800, 600, false)));
+
+        let before = format!("{:?}", state.session_setup);
+        let error = launch_firefox(&mut state, changed, &[], false)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+        assert_eq!(format!("{:?}", state.session_setup), before);
+    }
+
+    #[tokio::test]
     async fn a_failed_local_launch_keeps_the_session_setup() {
         let (_env, mut state) = seeded_state();
         let before = format!("{:?}", state.session_setup);
@@ -21714,12 +21839,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         state.mouse_state.x = 12.0;
         state.mouse_state.y = 34.0;
         state.mouse_state.buttons = 1;
+        state.pending_pointer_release = Some(crate::native::interaction::PendingRelease {
+            session_id: "session".into(),
+            owner_tab: None,
+            blocked: true,
+            owner_position: (12.0, 34.0),
+            x: 12.0,
+            y: 34.0,
+            button: crate::native::pointer::MouseButton::Left,
+            click_count: 1,
+            modifiers: crate::native::pointer::Modifiers::default(),
+        });
 
         state.reset_input_state();
 
         assert_eq!(state.mouse_state.x, 0.0);
         assert_eq!(state.mouse_state.y, 0.0);
         assert_eq!(state.mouse_state.buttons, 0);
+        assert!(state.pending_pointer_release.is_none());
     }
 
     #[test]

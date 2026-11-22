@@ -1904,6 +1904,28 @@ mod tests {
     }
 
     #[test]
+    fn daemon_proxy_credentials_forward_the_resolved_pair() {
+        let proxy = crate::session_settings::parse_proxy("http://user:secret@proxy.example:8080");
+        let mut opts = test_daemon_options(None, false, None);
+        opts.proxy = Some(&proxy.server);
+        opts.proxy_username = proxy.username.as_deref();
+        opts.proxy_password = proxy.password.as_deref();
+        let mut cmd = Command::new("agent-browser");
+        apply_daemon_env(&mut cmd, "session", &opts);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        for (key, value) in [
+            ("AGENT_BROWSER_PROXY", "http://proxy.example:8080"),
+            ("AGENT_BROWSER_PROXY_USERNAME", "user"),
+            ("AGENT_BROWSER_PROXY_PASSWORD", "secret"),
+        ] {
+            assert_eq!(
+                envs.get(std::ffi::OsStr::new(key)),
+                Some(&Some(std::ffi::OsStr::new(value)))
+            );
+        }
+    }
+
+    #[test]
     fn test_spawn_race_loser_does_not_overwrite_winner_config() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
         let dir = tempfile::tempdir().unwrap();

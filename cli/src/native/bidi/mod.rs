@@ -9,6 +9,7 @@ pub mod emulation;
 pub mod firefox;
 pub mod firefox_devtools;
 pub mod forms;
+pub mod frame_transform;
 pub mod input;
 pub mod interact;
 pub mod navigation;
