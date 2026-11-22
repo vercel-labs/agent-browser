@@ -1041,6 +1041,21 @@ fn open_lock_file(path: &Path) -> Result<fs::File, String> {
     Ok(file)
 }
 
+/// Whether the session has a daemon, counting one another caller is starting.
+/// A session that never started a daemon has no lock file; it is not created
+/// here, so asking leaves nothing behind.
+pub fn daemon_running(session: &str) -> bool {
+    if daemon_ready(session) {
+        return true;
+    }
+    if !SessionFile::Lock.path(session).exists() {
+        return false;
+    }
+    // Wait out a start in progress, then look again.
+    let _lock = SpawnLock::acquire(session);
+    daemon_ready(session)
+}
+
 /// Returns a ready daemon for the session, starting one if needed. Callers for
 /// the same session take turns, so one that arrives while another is starting
 /// the daemon attaches to it.

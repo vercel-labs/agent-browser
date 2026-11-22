@@ -252,6 +252,12 @@ pub fn clear_file(session: &str) -> Result<(), String> {
     clear_path(&SessionFile::Settings.path(session))
 }
 
+/// Whether anything sits where the settings file of `session` goes, readable
+/// or not: what `close` still has to clear when no daemon is running.
+pub fn has_file(session: &str) -> bool {
+    fs::symlink_metadata(SessionFile::Settings.path(session)).is_ok()
+}
+
 fn clear_path(path: &Path) -> Result<(), String> {
     let err = match fs::remove_file(path) {
         Ok(()) => return Ok(()),
