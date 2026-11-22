@@ -391,6 +391,8 @@ agent-browser frame main              # Return to main frame
 
 The `frame` command accepts element refs (`@e3`), CSS selectors (`"#my-iframe"`), or frame name/URL.
 
+While a frame is selected, `eval` runs in that frame's context, so `document`, `window` and globals are the iframe's rather than the main page's. It works for same-origin and cross-origin iframes; `frame main` returns `eval` to the main frame.
+
 ## Dialogs
 
 ```bash

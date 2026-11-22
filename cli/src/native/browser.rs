@@ -1796,7 +1796,17 @@ impl BrowserManager {
         script: &str,
     ) -> Result<RemoteObject, String> {
         let session_id = self.active_session_id()?.to_string();
+        self.evaluate_remote_object_in(script, &session_id).await
+    }
 
+    /// Runs `script` in the given CDP session. A cross-origin iframe's
+    /// dedicated session has that iframe as its main frame, so the script's
+    /// `document` is the iframe's document.
+    pub(crate) async fn evaluate_remote_object_in(
+        &self,
+        script: &str,
+        session_id: &str,
+    ) -> Result<RemoteObject, String> {
         let result: EvaluateResult = self
             .client
             .send_command_typed(
@@ -1806,7 +1816,7 @@ impl BrowserManager {
                     return_by_value: Some(true),
                     await_promise: Some(true),
                 },
-                Some(&session_id),
+                Some(session_id),
             )
             .await?;
 
@@ -1820,6 +1830,122 @@ impl BrowserManager {
         }
 
         Ok(result.result)
+    }
+
+    /// Runs `script` inside a same-process iframe. The iframe has no CDP
+    /// session of its own, but its document is a separate execution context
+    /// on the parent session, so the script runs there by `contextId`. That
+    /// keeps `document`, `window` and globals the iframe's, and the debugger
+    /// does not apply the page's CSP to `Runtime.evaluate`.
+    pub(crate) async fn evaluate_in_same_process_frame(
+        &self,
+        script: &str,
+        session_id: &str,
+        frame_id: &str,
+        known_context_id: Option<i64>,
+    ) -> Result<RemoteObject, String> {
+        let evaluate = |context_id: Option<i64>| async move {
+            // A cached id from a document the frame has since navigated away
+            // from no longer exists. Fall back to asking the browser once.
+            let context_id = match context_id {
+                Some(id) => id,
+                None => self.frame_execution_context(session_id, frame_id).await?,
+            };
+            self.client
+                .send_command_typed::<_, EvaluateResult>(
+                    "Runtime.evaluate",
+                    &json!({
+                        "expression": script,
+                        "returnByValue": true,
+                        "awaitPromise": true,
+                        "contextId": context_id,
+                    }),
+                    Some(session_id),
+                )
+                .await
+        };
+        let result = match evaluate(known_context_id).await {
+            Ok(result) => result,
+            Err(error) if error.contains("Cannot find context") => evaluate(None)
+                .await
+                .map_err(|error| format!("Evaluation error: {}", error))?,
+            Err(error) => return Err(error),
+        };
+        if let Some(ref details) = result.exception_details {
+            let msg = details
+                .exception
+                .as_ref()
+                .and_then(|e| e.description.as_deref())
+                .unwrap_or(&details.text);
+            return Err(format!("Evaluation error: {}", msg));
+        }
+        Ok(result.result)
+    }
+
+    /// Asks the browser for the id of the default execution context whose
+    /// `auxData` carries `frameId` and `isDefault`. The daemon normally
+    /// keeps this map itself from the event stream; this is the miss path.
+    ///
+    /// Chrome reports existing contexts only when reporting turns on, so a
+    /// second `Runtime.enable` is a no-op and the domains are cycled. That
+    /// cycle also replays stored console messages through the normal event
+    /// stream, so callers that drain events separately would show history
+    /// twice; the daemon therefore keeps its own map and reaches this only on
+    /// a miss.
+    async fn frame_execution_context(
+        &self,
+        session_id: &str,
+        frame_id: &str,
+    ) -> Result<i64, String> {
+        let mut rx = self.client.subscribe();
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.disable", Some(session_id))
+            .await;
+        // Enable replays the context list; a bare disable must not be left
+        // behind, so a failure is retried once before giving up.
+        if self
+            .client
+            .send_command_no_params("Runtime.enable", Some(session_id))
+            .await
+            .is_err()
+        {
+            self.client
+                .send_command_no_params("Runtime.enable", Some(session_id))
+                .await?;
+        }
+        let lookup = async {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if event.method != "Runtime.executionContextCreated"
+                            || event.session_id.as_deref().unwrap_or_default() != session_id
+                        {
+                            continue;
+                        }
+                        let context = &event.params["context"];
+                        let aux = &context["auxData"];
+                        let is_default = aux["isDefault"].as_bool().unwrap_or(false);
+                        if is_default && aux["frameId"].as_str() == Some(frame_id) {
+                            if let Some(id) = context["id"].as_i64() {
+                                return Ok(id);
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(
+                            "Lost the browser connection while resolving the frame".to_string()
+                        )
+                    }
+                }
+            }
+        };
+        // A frame that was detached between `frame <sel>` and `eval` never
+        // reports a context; fail instead of waiting forever.
+        tokio::time::timeout(Duration::from_secs(5), lookup)
+            .await
+            .map_err(|_| "Could not resolve the selected frame's execution context".to_string())?
     }
 
     async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {

@@ -387,6 +387,8 @@ The `frame` command accepts:
 - **CSS selectors** — `frame "#payment-iframe"` finds the iframe by selector
 - **Frame name/URL** — matches against the browser's frame tree
 
+While a frame is selected, `eval` runs in that frame's context (`document` and globals are the iframe's), for same-origin and cross-origin iframes alike. `frame main` returns `eval` to the main frame.
+
 ## Dialogs
 
 By default, `alert` and `beforeunload` dialogs are automatically accepted so they never block the agent. `confirm` and `prompt` dialogs still require explicit handling. Use `--no-auto-dialog` to disable this behavior.

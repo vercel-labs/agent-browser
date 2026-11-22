@@ -240,7 +240,7 @@ When several sessions share one Chrome over `--cdp <port>`, add `--pin-tab` so e
 
 ### Iframes and dialogs
 
-Iframes are inlined in the snapshot, so their refs work directly. To scope a snapshot to one frame, run `agent-browser frame @e3`, then `agent-browser frame main` to return.
+Iframes are inlined in the snapshot, so their refs work directly. To scope a snapshot to one frame, run `agent-browser frame @e3`, then `agent-browser frame main` to return. While a frame is selected, `eval` runs in that frame's context.
 
 `alert` and `beforeunload` are accepted automatically. Handle `confirm` and `prompt` with `agent-browser dialog status`, `dialog accept [text]`, or `dialog dismiss`.
 
@@ -258,7 +258,7 @@ Run `agent-browser doctor` before anything else when a command fails unexpectedl
 - **Element in the DOM but not in the snapshot**: it is off-screen or not rendered yet. Scroll or `wait --text "..."`, then snapshot.
 - **Click does nothing**: an overlay is covering the target. If `click` reports `covered by <...>`, dismiss that element first.
 - **Fill or type has no effect**: a custom input is intercepting key events. Run `focus @e1`, then `keyboard inserttext "text"` (or `keyboard type "text"` for raw keystrokes).
-- **Cross-origin iframe missing from the snapshot**: it blocks accessibility access. Try `frame "#iframe"`; otherwise use `eval` in that origin.
+- **Cross-origin iframe missing from the snapshot**: it blocks accessibility access. Select it with `frame "#iframe"`; element commands and `eval` then run inside it.
 - **WebGPU page screenshots black**: relaunch with `--webgpu`, wait for the first rendered frame, then capture. Load `references/webgpu.md` for Linux and Windows.
 
 ## Working safely

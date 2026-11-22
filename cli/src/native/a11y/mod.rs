@@ -519,6 +519,26 @@ fn frame_target(frame_id: &str, session_id: &str, parent_id: Option<&str>) -> Fr
     }
 }
 
+/// The CDP session whose JavaScript context hosts `frame_id`. An
+/// out-of-process iframe is hosted by its own dedicated session; a
+/// same-process frame by its nearest ancestor target session, which may be an
+/// OOPIF rather than the top-level page. Returns `None` when the frame is not
+/// in the active page's tree.
+pub async fn frame_host_session(
+    client: &CdpClient,
+    top_session_id: &str,
+    iframe_sessions: &HashMap<String, String>,
+    frame_id: &str,
+) -> Option<String> {
+    let (_, targets) = collect_frame_sessions(client, top_session_id, iframe_sessions)
+        .await
+        .ok()?;
+    targets
+        .into_iter()
+        .find(|target| target.frame_id == frame_id)
+        .map(|target| target.session_id)
+}
+
 /// Return the dedicated target sessions that belong to the active page's
 /// frame tree. The daemon keeps iframe sessions from background tabs so an
 /// audit can recover them after a tab switch, while network capture uses this

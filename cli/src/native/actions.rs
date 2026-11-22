@@ -726,6 +726,10 @@ pub struct DaemonState {
     /// second attachment event when returning to an already-attached tab.
     /// Target.detachedFromTarget events remove stale sessions.
     pub iframe_sessions: HashMap<String, String>,
+    /// (session_id, frame_id) → that frame's default execution context id,
+    /// filled from `Runtime.executionContextCreated` events. `eval` uses it
+    /// to run in a same-process iframe that has no CDP session of its own.
+    pub frame_contexts: HashMap<(String, String), i64>,
     /// Dedicated iframe sessions reachable from the currently active page.
     /// Network tracking uses this subset so background-tab iframe traffic is
     /// not mixed into the active tab's request list or HAR capture.
@@ -958,6 +962,7 @@ impl DaemonState {
             request_tracking: false,
             active_frame_id: None,
             iframe_sessions: HashMap::new(),
+            frame_contexts: HashMap::new(),
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             blocked_documents: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -1649,6 +1654,7 @@ impl DaemonState {
         for sid in &drained.detached_iframe_sessions {
             self.iframe_sessions.retain(|_, v| v != sid);
             self.active_iframe_sessions.remove(sid);
+            self.frame_contexts.retain(|(s, _), _| s != sid);
         }
 
         // Attach and register new targets
@@ -2058,6 +2064,46 @@ impl DaemonState {
                                     || self.active_iframe_sessions.contains(sid)
                                     || self.iframe_sessions.values().any(|known| known == sid)))
                     });
+
+                    // Remember each frame's default context so `eval` can
+                    // run inside a same-process iframe without cycling
+                    // Runtime (which would replay console history). This
+                    // runs before the session filter: a same-process frame
+                    // can live in an out-of-process iframe's session, and
+                    // direct-page mode reports no session id at all.
+                    match event.method.as_str() {
+                        "Runtime.executionContextCreated" => {
+                            let sid = event.session_id.as_deref().unwrap_or_default();
+                            let context = &event.params["context"];
+                            let aux = &context["auxData"];
+                            if aux["isDefault"].as_bool() == Some(true) {
+                                if let (Some(frame_id), Some(id)) =
+                                    (aux["frameId"].as_str(), context["id"].as_i64())
+                                {
+                                    self.frame_contexts
+                                        .insert((sid.to_string(), frame_id.to_string()), id);
+                                }
+                            }
+                        }
+                        // Every context of that session is gone; drop the
+                        // entries so a stale id is never reused.
+                        "Runtime.executionContextsCleared" => {
+                            let sid = event.session_id.as_deref().unwrap_or_default();
+                            self.frame_contexts.retain(|(s, _), _| s != sid);
+                        }
+                        // Same for a single detached frame; also kept
+                        // before the filter so non-active sessions clean up.
+                        "Page.frameDetached" => {
+                            if let Some(frame_id) =
+                                event.params.get("frameId").and_then(Value::as_str)
+                            {
+                                let sid = event.session_id.as_deref().unwrap_or_default();
+                                self.frame_contexts
+                                    .remove(&(sid.to_string(), frame_id.to_string()));
+                            }
+                        }
+                        _ => {}
+                    }
 
                     if !session_matches && !iframe_network_event && !webmcp_event {
                         continue;
@@ -2758,6 +2804,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.network_auto_attach_installed = false;
     state.iframe_sessions.clear();
     state.active_iframe_sessions.clear();
+    state.frame_contexts.clear();
     state.webmcp.clear_all();
     state.screencasting = false;
     state.pending_dialog = None;
@@ -6894,7 +6941,48 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let result = mgr.evaluate_remote_object(script).await?;
+    // `eval` follows the frame selected by `frame <sel>`, like element
+    // commands do. Resolve the frame's host session the same way a11y does:
+    // an out-of-process iframe is hosted by its own session, and a
+    // same-process frame by its nearest ancestor target (which may itself be
+    // an OOPIF). An iframe's own document runs in a separate context, so the
+    // script runs by that context's id rather than the session's default.
+    // Only Chrome reports execution contexts and attaches iframes; other
+    // engines keep the previous main-frame behavior.
+    let frame_id = state
+        .active_frame_id
+        .as_deref()
+        .filter(|_| state.engine == "chrome");
+    let result = match frame_id {
+        Some(frame_id) => {
+            let session_id = mgr.active_session_id()?.to_string();
+            let is_oopif = state.iframe_sessions.contains_key(frame_id);
+            let host_session = if is_oopif {
+                state.iframe_sessions.get(frame_id).cloned()
+            } else {
+                super::a11y::frame_host_session(
+                    &mgr.client,
+                    &session_id,
+                    &state.iframe_sessions,
+                    frame_id,
+                )
+                .await
+            };
+            let host_session =
+                host_session.ok_or_else(|| "Could not locate the selected frame".to_string())?;
+            if is_oopif {
+                mgr.evaluate_remote_object_in(script, &host_session).await?
+            } else {
+                let known = state
+                    .frame_contexts
+                    .get(&(host_session.clone(), frame_id.to_string()))
+                    .copied();
+                mgr.evaluate_in_same_process_frame(script, &host_session, frame_id, known)
+                    .await?
+            }
+        }
+        None => mgr.evaluate_remote_object(script).await?,
+    };
     let unserializable = result
         .unserializable_value
         .clone()
