@@ -2,7 +2,7 @@
 
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md. Unknown commands exit with status 1, including when you request command help.
 
-These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`. Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently.
+These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`. Operands of `select`, `upload`, `press`, `keydown`, `keyup`, `keyboard`, `set`, `clipboard`, `auth`, `webmcp`, `dialog`, `tab`, `skills` and `plugin` also follow a leading `--`; a lone `--` stays an operand. Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently.
 
 ## Linux dependencies
 
@@ -69,7 +69,7 @@ agent-browser snapshot            # Full accessibility tree
 agent-browser snapshot -i         # Interactive elements only (recommended)
 agent-browser snapshot -c         # Compact output
 agent-browser snapshot -d 3       # Limit depth to 3
-agent-browser snapshot -s "#main" # Scope to CSS selector
+agent-browser snapshot -s "#main" # Scope to every match of a CSS selector
 agent-browser snapshot --delta     # Full state once, then bounded structural deltas
 agent-browser snapshot --delta --full # Force full state and refresh baseline
 ```
@@ -106,10 +106,14 @@ agent-browser select @e1 "a" "b"  # Select multiple options
 agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
-agent-browser upload @e1 file.pdf # Upload files
+agent-browser upload @e1 file.pdf # Upload files (relative to cwd; errors: file_not_found, not_file_input)
 ```
 
+`upload` fails with `file_not_found` when a path does not exist and with `not_file_input` when the target is not a file input; relative paths resolve against the current directory. `diff snapshot` compares against the last snapshot taken on the tab with that snapshot's options, failing with `no_baseline` when there is none and `baseline_mismatch` when a named option differs.
+
 For `fill` and `type`, put options before the optional `--` marker. Text after the marker is literal, including values that look like flags. For example, `agent-browser fill @e2 -- --json` fills with `--json`, and `agent-browser type @e2 --clear --delay 10 -- --clear` clears the field, then types `--clear`. MCP `agent_browser_fill` and `agent_browser_type` pass typed `text` values literally, so they do not need the marker.
+
+MCP tools pass typed values literally where they are emitted as positionals (`fill` and `type` text, `select` values, `press` and `keyboard` text, `auth save` and `auth login` names and credential values, `webmcp invoke` tool names, `webmcp result` invocation ids, `plugin run` names and request types, and the other covered commands; `frameId` for `webmcp invoke` is still refused when it starts with `-`). In every other free-form field (for example storage, cookie, credential and wait values, and option values), MCP refuses a value that equals a global CLI token or has the form `--<global>=...`, such as `-v`, `-q`, `-p`, `--help`, `--session` or `--json=1`, because the CLI could read it as a global flag. Examples: `wait_for_text "--help"`, `storage_set` with value `-v`, `cookies_set` with value `-q`, `set_credentials` with password `-p`, `find` with `action: "fill"` and text `--json`, and `chat "--help"`. There is no workaround for those fields yet; use `agent_browser_fill` for flag-shaped text input. Carrying such values as data in every field is a planned follow-up.
 
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
@@ -233,9 +237,9 @@ agent-browser find nth 2 "a" hover
 ## Browser Settings
 
 ```bash
-agent-browser set viewport 1920 1080          # Set viewport size
+agent-browser set viewport 1920 1080          # Set viewport size (kept across relaunches and new tabs)
 agent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher res screenshots)
-agent-browser set device "iPhone 14"          # Emulate device
+agent-browser set device "iPhone 14"          # Emulate a device: viewport, user agent and touch input (touch events exist after the next navigation)
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
 agent-browser set offline on                  # Toggle offline mode
 agent-browser set headers '{"X-Key":"v"}'     # Extra HTTP headers
@@ -284,6 +288,8 @@ agent-browser network har stop [output.har]    # Stop and save HAR
 ```
 
 If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
+
+`har stop` fails with `no_har_recording` when no recording is active, for example after a daemon restart (`close` or idle shutdown).
 
 ## Saved flows
 
@@ -468,7 +474,7 @@ Clients connect to `ws://127.0.0.1:<port>` and receive `frame`, `status`, `tabs`
 
 ## WebMCP page tools
 
-Experimental. Browser responses announce brief tool summaries (names, short descriptions, origins, and frame IDs) on first discovery and when the catalog changes. Choose a relevant tool, fetch its schema, then invoke it within the user's task. Schemas and annotations are never included proactively. Omission means no update; an empty or unavailable update invalidates earlier tools. Support is enabled by default in managed Chrome; `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP` opts out. See [trust-boundaries.md](trust-boundaries.md#webmcp-tools-are-page-content) for how to treat tool metadata and results.
+Experimental. Browser responses announce a tool list (names, frame IDs, and descriptions) on first discovery and when the catalog changes. Catalogs of up to four tools show full descriptions; larger ones show up to 16 tools with descriptions shortened to 160 bytes, and the announcement says how many are listed. Choose a relevant tool, fetch its schema when the description does not show the arguments, then invoke it within the user's task. Schemas and annotations are never included proactively. Omission means no update; an empty or unavailable update invalidates earlier tools. Support is enabled by default in managed Chrome; `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP` opts out. See [trust-boundaries.md](trust-boundaries.md#webmcp-tools-are-page-content) for how to treat tool metadata and results.
 
 ```bash
 agent-browser webmcp list <tool> --frame <frame-id> --json   # One tool's schema
