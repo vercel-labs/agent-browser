@@ -20,7 +20,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         format!("CLI version {} ({})", version, platform),
     ));
 
-    match dirs::home_dir() {
+    match std::env::home_dir() {
         Some(home) => checks.push(Check::new(
             "env.home",
             category,

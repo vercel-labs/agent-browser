@@ -103,15 +103,13 @@ function describeActivity(
 
   const tool = part.toolName.replace(/^browser__/, "");
   switch (tool) {
-    case "navigate": {
-      const action = typeof input.action === "string" ? input.action : "goto";
-      if (action === "back") return { icon: ArrowLeft, label: pick("Going back", "Went back") };
-      if (action === "forward") {
-        return { icon: ArrowRight, label: pick("Going forward", "Went forward") };
-      }
-      if (action === "reload") {
-        return { icon: RotateCw, label: pick("Reloading the page", "Reloaded the page") };
-      }
+    case "back":
+      return { icon: ArrowLeft, label: pick("Going back", "Went back") };
+    case "forward":
+      return { icon: ArrowRight, label: pick("Going forward", "Went forward") };
+    case "reload":
+      return { icon: RotateCw, label: pick("Reloading the page", "Reloaded the page") };
+    case "open": {
       const site = hostOf(input.url);
       return {
         icon: Globe,
@@ -131,7 +129,7 @@ function describeActivity(
       return { icon: MousePointerClick, label: pick("Clicking", "Clicked") };
     case "fill":
       return { icon: TextCursorInput, label: pick("Filling in a field", "Filled in a field") };
-    case "press_key": {
+    case "press": {
       const key = typeof input.key === "string" ? input.key : undefined;
       return {
         icon: Keyboard,
@@ -140,13 +138,12 @@ function describeActivity(
     }
     case "hover":
       return { icon: MousePointer, label: pick("Hovering over an element", "Hovered over an element") };
-    case "select_option":
+    case "select":
       return { icon: ListChecks, label: pick("Picking an option", "Picked an option") };
-    case "set_checked":
-      return {
-        icon: SquareCheck,
-        label: input.checked === false ? pick("Unchecking a box", "Unchecked a box") : pick("Checking a box", "Checked a box"),
-      };
+    case "check":
+      return { icon: SquareCheck, label: pick("Checking a box", "Checked a box") };
+    case "uncheck":
+      return { icon: SquareCheck, label: pick("Unchecking a box", "Unchecked a box") };
     case "scroll":
       return {
         icon: ArrowDownUp,
@@ -162,12 +159,23 @@ function describeActivity(
       const noun = count > 1 ? `${count} files` : "a file";
       return { icon: Upload, label: pick(`Attaching ${noun}`, `Attached ${noun}`) };
     }
-    case "wait_for":
+    case "wait_for_load":
+    case "wait_for_selector":
+    case "wait_for_text":
+    case "wait_ms":
       return { icon: Hourglass, label: pick("Waiting for the page", "Waited for the page") };
-    case "get":
+    case "get_attr":
+    case "get_box":
+    case "get_count":
+    case "get_html":
+    case "get_styles":
+    case "get_text":
+    case "get_title":
+    case "get_url":
+    case "get_value":
       return { icon: Info, label: pick("Reading page details", "Read page details") };
     case "find": {
-      const query = typeof input.query === "string" ? truncate(input.query, 32) : undefined;
+      const query = typeof input.value === "string" ? truncate(input.value, 32) : undefined;
       const verbs: Record<string, [string, string]> = {
         check: ["Checking", "Checked"],
         click: ["Clicking", "Clicked"],
@@ -189,21 +197,16 @@ function describeActivity(
     }
     case "screenshot":
       return { icon: Camera, label: pick("Taking a screenshot", "Took a screenshot") };
-    case "evaluate":
+    case "eval":
       return { icon: Code2, label: pick("Running a page script", "Ran a page script") };
-    case "tabs": {
-      const labels: Record<string, [string, string]> = {
-        close: ["Closing a tab", "Closed a tab"],
-        list: ["Checking open tabs", "Checked open tabs"],
-        new: ["Opening a new tab", "Opened a new tab"],
-        switch: ["Switching tabs", "Switched tabs"],
-      };
-      const [ing, ed] =
-        typeof input.action === "string" && labels[input.action]
-          ? labels[input.action]
-          : labels.list;
-      return { icon: AppWindow, label: pick(ing, ed) };
-    }
+    case "tab_close":
+      return { icon: AppWindow, label: pick("Closing a tab", "Closed a tab") };
+    case "tab_list":
+      return { icon: AppWindow, label: pick("Checking open tabs", "Checked open tabs") };
+    case "tab_new":
+      return { icon: AppWindow, label: pick("Opening a new tab", "Opened a new tab") };
+    case "tab_switch":
+      return { icon: AppWindow, label: pick("Switching tabs", "Switched tabs") };
     case "console":
       return { icon: Terminal, label: pick("Checking for page errors", "Checked for page errors") };
     case "network_requests":

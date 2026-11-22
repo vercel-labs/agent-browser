@@ -2,7 +2,8 @@ export type Category =
   | "skill-loading"
   | "skill-selection"
   | "command-usage"
-  | "context-footprint";
+  | "context-footprint"
+  | "reference-routing";
 export type ProviderName = "claude" | "codex";
 
 export interface ProviderOptions {

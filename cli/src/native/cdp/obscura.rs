@@ -163,7 +163,7 @@ pub fn find_obscura() -> Option<PathBuf> {
         }
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         let candidates = [
             home.join(".obscura/obscura"),
             home.join(".local/bin/obscura"),

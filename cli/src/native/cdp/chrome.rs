@@ -331,6 +331,7 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
 pub struct LaunchOptions {
     pub headless: bool,
     pub executable_path: Option<String>,
+    /// Chrome proxy address; trailing slashes are removed except for scheme delimiters.
     pub proxy: Option<String>,
     pub proxy_bypass: Option<String>,
     pub proxy_username: Option<String>,
@@ -437,6 +438,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "NetworkServiceInProcess".to_string(),
     ];
     if options.webmcp {
+        enable_features.push("WebMCP".to_string());
         enable_features.push("WebMCPTesting".to_string());
         enable_features.push("DevToolsWebMCPSupport".to_string());
     }
@@ -468,6 +470,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--no-default-browser-check".to_string(),
         "--disable-background-networking".to_string(),
         "--disable-backgrounding-occluded-windows".to_string(),
+        "--disable-renderer-backgrounding".to_string(),
         "--disable-component-update".to_string(),
         "--disable-default-apps".to_string(),
         "--disable-hang-monitor".to_string(),
@@ -522,7 +525,13 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     }
 
     if let Some(ref proxy) = options.proxy {
-        args.push(format!("--proxy-server={}", proxy));
+        let trimmed = proxy.trim_end_matches('/');
+        let server = if trimmed.is_empty() || proxy.ends_with("://") {
+            proxy.as_str()
+        } else {
+            trimmed
+        };
+        args.push(format!("--proxy-server={}", server));
     }
 
     if let Some(ref bypass) = options.proxy_bypass {
@@ -710,6 +719,107 @@ fn terminate_launched_chrome(child: &mut Child) {
     let _ = child.wait();
 }
 
+#[cfg(unix)]
+const TEMP_PROFILE_PREFIXES: [&str; 2] = ["agent-browser-chrome-", "agent-browser-profile-"];
+#[cfg(unix)]
+const STALE_PROFILE_MIN_AGE: Duration = Duration::from_secs(2 * 60 * 60);
+#[cfg(unix)]
+const STALE_PROFILE_MAX_PER_SWEEP: usize = 50;
+
+/// What the sweep makes of a temp directory entry. Only `Stale` is removed:
+/// `Active` has a live Chrome on its `SingletonLock`, `Recent` may belong to a
+/// launch still starting, and `Skip` is not a temp profile or cannot be judged.
+#[cfg(unix)]
+#[derive(Debug, PartialEq)]
+enum TempProfileState {
+    Stale,
+    Active,
+    Recent,
+    Skip,
+}
+
+/// Starts removing temp profiles in `root` left by daemons that died before
+/// `ChromeProcess::drop` ran. Runs on a detached thread so no launch waits on
+/// recursive deletes, and returns `None` when that thread cannot start.
+#[cfg(unix)]
+fn spawn_stale_temp_profile_sweep(
+    root: PathBuf,
+    min_age: Duration,
+) -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("temp-profile-sweep".into())
+        .spawn(move || sweep_stale_temp_profiles(&root, min_age))
+        .ok()
+}
+
+/// Removes temp profiles in `root` left by daemons that died before
+/// `ChromeProcess::drop` ran, at most `STALE_PROFILE_MAX_PER_SWEEP` per call.
+#[cfg(unix)]
+fn sweep_stale_temp_profiles(root: &Path, min_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let _ = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| classify_temp_profile(path, min_age) == TempProfileState::Stale)
+        .filter(|path| std::fs::remove_dir_all(path).is_ok())
+        .take(STALE_PROFILE_MAX_PER_SWEEP)
+        .count();
+}
+
+/// Decides the state of one temp directory entry. Only `<prefix><uuid>` names
+/// are ours; the `SingletonLock` symlink (`<hostname>-<pid>`) shows a running Chrome.
+#[cfg(unix)]
+fn classify_temp_profile(path: &Path, min_age: Duration) -> TempProfileState {
+    let is_temp_profile = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| {
+            TEMP_PROFILE_PREFIXES
+                .iter()
+                .find_map(|p| name.strip_prefix(p))
+        })
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+    let age = std::fs::symlink_metadata(path)
+        .ok()
+        .filter(|meta| is_temp_profile && meta.is_dir())
+        .and_then(|meta| meta.modified().ok()?.elapsed().ok());
+    let Some(age) = age else {
+        return TempProfileState::Skip;
+    };
+    if age < min_age {
+        return TempProfileState::Recent;
+    }
+    match std::fs::read_link(path.join("SingletonLock")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TempProfileState::Stale,
+        Err(_) => TempProfileState::Skip,
+        Ok(target) => match local_lock_pid(&target.to_string_lossy()) {
+            Some(pid) if crate::connection::is_pid_alive(pid) => TempProfileState::Active,
+            Some(_) => TempProfileState::Stale,
+            None => TempProfileState::Skip,
+        },
+    }
+}
+
+/// Returns the pid in a `SingletonLock` target when this host wrote it.
+#[cfg(unix)]
+fn local_lock_pid(target: &str) -> Option<u32> {
+    let (host, pid) = target.rsplit_once('-')?;
+    let pid = pid.parse::<i32>().ok().filter(|pid| *pid > 0)?;
+    (host == local_hostname()?).then_some(pid as u32)
+}
+
+#[cfg(unix)]
+fn local_hostname() -> Option<String> {
+    let mut buf = [0 as libc::c_char; 257];
+    if unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len() - 1) } != 0 {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    Some(name.to_string_lossy().into_owned())
+}
+
 pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let chrome_path = match &options.executable_path {
         Some(p) => PathBuf::from(p),
@@ -726,6 +836,9 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
             )
         })?,
     };
+
+    #[cfg(unix)]
+    let _ = spawn_stale_temp_profile_sweep(std::env::temp_dir(), STALE_PROFILE_MIN_AGE);
 
     // Profile name preprocessing: if --profile is a Chrome profile name (not a
     // path), resolve it to a directory, copy the profile to a temp dir, and
@@ -1053,6 +1166,7 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
     )
 }
 
+/// Finds Chrome from the install cache, macOS Applications directories, or system paths.
 pub fn find_chrome() -> Option<PathBuf> {
     // 1. Check Chrome downloaded by `agent-browser install`
     if let Some(p) = crate::install::find_installed_chrome() {
@@ -1074,17 +1188,11 @@ pub fn find_chrome() -> Option<PathBuf> {
     // 2. Check system-installed Chrome
     #[cfg(target_os = "macos")]
     {
-        let candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        ];
-        for c in &candidates {
-            let p = PathBuf::from(c);
-            if p.exists() {
-                return Some(p);
-            }
+        let home_applications = std::env::home_dir().map(|home| home.join("Applications"));
+        if let Some(path) =
+            find_macos_chrome(Path::new("/Applications"), home_applications.as_deref())
+        {
+            return Some(path);
         }
     }
 
@@ -1143,6 +1251,28 @@ pub fn find_chrome() -> Option<PathBuf> {
         return Some(p);
     }
 
+    None
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn find_macos_chrome(
+    system_applications: &Path,
+    home_applications: Option<&Path>,
+) -> Option<PathBuf> {
+    let candidates = [
+        "Google Chrome.app/Contents/MacOS/Google Chrome",
+        "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        "Chromium.app/Contents/MacOS/Chromium",
+        "Brave Browser.app/Contents/MacOS/Brave Browser",
+    ];
+    for applications in std::iter::once(system_applications).chain(home_applications) {
+        for candidate in &candidates {
+            let path = applications.join(candidate);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
     None
 }
 
@@ -1283,7 +1413,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::home_dir() {
             let base = home.join("Library/Application Support");
             for name in [
                 "Google/Chrome",
@@ -1298,7 +1428,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::home_dir() {
             let config = home.join(".config");
             for name in [
                 "google-chrome",
@@ -1477,6 +1607,7 @@ const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
 /// The copy is best-effort: individual file failures (e.g., `SingletonLock`)
 /// are skipped with a warning. If the source profile directory is missing or
 /// the temp dir cannot be created, returns an error after cleaning up.
+/// A copied `Preferences` with `profile.exit_type` of `Crashed` is set to `Normal`, best effort.
 pub fn copy_chrome_profile(
     user_data_dir: &Path,
     profile_directory: &str,
@@ -1510,6 +1641,25 @@ pub fn copy_chrome_profile(
     if let Err(e) = copy_dir_recursive(&src_profile, &dst_profile) {
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(format!("Failed to copy profile: {}", e));
+    }
+
+    let preferences_path = dst_profile.join("Preferences");
+    let normalized = (|| {
+        let bytes = std::fs::read(&preferences_path).ok()?;
+        let mut preferences: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let exit_type = preferences.pointer_mut("/profile/exit_type")?;
+        if exit_type.as_str() != Some("Crashed") {
+            return None;
+        }
+        *exit_type = serde_json::Value::String("Normal".to_string());
+        serde_json::to_vec(&preferences).ok()
+    })();
+    if let Some(bytes) = normalized {
+        let candidate = dst_profile.join(format!(".Preferences-{}.tmp", uuid::Uuid::new_v4()));
+        if std::fs::write(&candidate, bytes).is_ok() {
+            let _ = std::fs::rename(&candidate, &preferences_path);
+        }
+        let _ = std::fs::remove_file(&candidate);
     }
 
     Ok(temp_dir)
@@ -1684,7 +1834,7 @@ fn find_puppeteer_chrome() -> Option<PathBuf> {
         search_dirs.push(PathBuf::from(custom).join("chrome"));
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         search_dirs.push(home.join(".cache/puppeteer/chrome"));
     }
 
@@ -1754,7 +1904,7 @@ fn find_playwright_chromium() -> Option<PathBuf> {
         search_dirs.push(PathBuf::from(custom));
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         search_dirs.push(home.join(".cache/ms-playwright"));
     }
 
@@ -1815,7 +1965,7 @@ fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
 
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix('~') {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::home_dir() {
             return home
                 .join(rest.strip_prefix('/').unwrap_or(rest))
                 .to_string_lossy()
@@ -1982,6 +2132,33 @@ exec sleep 60
     }
 
     #[test]
+    fn test_find_macos_chrome_searches_system_before_home() {
+        let dir = TempDir::new("macos-chrome");
+        let system = dir.join("system");
+        let home_applications = dir.join("home/Applications");
+        let user_chrome = home_applications.join("Google Chrome.app/Contents/MacOS/Google Chrome");
+        std::fs::create_dir_all(user_chrome.parent().unwrap()).unwrap();
+        std::fs::write(&user_chrome, b"").unwrap();
+
+        assert_eq!(
+            find_macos_chrome(&system, Some(&home_applications)),
+            Some(user_chrome)
+        );
+
+        let system_brave = system.join("Brave Browser.app/Contents/MacOS/Brave Browser");
+        std::fs::create_dir_all(system_brave.parent().unwrap()).unwrap();
+        std::fs::write(&system_brave, b"").unwrap();
+        assert_eq!(
+            find_macos_chrome(&system, Some(&home_applications)),
+            Some(system_brave.clone())
+        );
+        assert_eq!(find_macos_chrome(&system, None), Some(system_brave));
+
+        let missing = dir.join("missing");
+        assert_eq!(find_macos_chrome(&missing, None), None);
+    }
+
+    #[test]
     fn test_expand_tilde() {
         let expanded = expand_tilde("~/test/path");
         assert!(!expanded.starts_with('~'));
@@ -2052,6 +2229,41 @@ exec sleep 60
 
         let result = find_playwright_chromium();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_build_args_proxy_and_bypass() {
+        for (proxy, expected) in [
+            ("/", "--proxy-server=/"),
+            ("///", "--proxy-server=///"),
+            ("", "--proxy-server="),
+            ("direct://", "--proxy-server=direct://"),
+            (
+                "http://proxy.example:8080,direct://",
+                "--proxy-server=http://proxy.example:8080,direct://",
+            ),
+            (
+                "http://proxy.example:8080",
+                "--proxy-server=http://proxy.example:8080",
+            ),
+            (
+                "http://proxy.example:8080/",
+                "--proxy-server=http://proxy.example:8080",
+            ),
+        ] {
+            let opts = LaunchOptions {
+                proxy: Some(proxy.to_string()),
+                proxy_bypass: Some("localhost,*.example.com".to_string()),
+                ..Default::default()
+            };
+            let result = build_chrome_args(&opts).unwrap();
+            assert!(result.args.iter().any(|arg| arg == expected));
+            assert!(result
+                .args
+                .iter()
+                .any(|arg| arg == "--proxy-bypass-list=localhost,*.example.com"));
+            std::fs::remove_dir_all(result.temp_user_data_dir.unwrap()).unwrap();
+        }
     }
 
     #[test]
@@ -2375,8 +2587,10 @@ exec sleep 60
             .iter()
             .find(|arg| arg.starts_with("--enable-features="))
             .unwrap();
-        assert!(features.contains("WebMCPTesting"));
-        assert!(features.contains("DevToolsWebMCPSupport"));
+        let features: Vec<&str> = features["--enable-features=".len()..].split(',').collect();
+        for feature in ["WebMCP", "WebMCPTesting", "DevToolsWebMCPSupport"] {
+            assert!(features.contains(&feature), "{features:?}");
+        }
     }
 
     #[test]
@@ -2391,8 +2605,7 @@ exec sleep 60
             .iter()
             .find(|arg| arg.starts_with("--enable-features="))
             .unwrap();
-        assert!(!features.contains("WebMCPTesting"));
-        assert!(!features.contains("DevToolsWebMCPSupport"));
+        assert!(!features.contains("WebMCP"), "{features}");
     }
 
     #[test]
@@ -2736,6 +2949,51 @@ exec sleep 60
     }
 
     #[test]
+    fn test_copy_chrome_profile_normalizes_crashed_exit_type() {
+        let compact = r#"{"a":1,"profile":{"exit_type":"Crashed","name":"x"}}"#;
+        let spaced = "{ \"profile\": { \"exit_type\" : \"Crashed\" } }";
+        for (name, prefs, normalized) in [
+            ("compact", Some(compact), true),
+            ("spaced", Some(spaced), true),
+            (
+                "normal",
+                Some(r#"{"profile":{"exit_type":"Normal"}}"#),
+                false,
+            ),
+            ("missing-field", Some(r#"{"profile":{}}"#), false),
+            (
+                "malformed",
+                Some(r#"{"profile":{"exit_type":"Crashed""#),
+                false,
+            ),
+            ("missing-file", None, false),
+        ] {
+            let src = TempDir::new(&format!("copy-exit-{name}"));
+            create_fake_local_state(&src, &[("Default", "Person 1")]);
+            create_fake_profile(&src, "Default");
+            if let Some(p) = prefs {
+                std::fs::write(src.join("Default/Preferences"), p).unwrap();
+            }
+            let temp = TempDir(copy_chrome_profile(&src, "Default").unwrap());
+            let copied = std::fs::read(temp.join("Default/Preferences")).ok();
+            match prefs {
+                None => assert!(copied.is_none(), "{name}"),
+                Some(p) if normalized => {
+                    let mut want: serde_json::Value = serde_json::from_str(p).unwrap();
+                    want["profile"]["exit_type"] = "Normal".into();
+                    let got: serde_json::Value = serde_json::from_slice(&copied.unwrap()).unwrap();
+                    assert_eq!(got, want, "{name}");
+                }
+                Some(p) => assert_eq!(copied.unwrap(), p.as_bytes(), "{name}"),
+            }
+            if let Some(p) = prefs {
+                let source = std::fs::read(src.join("Default/Preferences")).unwrap();
+                assert_eq!(source, p.as_bytes(), "{name}");
+            }
+        }
+    }
+
+    #[test]
     fn test_copy_chrome_profile_missing_source() {
         let src = TempDir::new("copy-missing-src");
         std::fs::create_dir_all(&*src).unwrap();
@@ -3001,5 +3259,102 @@ exec sleep 60
     fn auto_connect_wait_stays_below_client_read_timeout() {
         let client_floor = crate::connection::read_timeout_for(&serde_json::json!({}));
         assert!(AUTO_CONNECT_WS_VERIFY_TIMEOUT < client_floor);
+    }
+
+    #[cfg(unix)]
+    mod sweep {
+        use super::super::*;
+        use std::os::unix::fs::symlink;
+
+        fn dead_pid() -> u32 {
+            let mut child = Command::new("true").spawn().unwrap();
+            child.wait().unwrap();
+            child.id()
+        }
+
+        fn local_lock(pid: u32) -> Option<String> {
+            Some(format!("{}-{pid}", local_hostname().unwrap()))
+        }
+
+        fn profile(root: &Path, prefix: &str, lock: Option<String>) -> PathBuf {
+            let path = root.join(format!("{prefix}{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            if let Some(target) = lock {
+                symlink(target, path.join("SingletonLock")).unwrap();
+            }
+            path
+        }
+
+        #[test]
+        fn classifies_temp_profiles() {
+            use TempProfileState::*;
+            let root = tempfile::tempdir().unwrap();
+            let chrome = "agent-browser-chrome-";
+            let cases = [
+                (chrome, local_lock(dead_pid()), Stale),
+                ("agent-browser-profile-", None, Stale),
+                (chrome, local_lock(std::process::id()), Active),
+                (chrome, Some("elsewhere-1".into()), Skip),
+                (chrome, Some("garbage".into()), Skip),
+                ("unrelated-", None, Skip),
+            ];
+            for (case, (prefix, lock, expected)) in cases.into_iter().enumerate() {
+                let path = profile(root.path(), prefix, lock);
+                let state = classify_temp_profile(&path, Duration::ZERO);
+                assert_eq!(state, expected, "case {case}");
+            }
+            let stale = profile(root.path(), chrome, None);
+            assert_eq!(classify_temp_profile(&stale, STALE_PROFILE_MIN_AGE), Recent);
+            let link = root
+                .path()
+                .join(format!("{chrome}{}", uuid::Uuid::new_v4()));
+            symlink(&stale, &link).unwrap();
+            assert_eq!(classify_temp_profile(&link, Duration::ZERO), Skip);
+            let named = root.path().join("agent-browser-profile-work");
+            std::fs::create_dir(&named).unwrap();
+            assert_eq!(classify_temp_profile(&named, Duration::ZERO), Skip);
+        }
+
+        #[test]
+        fn sweep_removes_stale_profiles_up_to_the_cap_and_keeps_live_ones() {
+            let root = tempfile::tempdir().unwrap();
+            let count = STALE_PROFILE_MAX_PER_SWEEP + 5;
+            for _ in 0..count {
+                profile(root.path(), "agent-browser-profile-", None);
+                let live = local_lock(std::process::id());
+                profile(root.path(), "agent-browser-chrome-", live);
+            }
+
+            sweep_stale_temp_profiles(root.path(), Duration::ZERO);
+
+            let left = |kind: &str| {
+                std::fs::read_dir(root.path())
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().contains(kind))
+                    .count()
+            };
+            assert_eq!(left("chrome"), count);
+            assert_eq!(left("profile"), 5);
+        }
+
+        #[test]
+        fn spawned_sweep_removes_stale_profiles_without_touching_live_ones() {
+            let root = tempfile::tempdir().unwrap();
+            let stale = profile(root.path(), "agent-browser-profile-", None);
+            let live = profile(
+                root.path(),
+                "agent-browser-chrome-",
+                local_lock(std::process::id()),
+            );
+
+            spawn_stale_temp_profile_sweep(root.path().to_path_buf(), Duration::ZERO)
+                .expect("sweep thread")
+                .join()
+                .unwrap();
+
+            assert!(!stale.exists(), "stale profile should be swept");
+            assert!(live.exists(), "live profile must survive the sweep");
+        }
     }
 }

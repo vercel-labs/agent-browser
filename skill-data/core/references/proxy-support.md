@@ -37,6 +37,8 @@ export HTTPS_PROXY="http://proxy.example.com:8080"
 agent-browser open https://example.com
 ```
 
+When launching Chrome, agent-browser accepts a proxy URL with a trailing slash. The MCP server uses the same environment and config settings; set the proxy there because MCP tools do not accept a proxy argument.
+
 ## Authenticated Proxy
 
 For proxies requiring authentication:
@@ -46,6 +48,8 @@ For proxies requiring authentication:
 export HTTP_PROXY="http://username:password@proxy.example.com:8080"
 agent-browser open https://example.com
 ```
+
+Credentials embedded in the URL are percent-decoded once before Chrome answers the proxy's authentication challenge. Encode reserved characters in the username or password, so `p@ss` is written `p%40ss` and a literal percent is written `%25`. A `+` stays a literal `+`. If the decoded bytes are not valid UTF-8, the entire credential is kept as written.
 
 ## SOCKS Proxy
 

@@ -19,19 +19,50 @@ use super::cdp::client::CdpClient;
 use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
+use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
+use crate::session_settings::{FsStore, Running, SecurityView, Store, DEFAULT_IDLE_TIMEOUT_MS};
+use crate::validation::{is_valid_session_name, session_name_error};
+
+/// What the daemon starts a session with: its settings and where the security
+/// part of them is kept.
+pub(super) struct Startup {
+    pub settings: Running,
+    pub store: Arc<dyn Store>,
+}
 
 pub async fn run_daemon(session: &str) {
+    if !is_valid_session_name(session) {
+        eprintln!("{}", session_name_error(session));
+        process::exit(1);
+    }
+
     let socket_dir = get_daemon_socket_dir();
     if !socket_dir.exists() {
         let _ = fs::create_dir_all(&socket_dir);
     }
+
+    // Settings are read before stderr goes away and before any file marks this
+    // daemon as running: a stored security setting that cannot be used must
+    // stop the start with a message the parent can show.
+    if let Err(e) = super::network::check_allowed_domains_env() {
+        eprintln!("{}", e);
+        process::exit(1);
+    }
+    let store: Arc<dyn Store> = Arc::new(FsStore::new(&socket_dir, session));
+    let settings = match Running::boot(store.as_ref(), session) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("{}", e);
+            process::exit(1);
+        }
+    };
 
     // When debug mode is on, redirect stderr to a log file so daemon
     // output can be inspected (the daemon normally has stderr piped to its
     // parent which drops the read end after startup).
     #[cfg(unix)]
     if env::var("AGENT_BROWSER_DEBUG").is_ok() {
-        let log_path = socket_dir.join(format!("{}.log", session));
+        let log_path = SessionFile::Log.path_in(&socket_dir, session);
         if let Ok(file) = fs::File::create(&log_path) {
             use std::os::unix::io::IntoRawFd;
             let fd = file.into_raw_fd();
@@ -63,31 +94,46 @@ pub async fn run_daemon(session: &str) {
         }
     }
 
-    let pid_path = socket_dir.join(format!("{}.pid", session));
+    // On Unix the daemon listens on a Unix domain socket; on Windows it uses
+    // TCP, so there is no .sock file, only a .port file written by the server.
+    let socket_path = SessionFile::Socket.path_in(&socket_dir, session);
+
+    // Bind before any session file is written or removed: a daemon that loses
+    // the bind to a live one must leave that one's files alone. On Unix the
+    // socket stays unreachable until publish_listener, after the pid and
+    // version are written; on Windows the port file, written by the server,
+    // makes the daemon reachable.
+    let listener = match bind_listener(&socket_dir, &socket_path, session).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("{}", e);
+            process::exit(1);
+        }
+    };
+
+    let pid_path = SessionFile::Pid.path_in(&socket_dir, session);
     let _ = fs::write(&pid_path, process::id().to_string());
 
-    let version_path = socket_dir.join(format!("{}.version", session));
+    let version_path = SessionFile::Version.path_in(&socket_dir, session);
     let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
 
-    // On Unix the daemon listens on a Unix domain socket; on Windows it uses
-    // TCP, so there is no .sock file — only a .port file written by the server.
-    let socket_path = socket_dir.join(format!("{}.sock", session));
+    let stream_path = SessionFile::Stream.path_in(&socket_dir, session);
+    let _ = fs::remove_file(&stream_path);
+    let _ = fs::remove_file(SessionFile::Engine.path_in(&socket_dir, session));
+    let _ = fs::remove_file(SessionFile::Provider.path_in(&socket_dir, session));
+    let _ = fs::remove_file(SessionFile::Extensions.path_in(&socket_dir, session));
 
+    // The pid and version exist now, so the socket may become reachable.
     #[cfg(unix)]
-    if socket_path.exists() {
-        let _ = fs::remove_file(&socket_path);
+    if let Err(e) = publish_listener(&socket_path) {
+        eprintln!("{}", e);
+        process::exit(1);
     }
 
     #[cfg(windows)]
     {
-        let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
+        let _ = fs::remove_file(SessionFile::Port.path_in(&socket_dir, session));
     }
-
-    let stream_path = socket_dir.join(format!("{}.stream", session));
-    let _ = fs::remove_file(&stream_path);
-    let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
     if let Ok(days_str) = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
         if let Ok(days) = days_str.parse::<u64>() {
@@ -124,39 +170,24 @@ pub async fn run_daemon(session: &str) {
         }
     }
 
-    // Auto-shutdown the daemon after this many ms of inactivity (no commands
-    // or dashboard input received). Applies a default when
-    // AGENT_BROWSER_IDLE_TIMEOUT_MS is unset; an explicit 0 disables idle
-    // shutdown entirely.
-    let idle_timeout = resolve_idle_timeout(env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS").ok());
-
     let autosave_interval_ms = autosave_interval_ms_from_env();
 
     let result = run_socket_server(
-        &socket_path,
+        listener,
         session,
         stream_client,
         stream_server_instance,
         idle_activity,
-        idle_timeout,
         autosave_interval_ms,
+        Startup { settings, store },
     )
     .await;
 
-    #[cfg(unix)]
-    {
-        let _ = fs::remove_file(&socket_path);
+    // Leave the files alone if a replacement daemon for this session has
+    // already taken over.
+    if owns_session(&socket_dir, session, process::id()) {
+        remove_daemon_files(&socket_dir, session);
     }
-    #[cfg(windows)]
-    {
-        let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
-    }
-    let _ = fs::remove_file(&pid_path);
-    let _ = fs::remove_file(&version_path);
-    let _ = fs::remove_file(&stream_path);
-    let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
     if let Err(e) = result {
         let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);
@@ -164,47 +195,94 @@ pub async fn run_daemon(session: &str) {
     }
 }
 
-/// Idle timeout applied when AGENT_BROWSER_IDLE_TIMEOUT_MS is unset, so an
-/// integration that dies without calling `close` cannot leak the daemon and
-/// its Chrome tree indefinitely (issue: leaked daemons observed running for
-/// days). Socket commands and dashboard input reset the timer. Unlike an
-/// explicit timeout, the default never closes a headed browser (including
-/// Safari and iOS WebDriver sessions) or a user-attached browser because those
-/// may be in direct human use that the daemon cannot observe. Provider-owned
-/// CDP browsers remain eligible for cleanup.
-pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 60 * 60 * 1000;
-
-#[derive(Clone, Copy)]
-struct IdleTimeout {
-    ms: u64,
-    /// True when the value came from DEFAULT_IDLE_TIMEOUT_MS rather than an
-    /// explicit AGENT_BROWSER_IDLE_TIMEOUT_MS. Only the default exempts
-    /// headed and user-attached browsers from shutdown.
-    is_default: bool,
+/// Where the socket is bound until the daemon's files are written.
+#[cfg(unix)]
+fn pending_socket_path(socket_path: &std::path::Path) -> PathBuf {
+    socket_path.with_extension("tmp")
 }
 
-/// Resolve AGENT_BROWSER_IDLE_TIMEOUT_MS into an effective idle timeout:
-/// unset or unparseable → the default; explicit 0 → disabled (None);
-/// any other value → that many milliseconds.
-fn resolve_idle_timeout(raw: Option<String>) -> Option<IdleTimeout> {
-    match raw.as_deref().map(str::trim).map(str::parse::<u64>) {
-        Some(Ok(0)) => None,
-        Some(Ok(ms)) => Some(IdleTimeout {
-            ms,
-            is_default: false,
-        }),
-        // Unparseable values are validated (with a warning) at the flags
-        // layer; falling back to the default here keeps the leak backstop
-        // in place rather than silently disabling it.
-        Some(Err(_)) | None => Some(IdleTimeout {
-            ms: DEFAULT_IDLE_TIMEOUT_MS,
-            is_default: true,
-        }),
+/// Binds the listening endpoint without touching a live daemon's files. A
+/// socket nobody accepts on is stale and replaced; one that accepts means
+/// another daemon owns the session, and the bind fails. The socket is bound
+/// at a pending path, so nothing can connect before `publish_listener`.
+#[cfg(unix)]
+async fn bind_listener(
+    _socket_dir: &std::path::Path,
+    socket_path: &std::path::Path,
+    _session: &str,
+) -> Result<tokio::net::UnixListener, String> {
+    if socket_path.exists() {
+        if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+            return Err("Failed to bind socket: Address already in use".to_string());
+        }
+        let _ = fs::remove_file(socket_path);
+    }
+    let pending = pending_socket_path(socket_path);
+    let _ = fs::remove_file(&pending);
+    tokio::net::UnixListener::bind(&pending).map_err(|e| format!("Failed to bind socket: {}", e))
+}
+
+/// Makes the bound socket reachable at its session path. The rename is atomic
+/// and the listener keeps accepting on the renamed socket.
+#[cfg(unix)]
+fn publish_listener(socket_path: &std::path::Path) -> Result<(), String> {
+    fs::rename(pending_socket_path(socket_path), socket_path)
+        .map_err(|e| format!("Failed to publish socket: {}", e))
+}
+
+/// Binds the listening endpoint without touching a live daemon's files. A port
+/// file that still accepts means another daemon owns the session.
+#[cfg(windows)]
+async fn bind_listener(
+    socket_dir: &std::path::Path,
+    _socket_path: &std::path::Path,
+    session: &str,
+) -> Result<tokio::net::TcpListener, String> {
+    use tokio::net::TcpListener;
+
+    let live_port = fs::read_to_string(SessionFile::Port.path_in(socket_dir, session))
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok());
+    if let Some(port) = live_port {
+        if let Ok(addr) = format!("127.0.0.1:{}", port).parse() {
+            if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
+                return Err("Failed to bind TCP: Address already in use".to_string());
+            }
+        }
+    }
+
+    // Try the hash-derived port first; if it is blocked (e.g. Windows Hyper-V
+    // excluded port range), fall back to an OS-assigned ephemeral port.
+    let preferred_port = get_port_for_session(session);
+    match TcpListener::bind(format!("127.0.0.1:{}", preferred_port)).await {
+        Ok(l) => Ok(l),
+        Err(_) => TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("Failed to bind TCP: {}", e)),
+    }
+}
+
+/// Stores the security settings again once the daemon is reachable. A
+/// `close --all` that swept the file between this daemon reading it and
+/// becoming visible (pid and socket) would otherwise leave a contained
+/// session with nothing stored.
+fn repair_stored_security(store: &dyn Store, security: &SecurityView) {
+    if *security != SecurityView::default() {
+        let _ = store.save(security);
     }
 }
 
 fn remaining_idle_timeout(activity: &IdleActivity, timeout_ms: u64) -> Option<Duration> {
     Duration::from_millis(timeout_ms).checked_sub(activity.elapsed())
+}
+
+/// Arms the idle timer from the timeout in effect now and the last activity.
+/// A session setting can change the timeout while the daemon runs, so the
+/// timer is never re-armed from a value read earlier.
+fn arm_idle_sleep(activity: &IdleActivity) -> Option<std::pin::Pin<Box<tokio::time::Sleep>>> {
+    let timeout = activity.timeout()?;
+    let remaining = remaining_idle_timeout(activity, timeout.ms).unwrap_or_default();
+    Some(Box::pin(tokio::time::sleep(remaining)))
 }
 
 /// Minimum ms between periodic session autosaves while the browser is open.
@@ -218,38 +296,40 @@ fn autosave_interval_ms_from_env() -> u64 {
 
 #[cfg(unix)]
 async fn run_socket_server(
-    socket_path: &PathBuf,
-    session: &str,
+    listener: tokio::net::UnixListener,
+    _session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_activity: Arc<IdleActivity>,
-    idle_timeout: Option<IdleTimeout>,
     autosave_interval_ms: u64,
+    startup: Startup,
 ) -> Result<(), String> {
-    use tokio::net::UnixListener;
-
+    // Auto-shutdown the daemon after this many ms of inactivity (no commands
+    // or dashboard input received). Applies a default when
+    // AGENT_BROWSER_IDLE_TIMEOUT_MS is unset; an explicit 0 disables idle
+    // shutdown entirely.
+    let idle_timeout = startup.settings.idle_timeout();
+    let security = startup.settings.security();
+    let store = startup.store.clone();
+    idle_activity.set_timeout(idle_timeout);
     let idle_timeout_ms = idle_timeout.map(|t| t.ms);
 
-    let listener =
-        UnixListener::bind(socket_path).map_err(|e| format!("Failed to bind socket: {}", e))?;
+    repair_stored_security(store.as_ref(), &security);
 
-    let stream_file: Option<PathBuf> = if stream_server.is_some() {
-        let dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
-        Some(dir.join(format!("{}.stream", session)))
-    } else {
-        None
-    };
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
+            startup.settings,
+            startup.store,
             stream_client,
             stream_server,
             idle_activity.clone(),
         )));
 
-    // Notifier used by handle_connection to signal the daemon loop to exit
-    // after a "close" command, instead of calling process::exit() which skips
-    // destructors and can leave Chrome processes orphaned (issue #1113).
-    let close_notify = Arc::new(Notify::new());
+    // Lets handle_connection end the daemon loop after a "close" command,
+    // instead of calling process::exit() which skips destructors and can
+    // leave Chrome processes orphaned (issue #1113).
+    let close = Arc::new(CloseHandshake::default());
+    let mut closed_by_command = false;
 
     let mut drain_interval = tokio::time::interval(Duration::from_millis(100));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -259,16 +339,17 @@ async fn run_socket_server(
     let mut idle_lock: Option<IdleLock> = None;
 
     loop {
+        let idle_timeout = idle_activity.timeout();
+        let idle_timeout_ms = idle_timeout.map(|t| t.ms);
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let idle_activity = idle_activity.clone();
-                        let sf = stream_file.clone();
-                        let cn = close_notify.clone();
+                        let close = close.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, sf, cn).await;
+                            handle_connection(stream, state, idle_activity, close).await;
                         });
                     }
                     Err(e) => {
@@ -292,11 +373,16 @@ async fn run_socket_server(
             s = async { idle_lock.as_mut().expect("idle lock armed").await }, if idle_lock.is_some() => {
                 idle_lock = None;
                 let mut s = s;
+                let idle_timeout = idle_activity.timeout();
+                let Some(timeout_ms) = idle_timeout.map(|t| t.ms) else {
+                    idle_sleep_pin = None;
+                    continue;
+                };
                 // The timer may have expired while a command held the state
                 // lock. Command completion refreshes the shared activity
                 // clock before releasing that lock, so re-check it here.
                 if let Some(remaining) =
-                    remaining_idle_timeout(&idle_activity, idle_timeout_ms.unwrap_or_default())
+                    remaining_idle_timeout(&idle_activity, timeout_ms)
                 {
                     idle_sleep_pin = Some(Box::pin(tokio::time::sleep(remaining)));
                     continue;
@@ -307,8 +393,8 @@ async fn run_socket_server(
                 if idle_timeout.is_some_and(|t| t.is_default)
                     && s.blocks_default_idle_shutdown()
                 {
-                    idle_sleep_pin = idle_timeout_ms
-                        .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                    idle_sleep_pin =
+                        Some(Box::pin(tokio::time::sleep(Duration::from_millis(timeout_ms))));
                     continue;
                 }
                 if idle_timeout.is_some_and(|t| t.is_default) {
@@ -322,15 +408,15 @@ async fn run_socket_server(
                 let _ = close_all_browser_backends(&mut s).await;
                 break;
             }
-            _ = idle_activity.notified(), if idle_timeout_ms.is_some() => {
-                idle_sleep_pin = idle_timeout_ms
-                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+            _ = idle_activity.notified() => {
+                idle_sleep_pin = arm_idle_sleep(&idle_activity);
                 continue;
             }
-            _ = close_notify.notified() => {
+            _ = close.requested.notified() => {
                 // "close" command was handled; browser already closed by
                 // handle_close(). Break to run cleanup and exit gracefully
                 // so destructors fire.
+                closed_by_command = true;
                 break;
             }
             _ = shutdown_signal() => {
@@ -347,54 +433,53 @@ async fn run_socket_server(
         }
     }
 
+    if closed_by_command {
+        close.finish(listener).await;
+    }
+
     Ok(())
 }
 
 #[cfg(windows)]
 async fn run_socket_server(
-    socket_path: &PathBuf,
+    listener: tokio::net::TcpListener,
     session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_activity: Arc<IdleActivity>,
-    idle_timeout: Option<IdleTimeout>,
     autosave_interval_ms: u64,
+    startup: Startup,
 ) -> Result<(), String> {
-    use tokio::net::TcpListener;
-
+    // Auto-shutdown the daemon after this many ms of inactivity (no commands
+    // or dashboard input received). Applies a default when
+    // AGENT_BROWSER_IDLE_TIMEOUT_MS is unset; an explicit 0 disables idle
+    // shutdown entirely.
+    let idle_timeout = startup.settings.idle_timeout();
+    let security = startup.settings.security();
+    let store = startup.store.clone();
+    idle_activity.set_timeout(idle_timeout);
     let idle_timeout_ms = idle_timeout.map(|t| t.ms);
 
-    let preferred_port = get_port_for_session(session);
-    // Try the hash-derived port first; if it is blocked (e.g. Windows Hyper-V
-    // excluded port range), fall back to an OS-assigned ephemeral port.
-    let listener = match TcpListener::bind(format!("127.0.0.1:{}", preferred_port)).await {
-        Ok(l) => l,
-        Err(_) => TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| format!("Failed to bind TCP: {}", e))?,
-    };
     let actual_port = listener
         .local_addr()
         .map_err(|e| format!("Failed to get local address: {}", e))?
         .port();
 
-    let socket_dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
-    let port_path = socket_dir.join(format!("{}.port", session));
+    let port_path = SessionFile::Port.path_in(&get_daemon_socket_dir(), session);
     let _ = fs::write(&port_path, actual_port.to_string());
+    repair_stored_security(store.as_ref(), &security);
 
-    let stream_file: Option<PathBuf> = if stream_server.is_some() {
-        Some(socket_dir.join(format!("{}.stream", session)))
-    } else {
-        None
-    };
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
+            startup.settings,
+            startup.store,
             stream_client,
             stream_server,
             idle_activity.clone(),
         )));
 
-    let close_notify = Arc::new(Notify::new());
+    let close = Arc::new(CloseHandshake::default());
+    let mut closed_by_command = false;
 
     let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
     let mut idle_sleep_pin = idle_sleep.map(Box::pin);
@@ -407,16 +492,17 @@ async fn run_socket_server(
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        let idle_timeout = idle_activity.timeout();
+        let idle_timeout_ms = idle_timeout.map(|t| t.ms);
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let idle_activity = idle_activity.clone();
-                        let sf = stream_file.clone();
-                        let cn = close_notify.clone();
+                        let close = close.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, sf, cn).await;
+                            handle_connection(stream, state, idle_activity, close).await;
                         });
                     }
                     Err(e) => {
@@ -440,8 +526,13 @@ async fn run_socket_server(
             s = async { idle_lock.as_mut().expect("idle lock armed").await }, if idle_lock.is_some() => {
                 idle_lock = None;
                 let mut s = s;
+                let idle_timeout = idle_activity.timeout();
+                let Some(timeout_ms) = idle_timeout.map(|t| t.ms) else {
+                    idle_sleep_pin = None;
+                    continue;
+                };
                 if let Some(remaining) =
-                    remaining_idle_timeout(&idle_activity, idle_timeout_ms.unwrap_or_default())
+                    remaining_idle_timeout(&idle_activity, timeout_ms)
                 {
                     idle_sleep_pin = Some(Box::pin(tokio::time::sleep(remaining)));
                     continue;
@@ -452,8 +543,8 @@ async fn run_socket_server(
                 if idle_timeout.is_some_and(|t| t.is_default)
                     && s.blocks_default_idle_shutdown()
                 {
-                    idle_sleep_pin = idle_timeout_ms
-                        .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                    idle_sleep_pin =
+                        Some(Box::pin(tokio::time::sleep(Duration::from_millis(timeout_ms))));
                     continue;
                 }
                 if idle_timeout.is_some_and(|t| t.is_default) {
@@ -465,16 +556,14 @@ async fn run_socket_server(
                 }
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
-                let _ = fs::remove_file(&port_path);
                 break;
             }
-            _ = idle_activity.notified(), if idle_timeout_ms.is_some() => {
-                idle_sleep_pin = idle_timeout_ms
-                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+            _ = idle_activity.notified() => {
+                idle_sleep_pin = arm_idle_sleep(&idle_activity);
                 continue;
             }
-            _ = close_notify.notified() => {
-                let _ = fs::remove_file(&port_path);
+            _ = close.requested.notified() => {
+                closed_by_command = true;
                 break;
             }
             _ = shutdown_signal() => {
@@ -486,10 +575,13 @@ async fn run_socket_server(
                 };
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
-                let _ = fs::remove_file(&port_path);
                 break;
             }
         }
+    }
+
+    if closed_by_command {
+        close.finish(listener).await;
     }
 
     Ok(())
@@ -532,12 +624,30 @@ fn spawn_background_tick_if_idle(
     true
 }
 
+/// Orders a `close` between the connection that handled it and the accept
+/// loop: the loop stops listening first and only then is the reply sent, so a
+/// command issued right after `close` returns is refused and starts a fresh
+/// daemon instead of reaching this exiting one (issue #2134).
+#[derive(Default)]
+struct CloseHandshake {
+    requested: Notify,
+    listener_closed: Notify,
+    replied: Notify,
+}
+
+impl CloseHandshake {
+    async fn finish<L>(&self, listener: L) {
+        drop(listener);
+        self.listener_closed.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(1), self.replied.notified()).await;
+    }
+}
+
 async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
     idle_activity: Arc<IdleActivity>,
-    stream_file_cleanup: Option<PathBuf>,
-    close_notify: Arc<Notify>,
+    close: Arc<CloseHandshake>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -591,22 +701,27 @@ async fn handle_connection<S>(
                     response
                 };
 
-                let mut resp = serde_json::to_string(&response).unwrap_or_default();
-                resp.push('\n');
-                if writer.write_all(resp.as_bytes()).await.is_err() {
-                    break;
+                let closing = close_completed_response(&action, &response);
+                if closing {
+                    close.requested.notify_one();
+                    close.listener_closed.notified().await;
+                }
+                if response.get("code").and_then(Value::as_str) == Some("page_wedged") {
+                    if let Some(id) = response.get("id").and_then(Value::as_str) {
+                        state.lock().await.wedge_report_delivered(id);
+                    }
                 }
 
-                if close_completed_response(&action, &response) {
-                    if let Some(ref path) = stream_file_cleanup {
-                        let _ = fs::remove_file(path);
-                    }
-                    // Signal the daemon loop to exit gracefully instead of
-                    // calling process::exit(), which skips destructors and
-                    // can leave Chrome processes orphaned (issue #1113).
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    close_notify.notify_one();
+                let mut resp = serde_json::to_string(&response).unwrap_or_default();
+                resp.push('\n');
+                let written = writer.write_all(resp.as_bytes()).await.is_ok();
+                if closing {
+                    let _ = writer.flush().await;
+                    close.replied.notify_one();
                     return;
+                }
+                if !written {
+                    break;
                 }
             }
             Err(_) => break,
@@ -708,6 +823,70 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+    use crate::session_settings::{resolve_idle_timeout, IdleTimeout, MemStore};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_socket_is_unreachable_until_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("pub.sock");
+
+        let listener = bind_listener(dir.path(), &socket_path, "pub")
+            .await
+            .unwrap();
+        assert!(
+            std::os::unix::net::UnixStream::connect(&socket_path).is_err(),
+            "a bound socket must not accept before the pid and version are written"
+        );
+
+        publish_listener(&socket_path).unwrap();
+        let client = std::thread::spawn({
+            let socket_path = socket_path.clone();
+            move || std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+        });
+        let (_stream, _) = listener.accept().await.unwrap();
+        assert!(client.join().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_losing_bind_leaves_live_socket_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("live.sock");
+
+        let _live = bind_listener(dir.path(), &socket_path, "live")
+            .await
+            .unwrap();
+        publish_listener(&socket_path).unwrap();
+
+        let err = bind_listener(dir.path(), &socket_path, "live")
+            .await
+            .err()
+            .expect("second bind must lose to the live daemon");
+        assert!(err.contains("Address already in use"));
+        assert!(std::os::unix::net::UnixStream::connect(&socket_path).is_ok());
+    }
+
+    #[test]
+    fn test_a_ready_daemon_restores_settings_a_sweep_removed() {
+        let store = MemStore::default();
+        let security = SecurityView {
+            allowed_domains: Some(vec!["example.com".into()]),
+            ..SecurityView::default()
+        };
+        assert_eq!(store.stored(), None);
+
+        repair_stored_security(&store, &security);
+
+        assert_eq!(store.stored(), Some(security));
+    }
+
+    #[test]
+    fn test_a_ready_daemon_without_security_settings_stores_nothing() {
+        let store = MemStore::default();
+        repair_stored_security(&store, &SecurityView::default());
+        assert_eq!(store.stored(), None);
+    }
 
     #[test]
     fn test_resolve_idle_timeout_unset_applies_default() {
@@ -756,6 +935,29 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), activity.notified())
             .await
             .expect("dashboard input notification should wake the idle loop");
+    }
+
+    #[tokio::test]
+    async fn test_idle_timer_rearms_from_the_timeout_in_effect_now() {
+        let activity = IdleActivity::new();
+        assert!(arm_idle_sleep(&activity).is_none(), "no timeout, no timer");
+
+        activity.set_timeout(Some(IdleTimeout {
+            ms: 3_600_000,
+            is_default: false,
+        }));
+        activity.mark();
+        // A command lowers the timeout live; the re-armed timer must use it.
+        activity.set_timeout(Some(IdleTimeout {
+            ms: 50,
+            is_default: false,
+        }));
+        let sleep = arm_idle_sleep(&activity).expect("timer armed");
+        let left = sleep.deadline() - tokio::time::Instant::now();
+        assert!(left <= Duration::from_millis(50), "re-armed for {left:?}");
+
+        activity.set_timeout(None);
+        assert!(arm_idle_sleep(&activity).is_none(), "disabled live");
     }
 
     #[tokio::test]

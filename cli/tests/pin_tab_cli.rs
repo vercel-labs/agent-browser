@@ -158,7 +158,114 @@ impl Drop for Sessions {
 
 #[test]
 #[ignore]
-fn cdp_pin_tab_precedes_attach_in_existing_daemon() {
+fn e2e_cdp_url_ignores_provider_configuration() {
+    let sessions = Sessions::new();
+    let output = sessions
+        .command("pin-tab-cli-victim")
+        .env("AGENT_BROWSER_PROVIDER", "metadata-invalid-provider")
+        .env("AGENT_BROWSER_PLUGINS", "[]")
+        .env_remove("AGENT_BROWSER_CDP")
+        .env_remove("AGENT_BROWSER_AUTO_CONNECT")
+        .args(["--json", "get", "cdp-url"])
+        .output()
+        .unwrap();
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{response}");
+    assert_eq!(response["error"], "Browser not launched");
+}
+
+#[test]
+#[ignore]
+fn e2e_cdp_url_batches_ignore_launch_configuration() {
+    for launch_args in [
+        vec!["-p", "metadata-invalid-provider"],
+        vec!["--headed", "--executable-path", "/not/a/browser"],
+    ] {
+        for stdin in [false, true] {
+            let sessions = Sessions::new();
+            let mut command = sessions.command("pin-tab-cli-victim");
+            command
+                .env_remove("AGENT_BROWSER_PROVIDER")
+                .env_remove("AGENT_BROWSER_CDP")
+                .env_remove("AGENT_BROWSER_AUTO_CONNECT")
+                .env("AGENT_BROWSER_PLUGINS", "[]")
+                .args(&launch_args)
+                .args(["--json", "batch"]);
+            if stdin {
+                command.stdin(std::process::Stdio::piped());
+            } else {
+                command.arg("get cdp-url");
+            }
+            command.stdout(std::process::Stdio::piped());
+            command.stderr(std::process::Stdio::piped());
+            let mut child = command.spawn().unwrap();
+            if stdin {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(b"[[\"get\",\"cdp-url\"]]")
+                    .unwrap();
+            }
+            let output = child.wait_with_output().unwrap();
+            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(output.status.code(), Some(1), "{response}");
+            assert_eq!(response[0]["error"], "Browser not launched", "{response}");
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn e2e_cdp_url_mcp_batch_ignores_provider_configuration() {
+    let sessions = Sessions::new();
+    let output = sessions
+        .command("pin-tab-cli-victim")
+        .env("AGENT_BROWSER_PROVIDER", "metadata-invalid-provider")
+        .env("AGENT_BROWSER_PLUGINS", "[]")
+        .env_remove("AGENT_BROWSER_CDP")
+        .env_remove("AGENT_BROWSER_AUTO_CONNECT")
+        .args([
+            "mcp",
+            "call",
+            "agent_browser_batch",
+            r#"{"session":"pin-tab-cli-victim","commands":[["get","cdp-url"]]}"#,
+        ])
+        .output()
+        .unwrap();
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["isError"], true, "{response}");
+    assert_eq!(
+        response["structuredContent"]["response"][0]["error"], "Browser not launched",
+        "{response}"
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_cdp_url_rejects_dead_external_browser_without_relaunch() {
+    let sessions = Sessions::new();
+    let host = "pin-tab-cli-host";
+    let victim = "pin-tab-cli-victim";
+
+    sessions.run_json(host, &["open", "data:text/html,<title>metadata</title>"]);
+    let cdp = sessions.run_json(host, &["get", "cdp-url"]);
+    let ws_url = cdp["data"]["cdpUrl"].as_str().unwrap();
+    let attached = sessions.run_json(victim, &["--cdp", ws_url, "get", "cdp-url"]);
+    assert_eq!(attached["data"]["cdpUrl"], ws_url);
+    let pid = sessions.pid(victim);
+
+    sessions.run_json(host, &["close"]);
+    let response = sessions.run_json_failure(victim, &["get", "cdp-url"]);
+
+    assert_eq!(response["error"], "Browser not launched");
+    assert_eq!(sessions.pid(victim), pid);
+}
+
+#[test]
+#[ignore]
+fn e2e_cdp_pin_tab_precedes_attach_in_existing_daemon() {
     let server = TestServer::start();
     let sessions = Sessions::new();
     let host = "pin-tab-cli-host";
@@ -209,7 +316,7 @@ fn cdp_pin_tab_precedes_attach_in_existing_daemon() {
 
 #[test]
 #[ignore]
-fn tab_gone_exposes_safe_recovery_data_in_cli_and_batch() {
+fn e2e_tab_gone_exposes_safe_recovery_data_in_cli_and_batch() {
     let server = TestServer::start();
     let sessions = Sessions::new();
     let host = "pin-tab-cli-host";

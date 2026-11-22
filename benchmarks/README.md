@@ -1,34 +1,35 @@
-# agent-browser Daemon Benchmarks
+# agent-browser daemon benchmarks
 
-Compares command latency and system metrics between the **Node.js daemon** (published npm version) and the **Rust native daemon** (built from source), running inside a [Vercel Sandbox](https://vercel.com/docs/sandbox) microVM.
+`bench.ts` compares command latency and system metrics between two agent-browser builds inside a [Vercel Sandbox](https://vercel.com/docs/sandbox) microVM: the latest `agent-browser` release from npm, and a Rust build of a repository branch.
+
+The harness was written to compare the Node.js daemon with the Rust native daemon. Releases since 0.23.0 ship only the Rust daemon, and phase 1 installs the latest npm release without pinning a version, so both phases now measure a Rust daemon. To measure the Node.js daemon, change `installNodeDaemon` in `bench.ts` to install a release older than 0.23.0. The default branch for phase 2 is `ctate/native-2`; pass `--branch main` to build current code.
 
 ## What it measures
 
-**Command latency** -- per-scenario timing with warmup, multiple iterations, and stddev:
+Command latency for each scenario in `scenarios.ts`, with warmup, measured iterations, and standard deviation:
 
-- `navigate` -- page load round-trip
-- `snapshot` -- accessibility tree generation
-- `screenshot` -- viewport capture
-- `evaluate` -- JavaScript execution
-- `click` -- element interaction
-- `fill` -- form input
-- `agent-loop` -- snapshot/click/snapshot cycle (typical AI agent pattern)
-- `full-workflow` -- realistic 7-command sequence
+- `navigate`: page load round trip
+- `snapshot`: accessibility tree generation
+- `screenshot`: viewport capture
+- `evaluate`: JavaScript execution
+- `click`: element interaction
+- `fill`: form input
+- `agent-loop`: a snapshot, click, snapshot cycle
+- `full-workflow`: a 7-command sequence
 
-**System metrics** -- collected while the daemon is running:
+System metrics collected while the daemon runs:
 
-- Cold start time (daemon spawn + browser launch)
-- Binary size and total distribution size (including browser download)
-- Daemon RSS and peak RSS (separated from browser process memory)
-- Browser RSS (Chrome processes, same for both daemons)
+- Cold start time, from daemon spawn to browser ready
+- Binary size and total distribution size, including the browser download
+- Daemon RSS and peak RSS, separate from browser process memory
+- Browser RSS for the Chrome processes
 - Daemon CPU time
 - Process counts
 
 ## Prerequisites
 
-- Node.js 18+
-- pnpm
-- Vercel Sandbox credentials (token, team ID, project ID)
+- Node.js and pnpm
+- Vercel Sandbox credentials: token, team ID, and project ID
 
 ## Setup
 
@@ -53,24 +54,17 @@ pnpm bench                             # 10 iterations, 1 warmup, 8 vCPUs
 pnpm bench -- --iterations 20          # more iterations for tighter stats
 pnpm bench -- --warmup 2               # extra warmup iterations
 pnpm bench -- --json                   # write results.json
-pnpm bench -- --branch main            # build native from a different branch
-pnpm bench -- --vcpus 16               # more vCPUs (faster Rust build)
+pnpm bench -- --branch main            # build phase 2 from another branch
+pnpm bench -- --vcpus 16               # more vCPUs for a faster Rust build
 ```
 
 ## How it works
 
-1. Creates a Vercel Sandbox (Amazon Linux, configurable vCPUs)
-2. Installs Chromium system dependencies
-3. **Phase 1 -- Node.js daemon**: installs `agent-browser` from npm (last version with the Node daemon), runs all scenarios, collects metrics
-4. **Phase 2 -- Rust native daemon**: installs Rust toolchain, clones the repo, runs `cargo build --release`, replaces the binary, runs the same scenarios, collects metrics
-5. Prints comparison tables and optionally writes `results.json`
+1. Creates a Vercel Sandbox and installs Chromium system dependencies.
+2. Phase 1 installs `agent-browser` from npm, runs every scenario, and collects metrics.
+3. Phase 2 installs the Rust toolchain, clones the repository at `--branch`, runs `cargo build --release`, replaces the npm binary with the build, and runs the same scenarios.
+4. Prints comparison tables and, with `--json`, writes `results.json`.
 
 ## Interpreting results
 
-**Command latency** is dominated by Chrome (CDP round-trips), not the daemon. Both daemons are thin relays between the CLI and Chrome, so per-command speedups are typically small. The stddev column helps distinguish real differences from noise.
-
-**Where the native daemon wins** is in cold start (no Node.js runtime to boot), daemon memory (single Rust binary vs V8 heap), and distribution size (no Playwright dependency).
-
-The **daemon RSS** metric isolates the daemon process memory from Chrome. This is the apples-to-apples comparison -- both daemons talk to the same Chrome, but Node.js adds ~140 MB of V8 overhead while the Rust daemon uses ~7 MB.
-
-**Distribution size** includes the daemon plus its browser download. The Node version includes the npm package + Playwright's bundled Chromium. The Rust version is just the binary + Chrome for Testing.
+Command latency is dominated by Chrome DevTools Protocol round trips, so per-command differences between daemons are usually small. Use the standard deviation column to separate real differences from noise. Cold start, daemon RSS, and distribution size show differences in the daemon itself, because both phases drive the same Chrome.

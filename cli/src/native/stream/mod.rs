@@ -3,6 +3,7 @@ pub(crate) mod chat;
 mod dashboard;
 mod discovery;
 mod http;
+pub(crate) mod origin;
 mod websocket;
 
 pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
@@ -18,6 +19,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 
 use super::cdp::client::CdpClient;
+use crate::session_settings::IdleTimeout;
 
 /// Screencast encoding for the live stream, from `AGENT_BROWSER_STREAM_*`.
 ///
@@ -126,6 +128,9 @@ fn seq_in_serialized_frame(frame: &str) -> Option<u64> {
 pub(crate) struct IdleActivity {
     last: std::sync::Mutex<Instant>,
     notify: Notify,
+    /// The idle timeout in effect. A session setting can change it while the
+    /// daemon runs, so the shutdown loop reads it on every pass.
+    timeout: std::sync::Mutex<Option<IdleTimeout>>,
 }
 
 impl IdleActivity {
@@ -133,7 +138,16 @@ impl IdleActivity {
         Self {
             last: std::sync::Mutex::new(Instant::now()),
             notify: Notify::new(),
+            timeout: std::sync::Mutex::new(None),
         }
+    }
+
+    pub(crate) fn timeout(&self) -> Option<IdleTimeout> {
+        *self.timeout.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    pub(crate) fn set_timeout(&self, timeout: Option<IdleTimeout>) {
+        *self.timeout.lock().unwrap_or_else(|err| err.into_inner()) = timeout;
     }
 
     pub(crate) fn mark(&self) {
@@ -621,23 +635,6 @@ pub(crate) fn timestamp_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn is_allowed_origin(origin: Option<&str>) -> bool {
-    match origin {
-        None => true,
-        Some(o) => {
-            if o.starts_with("file://") {
-                return true;
-            }
-            if let Ok(url) = url::Url::parse(o) {
-                let host = url.host_str().unwrap_or("");
-                host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
-            } else {
-                false
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,25 +696,50 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_allowed_origin_none() {
-        assert!(is_allowed_origin(None));
+    async fn try_connect_with_origin(
+        port: u16,
+        origin: &str,
+    ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://127.0.0.1:{port}/")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("origin", origin.parse().unwrap());
+        tokio_tungstenite::connect_async(request).await.map(|_| ())
     }
 
-    #[test]
-    fn test_allowed_origin_file() {
-        assert!(is_allowed_origin(Some("file:///path/to/file")));
-    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn websocket_upgrade_refuses_every_foreign_origin_and_allows_same_origin() {
+        use super::origin::invariant::{refused_origins, same_origin};
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "origin-policy".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+        let port = server.port();
 
-    #[test]
-    fn test_allowed_origin_localhost() {
-        assert!(is_allowed_origin(Some("http://localhost:3000")));
-        assert!(is_allowed_origin(Some("http://127.0.0.1:8080")));
-    }
+        for origin in refused_origins(port) {
+            let result = try_connect_with_origin(port, &origin).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(tokio_tungstenite::tungstenite::Error::Http(ref response))
+                        if response.status() == 403
+                ),
+                "{origin} must be refused with 403: {result:?}"
+            );
+        }
+        try_connect_with_origin(port, &same_origin(port))
+            .await
+            .expect("same origin connects");
+        connect_client(port).await;
 
-    #[test]
-    fn test_disallowed_origin() {
-        assert!(!is_allowed_origin(Some("http://evil.com")));
+        server.shutdown().await;
     }
 
     /// The legacy entry point reads the id out of its payload; no id means the

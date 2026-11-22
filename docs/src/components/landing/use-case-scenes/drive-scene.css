@@ -1,0 +1,177 @@
+/* A short Geist form on the card's own ground (background-200, from
+   scenes.css), whole and centered: three 272px fields that name themselves
+   by placeholder, Save under them on their left edge. The inputs are the
+   only white, the button the only black. Kept outside the upstream kit. */
+.ab-feature-scene .ab-drive {
+  & .ss-stage { --ss-control: 36px; overflow: hidden; }
+
+  /* 272px wide (64px sides at 400, 43px at 358); 184px tall (three 36px
+     rows 12px apart, Save 16px under them), 31px from the top so the Team
+     menu, which pops 2px above the select and covers Save, keeps 21px to
+     the foot. */
+  & .ab-drive-form {
+    position: absolute;
+    top: 31px;
+    left: 0;
+    right: 0;
+    width: 272px;
+    margin-inline: auto;
+    display: grid;
+    row-gap: 12px;
+    font-family: var(--ss-font);
+  }
+
+  /* Geist's input: white, a hairline ring and its small fall */
+  & .ss-field__box,
+  & .ab-drive-select {
+    height: var(--ss-control);
+    border-radius: var(--ss-radius-md);
+    background: var(--ss-surface);
+    box-shadow: var(--ss-shadow-control);
+  }
+  & .ss-field__box { font-size: 14px; }
+  & .ab-drive-email[data-focused] .ss-field__box {
+    box-shadow: 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-600, rgba(0, 0, 0, .34)), 0 0 0 3px var(--ss-accent-soft);
+  }
+  /* Dark: Geist's Input focuses on the same alpha-600 border (white at 51%
+     there) with a 4px white-24% halo, which reads as a white outline at this
+     size. A step down instead: Geist's hover border, alpha-500 (white at
+     24%), and the same quiet alpha-200 halo. */
+  :where(.dark-theme) & .ab-drive-email[data-focused] .ss-field__box {
+    box-shadow: 0 0 0 var(--ss-hairline, 1px) var(--ds-gray-alpha-500, rgba(255, 255, 255, .24)), 0 0 0 3px var(--ss-accent-soft);
+  }
+  & .ab-drive-email .ss-field__box { transition: box-shadow .2s ease; }
+
+  /* Geist's select: value at the field's inset, chevron at the right. No
+     ring while open: the menu covers it, and a 3px ring would peek out past
+     the menu's sides. */
+  & .ab-drive-select {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 10px 0 12px;
+    color: var(--ss-text-strong);
+    font-size: 14px;
+  }
+  & .ab-drive-chevron { flex: none; color: var(--ss-icon); }
+
+  /* Every team mounted in one cell, centered on cap height. The value
+     changes while the opaque menu still covers it, so it switches outright;
+     only the reset fades it (below). */
+  & .ab-drive-value { display: grid; }
+  & .ab-drive-team {
+    grid-area: 1 / 1;
+    line-height: 1;
+    text-box: trim-both cap alphabetic;
+    opacity: 0;
+  }
+  & .ab-drive-team[data-on] { opacity: 1; }
+
+  /* Geist's primary button at the inputs' height, on their left edge. Save
+     and Saved share one cell, so it is as wide as Saved and never resizes.
+     Under the pointer it steps one shade, never to gray (below); driven by the
+     scene's own state (data-over), since the kit's data-hover outlasts the
+     hand leaving it. */
+  & .ab-drive-save {
+    justify-self: start;
+    margin-top: 4px;
+    display: grid;
+    place-items: center;
+    height: var(--ss-control);
+    padding: 0 14px;
+    border-radius: var(--ss-radius-md);
+    overflow: hidden;
+    background: var(--ds-gray-1000, #171717);
+    color: var(--ds-background-100, #fff);
+    font-size: 14px;
+    font-weight: 500;
+    transition: background-color .2s ease, scale .12s ease;
+  }
+  /* One step toward the ground in either theme (#171717 to about #333 in
+     light, #ededed to about #d1d1d1 in dark). The shade arrives at once, as
+     a real hover does, and only eases off. */
+  & .ab-drive-save[data-over] {
+    background: color-mix(in oklab, var(--ds-gray-1000, #171717) 88%, var(--ds-background-100, #fff));
+    transition: background-color 0s, scale .12s ease;
+  }
+  & .ab-drive-save[data-pressed] { scale: .97; }
+  & .ab-drive-btn-roll {
+    grid-area: 1 / 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    line-height: 1;
+    text-box: trim-both cap alphabetic;
+    opacity: 0;
+    translate: 0 -.5em;
+    transition: opacity .16s ease-out, translate .22s ease-in;
+  }
+  & .ab-drive-btn-roll svg { flex: none; }
+  & .ab-drive-btn-roll[data-on] { opacity: 1; translate: 0 0; }
+  & .ab-drive-save:not([data-live]) .ab-drive-btn-roll { transition: none; }
+  & .ab-drive-save[data-live] .ab-drive-btn-roll[data-on] {
+    animation: ab-drive-roll-in .4s cubic-bezier(.22, 1, .36, 1) backwards;
+  }
+
+  /* The loop's reset: the entered values fade out together */
+  & .ab-drive-email .ss-field__chars,
+  & .ab-drive-value { transition: opacity .28s ease; }
+  & .ab-drive-form[data-clearing] :is(.ab-drive-email .ss-field__chars, .ab-drive-value) { opacity: 0; }
+
+  /* Geist's menu material popped over the select, its first row on the
+     select's line: the select starts 96px down the form, the row 4px into
+     the menu, so the menu starts at 94px and the row's text sits exactly
+     where the value does. 2px wider than the select each side (padding 6px,
+     so row text keeps the value's 12px inset): an edge exactly on Save's
+     would let the black button anti-alias through at the card's fractional
+     scale. Opaque, above Save. Radius: the rows' 6px plus 4px. It fades in
+     from the select's line; on a pick it closes at once, as a native select
+     does, so it never fades over Save with both labels showing. */
+  & .ab-drive-menu {
+    position: absolute;
+    z-index: 1;
+    top: 94px;
+    left: -2px;
+    right: -2px;
+    padding: 4px 6px;
+    border-radius: 10px;
+    background: var(--ss-surface);
+    box-shadow: var(--ss-shadow-float);
+    transform-origin: 50% 20px;
+    opacity: 0;
+    scale: .98;
+    visibility: hidden;
+  }
+  & .ab-drive-menu[data-open] {
+    opacity: 1;
+    scale: 1;
+    visibility: visible;
+    transition: opacity .07s ease-out, scale .18s cubic-bezier(.22, 1, .36, 1);
+  }
+  /* Rows highlight from state only, at once, as a native menu does: no fill
+     transition to lag the pointer, and not the kit's sticky data-hover,
+     which could leave two rows lit. */
+  & .ab-drive-option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 32px;
+    padding: 0 8px;
+    border-radius: var(--ss-radius-md);
+    color: var(--ss-text-strong);
+    font-size: 14px;
+  }
+  & .ab-drive-option[data-hl] { background: var(--ds-gray-alpha-100, rgba(0, 0, 0, .05)); }
+  /* Every row keeps its check mounted, so no row's layout changes */
+  & .ab-drive-tick { flex: none; color: var(--ss-text-strong); opacity: 0; }
+  & .ab-drive-tick[data-on] { opacity: 1; }
+}
+
+@keyframes ab-drive-roll-in {
+  from { opacity: 0; translate: 0 .5em; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ab-feature-scene .ab-drive :is(.ab-drive-menu, .ab-drive-btn-roll, .ab-drive-save, .ab-drive-value, .ss-field__chars) { transition: none; animation: none; }
+}

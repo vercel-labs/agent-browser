@@ -7,6 +7,7 @@ use super::cdp::types::*;
 use super::element::{
     resolve_element_center, resolve_element_object_id, session_viewport_offset, RefMap,
 };
+use super::pointer::{ClickSpec, Modifiers, MouseButton};
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
 /// mid-sequence (the page is then blocked until `dialog accept`/`dismiss`).
@@ -29,7 +30,9 @@ pub struct PendingRelease {
     pub session_id: String,
     pub x: f64,
     pub y: f64,
-    pub button: String,
+    pub button: MouseButton,
+    pub click_count: u8,
+    pub modifiers: Modifiers,
 }
 
 pub async fn click(
@@ -37,9 +40,30 @@ pub async fn click(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
-    button: &str,
-    click_count: i32,
+    spec: ClickSpec,
     iframe_sessions: &HashMap<String, String>,
+) -> Result<ClickResult, String> {
+    click_element(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        spec,
+        iframe_sessions,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn click_element(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    spec: ClickSpec,
+    iframe_sessions: &HashMap<String, String>,
+    require_actionable: bool,
 ) -> Result<ClickResult, String> {
     let (x, y, effective_session_id) = resolve_element_center(
         client,
@@ -47,6 +71,7 @@ pub async fn click(
         ref_map,
         selector_or_ref,
         iframe_sessions,
+        require_actionable,
     )
     .await?;
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
@@ -60,33 +85,13 @@ pub async fn click(
         &[effective_session_id.as_str(), session_id],
         x,
         y,
-        button,
-        click_count,
+        spec,
     )
     .await?;
     // Compute before dispatch: a click may navigate or open a blocking dialog.
     result.position = (x + offset.0, y + offset.1);
     (result.x, result.y) = result.position;
     Ok(result)
-}
-
-pub async fn dblclick(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<ClickResult, String> {
-    click(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        "left",
-        2,
-        iframe_sessions,
-    )
-    .await
 }
 
 pub async fn hover(
@@ -102,6 +107,7 @@ pub async fn hover(
         ref_map,
         selector_or_ref,
         iframe_sessions,
+        false,
     )
     .await?;
     let offset =
@@ -347,7 +353,6 @@ pub async fn type_text_into_active_context(
                         text: text_str.clone(),
                         unmodified_text: text_str,
                         windows_virtual_key_code: Some(key_code),
-                        native_virtual_key_code: Some(key_code),
                         modifiers: None,
                     },
                     Some(session_id),
@@ -364,7 +369,6 @@ pub async fn type_text_into_active_context(
                         text: None,
                         unmodified_text: None,
                         windows_virtual_key_code: Some(key_code),
-                        native_virtual_key_code: Some(key_code),
                         modifiers: None,
                     },
                     Some(session_id),
@@ -431,7 +435,6 @@ pub async fn press_key_with_modifiers(
                 text: text.clone(),
                 unmodified_text: text.clone(),
                 windows_virtual_key_code: Some(key_code),
-                native_virtual_key_code: Some(key_code),
                 modifiers,
             },
             Some(session_id),
@@ -448,7 +451,6 @@ pub async fn press_key_with_modifiers(
                 text: None,
                 unmodified_text: None,
                 windows_virtual_key_code: Some(key_code),
-                native_virtual_key_code: Some(key_code),
                 modifiers,
             },
             Some(session_id),
@@ -530,11 +532,102 @@ pub async fn select_option(
     // Matching nothing must be an error, not a silent success: an agent that
     // selects a misspelled option otherwise sees "Done", and only discovers
     // the page state is wrong after more commands. List what was available.
-    let js = r#"function(vals) {
+    //
+    // Native <select> keeps its own path. For a div-based ARIA combobox/listbox
+    // (Radix, Headless UI, ui-sdk) there is no `this.options`, so open the widget
+    // when it is not already expanded, wait for its role=option items, and click
+    // the ones whose accessible name or value matches.
+    let js = r#"async function(vals) {
             const normalize = (value) => String(value ?? '')
                 .replace(/[\u200B\u200C\u200D\u2060\uFEFF]/g, '')
                 .replace(/\s+/g, ' ')
                 .trim();
+            if (!(this instanceof HTMLSelectElement)) {
+                const role = this.getAttribute('role');
+                if (role !== 'combobox' && role !== 'listbox') {
+                    return { error: 'select target <' + this.tagName.toLowerCase() + '> is not a <select> or a role=combobox/listbox element' };
+                }
+                const realClick = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const o = { bubbles: true, cancelable: true, composed: true,
+                                clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+                                button: 0, pointerId: 1, isPrimary: true };
+                    el.dispatchEvent(new PointerEvent('pointerdown', o));
+                    el.dispatchEvent(new MouseEvent('mousedown', o));
+                    el.dispatchEvent(new PointerEvent('pointerup', o));
+                    el.dispatchEvent(new MouseEvent('mouseup', o));
+                    el.dispatchEvent(new MouseEvent('click', o));
+                };
+                // Clicking an open combobox toggles it shut, so only open when collapsed.
+                if (role === 'combobox' && this.getAttribute('aria-expanded') !== 'true') {
+                    realClick(this);
+                }
+                const collect = () => {
+                    let scope = role === 'listbox' ? this : null;
+                    if (!scope) {
+                        const controls = this.getAttribute('aria-controls');
+                        if (controls) {
+                            // Radix sets aria-controls before the popup mounts, so a
+                            // missing target means "not rendered yet": return nothing
+                            // and let the wait loop retry, instead of collecting another
+                            // listbox's options from the document.
+                            scope = document.getElementById(controls);
+                            if (!scope) return [];
+                        }
+                    }
+                    const nodes = Array.from((scope || document).querySelectorAll('[role=option]'));
+                    return nodes.filter((o) => o.getClientRects().length > 0);
+                };
+                let options = collect();
+                for (let i = 0; i < 40 && options.length === 0; i++) {
+                    await new Promise((r) => setTimeout(r, 50));
+                    options = collect();
+                }
+                if (options.length === 0) {
+                    return { error: 'combobox opened but no visible role=option elements were found' };
+                }
+                // Accessible name precedence: aria-labelledby, aria-label, text
+                // content. Option rows often carry an indicator or a description
+                // next to the label, so textContent alone misses their name.
+                const nameOf = (o) => {
+                    const labels = (o.getAttribute('aria-labelledby') || '').trim();
+                    if (labels) {
+                        const text = labels.split(/\s+/)
+                            .map((id) => { const el = document.getElementById(id); return el ? el.textContent : ''; })
+                            .join(' ');
+                        if (normalize(text)) return normalize(text);
+                    }
+                    return normalize(o.getAttribute('aria-label')) || normalize(o.textContent);
+                };
+                const valueOf = (o) => normalize(o.getAttribute('data-value')) || normalize(o.getAttribute('value'));
+                const wanted = new Set();
+                for (const value of vals) {
+                    const want = normalize(value);
+                    const matches = options.filter((o) => nameOf(o) === want || (valueOf(o) && valueOf(o) === want));
+                    if (matches.length === 0) {
+                        const available = options.map((o) => '"' + nameOf(o) + '"').join(', ');
+                        return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
+                    }
+                    if (matches.length > 1) {
+                        return { error: 'Multiple options matched ' + JSON.stringify(value) };
+                    }
+                    // A disabled option swallows the click, so selecting it would
+                    // report success with an unchanged widget.
+                    if (matches[0].getAttribute('aria-disabled') === 'true') {
+                        return { error: 'Option "' + nameOf(matches[0]) + '" is disabled' };
+                    }
+                    wanted.add(matches[0]);
+                }
+                // A click toggles selection in a multi-select listbox, so an option
+                // that is already selected must be left alone.
+                const multi = role === 'listbox' && this.getAttribute('aria-multiselectable') === 'true';
+                for (const opt of wanted) {
+                    if (multi && opt.getAttribute('aria-selected') === 'true') continue;
+                    opt.scrollIntoView({ block: 'nearest' });
+                    realClick(opt);
+                }
+                return { matched: wanted.size };
+            }
             const options = Array.from(this.options);
             const wanted = new Set();
             for (const value of vals) {
@@ -579,11 +672,22 @@ pub async fn select_option(
                     object_id: None,
                 }]),
                 return_by_value: Some(true),
-                await_promise: Some(false),
+                await_promise: Some(true),
             },
             Some(&effective_session_id),
         )
         .await?;
+
+    // A thrown script error must surface instead of reporting success.
+    if let Some(exc) = result.get("exceptionDetails") {
+        let msg = exc
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("select failed: script error");
+        return Err(msg.to_string());
+    }
 
     if let Some(error) = result
         .get("result")
@@ -597,58 +701,29 @@ pub async fn select_option(
     Ok(())
 }
 
+/// What a check or uncheck did. `verified` is false when the page navigated
+/// before the toggle could be read back.
+pub struct ToggleOutcome {
+    pub position: Option<(f64, f64)>,
+    pub verified: bool,
+}
+
 pub async fn check(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<Option<(f64, f64)>, String> {
-    let mut position = None;
-    let is_checked = super::element::is_element_checked(
+) -> Result<ToggleOutcome, String> {
+    Box::pin(toggle(
         client,
         session_id,
         ref_map,
         selector_or_ref,
         iframe_sessions,
-    )
-    .await?;
-    if !is_checked {
-        let result = click(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            "left",
-            1,
-            iframe_sessions,
-        )
-        .await?;
-        position = Some(result.position);
-
-        // Verify the click changed the state (Playwright parity: _setChecked re-checks).
-        // If the coordinate-based click missed (e.g. hidden input, overlay), retry
-        // with a JS .click() on the element and its associated input.
-        if !super::element::is_element_checked(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            iframe_sessions,
-        )
-        .await?
-        {
-            js_click_checkbox(
-                client,
-                session_id,
-                ref_map,
-                selector_or_ref,
-                iframe_sessions,
-            )
-            .await?;
-        }
-    }
-    Ok(position)
+        true,
+    ))
+    .await
 }
 
 pub async fn uncheck(
@@ -657,8 +732,31 @@ pub async fn uncheck(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<Option<(f64, f64)>, String> {
-    let mut position = None;
+) -> Result<ToggleOutcome, String> {
+    Box::pin(toggle(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+        false,
+    ))
+    .await
+}
+
+async fn toggle(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+    want_checked: bool,
+) -> Result<ToggleOutcome, String> {
+    use super::element::read_after_action;
+    let mut outcome = ToggleOutcome {
+        position: None,
+        verified: true,
+    };
     let is_checked = super::element::is_element_checked(
         client,
         session_id,
@@ -667,51 +765,52 @@ pub async fn uncheck(
         iframe_sessions,
     )
     .await?;
-    if is_checked {
-        let result = click(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            "left",
-            1,
-            iframe_sessions,
-        )
-        .await?;
-        position = Some(result.position);
+    if is_checked == want_checked {
+        return Ok(outcome);
+    }
+    let result = click_element(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        ClickSpec::default(),
+        iframe_sessions,
+        false,
+    )
+    .await?;
+    outcome.position = Some(result.position);
 
-        // Same verify-and-retry as check().
-        if super::element::is_element_checked(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            iframe_sessions,
-        )
-        .await?
-        {
-            js_click_checkbox(
+    // Verify the click changed the state (Playwright parity: _setChecked re-checks).
+    // If the coordinate-based click missed (e.g. hidden input, overlay), retry
+    // with a JS .click() on the element and its associated input. The click has
+    // already happened, so a document replaced by it ends the verification
+    // without failing the action.
+    let after = read_after_action(super::element::is_element_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    ))
+    .await?;
+    match after {
+        None => outcome.verified = false,
+        Some(checked) if checked != want_checked => {
+            let retried = read_after_action(js_click_checkbox(
                 client,
                 session_id,
                 ref_map,
                 selector_or_ref,
                 iframe_sessions,
-            )
+            ))
             .await?;
+            outcome.verified = retried.is_some();
         }
+        Some(_) => {}
     }
-    Ok(position)
+    Ok(outcome)
 }
 
-/// Fallback for when the coordinate-based CDP click did not toggle the
-/// checkbox/radio state. This mirrors how Playwright dispatches clicks
-/// through the DOM rather than via raw Input.dispatchMouseEvent coordinates.
-///
-/// Uses the same follow-label resolution as `is_element_checked`:
-/// 1. If the element is a native input → `.click()` it directly.
-/// 2. If the element is inside a `<label>` → `.click()` the label's `.control`.
-/// 3. If the element has a nested `<input>` → `.click()` that input.
-/// 4. Otherwise → `.click()` the element itself (handles ARIA role controls).
 async fn js_click_checkbox(
     client: &CdpClient,
     session_id: &str,
@@ -1021,6 +1120,7 @@ pub async fn tap_touch(
         ref_map,
         selector_or_ref,
         iframe_sessions,
+        false,
     )
     .await?;
 
@@ -1102,110 +1202,112 @@ async fn dispatch_mouse_or_dialog(
     }
 }
 
+/// One step of a click: the pointer moves to the target, then each click presses and releases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickPhase {
+    Move,
+    Press(u8),
+    Release(u8),
+}
+
+impl ClickPhase {
+    /// The phase that follows this one, or None when the last click is released.
+    fn next(self, spec: &ClickSpec) -> Option<Self> {
+        match self {
+            Self::Move => Some(Self::Press(1)),
+            Self::Press(n) => Some(Self::Release(n)),
+            Self::Release(n) if n < spec.count => Some(Self::Press(n + 1)),
+            Self::Release(_) => None,
+        }
+    }
+
+    /// The CDP mouse event this phase dispatches.
+    fn event(self, spec: &ClickSpec, x: f64, y: f64) -> DispatchMouseEventParams {
+        let modifiers = spec.modifiers.cdp();
+        match self {
+            Self::Move => DispatchMouseEventParams {
+                event_type: "mouseMoved".to_string(),
+                x,
+                y,
+                button: None,
+                buttons: None,
+                click_count: None,
+                delta_x: None,
+                delta_y: None,
+                modifiers,
+            },
+            Self::Press(n) => DispatchMouseEventParams {
+                event_type: "mousePressed".to_string(),
+                x,
+                y,
+                button: Some(spec.button.name().to_string()),
+                buttons: Some(spec.button.mask()),
+                click_count: Some(i32::from(n)),
+                delta_x: None,
+                delta_y: None,
+                modifiers,
+            },
+            Self::Release(n) => DispatchMouseEventParams {
+                event_type: "mouseReleased".to_string(),
+                x,
+                y,
+                button: Some(spec.button.name().to_string()),
+                buttons: Some(0),
+                click_count: Some(i32::from(n)),
+                delta_x: None,
+                delta_y: None,
+                modifiers,
+            },
+        }
+    }
+}
+
 async fn dispatch_click(
     client: &CdpClient,
     session_id: &str,
     accept_sessions: &[&str],
     x: f64,
     y: f64,
-    button: &str,
-    click_count: i32,
+    spec: ClickSpec,
 ) -> Result<ClickResult, String> {
-    // Move
-    if dispatch_mouse_or_dialog(
-        client,
-        session_id,
-        accept_sessions,
-        &DispatchMouseEventParams {
-            event_type: "mouseMoved".to_string(),
-            x,
-            y,
-            button: None,
-            buttons: None,
-            click_count: None,
-            delta_x: None,
-            delta_y: None,
-            modifiers: None,
-        },
-    )
-    .await?
-    {
-        // No button was pressed yet, nothing to release.
-        return Ok(ClickResult {
-            position: (x, y),
-            dialog_opened: true,
-            pending_release: None,
-            x,
-            y,
-            button_pressed: false,
-        });
-    }
-
-    let button_value = match button {
-        "right" => 2,
-        "middle" => 4,
-        _ => 1,
-    };
-
-    // Press
-    if dispatch_mouse_or_dialog(
-        client,
-        session_id,
-        accept_sessions,
-        &DispatchMouseEventParams {
-            event_type: "mousePressed".to_string(),
-            x,
-            y,
-            button: Some(button.to_string()),
-            buttons: Some(button_value),
-            click_count: Some(click_count),
-            delta_x: None,
-            delta_y: None,
-            modifiers: None,
-        },
-    )
-    .await?
-    {
-        // Dialog opened from the mousedown handler: the button is held and the
-        // release will never arrive on its own. Hand the caller what it needs
-        // to release once the dialog is resolved.
-        return Ok(ClickResult {
-            position: (x, y),
-            dialog_opened: true,
-            pending_release: Some(PendingRelease {
-                session_id: session_id.to_string(),
+    let mut phase = Some(ClickPhase::Move);
+    let mut button_pressed = false;
+    while let Some(current) = phase {
+        if matches!(current, ClickPhase::Press(_)) {
+            button_pressed = true;
+        }
+        if dispatch_mouse_or_dialog(
+            client,
+            session_id,
+            accept_sessions,
+            &current.event(&spec, x, y),
+        )
+        .await?
+        {
+            return Ok(ClickResult {
+                position: (x, y),
+                dialog_opened: true,
+                pending_release: match current {
+                    ClickPhase::Press(n) => Some(PendingRelease {
+                        session_id: session_id.to_string(),
+                        x,
+                        y,
+                        button: spec.button,
+                        click_count: n,
+                        modifiers: spec.modifiers,
+                    }),
+                    _ => None,
+                },
                 x,
                 y,
-                button: button.to_string(),
-            }),
-            x,
-            y,
-            button_pressed: true,
-        });
+                button_pressed,
+            });
+        }
+        phase = current.next(&spec);
     }
-
-    // Release. A dialog here fired from the click/mouseup handler, which runs
-    // after the button is already up, so there is nothing left to release.
-    let dialog_opened = dispatch_mouse_or_dialog(
-        client,
-        session_id,
-        accept_sessions,
-        &DispatchMouseEventParams {
-            event_type: "mouseReleased".to_string(),
-            x,
-            y,
-            button: Some(button.to_string()),
-            buttons: Some(0),
-            click_count: Some(click_count),
-            delta_x: None,
-            delta_y: None,
-            modifiers: None,
-        },
-    )
-    .await?;
     Ok(ClickResult {
         position: (x, y),
-        dialog_opened,
+        dialog_opened: false,
         pending_release: None,
         x,
         y,
@@ -1226,12 +1328,12 @@ pub async fn dispatch_pending_release(
                 event_type: "mouseReleased".to_string(),
                 x: release.x,
                 y: release.y,
-                button: Some(release.button.clone()),
+                button: Some(release.button.name().to_string()),
                 buttons: Some(0),
-                click_count: Some(1),
+                click_count: Some(i32::from(release.click_count)),
                 delta_x: None,
                 delta_y: None,
-                modifiers: None,
+                modifiers: release.modifiers.cdp(),
             },
             Some(&release.session_id),
         )
@@ -1445,6 +1547,38 @@ mod tests {
             );
             assert_eq!(key, ch.to_string());
         }
+    }
+
+    #[test]
+    fn click_phase_walks_move_press_release_for_each_click() {
+        let spec = ClickSpec {
+            button: MouseButton::Right,
+            count: 2,
+            modifiers: Modifiers::parse_list("ctrl+shift").unwrap(),
+        };
+        let mut phases = Vec::new();
+        let mut phase = Some(ClickPhase::Move);
+        while let Some(current) = phase {
+            phases.push(current);
+            phase = current.next(&spec);
+        }
+        assert_eq!(
+            phases,
+            [
+                ClickPhase::Move,
+                ClickPhase::Press(1),
+                ClickPhase::Release(1),
+                ClickPhase::Press(2),
+                ClickPhase::Release(2),
+            ]
+        );
+
+        let press = ClickPhase::Press(2).event(&spec, 10.0, 20.0);
+        assert_eq!(press.event_type, "mousePressed");
+        assert_eq!(press.button.as_deref(), Some("right"));
+        assert_eq!(press.buttons, Some(2));
+        assert_eq!(press.click_count, Some(2));
+        assert_eq!(press.modifiers, Some(10));
     }
 
     #[test]
