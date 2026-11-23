@@ -57,7 +57,7 @@ Firefox 150 or newer attaches over WebDriver BiDi when it runs with remote debug
 
 ## Supported features
 
-Navigation, tabs, `eval`, snapshots and refs (including iframes and open shadow roots), all element commands, `find`, frames, dialogs, screenshots (including `--annotate`), PDF, cookies, storage, state save and load with `--session-name` restore, `network route` and `network unroute`, requests, HAR and response bodies, extra headers, offline mode, HTTP auth, `--allowed-domains`, downloads, uploads, emulation (`set viewport`, `set geo`, `set media`, and `--user-agent`), `--proxy`, `--ignore-https-errors`, and the dashboard live view.
+Navigation, tabs, `eval`, snapshots and refs (including iframes and shadow roots), all element commands, `find`, frames, dialogs, screenshots (including `--annotate`), PDF, cookies, storage, state save and load with `--session-name` restore, `network route` and `network unroute`, requests, HAR and response bodies, extra headers, offline mode, HTTP auth, `--allowed-domains`, downloads, uploads, emulation (`set viewport`, `set geo`, `set media`, and `--user-agent`), `--proxy`, `--ignore-https-errors`, and the dashboard live view.
 
 On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
 
@@ -65,7 +65,7 @@ With `--no-auto-dialog`, if the first click of `dblclick` opens a JavaScript dia
 
 Firefox cancels an HTTP auth challenge that the session has no credentials for, so the page loads the server's 401 response instead of waiting on a browser prompt. Run `set credentials` before you open the page.
 
-Snapshots list controls inside closed shadow roots, but Firefox cannot act on them, so a command that uses such a ref fails. Pointer commands inside an iframe that has a CSS transform can miss their target.
+Pointer commands inside an iframe that has a CSS transform can miss their target.
 
 Media emulation on Firefox supports only `prefers-color-scheme` and print media. Other media features return an error that lists the supported ones.
 

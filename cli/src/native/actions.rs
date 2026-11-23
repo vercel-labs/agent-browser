@@ -914,7 +914,7 @@ impl DaemonState {
     }
 
     /// Queue a warning for the current command's response.
-    fn push_action_warning(&mut self, warning: &str) {
+    pub(crate) fn push_action_warning(&mut self, warning: &str) {
         self.pending_action_warning = Some(match self.pending_action_warning.take() {
             Some(existing) => format!("{}\n{}", existing, warning),
             None => warning.to_string(),
@@ -1531,7 +1531,7 @@ impl DaemonState {
                 &mut self.pending_dialog,
                 &mut self.pending_pointer_release,
             );
-            let held = hold.as_ref().map(|release| release.button);
+            let held = hold.as_ref().and_then(|release| release.button);
             let active_changed = firefox
                 .as_mut()
                 .is_some_and(|ff| ff.drain_events_with(dialog, hold));
@@ -1557,7 +1557,7 @@ impl DaemonState {
         let held = self
             .pending_pointer_release
             .as_ref()
-            .map(|release| release.button);
+            .and_then(|release| release.button);
         if let Some(ff) = self.firefox.as_mut() {
             let reconciled = ff
                 .reconcile_event_loss(&mut self.pending_dialog, &mut self.pending_pointer_release)
@@ -11375,12 +11375,7 @@ async fn handle_upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     let files = upload_files(cmd);
 
-    let remote = state.active_provider_connection
-        || state
-            .attached_target
-            .as_ref()
-            .is_some_and(AttachedTarget::is_remote);
-    let warning = check_upload_files(&files, remote)?;
+    let warning = check_upload_files(&files, upload_browser_is_remote(state))?;
     mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
         .await?;
     if let Some(warning) = warning {
@@ -11389,10 +11384,22 @@ async fn handle_upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "uploaded": files.len(), "selector": selector }))
 }
 
+/// Whether the active browser reads upload paths on a host other than the daemon's.
+pub(crate) fn upload_browser_is_remote(state: &DaemonState) -> bool {
+    state.active_provider_connection
+        || state
+            .attached_target
+            .as_ref()
+            .is_some_and(AttachedTarget::is_remote)
+}
+
 /// Rejects upload paths that do not exist on this host. A browser on another
 /// machine reads the paths on its own host, so there a local miss only warns.
 /// Directories pass through for `webkitdirectory` inputs.
-fn check_upload_files(files: &[String], remote_browser: bool) -> Result<Option<String>, String> {
+pub(crate) fn check_upload_files(
+    files: &[String],
+    remote_browser: bool,
+) -> Result<Option<String>, String> {
     let mut unverified = Vec::new();
     for file in files {
         if std::fs::metadata(file).is_ok() {
@@ -22762,7 +22769,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             owner_position: (12.0, 34.0),
             x: 12.0,
             y: 34.0,
-            button: crate::native::pointer::MouseButton::Left,
+            button: Some(crate::native::pointer::MouseButton::Left),
             click_count: 1,
             modifiers: crate::native::pointer::Modifiers::default(),
         });
