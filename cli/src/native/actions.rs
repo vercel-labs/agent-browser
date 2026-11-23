@@ -3718,7 +3718,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         run_flow.as_deref(),
         effective_settings,
     );
-    if launches || (!skip_launch && needs_launch) {
+    if action == "launch" || (!skip_launch && needs_launch) {
         if let Some(("provider", value)) = settings_launch_target(effective_settings) {
             if let Some(provider) = value.as_str() {
                 let plugins = plugins_from_command_or_env(cmd);
@@ -27312,6 +27312,73 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             );
             assert_eq!(state.settings.get(Key::Provider), None, "{resp}");
         }
+    }
+
+    #[tokio::test]
+    async fn page_command_on_connected_provider_does_not_reconfirm_provider_plugin() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let command: Value = serde_json::from_str(&text).unwrap();
+                        let reply = json!({ "id": command["id"], "result": {} });
+                        if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        for rule in ["deny", "confirm"] {
+            let policy = dir.path().join(format!("{rule}.json"));
+            fs::write(
+                &policy,
+                format!(r#"{{"{rule}": ["plugin:browserbox:browser.provider"]}}"#),
+            )
+            .unwrap();
+            let (_env, mut state) = isolated_state();
+            state.settings = Running::defaults();
+            state.settings.set(Key::Provider, json!("browserbox"));
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            let cmd = json!({
+                "id": "1",
+                "action": "url",
+                "plugins": provider_plugins(),
+                "settings": {
+                    "action-policy": policy.to_str().unwrap()
+                }
+            });
+
+            let resp = execute_command(&cmd, &mut state).await;
+
+            assert_ne!(
+                resp["data"]["confirmation_required"], true,
+                "{rule}: {resp}"
+            );
+            assert!(
+                !resp["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("denied by policy"),
+                "{rule}: {resp}"
+            );
+        }
+        server.abort();
     }
     #[tokio::test]
     async fn test_changed_cdp_headers_replace_the_cached_ones_for_the_endpoint() {
