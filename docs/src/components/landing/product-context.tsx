@@ -58,7 +58,7 @@ export function useProduct() {
 export function ProductWordmark() {
   const selected = useContext(ProductContext)?.selected ?? 'browser';
   return (
-    <span className="inline-grid font-[family-name:var(--font-geist-pixel-square)] text-lg leading-none tracking-tight">
+    <span className="inline-grid font-[family-name:var(--font-geist-sans)] text-[24.4px] font-semibold leading-none tracking-[-0.05em] text-black dark:text-white">
       {PRODUCTS.map((product) => {
         const active = product === selected;
         return (
