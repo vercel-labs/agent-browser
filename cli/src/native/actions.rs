@@ -8872,7 +8872,7 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
 /// The options a snapshot was taken with.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct SnapshotScope {
+pub(crate) struct SnapshotScope {
     selector: Option<String>,
     interactive: bool,
     compact: bool,
