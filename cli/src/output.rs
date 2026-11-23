@@ -1112,6 +1112,17 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             color::error_indicator(),
             resp.error.as_deref().unwrap_or("Unknown error")
         );
+        if let Some(options) = resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("options"))
+            .and_then(|o| o.as_array())
+            .filter(|o| !o.is_empty())
+        {
+            let lines: Vec<String> = options.iter().map(|o| o.to_string()).collect();
+            let content = format!("Available options:\n{}", lines.join("\n"));
+            eprintln!("{}", format_with_boundaries(&content, None, opts));
+        }
         // Still print dialog warning after errors, since a pending dialog
         // is the most common cause of commands timing out
         if let Some(ref warning) = resp.warning {
@@ -2465,6 +2476,18 @@ Usage: agent-browser fill <selector> [--] <text>
 
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
+Date, time, color and range inputs get the value set directly (for example 2024-01-15);
+a value the input would reject fails with malformed_value, and a range value inside
+its bounds is snapped to the step as the browser does, with a warning. A color input
+takes any CSS color Chrome accepts (#fff, red, rgb(1, 2, 3)) and stores it as #rrggbb.
+Readonly and disabled fields, and elements that can never take text (select, option, button, a label without a control, checkbox,
+radio, file, hidden, image, button, submit, reset), are refused before anything changes, with a code of
+read_only, disabled or not_editable. A label stands for its control.
+A value longer than maxlength is cut by the browser and reported as a value_truncated
+warning. If the page does not hold the value afterwards (it applies it late or rewrites
+it, or the page navigated before it could be read), the command still succeeds and
+prints a warning. These checks apply to the Chrome backend; the WebDriver backend fills
+without them.
 Put flags before --. Text after -- is literal, including values that look like flags.
 
 Global Options:
@@ -2485,6 +2508,17 @@ agent-browser type - Type text into an element
 Usage: agent-browser type <selector> [--clear] [--delay <ms>] [--] <text>
 
 Types text into the specified element character by character.
+Disabled fields, and elements that can never take text (select, option, button, a label without a control, checkbox,
+radio, file, hidden, image, button, submit, reset, and the color, range and date-type inputs) are
+refused before any text is typed (disabled, not_editable); use fill for date, time,
+color and range inputs. With --clear a readonly field is refused too (read_only), as
+fill does, because clearing would empty it; plain type leaves a readonly field to the
+page. To send text to a focused element use keyboard type, or
+press for a single key. An element that neither takes focus nor forwards it to a field (a plain div or
+custom element) is refused too (not_editable), since the text would go to whatever was
+focused before. Text made only of newline, carriage return and tab is
+sent as key events to any focused target. If the page does not show the text afterwards,
+the command still succeeds and prints a warning.
 Use --clear to clear existing content first. Use --delay to set the delay between keystrokes in milliseconds.
 Use -- before text that looks like a flag to pass it literally. Put options before --.
 
@@ -2545,6 +2579,9 @@ agent-browser check - Check a checkbox
 Usage: agent-browser check <selector>
 
 Checks a checkbox element. If already checked, no action is taken.
+Fails with not_checkable on elements that cannot be toggled, and disabled on disabled
+ones. If the state has not changed afterwards (a custom control may apply it late), the
+command still succeeds and prints a warning.
 
 Global Options:
   --json               Output as JSON
@@ -2562,6 +2599,8 @@ agent-browser uncheck - Uncheck a checkbox
 Usage: agent-browser uncheck <selector>
 
 Unchecks a checkbox element. If already unchecked, no action is taken.
+Fails with not_checkable on elements that cannot be toggled, and on a checked radio
+(select another radio in its group instead). Fails with disabled on disabled ones.
 
 Global Options:
   --json               Output as JSON
@@ -2576,15 +2615,25 @@ Examples:
             r##"
 agent-browser select - Select a dropdown option
 
-Usage: agent-browser select <selector> <value...>
+Usage: agent-browser select <selector> [--by value|label] [--] <value...>
 
 Selects one or more options in a <select> dropdown by value or visible label.
 Label matching normalizes whitespace such as non-breaking spaces.
+A string that matches exactly one option, by value or by exact label, selects it. A
+string that matches options with different values (it equals one option's value and
+another's label, or several options share the label) fails with ambiguous and reports how many
+options matched. Pass --by value or --by label to match only that attribute, so every
+option is reachable, for example: select "#idx" 1 --by value. Options that share a value
+are one choice. No match fails with option_not_found; the message gives the option count
+and data.options lists them ([{value, label}], page content). Several values on a select that is
+not multiple (not_multiple), and a disabled select, are refused before anything changes.
+Put flags before --. Text after -- is literal, including values that look like flags.
 
 On a custom ARIA widget (role=combobox or role=listbox, as in Radix or Headless UI),
 select opens it when collapsed, waits for the visible role=option items, and clicks
-the ones whose accessible name or value matches. If none match, the error lists the
-available options, and a matched option marked aria-disabled is an error instead of
+the ones whose accessible name or value matches. If none match, the error carries the
+available options as data.options ([{value, label}], page content; wrapped in content
+boundaries when enabled), and a matched option marked aria-disabled is an error instead of
 a click. An option that is already selected in a multi-select listbox is left alone.
 
 Global Options:
@@ -2595,6 +2644,7 @@ Examples:
   agent-browser select "#country" "US"
   agent-browser select @e5 "option2"
   agent-browser select "#menu" "opt1" "opt2" "opt3"
+  agent-browser select "#idx" 1 --by value
 "##
         }
         "drag" => {
@@ -4710,7 +4760,7 @@ Core Commands:
   focus <sel>                Focus element
   check <sel>                Check checkbox
   uncheck <sel>              Uncheck checkbox
-  select <sel> <val...>      Select dropdown by value or visible label
+  select <sel> <val...> [--by value|label]  Select dropdown by value or visible label
   drag <src> <dst>           Drag and drop
   upload <sel> <files...>    Upload files
   download <sel> <path>      Download file by clicking element
