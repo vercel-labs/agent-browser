@@ -2022,6 +2022,20 @@ fn main() {
     };
 
     let is_close = cmd.get("action").and_then(|v| v.as_str()) == Some("close");
+    // Nothing to close: starting a daemon only to answer would make `close`
+    // unsafe as a cleanup step. Stored settings still need a daemon, so their
+    // policy governs the close.
+    if is_close
+        && !session_settings::has_file(&flags.session)
+        && !connection::daemon_running(&flags.session)
+    {
+        if flags.json {
+            print_json_value(json!({ "success": true, "data": { "closed": false } }));
+        } else {
+            println!("No active session");
+        }
+        return;
+    }
     let daemon_result = match ensure_daemon_for(&flags.session, &daemon_opts, is_close) {
         Ok(result) => result,
         Err(e) => {

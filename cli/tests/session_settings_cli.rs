@@ -247,6 +247,23 @@ fn close_clears_a_file_when_no_daemon_is_running() {
 }
 
 #[test]
+fn close_on_a_session_that_never_ran_starts_no_daemon() {
+    let session = Session::new();
+
+    let json = session.run(&["close"]);
+    let human = session.output(&["--json", "false", "close"]);
+
+    assert_eq!(json["success"], true, "{json}");
+    assert_eq!(json["data"]["closed"], false, "{json}");
+    let leftovers: Vec<_> = fs::read_dir(session.dir())
+        .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "a daemon was started: {leftovers:?}");
+    assert!(human.status.success(), "{}", text(&human));
+    assert!(!text(&human).contains("Browser closed"), "{}", text(&human));
+}
+
+#[test]
 fn a_cli_driven_restart_keeps_the_settings_and_the_filter() {
     let session = Session::new();
     session.touch(&["--allowed-domains", "example.com"]);
