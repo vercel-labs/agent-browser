@@ -14,11 +14,12 @@ pub use dashboard::{
 };
 
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify, RwLock};
 
 use super::cdp::client::CdpClient;
 use crate::session_settings::IdleTimeout;
@@ -195,6 +196,60 @@ impl Default for FrameMetadata {
     }
 }
 
+/// How long `/api/tabs` waits for a Firefox list before answering from the cache.
+const TAB_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Asks the poller that owns a Firefox session for a fresh tab list.
+#[derive(Clone)]
+pub(crate) struct TabRefresh {
+    id: u64,
+    tx: mpsc::UnboundedSender<oneshot::Sender<Option<Vec<Value>>>>,
+}
+
+impl TabRefresh {
+    /// Reads the tabs from the poller, or `None` when it cannot answer in time.
+    pub(crate) async fn request(&self) -> Option<Vec<Value>> {
+        let (reply, answer) = oneshot::channel();
+        self.tx.send(reply).ok()?;
+        match tokio::time::timeout(TAB_REFRESH_TIMEOUT, answer).await {
+            Ok(Ok(tabs)) => tabs,
+            _ => None,
+        }
+    }
+}
+
+/// The Firefox poller that answers `/api/tabs`, if one is running. Every registration carries an
+/// id, so a poller that is replaced only ever unregisters itself.
+#[derive(Default)]
+pub(crate) struct FirefoxTabs {
+    next_id: AtomicU64,
+    current: std::sync::Mutex<Option<TabRefresh>>,
+}
+
+impl FirefoxTabs {
+    /// Registers the poller that answers tab reads from now on.
+    pub(crate) fn attach(
+        &self,
+        tx: mpsc::UnboundedSender<oneshot::Sender<Option<Vec<Value>>>>,
+    ) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        *self.current.lock().unwrap() = Some(TabRefresh { id, tx });
+        id
+    }
+
+    /// Drops the registration while it still belongs to `id`.
+    pub(crate) fn detach(&self, id: u64) {
+        let mut current = self.current.lock().unwrap();
+        if current.as_ref().is_some_and(|refresh| refresh.id == id) {
+            *current = None;
+        }
+    }
+
+    pub(crate) fn refresher(&self) -> Option<TabRefresh> {
+        self.current.lock().unwrap().clone()
+    }
+}
+
 pub struct StreamServer {
     port: u16,
     session_name: String,
@@ -215,6 +270,7 @@ pub struct StreamServer {
     viewport_width: Arc<Mutex<u32>>,
     viewport_height: Arc<Mutex<u32>>,
     last_tabs: Arc<RwLock<Vec<Value>>>,
+    firefox_tabs: Arc<FirefoxTabs>,
     last_engine: Arc<RwLock<String>>,
     recording: Arc<Mutex<bool>>,
     shutdown_tx: watch::Sender<bool>,
@@ -272,6 +328,13 @@ impl StreamServer {
                 next.modifiers = Arc::clone(&current.modifiers);
             }
         }
+        let same_session = match (current.as_ref(), live.as_ref()) {
+            (Some(current), Some(next)) => Arc::ptr_eq(&current.bidi, &next.bidi),
+            _ => false,
+        };
+        if !same_session {
+            self.last_tabs.write().await.clear();
+        }
         if current.as_ref().map(|live| &live.context) != live.as_ref().map(|live| &live.context) {
             self.frame_watch.send_replace(None);
             let _ = self
@@ -293,6 +356,16 @@ impl StreamServer {
     /// True while at least one dashboard client is connected.
     pub async fn has_clients(&self) -> bool {
         *self.client_count.lock().await > 0
+    }
+
+    /// The registration slot a Firefox poller answers tab reads through.
+    pub(crate) fn firefox_tabs(&self) -> Arc<FirefoxTabs> {
+        Arc::clone(&self.firefox_tabs)
+    }
+
+    /// The tab list `/api/tabs` last published.
+    pub async fn cached_tabs(&self) -> Vec<Value> {
+        self.last_tabs.read().await.clone()
     }
 
     /// Check whether the server currently has active screencast running.
@@ -386,6 +459,7 @@ impl StreamServer {
         let viewport_width = Arc::new(Mutex::new(1280u32));
         let viewport_height = Arc::new(Mutex::new(720u32));
         let last_tabs = Arc::new(RwLock::new(Vec::<Value>::new()));
+        let firefox_tabs = Arc::new(FirefoxTabs::default());
         let last_engine = Arc::new(RwLock::new("chrome".to_string()));
         let recording = Arc::new(Mutex::new(false));
         let firefox_live = Arc::new(RwLock::new(None::<FirefoxLive>));
@@ -402,6 +476,7 @@ impl StreamServer {
         let vw_clone = viewport_width.clone();
         let vh_clone = viewport_height.clone();
         let last_tabs_clone = last_tabs.clone();
+        let firefox_tabs_accept = firefox_tabs.clone();
         let last_engine_clone = last_engine.clone();
         let recording_clone = recording.clone();
         let accept_shutdown_rx = shutdown_rx.clone();
@@ -423,6 +498,7 @@ impl StreamServer {
                 vw_clone,
                 vh_clone,
                 last_tabs_clone,
+                firefox_tabs_accept,
                 last_engine_clone,
                 recording_clone,
                 accept_shutdown_rx,
@@ -481,6 +557,7 @@ impl StreamServer {
                 viewport_width,
                 viewport_height,
                 last_tabs,
+                firefox_tabs,
                 last_engine,
                 recording,
                 shutdown_tx,

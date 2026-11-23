@@ -10,16 +10,18 @@ use tokio::sync::Notify;
 use super::attach::AttachTarget;
 use super::client::{remote_to_json, unserializable, BidiClient, Events, SANDBOX};
 use super::contexts::{Contexts, Removed};
-use super::emulation::{self, Settings as EmulationSettings};
+use super::emulation::{self, Emulation, Settings as EmulationSettings};
 use super::firefox::{
     check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess, NONCE_PREF,
 };
 use super::firefox_devtools::RdpClient;
+use super::interact::closed_prompt_owns_hold;
 use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
 use super::permissions;
 use super::types::UserPromptOpened;
 use crate::native::actions::{EmulatedMedia, PendingDialog};
 use crate::native::cdp::chrome::LaunchOptions;
+use crate::native::interaction::PendingRelease;
 use crate::session_settings::Key;
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -28,10 +30,13 @@ const DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 const ATTACH_DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const ATTACHED_RESET_TIMEOUT: Duration = Duration::from_secs(1);
-const CONTEXT_EVENTS: [&str; 3] = [
+const CONTEXT_EVENTS: [&str; 6] = [
     "browsingContext.contextCreated",
     "browsingContext.contextDestroyed",
     "browsingContext.domContentLoaded",
+    "browsingContext.navigationStarted",
+    "browsingContext.load",
+    "browsingContext.fragmentNavigated",
 ];
 const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptOpened",
@@ -79,12 +84,11 @@ pub struct FirefoxSession {
     pub refs: HashMap<(String, String, String), i64>,
     pub next_node_id: i64,
     pub frames: Option<super::snapshot::FrameWatch>,
-    /// Touch points of the active touch sequence, released by a later `input_touch` end.
-    pub touches: Vec<(f64, f64)>,
+    pub touches: HashMap<String, usize>,
     /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
     pub shadow_ids: std::collections::HashSet<i64>,
     /// Emulation applied to the active tab and replayed onto new tabs.
-    pub emulation: Arc<std::sync::RwLock<EmulationSettings>>,
+    pub emulation: Arc<Emulation>,
     /// Permissions the session granted, given to each origin as its tabs load it.
     pub permissions: Arc<tokio::sync::Mutex<permissions::Grants>>,
     /// Launch download directory, restored after `download` redirects it.
@@ -95,6 +99,7 @@ pub struct FirefoxSession {
     attached_download_path: Option<String>,
     pub(super) data_collector: DataCollectorState,
     events: Events,
+    network_events: Events,
     pub net: NetContext,
     /// True once the single global network intercept is installed; it is never installed twice.
     pub intercepting: bool,
@@ -223,6 +228,7 @@ impl FirefoxSession {
         options: &LaunchOptions,
         net: NetContext,
         auto_dialog: bool,
+        emulation_settings: EmulationSettings,
     ) -> Result<Self, String> {
         let path = find_firefox(options.executable_path.as_deref())?;
         let (headless, download) = (options.headless, options.download_path.clone());
@@ -244,7 +250,16 @@ impl FirefoxSession {
             devtools: process.devtools.clone(),
             devtools_explicit: false,
         };
-        Self::initialize(&target, Some(process), options, net, auto_dialog, None).await
+        Self::initialize(
+            &target,
+            Some(process),
+            options,
+            net,
+            auto_dialog,
+            emulation_settings,
+            None,
+        )
+        .await
     }
 
     /// Opens a BiDi session on an already running Firefox and connects its DevTools server.
@@ -254,12 +269,21 @@ impl FirefoxSession {
         net: NetContext,
         auto_dialog: bool,
     ) -> Result<Self, String> {
+        let attached_emulation = EmulationSettings {
+            media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
+                media: None,
+                features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
+            }),
+            tab_scoped: true,
+            ..EmulationSettings::default()
+        };
         Self::initialize(
             target,
             None,
             options,
             net,
             auto_dialog,
+            attached_emulation,
             Some(tokio::time::Instant::now() + ATTACH_TIMEOUT),
         )
         .await
@@ -271,6 +295,7 @@ impl FirefoxSession {
         options: &LaunchOptions,
         net: NetContext,
         auto_dialog: bool,
+        emulation_settings: EmulationSettings,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<Self, String> {
         let attached = process.is_none();
@@ -280,7 +305,8 @@ impl FirefoxSession {
                 .map_err(|_| "Firefox BiDi connection timed out".to_string())?
         };
         let bidi = Arc::new(within_attach_deadline(deadline, connect).await?);
-        let events = bidi.subscribe_buffered();
+        let events = bidi.subscribe_matching(lifecycle_event);
+        let network_events = bidi.subscribe_buffered();
         let mut caps = json!({
             "acceptInsecureCerts": options.ignore_https_errors,
             "unhandledPromptBehavior": {"default": "ignore"},
@@ -312,6 +338,8 @@ impl FirefoxSession {
                 net,
                 auto_dialog,
                 events,
+                network_events,
+                emulation_settings,
                 created,
             ),
         )
@@ -359,10 +387,12 @@ impl FirefoxSession {
         net: NetContext,
         auto_dialog: bool,
         events: Events,
+        network_events: Events,
+        emulation_settings: EmulationSettings,
         created: Value,
     ) -> Result<Self, String> {
         let attached = process.is_none();
-        let dispatch_events = bidi.subscribe_buffered();
+        let dispatch_events = super::network::subscribe_dispatcher(&bidi);
         let browser_version = created["capabilities"]["browserVersion"]
             .as_str()
             .unwrap_or("")
@@ -420,19 +450,7 @@ impl FirefoxSession {
             };
             contexts.activate(&selected);
         }
-        let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
-            viewport: options
-                .viewport_size
-                .filter(|_| !attached)
-                .map(|(width, height)| (i64::from(width), i64::from(height), 1.0)),
-            user_agent: options.user_agent.clone().filter(|_| !attached),
-            media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
-                media: None,
-                features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
-            }),
-            tab_scoped: attached,
-            ..EmulationSettings::default()
-        }));
+        let emulation = Arc::new(Emulation::new(emulation_settings));
         let permissions = Arc::new(tokio::sync::Mutex::new(permissions::Grants::default()));
         let dispatcher = Some(super::network::spawn_dispatcher(
             bidi.clone(),
@@ -452,7 +470,7 @@ impl FirefoxSession {
             refs: HashMap::new(),
             next_node_id: 0,
             frames: None,
-            touches: Vec::new(),
+            touches: HashMap::new(),
             shadow_ids: Default::default(),
             emulation,
             permissions,
@@ -460,6 +478,7 @@ impl FirefoxSession {
             attached_download_path: None,
             data_collector: DataCollectorState::Off,
             events,
+            network_events,
             net,
             intercepting: false,
             inflight: HashMap::new(),
@@ -469,6 +488,9 @@ impl FirefoxSession {
         };
         if let Some(contexts) = tree["contexts"].as_array() {
             session.record_context_origins(contexts);
+        }
+        if session.net.needs_request_intercept().await {
+            super::network::ensure_intercept(&mut session).await?;
         }
         Ok(session)
     }
@@ -497,26 +519,6 @@ impl FirefoxSession {
     /// that tab's cookie jar.
     pub fn active_partition(&self) -> Value {
         self.contexts.partition(self.contexts.active())
-    }
-
-    /// Rebuilds what events keep current when events were dropped or no context is active: the
-    /// context tree is read again, and after a drop the unfinished requests are forgotten, since
-    /// their completions may be among the lost events. Returns true when the active context
-    /// changed.
-    pub async fn recover_lost_events(
-        &mut self,
-        dialog: &mut Option<PendingDialog>,
-    ) -> Result<bool, String> {
-        let lost = self.bidi.take_event_loss();
-        if !lost && !self.contexts.active().is_empty() {
-            return Ok(false);
-        }
-        let tree = self.bidi.send("browsingContext.getTree", json!({})).await?;
-        let removed = self.contexts.sync(&tree);
-        if lost {
-            self.inflight.clear();
-        }
-        Ok(self.forget(removed, dialog))
     }
 
     /// Removes the user contexts this session created once their last tab is gone.
@@ -577,7 +579,7 @@ impl FirefoxSession {
             return Ok(());
         }
         if changed.contains(&Key::UserAgent)
-            && self.emulation.read().unwrap().user_agent != options.user_agent
+            && self.emulation.settings.read().unwrap().user_agent != options.user_agent
         {
             let tabs = self.open_tabs(START_TIMEOUT).await?;
             let results = emulation::send_to_tabs(
@@ -602,7 +604,7 @@ impl FirefoxSession {
                     .filter_map(|(tab, result)| result.ok().map(|_| tab))
                     .collect();
                 if !applied_tabs.is_empty() {
-                    let previous = self.emulation.read().unwrap().user_agent.clone();
+                    let previous = self.emulation.settings.read().unwrap().user_agent.clone();
                     emulation::send_to_tabs(
                         &self.bidi,
                         &applied_tabs,
@@ -616,7 +618,7 @@ impl FirefoxSession {
                 }
                 return Err(error);
             }
-            self.emulation.write().unwrap().user_agent = options.user_agent.clone();
+            self.emulation.settings.write().unwrap().user_agent = options.user_agent.clone();
         }
         if changed.contains(&Key::DownloadPath)
             && self.attached_download_path != options.download_path
@@ -668,10 +670,11 @@ impl FirefoxSession {
             .open_tabs(ATTACHED_RESET_TIMEOUT)
             .await
             .unwrap_or_default();
-        let settings = self.emulation.read().unwrap().clone();
+        let settings = self.emulation.settings.read().unwrap().clone();
         for command in emulation::resets(&settings) {
             emulation::send_to_tabs(&self.bidi, &tabs, &command, ATTACHED_RESET_TIMEOUT).await;
         }
+        emulation::reset_window_viewports(&self.bidi, &settings, ATTACHED_RESET_TIMEOUT).await;
         self.permissions
             .lock()
             .await
@@ -689,14 +692,23 @@ impl FirefoxSession {
             .await;
     }
 
-    /// Applies buffered BiDi events to the session's own bookkeeping and returns them for the
-    /// recorders, which read the batch once through the single intake in `network.rs`.
-    pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> Vec<Value> {
-        let mut drained = Vec::new();
+    /// Applies buffered BiDi events and returns whether the active context changed.
+    #[cfg(test)]
+    pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) -> bool {
+        self.drain_events_with(dialog, &mut None)
+    }
+
+    /// Applies buffered BiDi events, also letting them unblock or retire a held pointer release.
+    pub fn drain_events_with(
+        &mut self,
+        dialog: &mut Option<PendingDialog>,
+        release: &mut Option<PendingRelease>,
+    ) -> bool {
+        let mut active_changed = false;
         while let Ok(e) = self.events.try_recv() {
-            self.track_request(&e);
             let removed = self.contexts.apply(&e);
-            self.forget(removed, dialog);
+            forget_release(&removed, release);
+            active_changed |= self.forget(removed, dialog);
             if matches!(
                 e["method"].as_str(),
                 Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
@@ -708,10 +720,22 @@ impl FirefoxSession {
             apply_event(
                 &e,
                 dialog,
+                release,
                 &self.contexts,
                 self.auto_dialog.load(Ordering::Acquire),
             );
-            drained.push(e);
+        }
+        if self.events.has_lost_events() {
+            self.events = self.bidi.subscribe_matching(lifecycle_event);
+        }
+        active_changed
+    }
+
+    pub(super) fn drain_network_events(&mut self) -> Vec<Value> {
+        let mut drained = Vec::new();
+        while let Ok(event) = self.network_events.try_recv() {
+            self.track_request(&event);
+            drained.push(event);
         }
         drained
     }
@@ -782,8 +806,8 @@ impl FirefoxSession {
     }
 
     /// Forgets a browsing context that is gone and everything nested in it: element refs,
-    /// shadow ids and any prompt they owned. Returns true when the active context was
-    /// among them, which the registry then replaces.
+    /// shadow ids, held touch points and any prompt they owned. Returns true when the active
+    /// context was among them, which the registry then replaces.
     pub fn forget_context(&mut self, context: &str, dialog: &mut Option<PendingDialog>) -> bool {
         let removed = self.contexts.remove(context);
         self.forget(removed, dialog)
@@ -791,6 +815,7 @@ impl FirefoxSession {
 
     fn forget(&mut self, removed: Removed, dialog: &mut Option<PendingDialog>) -> bool {
         let gone = &removed.contexts;
+        self.emulation.forget_viewports(gone);
         let stale_ids: HashSet<i64> = self
             .refs
             .iter()
@@ -801,6 +826,7 @@ impl FirefoxSession {
         self.shadow_ids.retain(|id| !stale_ids.contains(id));
         self.inflight
             .retain(|_, owner| !owner.as_ref().is_some_and(|owner| gone.contains(owner)));
+        self.touches.retain(|context, _| !gone.contains(context));
         if dialog.as_ref().is_some_and(|d| {
             [&d.owner_context, &d.session_id]
                 .into_iter()
@@ -821,10 +847,41 @@ impl FirefoxSession {
         self.shadow_ids.clear();
     }
 
+    /// Re-reads the context tree after lost events so refs, prompts and held releases follow what
+    /// is still there. Returns true whenever events were lost, which makes the caller reset page state.
+    pub async fn reconcile_event_loss(
+        &mut self,
+        dialog: &mut Option<PendingDialog>,
+        release: &mut Option<PendingRelease>,
+    ) -> Result<bool, String> {
+        let lost = self.bidi.take_event_loss();
+        if !lost && !self.events.has_lost_events() && !self.contexts.active().is_empty() {
+            return Ok(false);
+        }
+        let lost = lost || self.events.has_lost_events();
+        if self.events.has_lost_events() {
+            self.events = self.bidi.subscribe_matching(lifecycle_event);
+        }
+        if lost {
+            self.inflight.clear();
+        }
+        let active = self.contexts.active().to_string();
+        let tree = self.bidi.send("browsingContext.getTree", json!({})).await?;
+        if let Some(contexts) = tree["contexts"].as_array() {
+            self.record_context_origins(contexts);
+        }
+        let removed = self.contexts.sync(&tree);
+        if self.contexts.tab_of(&active).is_some() {
+            self.contexts.activate(&active);
+        }
+        forget_release(&removed, release);
+        Ok(self.forget(removed, dialog) || lost)
+    }
+
     /// Accepts the prompts the daemon answers itself, following `auto_dialog` as it changes.
     pub fn spawn_auto_dismiss(&self) -> tokio::task::JoinHandle<()> {
         let client = Arc::clone(&self.bidi);
-        let mut events = client.subscribe_buffered();
+        let mut events = client.subscribe_matching(prompt_lifecycle_event);
         let enabled = Arc::clone(&self.auto_dialog);
         let changed = Arc::clone(&self.auto_dialog_changed);
         tokio::spawn(async move {
@@ -848,13 +905,20 @@ impl FirefoxSession {
                 }
             };
             loop {
-                tokio::select! {
+                let received = tokio::select! {
                     biased;
-                    event = events.recv() => match event {
-                        Some(event) => track(&event, &mut pending),
-                        None => break,
-                    },
-                    _ = changed.notified() => {}
+                    event = events.recv() => Some(event),
+                    _ = changed.notified() => None,
+                };
+                match received {
+                    Some(Some(event)) => track(&event, &mut pending),
+                    Some(None) if events.has_lost_events() => {
+                        pending.clear();
+                        events = client.subscribe_matching(prompt_lifecycle_event);
+                        continue;
+                    }
+                    Some(None) => break,
+                    None => {}
                 }
                 while let Ok(event) = events.try_recv() {
                     track(&event, &mut pending);
@@ -886,24 +950,38 @@ impl FirefoxSession {
         context: &str,
         fut: impl Future<Output = Result<T, String>>,
     ) -> Result<Option<T>, String> {
-        let mut events = self.bidi.subscribe_buffered();
+        let mut events = self.bidi.subscribe_matching(prompt_race_event);
         let mut contexts = self.contexts.clone();
         tokio::pin!(fut);
         loop {
-            tokio::select! {
+            let event = tokio::select! {
                 r = &mut fut => return r.map(Some),
-                e = events.recv() => match e {
-                    Some(e) if e["method"] == "browsingContext.userPromptOpened"
-                        && !auto_handles_prompt(&e["params"], self.auto_dialog.load(Ordering::Acquire))
-                        && [context, contexts.active()].iter().any(|active|
+                event = events.recv() => event,
+            };
+            if events.has_lost_events() {
+                return Err("Firefox event queue overflowed while waiting for a dialog".into());
+            }
+            match event {
+                Some(event)
+                    if event["method"] == "browsingContext.userPromptOpened"
+                        && !auto_handles_prompt(
+                            &event["params"],
+                            self.auto_dialog.load(Ordering::Acquire),
+                        )
+                        && [context, contexts.active()].iter().any(|active| {
                             contexts.tab_of(active)
-                                == contexts.tab_of(e["params"]["context"].as_str().unwrap_or_default())
-                        ) => return Ok(None),
-                    Some(e) => {
-                        contexts.apply(&e);
-                    }
-                    None => return fut.await.map(Some),
-                },
+                                == contexts
+                                    .tab_of(event["params"]["context"].as_str().unwrap_or_default())
+                        }) =>
+                {
+                    return Ok(None);
+                }
+                Some(event) => {
+                    contexts.apply(&event);
+                }
+                None => {
+                    return Err("Firefox BiDi connection closed while waiting for a dialog".into());
+                }
             }
         }
     }
@@ -971,20 +1049,62 @@ impl FirefoxSession {
         Ok((remote_to_json(&r["result"]), unserializable(&r["result"])))
     }
 
-    /// URL of the active top-level tab, read from the browsing context tree.
-    pub async fn url(&self) -> Result<String, String> {
+    /// The tab that holds the active context.
+    pub fn active_tab(&self) -> &str {
+        self.contexts.active_tab()
+    }
+
+    /// URL of `context`, read from the browsing context tree.
+    pub async fn url_in_context(&self, context: &str) -> Result<String, String> {
         let tree = self
             .bidi
-            .send(
-                "browsingContext.getTree",
-                json!({"root": self.contexts.active_tab()}),
-            )
+            .send("browsingContext.getTree", json!({"root": context}))
             .await?;
         Ok(tree["contexts"][0]["url"]
             .as_str()
             .unwrap_or("")
             .to_string())
     }
+
+    /// URL of the active tab.
+    pub async fn url(&self) -> Result<String, String> {
+        self.url_in_context(self.active_tab()).await
+    }
+}
+
+/// The lifecycle events `drain_events` applies, so unrelated floods cannot crowd them out.
+fn lifecycle_event(event: &Value) -> bool {
+    matches!(
+        event["method"].as_str(),
+        Some(
+            "browsingContext.userPromptOpened"
+                | "browsingContext.userPromptClosed"
+                | "browsingContext.contextCreated"
+                | "browsingContext.contextDestroyed"
+                | "browsingContext.domContentLoaded"
+        )
+    )
+}
+
+/// The prompt events the auto-dismiss task answers.
+fn prompt_lifecycle_event(event: &Value) -> bool {
+    matches!(
+        event["method"].as_str(),
+        Some("browsingContext.userPromptOpened" | "browsingContext.userPromptClosed")
+    )
+}
+
+/// The events a command waiting on a dialog follows: prompts, plus the context tree changes that
+/// decide which tab a prompt belongs to, so unrelated floods cannot crowd them out.
+fn prompt_race_event(event: &Value) -> bool {
+    matches!(
+        event["method"].as_str(),
+        Some(
+            "browsingContext.userPromptOpened"
+                | "browsingContext.contextCreated"
+                | "browsingContext.contextDestroyed"
+        )
+    )
 }
 
 /// True when a dialog with this owner context would block the tab `top_context`.
@@ -1002,9 +1122,23 @@ pub(crate) fn auto_handles_prompt(params: &Value, auto_dialog: bool) -> bool {
             ))
 }
 
+/// Retires a hold whose tab left the tree, and unblocks one whose own context is gone so the next
+/// release goes to the tab that is still there.
+fn forget_release(removed: &Removed, release: &mut Option<PendingRelease>) {
+    let Some(hold) = release.as_mut() else {
+        return;
+    };
+    if hold.tab_removed(&removed.contexts) {
+        *release = None;
+    } else if hold.context_removed(&removed.contexts) {
+        hold.blocked = false;
+    }
+}
+
 fn apply_event(
     e: &Value,
     dialog: &mut Option<PendingDialog>,
+    release: &mut Option<PendingRelease>,
     contexts: &Contexts,
     auto_dialog: bool,
 ) {
@@ -1024,10 +1158,17 @@ fn apply_event(
                 session_id: prompt.context,
             });
         }
-        Some("browsingContext.userPromptClosed")
-            if dialog.as_ref().and_then(|d| d.session_id.as_deref()) == p["context"].as_str() =>
-        {
-            *dialog = None;
+        Some("browsingContext.userPromptClosed") => {
+            let closed = p["context"].as_str().unwrap_or_default();
+            let tracked = dialog.as_ref().and_then(|d| d.session_id.as_deref());
+            if let Some(hold) = release.as_mut() {
+                if closed_prompt_owns_hold(contexts, hold, closed, tracked) {
+                    hold.blocked = false;
+                }
+            }
+            if tracked == p["context"].as_str() {
+                *dialog = None;
+            }
         }
         _ => {}
     }
@@ -1168,7 +1309,8 @@ pub(crate) mod tests {
     }
 
     async fn session_over_bidi(bidi: Arc<BidiClient>) -> FirefoxSession {
-        let events = bidi.subscribe_buffered();
+        let events = bidi.subscribe_matching(lifecycle_event);
+        let network_events = bidi.subscribe_buffered();
         let (a, mut b) = tokio::io::duplex(4096);
         let greeting = json!({"from":"root"}).to_string();
         b.write_all(format!("{}:{}", greeting.len(), greeting).as_bytes())
@@ -1176,7 +1318,7 @@ pub(crate) mod tests {
             .unwrap();
         std::mem::forget(b);
         let rdp = RdpClient::from_stream(a).await.unwrap();
-        test_session(bidi, rdp, events)
+        test_session(bidi, rdp, events, network_events)
     }
 
     pub(crate) async fn fake_bidi_with(
@@ -1241,7 +1383,12 @@ pub(crate) mod tests {
         (url, tx, calls, messages)
     }
 
-    fn test_session(bidi: Arc<BidiClient>, rdp: RdpClient, events: Events) -> FirefoxSession {
+    fn test_session(
+        bidi: Arc<BidiClient>,
+        rdp: RdpClient,
+        events: Events,
+        network_events: Events,
+    ) -> FirefoxSession {
         FirefoxSession {
             process: None,
             headless: false,
@@ -1253,7 +1400,7 @@ pub(crate) mod tests {
             refs: HashMap::new(),
             next_node_id: 0,
             frames: None,
-            touches: Vec::new(),
+            touches: HashMap::new(),
             shadow_ids: Default::default(),
             emulation: Arc::default(),
             permissions: Arc::default(),
@@ -1262,6 +1409,7 @@ pub(crate) mod tests {
             data_collector: DataCollectorState::Off,
             visited_origins: HashSet::new(),
             events,
+            network_events,
             net: NetContext::default(),
             intercepting: false,
             inflight: HashMap::new(),
@@ -1479,12 +1627,15 @@ pub(crate) mod tests {
         let (url, _tx, _calls, _) =
             fake_bidi_with(|_| json!({"contexts": [{"context": "ctx-active"}]})).await;
         let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
-        let events = bidi.subscribe_buffered();
+        let events = bidi.subscribe_matching(lifecycle_event);
+        let network_events = bidi.subscribe_buffered();
         let (devtools, mut server) = tokio::io::duplex(4096);
         put(&mut server, json!({"from": "root"})).await;
         let rdp = RdpClient::from_stream(devtools).await.unwrap();
 
-        test_session(bidi, rdp, events).close().await;
+        test_session(bidi, rdp, events, network_events)
+            .close()
+            .await;
 
         let mut buffer = [0; 8];
         let read = tokio::time::timeout(Duration::from_secs(2), server.read(&mut buffer))
@@ -1573,6 +1724,7 @@ pub(crate) mod tests {
             &LaunchOptions::default(),
             NetContext::default(),
             false,
+            EmulationSettings::default(),
             Some(tokio::time::Instant::now() + timeout),
         )
         .await
@@ -1822,7 +1974,8 @@ pub(crate) mod tests {
         })
         .await;
         let bidi = BidiClient::connect(&url).await.unwrap();
-        let events = bidi.subscribe_buffered();
+        let events = bidi.subscribe_matching(lifecycle_event);
+        let network_events = bidi.subscribe_buffered();
 
         let (a, mut b) = tokio::io::duplex(65536);
         let rdp_messages = Messages::default();
@@ -1854,7 +2007,7 @@ pub(crate) mod tests {
             }
         });
         let rdp = RdpClient::from_stream(a).await.unwrap();
-        let session = test_session(Arc::new(bidi), rdp, events);
+        let session = test_session(Arc::new(bidi), rdp, events, network_events);
         (session, tx, calls, bidi_messages, rdp_messages)
     }
 
@@ -1878,7 +2031,8 @@ pub(crate) mod tests {
         })
         .await;
         let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
-        let events = bidi.subscribe_buffered();
+        let events = bidi.subscribe_matching(lifecycle_event);
+        let network_events = bidi.subscribe_buffered();
         let (a, mut b) = tokio::io::duplex(65536);
         let rdp_messages = Messages::default();
         let log = rdp_messages.clone();
@@ -1908,7 +2062,10 @@ pub(crate) mod tests {
             }
         });
         let rdp = RdpClient::from_stream(a).await.unwrap();
-        (test_session(bidi, rdp, events), rdp_messages)
+        (
+            test_session(bidi, rdp, events, network_events),
+            rdp_messages,
+        )
     }
 
     /// Runs the peer check against a fake DevTools server that answers `getRoot` and then `reply`
@@ -2074,14 +2231,14 @@ pub(crate) mod tests {
         .await;
         ff.inflight
             .insert("unfinished".into(), Some("ctx-active".into()));
-        assert!(!ff.recover_lost_events(&mut None).await.unwrap());
+        assert!(!ff.reconcile_event_loss(&mut None, &mut None).await.unwrap());
         assert_eq!(ff.inflight.len(), 1);
 
         ff.bidi.lost_events.store(true, Ordering::Relaxed);
-        assert!(ff.recover_lost_events(&mut None).await.unwrap());
+        assert!(ff.reconcile_event_loss(&mut None, &mut None).await.unwrap());
         assert!(ff.inflight.is_empty());
         assert_eq!(ff.contexts.active(), "ctx-next");
-        assert!(!ff.recover_lost_events(&mut None).await.unwrap());
+        assert!(!ff.reconcile_event_loss(&mut None, &mut None).await.unwrap());
     }
 
     #[tokio::test]
@@ -2095,7 +2252,7 @@ pub(crate) mod tests {
         for _ in 0..2048 {
             received.recv().await.unwrap();
         }
-        assert_eq!(ff.drain_events(&mut None).len(), 2048);
+        assert_eq!(ff.drain_network_events().len(), 2048);
     }
 
     #[tokio::test]
@@ -2141,17 +2298,17 @@ pub(crate) mod tests {
         )
         .unwrap();
         let open = json!({"method":"browsingContext.userPromptOpened","params":{"context":"frame","type":"confirm","message":"sure?"}});
-        apply_event(&open, &mut d, &contexts, false);
+        apply_event(&open, &mut d, &mut None, &contexts, false);
         assert_eq!(d.as_ref().unwrap().dialog_type, "confirm");
         assert_eq!(d.as_ref().unwrap().session_id.as_deref(), Some("frame"));
         assert_eq!(d.as_ref().unwrap().owner_context.as_deref(), Some("top"));
         let other =
             json!({"method":"browsingContext.userPromptClosed","params":{"context":"other"}});
-        apply_event(&other, &mut d, &contexts, false);
+        apply_event(&other, &mut d, &mut None, &contexts, false);
         assert!(d.is_some());
         let close =
             json!({"method":"browsingContext.userPromptClosed","params":{"context":"frame"}});
-        apply_event(&close, &mut d, &contexts, false);
+        apply_event(&close, &mut d, &mut None, &contexts, false);
         assert!(d.is_none());
     }
 
@@ -2167,6 +2324,7 @@ pub(crate) mod tests {
                             "context": "ctx-active", "type": kind, "handler": handler
                         }}),
                         &mut dialog,
+                        &mut None,
                         &active_only(),
                         enabled,
                     );
@@ -2225,6 +2383,11 @@ pub(crate) mod tests {
             .await
             .is_err());
         let background = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"other"}});
+        for _ in 0..2_000 {
+            events
+                .send(json!({"type":"event","method":"network.beforeRequestSent","params":{"context":"other"}}))
+                .unwrap();
+        }
         events.send(background).unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(100), &mut racer)
             .await
@@ -2297,5 +2460,118 @@ pub(crate) mod tests {
         let ours = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"frame-child"}});
         events.send(ours).unwrap();
         assert!(racer.await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn unrelated_events_do_not_crowd_out_lifecycle_events() {
+        let (mut session, tx, _) = fake_session().await;
+        session.contexts.record(&json!({"context": "doomed"}));
+        let mut barrier = session.bidi.subscribe_buffered();
+        tx.send(
+            json!({"type":"event", "method":"browsingContext.contextDestroyed",
+            "params":{"context":"doomed"}}),
+        )
+        .unwrap();
+        tx.send(json!({"type":"event", "method":"browsingContext.userPromptOpened",
+            "params":{"context":"ctx-active", "type":"confirm", "message":"sure?", "handler":"ignore"}}))
+            .unwrap();
+        for i in 0..2_000 {
+            let event = if i % 2 == 0 {
+                json!({"type":"event", "method":"network.beforeRequestSent", "params":{"context":"other"}})
+            } else {
+                json!({"type":"event", "method":"log.entryAdded", "params":{"text":"noise"}})
+            };
+            tx.send(event).unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for _ in 0..2_002 {
+                assert!(barrier.recv().await.is_some());
+            }
+        })
+        .await
+        .unwrap();
+        let mut dialog = None;
+        session.drain_events(&mut dialog);
+        assert!(session.contexts.tab("doomed").is_none());
+        assert_eq!(
+            dialog.as_ref().and_then(|d| d.session_id.as_deref()),
+            Some("ctx-active")
+        );
+        assert!(!session.events.has_lost_events());
+        assert!(!session.bidi.take_event_loss());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_overflow_renews_events_and_reconciles_the_tree() {
+        let (mut session, tx, calls) = fake_session_with_trees(vec![json!({"contexts": [
+            {"context": "ctx-active"},
+            {"context": "popup", "originalOpener": "ctx-active"}
+        ]})])
+        .await;
+        for _ in 0..70_000 {
+            tx.send(
+                json!({"type":"event", "method":"browsingContext.domContentLoaded",
+                "params":{"context":"flood"}}),
+            )
+            .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !session.events.has_lost_events() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        session.drain_events(&mut None);
+        assert!(!session.events.has_lost_events());
+
+        let trees = |calls: &Calls| {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|method| *method == "browsingContext.getTree")
+                .count()
+        };
+        let before = trees(&calls);
+        assert!(session
+            .reconcile_event_loss(&mut None, &mut None)
+            .await
+            .unwrap());
+        assert_eq!(trees(&calls), before + 1);
+        assert_eq!(session.contexts.active(), "ctx-active");
+        assert!(session.contexts.tab("popup").is_some());
+
+        tx.send(json!({"type":"event", "method":"browsingContext.contextCreated", "params":{"context":"later"}}))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while session.contexts.tab("later").is_none() {
+                session.drain_events(&mut None);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn prompt_race_returns_an_error_when_the_connection_closes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (mut session, _events, _) = fake_session().await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket.close(None).await.unwrap();
+        });
+        session.bidi = BidiClient::connect(&url).await.unwrap().into();
+        let waiting =
+            session.race_prompt("ctx-active", std::future::pending::<Result<(), String>>());
+        let error = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("connection closed"), "{error}");
+        server.await.unwrap();
     }
 }

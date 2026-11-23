@@ -150,14 +150,23 @@ pub struct NetContext {
 
 impl NetContext {
     /// Shares the daemon's routes, domain filter, origin headers and proxy credentials.
-    pub fn from_state(state: &DaemonState) -> Self {
+    pub fn from_state(state: &DaemonState, headers: HashMap<String, String>) -> Self {
         Self {
             routes: state.routes.clone(),
             domain_filter: state.domain_filter.clone(),
             origin_headers: state.origin_headers.clone(),
             proxy_credentials: state.proxy_credentials.clone(),
+            headers: Arc::new(RwLock::new(headers)),
             ..Self::default()
         }
+    }
+
+    pub(super) async fn needs_request_intercept(&self) -> bool {
+        self.domain_filter.read().await.is_some()
+            || self.proxy_credentials.read().await.is_some()
+            || !self.routes.read().await.is_empty()
+            || !self.origin_headers.read().await.is_empty()
+            || !self.headers.read().await.is_empty()
     }
 }
 
@@ -267,25 +276,73 @@ impl LegacyDownloadIds {
     }
 }
 
-/// Starts the task that owns the protocol side of BiDi events: resolving intercepted requests,
-/// tracking downloads and replaying emulation onto new tabs. It never touches daemon state; the
-/// drain owns that.
+pub struct DispatchEvents {
+    control: super::client::Events,
+    completed: super::client::Events,
+}
+
+pub fn subscribe_dispatcher(bidi: &BidiClient) -> DispatchEvents {
+    DispatchEvents {
+        control: bidi.subscribe_matching(|event| {
+            let method = event["method"].as_str();
+            match method {
+                Some("browsingContext.contextCreated") => event["params"]["parent"].is_null(),
+                Some("browsingContext.downloadWillBegin" | "browsingContext.downloadEnd") => true,
+                Some("network.beforeRequestSent" | "network.authRequired") => {
+                    event["params"]["isBlocked"] == true
+                }
+                _ => false,
+            }
+        }),
+        completed: bidi.subscribe_matching(request_completed),
+    }
+}
+
+fn request_completed(event: &Value) -> bool {
+    matches!(
+        event["method"].as_str(),
+        Some("network.responseCompleted" | "network.fetchError")
+    )
+}
+
+/// Resolves intercepted requests, tracks downloads, and replays emulation on new tabs.
 pub fn spawn_dispatcher(
     bidi: Arc<BidiClient>,
     net: NetContext,
-    mut rx: super::client::Events,
-    emulation: Arc<std::sync::RwLock<super::emulation::Settings>>,
+    mut events: DispatchEvents,
+    emulation: Arc<super::emulation::Emulation>,
     permissions: Arc<Mutex<super::permissions::Grants>>,
 ) -> AbortOnDrop {
     AbortOnDrop(tokio::spawn(async move {
         let mut legacy_downloads = LegacyDownloadIds::default();
-        while let Some(mut e) = rx.recv().await {
+        let mut completions_open = true;
+        loop {
+            let mut e = tokio::select! {
+                biased;
+                event = events.control.recv() => {
+                    let Some(event) = event else { break };
+                    event
+                }
+                event = events.completed.recv(), if completions_open => {
+                    match event {
+                        Some(event) => {
+                            if let Some(id) = event["params"]["request"]["request"].as_str() {
+                                net.proxy_auth_requests.write().await.remove(id);
+                            }
+                        }
+                        None if events.completed.has_lost_events() => {
+                            events.completed = bidi.subscribe_matching(request_completed);
+                        }
+                        None => completions_open = false,
+                    }
+                    continue;
+                }
+            };
             if e["method"] == "browsingContext.contextCreated" && e["params"]["parent"].is_null() {
                 if let Some(context) = e["params"]["context"].as_str() {
-                    let settings = emulation.read().unwrap().clone();
                     let jar = e["params"]["userContext"].as_str().unwrap_or("default");
                     if let Err(error) =
-                        super::emulation::apply_overrides(&bidi, &settings, context, jar).await
+                        super::emulation::apply_overrides(&bidi, &emulation, context, jar).await
                     {
                         eprintln!(
                             "Warning: failed to apply Firefox emulation to {context}: {error}"
@@ -320,13 +377,6 @@ pub fn spawn_dispatcher(
             }
             if e["params"]["isBlocked"] == true {
                 tokio::spawn(resolve(bidi.clone(), net.clone(), e));
-            } else if matches!(
-                e["method"].as_str(),
-                Some("network.responseCompleted" | "network.fetchError")
-            ) {
-                if let Some(id) = e["params"]["request"]["request"].as_str() {
-                    net.proxy_auth_requests.write().await.remove(id);
-                }
             }
         }
     }))
@@ -491,20 +541,12 @@ fn auth_response(
     }
 }
 
-/// Drains buffered BiDi events into the daemon: tab bookkeeping and dialogs first, then the
-/// recorders, which only see events from the active tab. When the drained events dropped the
-/// active context, or its tab, the daemon's element refs and frame scope go with it.
+/// Updates tab and prompt state before sending the active tab's events to the recorders, returning
+/// whether the active tab changed.
 pub async fn drain(state: &mut DaemonState) -> bool {
-    let mut tabs_changed = false;
+    let active_changed = state.drain_firefox_events();
     if let Some(ff) = state.firefox.as_mut() {
-        let active = ff.contexts.active().to_string();
-        let events = ff.drain_events(&mut state.pending_dialog);
-        tabs_changed = events.iter().any(top_level_context_changed);
-        if ff.contexts.active() != active {
-            state.ref_map.invalidate_all_documents();
-            state.active_iframe_sessions.clear();
-            state.active_frame_id = None;
-        }
+        let events = ff.drain_network_events();
         apply_events(state, events).await;
     }
     let mode = if state.har_recording {
@@ -517,14 +559,7 @@ pub async fn drain(state: &mut DaemonState) -> bool {
     if let Some(ff) = state.firefox.as_mut() {
         collect_bodies(ff, mode).await;
     }
-    tabs_changed
-}
-
-fn top_level_context_changed(event: &Value) -> bool {
-    matches!(
-        event["method"].as_str(),
-        Some("browsingContext.contextCreated" | "browsingContext.contextDestroyed")
-    ) && event["params"]["parent"].is_null()
+    active_changed
 }
 
 /// Reconciles the Firefox BiDi data collector with `desired`, keeping request/response body
@@ -850,10 +885,11 @@ async fn set_headers(
 ) -> Result<Value, String> {
     let ff = session(state)?;
     let any = !headers.is_empty();
-    *ff.net.headers.write().await = headers;
     if any {
         ensure_intercept(ff).await?;
     }
+    *ff.net.headers.write().await = headers.clone();
+    state.session_setup.extra_headers = any.then_some(headers);
     Ok(json!({ "set": true }))
 }
 
@@ -1187,24 +1223,6 @@ mod tests {
             abort: false,
             resource_types: Vec::new(),
         }
-    }
-
-    #[test]
-    fn only_top_level_lifecycle_events_change_the_tab_set() {
-        for method in [
-            "browsingContext.contextCreated",
-            "browsingContext.contextDestroyed",
-        ] {
-            assert!(top_level_context_changed(
-                &json!({"method":method, "params":{"context":"tab", "parent":null}})
-            ));
-            assert!(!top_level_context_changed(
-                &json!({"method":method, "params":{"context":"frame", "parent":"tab"}})
-            ));
-        }
-        assert!(!top_level_context_changed(
-            &json!({"method":"log.entryAdded", "params":{}})
-        ));
     }
 
     #[tokio::test]
@@ -1746,13 +1764,13 @@ mod tests {
     async fn dispatcher_resolves_each_blocked_request_once() {
         let (mut ff, tx, calls) = fake_session().await;
         ff.contexts.record(&json!({"context": "popup"}));
-        ff.emulation.write().unwrap().user_agent = Some("Popup Agent".to_string());
+        ff.emulation.settings.write().unwrap().user_agent = Some("Popup Agent".to_string());
         let net = NetContext::default();
         *net.domain_filter.write().await = Some(DomainFilter::new("allowed.example"));
         let _dispatcher = spawn_dispatcher(
             ff.bidi.clone(),
             net,
-            ff.bidi.subscribe_buffered(),
+            subscribe_dispatcher(&ff.bidi),
             ff.emulation.clone(),
             ff.permissions.clone(),
         );
@@ -1805,7 +1823,7 @@ mod tests {
         let _dispatcher = spawn_dispatcher(
             ff.bidi.clone(),
             net,
-            ff.bidi.subscribe_buffered(),
+            subscribe_dispatcher(&ff.bidi),
             ff.emulation.clone(),
             ff.permissions.clone(),
         );
@@ -2040,6 +2058,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatcher_control_does_not_queue_page_logs_or_unblocked_telemetry() {
+        let (ff, tx, _) = fake_session().await;
+        let mut events = subscribe_dispatcher(&ff.bidi);
+        for event in [
+            json!({"type":"event", "method":"log.entryAdded", "params":{}}),
+            request_event(
+                "network.beforeRequestSent",
+                "observed",
+                "https://example.com/",
+                false,
+            ),
+            request_event(
+                "network.responseCompleted",
+                "observed",
+                "https://example.com/",
+                false,
+            ),
+            request_event(
+                "network.beforeRequestSent",
+                "blocked",
+                "https://example.com/",
+                true,
+            ),
+            request_event("network.authRequired", "auth", "https://example.com/", true),
+        ] {
+            tx.send(event).unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for id in ["blocked", "auth"] {
+                let event = events.control.recv().await.unwrap();
+                assert_eq!(event["params"]["request"]["request"], id);
+            }
+            let completed = events.completed.recv().await.unwrap();
+            assert_eq!(completed["params"]["request"]["request"], "observed");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn in_flight_set_ignores_websockets_and_clears_on_completion() {
         let (mut ff, tx, _) = fake_session().await;
         let mut received = ff.bidi.subscribe_buffered();
@@ -2052,7 +2111,7 @@ mod tests {
         }
         received.recv().await.unwrap();
         received.recv().await.unwrap();
-        ff.drain_events(&mut None);
+        ff.drain_network_events();
         assert_eq!(ff.inflight.len(), 1);
         tx.send(request_event(
             "network.responseCompleted",
@@ -2062,7 +2121,7 @@ mod tests {
         ))
         .unwrap();
         received.recv().await.unwrap();
-        ff.drain_events(&mut None);
+        ff.drain_network_events();
         assert!(ff.inflight.is_empty());
     }
 

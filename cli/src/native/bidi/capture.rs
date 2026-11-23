@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-
 use base64::Engine;
 use serde_json::{json, Value};
 
 use super::client::remote_to_json;
 use super::daemon::session;
+use super::frame_transform;
 use super::query;
 use super::target::{resolve_target, Target};
 use crate::native::actions::{pdf_save_path, DaemonState};
@@ -112,52 +111,9 @@ async fn target_rect(state: &DaemonState, target: &Target) -> Option<Rect> {
     parse_rect(&value)
 }
 
-const FRAME_RECTS_JS: &str = r#"() => Array.from(document.querySelectorAll('iframe,frame')).map(f => {
-  const r = f.getBoundingClientRect(), s = getComputedStyle(f);
-  return [f.contentWindow, r.left + f.clientLeft + parseFloat(s.paddingLeft), r.top + f.clientTop + parseFloat(s.paddingTop)];
-})"#;
-
-/// The context id that contains `child` in a `browsingContext.getTree` context list.
-fn parent_context(contexts: &Value, child: &str) -> Option<String> {
-    for c in contexts.as_array()? {
-        let kids = &c["children"];
-        if kids
-            .as_array()
-            .is_some_and(|k| k.iter().any(|k| k["context"] == child))
-        {
-            return c["context"].as_str().map(String::from);
-        }
-        if let Some(found) = parent_context(kids, child) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-/// Offset of the document in `from` inside the viewport of its ancestor `to`, summed over the iframes between them.
-async fn frame_offset(
-    ff: &super::session::FirefoxSession,
-    tree: &Value,
-    from: &str,
-    to: &str,
-) -> Option<(f64, f64)> {
-    let (mut current, mut dx, mut dy) = (from.to_string(), 0.0, 0.0);
-    while current != to {
-        let parent = parent_context(&tree["contexts"], &current)?;
-        let rows = ff
-            .bidi
-            .call_function_in_sandbox(&parent, super::client::SANDBOX, FRAME_RECTS_JS, vec![])
-            .await
-            .ok()?;
-        let row = rows.as_array()?.iter().find(|r| r[0] == current.as_str())?;
-        dx += row[1].as_f64()?;
-        dy += row[2].as_f64()?;
-        current = parent;
-    }
-    Some((dx, dy))
-}
-
-/// Boxes for every resolved ref, read through each node's handle and expressed in `capture` viewport coordinates.
+/// Boxes for every resolved ref, read through each node's handle and expressed in `capture` viewport
+/// coordinates. A frame whose geometry the browser cannot confirm fails the screenshot, rather than
+/// moving a box to a place it is not.
 async fn collect_annotations(
     state: &DaemonState,
     capture: &str,
@@ -165,42 +121,40 @@ async fn collect_annotations(
     let Some(ff) = state.firefox.as_ref() else {
         return Ok((Vec::new(), Vec::new()));
     };
-    let tree = ff
-        .bidi
-        .send(
-            "browsingContext.getTree",
-            json!({"root": ff.contexts.active_tab()}),
-        )
-        .await?;
-    let mut targets_by_id = HashMap::with_capacity(ff.refs.len());
-    for ((context, shared_id, _), id) in &ff.refs {
-        targets_by_id
-            .entry(*id)
-            .or_insert_with(|| (context.clone(), shared_id.clone()));
-    }
+    let tree = frame_transform::tree(ff).await?;
     let mut annotations = Vec::new();
     let mut overlay_annotations = Vec::new();
     for (ref_id, entry) in state.ref_map.entries_sorted() {
         let Some(id) = entry.backend_node_id else {
             continue;
         };
-        let Some((context, shared_id)) = targets_by_id.get(&id) else {
+        let Some(((context, shared_id, _), _)) = ff.refs.iter().find(|(_, value)| **value == id)
+        else {
             continue;
         };
         let target = Target {
             context: context.clone(),
             shared_id: shared_id.clone(),
         };
-        let Some(mut rect) = target_rect(state, &target).await else {
+        let Some(rect) = target_rect(state, &target).await else {
             continue;
         };
-        if context != capture {
-            let Some((dx, dy)) = frame_offset(ff, &tree, context, capture).await else {
+        let rect = if context != capture {
+            let Some(hops) = frame_transform::chain(&tree, context, capture) else {
                 continue;
             };
-            rect.x += dx;
-            rect.y += dy;
-        }
+            let (x, y, width, height) =
+                frame_transform::lift_rect(ff, &hops, (rect.x, rect.y, rect.width, rect.height))
+                    .await?;
+            Rect {
+                x,
+                y,
+                width,
+                height,
+            }
+        } else {
+            rect
+        };
         if rect.width <= 0.0 || rect.height <= 0.0 {
             continue;
         }
@@ -406,16 +360,5 @@ mod tests {
         assert_eq!(custom["background"], false);
         assert_eq!(custom["orientation"], "landscape");
         assert_eq!(custom["shrinkToFit"], false);
-    }
-
-    #[test]
-    fn parent_context_finds_the_direct_parent_at_any_depth() {
-        let tree = json!([{"context": "top", "children": [
-            {"context": "a", "children": [{"context": "b", "children": []}]},
-            {"context": "c", "children": []}
-        ]}]);
-        assert_eq!(parent_context(&tree, "b").as_deref(), Some("a"));
-        assert_eq!(parent_context(&tree, "c").as_deref(), Some("top"));
-        assert_eq!(parent_context(&tree, "top"), None);
     }
 }

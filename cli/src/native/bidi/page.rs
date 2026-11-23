@@ -497,29 +497,48 @@ mod tests {
     #[tokio::test]
     async fn history_and_reload_use_the_bidi_commands_and_return_the_url() {
         let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
+        let (ff, _tx, calls) =
+            fake_session_with_replies(|request| match request["method"].as_str() {
+                Some("browsingContext.traverseHistory") => FakeReply::Error {
+                    error: "no such history entry",
+                    message: "no other document",
+                },
+                Some("browsingContext.getTree") => FakeReply::Result(json!({
+                    "contexts": [{"context": "ctx-active", "url": "https://example.com/current"}]
+                })),
+                Some("browsingContext.reload") => {
+                    FakeReply::Result(json!({"url": "https://example.com/reloaded"}))
+                }
+                _ => FakeReply::Result(json!({})),
+            })
+            .await;
         state.firefox = Some(ff);
 
         assert_eq!(
             back(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "" })
+            json!({ "url": "https://example.com/current" })
         );
         assert_eq!(
             forward(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "" })
+            json!({ "url": "https://example.com/current" })
         );
         assert_eq!(
             reload(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "" })
+            json!({ "url": "https://example.com/reloaded" })
         );
 
-        let calls = calls.lock().unwrap().clone();
-        assert_eq!(calls[0], "browsingContext.traverseHistory");
-        assert_eq!(calls[1], "browsingContext.getTree");
-        assert_eq!(calls[2], "browsingContext.traverseHistory");
-        assert_eq!(calls[3], "browsingContext.getTree");
-        assert_eq!(calls[4], "browsingContext.reload");
-        assert_eq!(calls[5], "browsingContext.getTree");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "script.evaluate",
+                "browsingContext.traverseHistory",
+                "browsingContext.getTree",
+                "script.evaluate",
+                "browsingContext.traverseHistory",
+                "browsingContext.getTree",
+                "browsingContext.reload",
+            ]
+        );
     }
 
     #[tokio::test]
