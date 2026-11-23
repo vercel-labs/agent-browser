@@ -34,3 +34,9 @@ header a[aria-label='Vercel Labs'] + div + a {
 header a[aria-label='Vercel Labs'] + div ~ div > nav {
   margin-left: -2.3px;
 }
+
+/* The name's ink sits half a pixel below the Labs caps; align them. */
+header a[aria-label='Vercel Labs'] + div ~ a span.inline-grid,
+header a[aria-label='Vercel Labs'] + div ~ div span.inline-grid {
+  transform: translateY(-0.5px);
+}
