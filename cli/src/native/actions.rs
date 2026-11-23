@@ -28296,7 +28296,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 "action": "navigate",
                 "url": "https://example.com",
                 "settings": {
-                    "allowedDomains": ["example.com"],
+                    "allowed-domains": ["example.com"],
                     "cdp": format!("ws://127.0.0.1:{port}/devtools/browser/leak?secret=token"),
                 },
             }),
