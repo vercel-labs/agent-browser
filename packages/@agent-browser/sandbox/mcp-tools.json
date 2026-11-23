@@ -301,7 +301,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Check a checkbox or switch.",
+      "description": "Check a checkbox or switch. Fails for elements that cannot be toggled and disabled ones; warns if the state does not change.",
       "inputSchema": {
         "properties": {
           "selector": {
@@ -978,7 +978,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Diff current snapshot against last or baseline.",
+      "description": "Diff current snapshot against the last snapshot or a baseline file. Without a baseline the last snapshot's options are reused; an option that differs fails with baseline_mismatch, and no earlier snapshot fails with no_baseline. A missing baseline file fails with file_not_found; a relative baseline path resolves against the working directory of the caller.",
       "inputSchema": {
         "properties": {
           "baseline": {
@@ -990,12 +990,18 @@
           "depth": {
             "type": "integer"
           },
+          "interactive": {
+            "type": "boolean"
+          },
           "selector": {
             "type": "string"
           },
           "session": {
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
+          },
+          "urls": {
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -1011,7 +1017,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Compare two URLs.",
+      "description": "Compare two URLs. fullPage applies to the screenshot diff and requires screenshot.",
       "inputSchema": {
         "properties": {
           "compact": {
@@ -1228,7 +1234,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Clear and fill an input by @ref or CSS selector.",
+      "description": "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly; a color input takes any CSS color Chrome accepts and stores it as #rrggbb. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome backend only.",
       "inputSchema": {
         "properties": {
           "selector": {
@@ -2302,7 +2308,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Stop HAR capture.",
+      "description": "Stop HAR capture and save it. Fails with no_har_recording when no recording is active, for example after a daemon restart. A relative path resolves against the working directory of the caller.",
       "inputSchema": {
         "properties": {
           "path": {
@@ -3340,9 +3346,17 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Select one or more options in a select element.",
+      "description": "Select one or more options in a select element. A string that matches exactly one option by value or exact label selects it. Fails with ambiguous when it matches options with different values (pass `by`: `value` or `label` to match one attribute), and with option_not_found when none match; the options are then in structuredContent.response.data.options as [{value, label}] (page content, untrusted).",
       "inputSchema": {
         "properties": {
+          "by": {
+            "description": "Match only option values or only visible labels. Needed when a string matches options with different values.",
+            "enum": [
+              "value",
+              "label"
+            ],
+            "type": "string"
+          },
           "selector": {
             "description": "Element @ref from snapshot, or a CSS selector.",
             "type": "string"
@@ -4510,7 +4524,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Type text into an element by @ref or CSS selector.",
+      "description": "Type text into an element by @ref or CSS selector. Fails for disabled fields, for readonly fields when `clear` is set (clearing would empty them), and for elements that can never take text (select, option, button, a label without a control, checkbox, radio, file, hidden, image, button, submit, reset, color, range and date-type inputs; use fill for date, time, color and range inputs, keyboard type for a focused element, press for a single key); warns if the page does not show the text.",
       "inputSchema": {
         "properties": {
           "clear": {
@@ -4553,7 +4567,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Uncheck a checkbox or switch.",
+      "description": "Uncheck a checkbox or switch. Fails for elements that cannot be toggled, a checked radio and disabled ones; warns if the state does not change.",
       "inputSchema": {
         "properties": {
           "selector": {
@@ -4602,7 +4616,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Upload files through a file input.",
+      "description": "Upload files through a file input. Relative paths resolve against the working directory of the caller and `~` expands to the home directory. A missing path fails with file_not_found, a target that is not a file input with not_file_input. A directory is accepted for webkitdirectory inputs. With a browser on another machine, a path missing locally only warns.",
       "inputSchema": {
         "properties": {
           "files": {

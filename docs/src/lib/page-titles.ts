@@ -1,5 +1,9 @@
+/** The generated default card's title; the page title keeps its own wording. */
+export const HOME_OG_TITLE = "Browser automation for AI";
+
 export const PAGE_TITLES: Record<string, string> = {
   "": "Browser\nAutomation for AI",
+  introduction: "Introduction",
   installation: "Installation",
   "quick-start": "Quick Start",
   skills: "Skills",

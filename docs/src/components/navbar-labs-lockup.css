@@ -1,0 +1,42 @@
+/*
+ * Navbar lockup spacing, following the OG card's formula at an 18px logo.
+ * Geistdocs renders the lockup as: Vercel Labs link, slash container, product
+ * link, inside a flex row with a 10px gap. At the OG card's 18px scale the
+ * slash sits 11px from the logo's right edge, measures 6.2px wide by 14.8px
+ * tall with a 1.05px stroke, and leaves 7.7px to the product name's text box.
+ */
+header a[aria-label='Vercel Labs'] + div {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 6.2px;
+  height: 18px;
+  margin-left: 1px;
+}
+
+header a[aria-label='Vercel Labs'] + div > svg {
+  display: none;
+}
+
+header a[aria-label='Vercel Labs'] + div::before {
+  content: '';
+  flex: none;
+  width: 1.05px;
+  height: 14.8px;
+  background-color: currentColor;
+  transform: skewX(-19.25deg);
+}
+
+header a[aria-label='Vercel Labs'] + div + a {
+  margin-left: -2.3px;
+}
+
+header a[aria-label='Vercel Labs'] + div ~ div > nav {
+  margin-left: -2.3px;
+}
+
+/* The name's ink sits half a pixel below the Labs caps; align them. */
+header a[aria-label='Vercel Labs'] + div ~ a span.inline-grid,
+header a[aria-label='Vercel Labs'] + div ~ div span.inline-grid {
+  transform: translateY(-0.5px);
+}

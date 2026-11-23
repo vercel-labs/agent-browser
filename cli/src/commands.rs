@@ -359,6 +359,27 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
     Ok(headers)
 }
 
+/// Resolves a local file path argument against this process's working
+/// directory, expanding a leading `~`. The daemon runs elsewhere, so a relative
+/// path sent as-is would resolve there.
+fn absolute_path_arg(path: &str) -> String {
+    let expanded = match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', std::path::MAIN_SEPARATOR]) => {
+            match std::env::home_dir() {
+                Some(home) => match rest.trim_start_matches(['/', std::path::MAIN_SEPARATOR]) {
+                    "" => home,
+                    tail => home.join(tail),
+                },
+                None => std::path::PathBuf::from(path),
+            }
+        }
+        _ => std::path::PathBuf::from(path),
+    };
+    std::path::absolute(&expanded)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
 /// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
@@ -876,20 +897,67 @@ fn parse_command_inner(
             parse_selector_command(&rest, &id, "uncheck", "uncheck <selector>", batch_item)
         }
         "select" => {
+            const USAGE: &str = "select <selector> <value...> [--by value|label]";
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "select".to_string(),
-                usage: "select <selector> <value...>",
+                usage: USAGE,
             })?;
-            let _val = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "select".to_string(),
-                usage: "select <selector> <value...>",
-            })?;
-            let values = &rest[1..];
-            if values.len() == 1 {
-                Ok(json!({ "id": id, "action": "select", "selector": sel, "values": values[0] }))
-            } else {
-                Ok(json!({ "id": id, "action": "select", "selector": sel, "values": values }))
+            // Only `--by <v>`, `--by=<v>` and a `--` marker are special. Every
+            // other argument is an option value, including ones that start with
+            // `-` such as "-- Select --" or "-none-"; after `--` nothing is.
+            let mut by: Option<&str> = None;
+            let mut values: Vec<&str> = Vec::new();
+            let mut i = 1;
+            while i < rest.len() {
+                let arg = rest[i];
+                let by_value = if arg == "--by" {
+                    i += 1;
+                    Some(*rest.get(i).ok_or_else(|| ParseError::MissingArguments {
+                        context: "select --by".to_string(),
+                        usage: USAGE,
+                    })?)
+                } else {
+                    arg.strip_prefix("--by=")
+                };
+                match by_value {
+                    Some(value) => {
+                        if value != "value" && value != "label" {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("--by must be 'value' or 'label', got '{value}'"),
+                                usage: USAGE,
+                            });
+                        }
+                        if by.is_some() {
+                            return Err(ParseError::InvalidValue {
+                                message: "--by was given more than once".to_string(),
+                                usage: USAGE,
+                            });
+                        }
+                        by = Some(value);
+                    }
+                    None if arg == "--" => {
+                        values.extend_from_slice(&rest[i + 1..]);
+                        break;
+                    }
+                    None => values.push(arg),
+                }
+                i += 1;
             }
+            if values.is_empty() {
+                return Err(ParseError::MissingArguments {
+                    context: "select".to_string(),
+                    usage: USAGE,
+                });
+            }
+            let mut cmd = if values.len() == 1 {
+                json!({ "id": id, "action": "select", "selector": sel, "values": values[0] })
+            } else {
+                json!({ "id": id, "action": "select", "selector": sel, "values": values })
+            };
+            if let Some(by) = by {
+                cmd["by"] = json!(by);
+            }
+            Ok(cmd)
         }
         "drag" => {
             const USAGE: &str = "drag <source> <target> [--human]";
@@ -934,7 +1002,8 @@ fn parse_command_inner(
                 context: "upload".to_string(),
                 usage: "upload <selector> <files...>",
             })?;
-            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
+            let files: Vec<String> = rest[1..].iter().map(|f| absolute_path_arg(f)).collect();
+            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": files }))
         }
         "download" => {
             const USAGE: &str = "download <selector> <path>";
@@ -3629,7 +3698,7 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 match rest[i] {
                     "-b" | "--baseline" => {
                         if let Some(path) = rest.get(i + 1) {
-                            obj.insert("baseline".to_string(), json!(path));
+                            obj.insert("baseline".to_string(), json!(absolute_path_arg(path)));
                             i += 1;
                         } else {
                             return Err(ParseError::MissingArguments {
@@ -3651,6 +3720,12 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     }
                     "-c" | "--compact" => {
                         obj.insert("compact".to_string(), json!(true));
+                    }
+                    "-i" | "--interactive" => {
+                        obj.insert("interactive".to_string(), json!(true));
+                    }
+                    "-u" | "--urls" => {
+                        obj.insert("urls".to_string(), json!(true));
                     }
                     "-d" | "--depth" => {
                         if let Some(d) = rest.get(i + 1) {
@@ -3679,13 +3754,13 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     other if other.starts_with('-') => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unknown flag: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--interactive] [--compact] [--depth <n>] [--urls]",
                         });
                     }
                     other => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unexpected argument: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--interactive] [--compact] [--depth <n>] [--urls]",
                         });
                     }
                 }
@@ -3876,6 +3951,14 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     }
                 }
                 i += 1;
+            }
+            let obj = cmd.as_object().unwrap();
+            if obj.contains_key("fullPage") && !obj.contains_key("screenshot") {
+                return Err(ParseError::InvalidValue {
+                    message: "--full only applies to the screenshot diff; add --screenshot"
+                        .to_string(),
+                    usage: "diff url <url1> <url2> --screenshot --full",
+                });
             }
             Ok(cmd)
         }
@@ -4736,7 +4819,7 @@ fn parse_network(rest: &[&str], id: &str, batch_item: bool) -> Result<Value, Par
                         "network har stop [path]",
                         batch_item,
                     )? {
-                        cmd["path"] = json!(path);
+                        cmd["path"] = json!(absolute_path_arg(path));
                     }
                     Ok(cmd)
                 }
@@ -6163,6 +6246,90 @@ mod tests {
     }
 
     #[test]
+    fn test_select_by_flag() {
+        for by in ["value", "label"] {
+            let cmd = parse_command(
+                &args(&format!("select #menu 1 --by {by}")),
+                &default_flags(),
+            )
+            .unwrap();
+            assert_eq!(cmd["values"], "1");
+            assert_eq!(cmd["by"], by);
+        }
+        let cmd = parse_command(&args("select #menu --by value 1 2"), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], json!(["1", "2"]));
+        assert_eq!(cmd["by"], "value");
+        let cmd = parse_command(&args("select #menu 1"), &default_flags()).unwrap();
+        assert!(cmd.get("by").is_none());
+    }
+
+    #[test]
+    fn test_select_by_flag_is_validated() {
+        let err = parse_command(&args("select #menu 1 --by text"), &default_flags()).unwrap_err();
+        assert!(err.format().contains("--by"));
+        let err = parse_command(&args("select #menu 1 --by"), &default_flags()).unwrap_err();
+        assert!(err.format().contains("select"));
+        let err = parse_command(
+            &args("select #menu 1 --by value --by label"),
+            &default_flags(),
+        )
+        .unwrap_err();
+        assert!(err.format().contains("more than once"));
+        let cmd = parse_command(&args("select #menu 1 --by=label"), &default_flags()).unwrap();
+        assert_eq!(cmd["by"], "label");
+        assert_eq!(cmd["values"], "1");
+        let err = parse_command(&args("select #menu --by=nope 1"), &default_flags()).unwrap_err();
+        assert!(err.format().contains("--by"));
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn test_select_values_that_start_with_a_dash_are_data() {
+        for value in ["-- Select --", "- None -", "-none-", "--x", "-1", "--"] {
+            let tokens = if value == "--" {
+                argv(&["select", "#d", "--", "--"])
+            } else {
+                argv(&["select", "#d", value])
+            };
+            let cmd = parse_command(&tokens, &default_flags()).unwrap();
+            assert_eq!(cmd["selector"], "#d");
+            assert_eq!(cmd["values"], value, "{value}");
+            assert!(cmd.get("by").is_none());
+        }
+        let cmd = parse_command(&argv(&["select", "#m", "x", "-none-"]), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], json!(["x", "-none-"]));
+        // After `--` a value that looks like the flag is literal.
+        let cmd = parse_command(
+            &argv(&["select", "#d", "--", "--by", "value"]),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["values"], json!(["--by", "value"]));
+        assert!(cmd.get("by").is_none());
+        // The flag still works next to a dash-leading value.
+        let cmd = parse_command(
+            &argv(&["select", "#d", "-- Select --", "--by", "label"]),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["values"], "-- Select --");
+        assert_eq!(cmd["by"], "label");
+    }
+
+    #[test]
+    fn test_select_dash_values_in_a_batch() {
+        let cmd = parse_batch_command(&argv(&["select", "#d", "-- Select --"]), &default_flags())
+            .unwrap();
+        assert_eq!(cmd["values"], "-- Select --");
+        let cmd =
+            parse_batch_command(&argv(&["select", "#d", "x", "-none-"]), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], json!(["x", "-none-"]));
+    }
+
+    #[test]
     fn test_frame_main() {
         let cmd = parse_command(&args("frame main"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "mainframe");
@@ -6353,7 +6520,7 @@ mod tests {
     fn test_network_har_stop_with_path() {
         let cmd = parse_command(&args("network har stop ./capture.har"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "har_stop");
-        assert_eq!(cmd["path"], "./capture.har");
+        assert_eq!(cmd["path"], cwd_path("capture.har"));
     }
 
     #[test]
@@ -6752,10 +6919,10 @@ mod tests {
         );
 
         let cmd = parse_command(&args("network har stop ./capture.har"), &default_flags()).unwrap();
-        assert_eq!(cmd["path"], "./capture.har");
+        assert_eq!(cmd["path"], cwd_path("capture.har"));
         let cmd =
             parse_command(&args("network har stop -- --capture.har"), &default_flags()).unwrap();
-        assert_eq!(cmd["path"], "--capture.har");
+        assert_eq!(cmd["path"], cwd_path("--capture.har"));
 
         let cmd = parse_command(
             &args("vitals http://localhost:3000/dashboard --json"),
@@ -8372,6 +8539,38 @@ mod tests {
         assert!(cmd.get("path").is_none() || cmd["path"].is_null());
     }
 
+    #[test]
+    fn test_upload_resolves_relative_paths_in_the_cli() {
+        let abs = std::env::temp_dir().join("abs.txt");
+        let abs_arg = abs.to_string_lossy().into_owned();
+        let argv = vec![
+            "upload".to_string(),
+            "#f".to_string(),
+            "./rel.txt".to_string(),
+            "sub/rel2.txt".to_string(),
+            abs_arg.clone(),
+        ];
+        let cmd = parse_command(&argv, &default_flags()).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let files: Vec<&str> = cmd["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(files[0], cwd.join("rel.txt").to_string_lossy());
+        assert_eq!(files[1], cwd.join("sub").join("rel2.txt").to_string_lossy());
+        assert_eq!(files[2], abs_arg);
+    }
+
+    fn cwd_path(rel: &str) -> String {
+        std::env::current_dir()
+            .unwrap()
+            .join(rel)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     // === Diff Tests ===
 
     #[test]
@@ -8388,7 +8587,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd["action"], "diff_snapshot");
-        assert_eq!(cmd["baseline"], "before.txt");
+        assert_eq!(cmd["baseline"], cwd_path("before.txt"));
     }
 
     #[test]
@@ -8412,7 +8611,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd["action"], "diff_snapshot");
-        assert_eq!(cmd["baseline"], "snap.txt");
+        assert_eq!(cmd["baseline"], cwd_path("snap.txt"));
         assert_eq!(cmd["selector"], ".content");
         assert_eq!(cmd["compact"], true);
         assert_eq!(cmd["maxDepth"], 2);
@@ -8514,11 +8713,55 @@ mod tests {
     #[test]
     fn test_diff_url_command_full_flag() {
         let cmd = parse_command(
-            &args("diff url https://a.com https://b.com --full"),
+            &args("diff url https://a.com https://b.com --screenshot --full"),
             &default_flags(),
         )
         .unwrap();
         assert_eq!(cmd["fullPage"], true);
+    }
+
+    #[test]
+    fn test_diff_url_full_requires_screenshot() {
+        let err = parse_command(
+            &args("diff url https://a.com https://b.com --full"),
+            &default_flags(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn test_diff_snapshot_accepts_interactive_and_urls() {
+        let cmd = parse_command(&args("diff snapshot -i -u"), &default_flags()).unwrap();
+        assert_eq!(cmd["interactive"], true);
+        assert_eq!(cmd["urls"], true);
+    }
+
+    #[test]
+    fn test_local_path_arguments_are_resolved_in_the_cli() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute_path_arg("a/b.txt"),
+            cwd.join("a").join("b.txt").to_string_lossy()
+        );
+        assert_eq!(
+            absolute_path_arg("./a.txt"),
+            cwd.join("a.txt").to_string_lossy()
+        );
+        let abs = std::env::temp_dir().join("x.txt");
+        let abs = abs.to_string_lossy();
+        assert_eq!(absolute_path_arg(&abs), abs);
+        let home = std::env::home_dir().unwrap();
+        assert_eq!(
+            absolute_path_arg("~/x.txt"),
+            home.join("x.txt").to_string_lossy()
+        );
+        assert_eq!(absolute_path_arg("~"), home.to_string_lossy());
+        // `~user` is not expanded.
+        assert_eq!(
+            absolute_path_arg("~user/x"),
+            cwd.join("~user").join("x").to_string_lossy()
+        );
     }
 
     #[test]
