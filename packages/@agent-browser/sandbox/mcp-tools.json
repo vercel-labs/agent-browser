@@ -4980,7 +4980,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Invoke an experimental page-provided WebMCP tool.",
+      "description": "Invoke an experimental page-provided WebMCP tool. Inputs go to the tool's origin; before invoking a tool announced as cross-origin, confirm that its origin matches the user's task.",
       "inputSchema": {
         "properties": {
           "detach": {
