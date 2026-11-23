@@ -147,6 +147,31 @@ fn mcp_call_reads_arguments_from_stdin() {
 }
 
 #[test]
+fn mcp_eval_tool_is_denied_by_the_eval_category() {
+    let home = tempfile::tempdir().unwrap();
+    let policy = home.path().join("policy.json");
+    std::fs::write(&policy, r#"{"default":"allow","deny":["eval"]}"#).unwrap();
+    let output = run(
+        command(&home)
+            .env("AGENT_BROWSER_ACTION_POLICY", &policy)
+            .args(["mcp", "call", "agent_browser_eval", "-"]),
+        r#"{"script":"1 + 1"}"#,
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["isError"], true, "{result}");
+    let response = &result["structuredContent"]["response"];
+    assert_eq!(response["success"], false, "{result}");
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap()
+            .contains("denied by policy"),
+        "{result}"
+    );
+}
+
+#[test]
 fn mcp_call_reports_invalid_calls_with_exit_code_two() {
     let (code, result) = mcp_call(&["agent_browser_nope"], None);
     assert_eq!(code, 2);

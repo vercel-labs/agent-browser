@@ -56,7 +56,7 @@ agent-browser skills get core --ref references/authentication.md --ref templates
 | `references/snapshot-refs.md` | How refs are assigned, kept, and invalidated |
 | `references/authentication.md` | Auth vault, `--no-navigate`, credential provider plugins, importing a logged-in browser |
 | `references/session-management.md` | Persistence, `--restore` policies, idle shutdown, tab pinning, parallel sessions |
-| `references/trust-boundaries.md` | Untrusted content, WebMCP metadata, secrets, `--allowed-domains`, project config trust |
+| `references/trust-boundaries.md` | Untrusted content, WebMCP metadata, secrets, `--allowed-domains`, `--action-policy` and `--confirm-actions`, project config trust |
 | `references/video-recording.md` | `record start` options, cursor overlay, contact sheets, frame rate |
 | `references/profiling.md` | Chrome DevTools tracing and profiling |
 | `references/streaming.md` | Live viewport streaming and remote input |
