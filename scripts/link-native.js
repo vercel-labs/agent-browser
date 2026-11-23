@@ -79,11 +79,15 @@ function isLauncherSymlink(entry, launcher) {
   }
 }
 
-// npm, yarn and bun link bin entries as symlinks on macOS and Linux.
+// npm, yarn and bun link bin entries as symlinks on macOS and Linux. The link
+// is relative so it survives the install directory being renamed afterwards
+// (Volta installs into a staging directory and moves it).
 function relinkSymlink(entry, binary) {
   const staged = join(dirname(entry), `.${basename(entry)}-${process.pid}`);
   try {
-    symlinkSync(binary, staged);
+    const entryDir = realpathSafe(dirname(entry));
+    const binaryPath = join(realpathSafe(dirname(binary)), basename(binary));
+    symlinkSync(relative(entryDir, binaryPath), staged);
     renameSync(staged, entry);
     return true;
   } catch {

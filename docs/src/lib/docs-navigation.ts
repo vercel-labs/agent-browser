@@ -8,14 +8,18 @@ export type NavSection = {
   items: NavItem[];
 };
 
+/** Public URL for the introduction page, whose source stays at `index.mdx`. */
+export const docsIntroHref = "/introduction";
+
 export const navigation: NavSection[] = [
   {
     title: null,
     items: [
-      { name: "Introduction", href: "/" },
+      { name: "Introduction", href: docsIntroHref },
       { name: "Installation", href: "/installation" },
       { name: "Quick Start", href: "/quick-start" },
       { name: "Skills", href: "/skills" },
+      { name: "Modern Web Guidance", href: "/modern-web-guidance" },
     ],
   },
   {
@@ -47,6 +51,7 @@ export const navigation: NavSection[] = [
       { name: "Init Scripts", href: "/init-scripts" },
       { name: "Proxy", href: "/proxy" },
       { name: "iOS Simulator", href: "/ios" },
+      { name: "Ladybird", href: "/ladybird" },
       { name: "Security", href: "/security" },
       { name: "Next.js + Vercel", href: "/next" },
       { name: "eve Extension", href: "/eve" },

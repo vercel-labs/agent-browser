@@ -90,8 +90,64 @@ pub fn replay_commands(flow: &Flow, cmd_params: &[(String, String)]) -> Result<V
                 .filter(|s| s.ok)
                 .map(|s| s.command.clone()),
         )
-        .map(|cmd| render_command(&cmd, None, &swaps, &values))
+        .map(|cmd| render_command(&interaction_only(cmd), None, &swaps, &values))
         .collect())
+}
+
+/// The fields of a command a replay sends. Session settings, plugins, restore
+/// options and connection targets recorded with a command or written into a
+/// flow file are dropped, so a replay runs under the session it was started in.
+const INTERACTION_KEYS: &[&str] = &[
+    "action",
+    "selector",
+    "url",
+    "waitUntil",
+    "headers",
+    "value",
+    "values",
+    "text",
+    "key",
+    "clear",
+    "delay",
+    "timeout",
+    "amount",
+    "direction",
+    "x",
+    "y",
+    "loadState",
+    "state",
+    "compact",
+    "delta",
+    "full",
+    "interactive",
+    "maxDepth",
+    "urls",
+    "exact",
+    "name",
+    "role",
+    "subaction",
+    "label",
+    "placeholder",
+    "testId",
+    "eventType",
+    "tabId",
+    "button",
+    "clickCount",
+    "modifiers",
+    "newTab",
+    "inputMode",
+    "seed",
+];
+
+/// A recorded command with only its interaction fields. Script fields stay so
+/// the replay check still refuses the command instead of running it without them.
+fn interaction_only(mut cmd: Value) -> Value {
+    if let Some(obj) = cmd.as_object_mut() {
+        obj.retain(|k, _| {
+            INTERACTION_KEYS.contains(&k.as_str()) || SCRIPT_KEYS.contains(&k.as_str())
+        });
+    }
+    cmd
 }
 
 /// One command with the run's values in place: every string is read once,
