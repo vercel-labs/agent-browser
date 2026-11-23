@@ -18634,6 +18634,80 @@ async fn e2e_firefox_click_buttons_modifiers_and_double_click() {
     firefox_close(&mut state).await;
 }
 
+/// Clicking with `--modifiers` when `onclick` or `onmousedown` opens `confirm()` returns
+/// `dialogOpened` promptly and releases the modifier (and any held button) once the dialog closes.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_modified_click_opening_dialog_defers_modifier_release() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(
+        &mut state,
+        "data:text/html,\
+        <button id=on-click>Click confirm</button>\
+        <button id=on-down>Down confirm</button>\
+        <button id=plain>Plain</button>\
+        <script>\
+          window.log = [];\
+          document.getElementById('on-click').addEventListener('click', e => {\
+            window.log.push('click:' + e.shiftKey);\
+            confirm('from click');\
+          });\
+          document.getElementById('on-down').addEventListener('mousedown', e => {\
+            window.log.push('down:' + e.shiftKey);\
+            confirm('from down');\
+          });\
+          document.getElementById('plain').addEventListener('click', e => {\
+            window.log.push('plain:' + e.shiftKey + ':' + e.buttons);\
+          });\
+        </script>",
+    )
+    .await;
+
+    let click_resp = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        firefox_act(&mut state, "click", "#on-click", json!({ "modifiers": 8 })),
+    )
+    .await
+    .expect("shift-click opening confirm() must not block on modifier release");
+    assert_success(&click_resp);
+    assert_eq!(get_data(&click_resp)["dialogOpened"], true, "{click_resp}");
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "d1", "action": "dialog", "response": "accept" }),
+        )
+        .await,
+    );
+    assert_success(&firefox_act(&mut state, "click", "#plain", json!({})).await);
+
+    let down_resp = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        firefox_act(&mut state, "click", "#on-down", json!({ "modifiers": 8 })),
+    )
+    .await
+    .expect("shift-mousedown opening confirm() must not block on modifier release");
+    assert_success(&down_resp);
+    assert_eq!(get_data(&down_resp)["dialogOpened"], true, "{down_resp}");
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "d2", "action": "dialog", "response": "accept" }),
+        )
+        .await,
+    );
+    assert_success(&firefox_act(&mut state, "click", "#plain", json!({})).await);
+
+    assert_eq!(
+        firefox_eval(&mut state, "JSON.stringify(window.log)").await,
+        "[\"click:true\",\"plain:false:0\",\"down:true\",\"plain:false:0\"]"
+    );
+    firefox_close(&mut state).await;
+}
+
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_role_selector_semantics() {
