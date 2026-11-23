@@ -9,6 +9,8 @@ pub mod browser;
 #[allow(dead_code)]
 pub mod cdp;
 #[allow(dead_code)]
+pub mod click_point;
+#[allow(dead_code)]
 pub mod cookies;
 #[allow(dead_code)]
 pub mod daemon;
