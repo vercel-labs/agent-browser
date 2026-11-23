@@ -21511,6 +21511,25 @@ async fn e2e_poppy_join_blocks_meta_refresh_to_private_address() {
 #[cfg(unix)]
 #[tokio::test]
 #[ignore]
+async fn e2e_poppy_join_holds_popups_to_the_address_rules() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    let page = format!(
+        "{POPPY_FORM}<script>window.open('{}/popup');</script>",
+        target.origin
+    );
+    let (origin, site) =
+        poppy_site("[::1]:0", PoppyJoinPage::Html(page), "/done".to_string()).await;
+    let resp = run_poppy_join_with(&origin, "sleep 1; echo '{\"signed_in\":true}'").await;
+    site.abort();
+    target.server.abort();
+    assert_eq!(target.requests.load(Ordering::SeqCst), 0, "{resp}");
+    assert_error_code(&resp, "request_blocked");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
 async fn e2e_poppy_join_blocked_request_errors_never_carry_the_code() {
     let _public = PublicAddressForTest::set("::1".parse().unwrap());
     let target = poppy_forbidden_target().await;

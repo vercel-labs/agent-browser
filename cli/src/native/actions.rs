@@ -1166,6 +1166,13 @@ impl DaemonState {
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
+                        let joining = match poppy_guard.read().await.as_ref() {
+                            Some(guard) if waiting_for_debugger => {
+                                guard.adopt(&sid);
+                                true
+                            }
+                            _ => false,
+                        };
                         setup_auto_attached_session(
                             &client,
                             &sid,
@@ -1173,6 +1180,7 @@ impl DaemonState {
                             waiting_for_debugger,
                             df.as_ref(),
                             has_proxy_creds,
+                            joining,
                         )
                         .await;
                     }
@@ -4483,9 +4491,10 @@ async fn setup_auto_attached_session(
     waiting_for_debugger: bool,
     domain_filter: Option<&DomainFilter>,
     has_proxy_creds: bool,
+    joining: bool,
 ) -> AutoAttachedSetup {
     let target_needs_controls = target_info.is_some_and(target_supports_network_controls);
-    let controls_active = domain_filter.is_some() || has_proxy_creds;
+    let controls_active = domain_filter.is_some() || has_proxy_creds || joining;
     let controls_result = match target_info {
         Some(target) if controls_active && target_needs_controls => {
             bounded_auto_attached_setup("session", sid, async {
@@ -4498,7 +4507,7 @@ async fn setup_auto_attached_session(
                         has_proxy_creds,
                         target,
                     )
-                    .await
+                    .await?;
                 } else {
                     install_network_controls_for_session(
                         client,
@@ -4507,8 +4516,21 @@ async fn setup_auto_attached_session(
                         has_proxy_creds,
                         waiting_for_debugger,
                     )
-                    .await
+                    .await?;
                 }
+                if joining
+                    && (!target_is_worker_like(target)
+                        || target_supports_worker_fetch_controls(target))
+                {
+                    client
+                        .send_command(
+                            "Fetch.enable",
+                            Some(super::poppy::fetch_enable_params(has_proxy_creds)),
+                            Some(sid),
+                        )
+                        .await?;
+                }
+                Ok(())
             })
             .await
         }
@@ -4639,6 +4661,16 @@ async fn install_worker_network_controls_for_session(
         network::install_domain_filter_fetch(client, session_id, true).await?;
     }
 
+    Ok(())
+}
+
+pub(super) async fn ensure_browser_auto_attach(state: &mut DaemonState) -> Result<(), String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    if state.network_auto_attach_installed || mgr.is_direct_page_connection() {
+        return Ok(());
+    }
+    mgr.enable_browser_auto_attach_pub().await?;
+    state.network_auto_attach_installed = true;
     Ok(())
 }
 
@@ -19201,7 +19233,15 @@ mod tests {
                 let target = setup_test_target(target_id, target_type);
                 let outcome = tokio::time::timeout(
                     std::time::Duration::from_secs(2),
-                    setup_auto_attached_session(&client, sid, Some(&target), true, None, true),
+                    setup_auto_attached_session(
+                        &client,
+                        sid,
+                        Some(&target),
+                        true,
+                        None,
+                        true,
+                        false,
+                    ),
                 )
                 .await
                 .unwrap_or_else(|_| panic!("{target_type} {sid}: setup must not stall"));
@@ -19288,6 +19328,7 @@ mod tests {
                     Some(&target),
                     false,
                     Some(&filter),
+                    false,
                     false,
                 ),
             )

@@ -5,7 +5,7 @@
 //! daemon. Discovery runs inside the normal dispatch, so action policy,
 //! confirmation and the session's domain allowlist apply before any request.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,6 +30,19 @@ const SUBMIT: &str = "(() => { const i = document.querySelector('form input[name
 
 type AddressSpaces = HashMap<String, Vec<(i64, bool)>>;
 
+pub(super) fn fetch_enable_params(handle_auth_requests: bool) -> Value {
+    let mut params = json!({
+        "patterns": [
+            { "urlPattern": "*" },
+            { "urlPattern": "*", "requestStage": "Response" },
+        ]
+    });
+    if handle_auth_requests {
+        params["handleAuthRequests"] = json!(true);
+    }
+    params
+}
+
 const RESPONSE_WAIT: Duration = Duration::from_secs(1);
 
 fn fail(code: &str, message: impl std::fmt::Display) -> String {
@@ -43,6 +56,7 @@ fn fail(code: &str, message: impl std::fmt::Display) -> String {
 #[derive(Clone)]
 pub struct JoinGuard {
     session_id: String,
+    sessions: Arc<Mutex<HashSet<String>>>,
     local: bool,
     deadline: Instant,
     blocked: Arc<Mutex<Option<String>>>,
@@ -55,6 +69,7 @@ impl JoinGuard {
     fn new(session_id: &str, local: bool, deadline: Instant) -> Self {
         Self {
             session_id: session_id.to_string(),
+            sessions: Arc::new(Mutex::new(HashSet::from([session_id.to_string()]))),
             local,
             deadline,
             blocked: Arc::default(),
@@ -132,7 +147,27 @@ impl JoinGuard {
     }
 
     pub(super) fn guards(&self, session_id: &str) -> bool {
-        self.session_id == session_id
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(session_id)
+    }
+
+    pub(super) fn adopt(&self, session_id: &str) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string());
+    }
+
+    fn adopted(&self) -> Vec<String> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|s| **s != self.session_id)
+            .cloned()
+            .collect()
     }
 
     /// Whether the tab may request `url`; a refusal is recorded for the join.
@@ -167,7 +202,7 @@ impl JoinGuard {
         responses: &mut tokio::sync::mpsc::UnboundedReceiver<super::cdp::types::CdpEvent>,
     ) -> Result<(), String> {
         while let Ok(event) = responses.try_recv() {
-            if event.session_id.as_deref() != Some(self.session_id.as_str()) {
+            if !event.session_id.as_deref().is_some_and(|s| self.guards(s)) {
                 continue;
             }
             let response = event.params.get("response");
@@ -267,6 +302,9 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
         .active_session_id()?
         .to_string();
 
+    super::actions::ensure_browser_auto_attach(state)
+        .await
+        .map_err(|e| fail("join_failed", e))?;
     let guard = JoinGuard::new(&session_id, discovery.local, deadline);
     let mut infos = state
         .browser
@@ -278,7 +316,7 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
         let guard = guard.clone();
         tokio::spawn(async move {
             while let Some(event) = infos.recv().await {
-                if event.session_id.as_deref() == Some(guard.session_id.as_str()) {
+                if event.session_id.as_deref().is_some_and(|s| guard.guards(s)) {
                     guard.record_address_space(&event.params);
                 }
             }
@@ -318,6 +356,9 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
     }
     *state.poppy_guard.write().await = None;
     let _ = super::actions::sync_fetch_interception(state, &session_id).await;
+    for adopted in guard.adopted() {
+        let _ = super::actions::sync_fetch_interception(state, &adopted).await;
+    }
     recorder.abort();
     result
 }
