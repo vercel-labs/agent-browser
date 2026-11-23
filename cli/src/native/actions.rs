@@ -1136,23 +1136,42 @@ impl DaemonState {
                         if is_recorder_session {
                             continue;
                         }
-                        let waiting_for_debugger = event
-                            .params
-                            .get("waitingForDebugger")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
-                        setup_auto_attached_session(
-                            &client,
-                            &sid,
-                            target_info.as_ref(),
-                            waiting_for_debugger,
-                            df.as_ref(),
-                            has_proxy_creds,
-                        )
-                        .await;
+                        if df.is_some() || has_proxy_creds {
+                            // The setup below awaits renderer-bound commands,
+                            // and a target paused by `waitForDebuggerOnStart`
+                            // only answers them once its first request has been
+                            // resolved on THIS event loop
+                            // (`Fetch.requestPaused`). Running the setup inline
+                            // would block the loop against its own resolver and
+                            // deadlock until the CDP timeout, so it runs on its
+                            // own task and leaves the loop free.
+                            let client = client.clone();
+                            let sid = sid.clone();
+                            tokio::spawn(async move {
+                                setup_auto_attached_session(
+                                    &client,
+                                    &sid,
+                                    target_info.as_ref(),
+                                    df.as_ref(),
+                                    has_proxy_creds,
+                                )
+                                .await;
+                            });
+                        } else {
+                            // No controls to install, but the target may still
+                            // be paused by auto-attach (e.g. a cross-origin
+                            // iframe): resume it right away so its navigation
+                            // is not left frozen.
+                            let _ = client
+                                .send_command_no_wait(
+                                    "Runtime.runIfWaitingForDebugger",
+                                    None,
+                                    Some(&sid),
+                                )
+                                .await;
+                        }
                     }
                     Some(event) if event.method == "Fetch.requestPaused" => {
                         let request_id = event
@@ -1460,7 +1479,13 @@ impl DaemonState {
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mgr) = self.browser {
                 bounded_auto_attached_setup("session", iframe_sid, async {
-                    mgr.prepare_domains_pub(iframe_sid).await?;
+                    install_network_controls_for_session(
+                        mgr,
+                        iframe_sid,
+                        filter.as_ref(),
+                        has_proxy_creds,
+                    )
+                    .await?;
                     let _ = mgr
                         .client
                         .send_command_no_params("DOM.enable", Some(iframe_sid.as_str()))
@@ -1469,16 +1494,6 @@ impl DaemonState {
                         .client
                         .send_command_no_params("Accessibility.enable", Some(iframe_sid.as_str()))
                         .await;
-                    if controls_active {
-                        install_network_controls_for_session(
-                            &mgr.client,
-                            iframe_sid,
-                            filter.as_ref(),
-                            has_proxy_creds,
-                            false,
-                        )
-                        .await?;
-                    }
                     mgr.resume_if_waiting_pub(iframe_sid).await
                 })
                 .await
@@ -1511,24 +1526,25 @@ impl DaemonState {
         }
 
         // Register top-level pages that browser-level auto-attach paused before
-        // their first request. Controls must be installed before resuming.
+        // their first request. `install_network_controls_for_session` installs
+        // the Fetch interception first (the browser answers it even while the
+        // renderer is frozen), then `prepare_domains` resumes the paused target
+        // before its first renderer-bound command, then the in-page filter
+        // script lands: a renderer-initiated popup issues its first request the
+        // moment it resumes, so interception must already be in place.
         for (target_info, page_sid) in &drained.attached_page_sessions {
             let filter = self.domain_filter.read().await.clone();
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 bounded_auto_attached_setup("session", page_sid, async {
-                    mgr.prepare_domains_pub(page_sid).await?;
-                    if controls_active {
-                        install_network_controls_for_session(
-                            &mgr.client,
-                            page_sid,
-                            filter.as_ref(),
-                            has_proxy_creds,
-                            false,
-                        )
-                        .await?;
-                    }
+                    install_network_controls_for_session(
+                        mgr,
+                        page_sid,
+                        filter.as_ref(),
+                        has_proxy_creds,
+                    )
+                    .await?;
 
                     let mut page_url = target_info.url.clone();
                     if let Some(ref filter) = filter {
@@ -1670,17 +1686,13 @@ impl DaemonState {
                             None,
                         )
                         .await?;
-                    mgr.prepare_domains_pub(&attach.session_id).await?;
-                    if controls_active {
-                        install_network_controls_for_session(
-                            &mgr.client,
-                            &attach.session_id,
-                            filter.as_ref(),
-                            has_proxy_creds,
-                            false,
-                        )
-                        .await?;
-                    }
+                    install_network_controls_for_session(
+                        mgr,
+                        &attach.session_id,
+                        filter.as_ref(),
+                        has_proxy_creds,
+                    )
+                    .await?;
 
                     let mut page_url = te.target_info.url.clone();
                     if let Some(ref filter) = filter {
@@ -4387,11 +4399,18 @@ enum AutoAttachedSetup {
 /// reported, then resumes it. This runs in the background handler that also
 /// answers `Fetch.requestPaused` for the page, so a dead child session must
 /// not stall it.
+///
+/// For a page or iframe target the controls install in containment order:
+/// `Fetch.enable` first (the browser process answers it even while the
+/// renderer is frozen, and the target issues its first request the moment the
+/// resume below unpauses it), then `prepare_network_control_target_session`,
+/// which resumes a `waitForDebuggerOnStart`-paused target before its first
+/// renderer-bound command (see the note in `BrowserManager::prepare_domains`),
+/// then the in-page filter script, which needs a live renderer.
 async fn setup_auto_attached_session(
     client: &CdpClient,
     sid: &str,
     target_info: Option<&TargetInfo>,
-    waiting_for_debugger: bool,
     domain_filter: Option<&DomainFilter>,
     has_proxy_creds: bool,
 ) -> AutoAttachedSetup {
@@ -4400,8 +4419,8 @@ async fn setup_auto_attached_session(
     let controls_result = match target_info {
         Some(target) if controls_active && target_needs_controls => {
             bounded_auto_attached_setup("session", sid, async {
-                prepare_network_control_target_session(client, sid, target).await?;
                 if target_is_worker_like(target) {
+                    prepare_network_control_target_session(client, sid, target).await?;
                     install_worker_network_controls_for_session(
                         client,
                         sid,
@@ -4411,14 +4430,9 @@ async fn setup_auto_attached_session(
                     )
                     .await
                 } else {
-                    install_network_controls_for_session(
-                        client,
-                        sid,
-                        domain_filter,
-                        has_proxy_creds,
-                        waiting_for_debugger,
-                    )
-                    .await
+                    install_fetch_interception(client, sid, domain_filter, has_proxy_creds).await?;
+                    prepare_network_control_target_session(client, sid, target).await?;
+                    install_domain_filter_script_for_session(client, sid, domain_filter).await
                 }
             })
             .await
@@ -4462,6 +4476,14 @@ fn log_detached_during_setup(kind: &str, error: &str) {
 }
 
 async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> Result<(), String> {
+    // Resume a `waitForDebuggerOnStart`-paused target before the first
+    // renderer-bound command: a paused renderer never answers `Page.enable`,
+    // which rides the 30s CDP timeout and closes the browser. See the note in
+    // `BrowserManager::prepare_domains` for the full reasoning and the
+    // containment trade-off. No-op when nothing is waiting.
+    let _ = client
+        .send_command_no_wait("Runtime.runIfWaitingForDebugger", None, Some(session_id))
+        .await;
     client
         .send_command_no_params("Page.enable", Some(session_id))
         .await?;
@@ -4512,26 +4534,54 @@ async fn prepare_network_control_target_session(
     }
 }
 
-async fn install_network_controls_for_session(
+pub(super) async fn install_network_controls_for_session(
+    mgr: &BrowserManager,
+    session_id: &str,
+    filter: Option<&DomainFilter>,
+    handle_auth_requests: bool,
+) -> Result<(), String> {
+    install_fetch_interception(&mgr.client, session_id, filter, handle_auth_requests).await?;
+    // `prepare_domains` resumes a `waitForDebuggerOnStart`-paused target
+    // before its first renderer-bound command (see the note in browser.rs).
+    mgr.prepare_domains_pub(session_id).await?;
+    install_domain_filter_script_for_session(&mgr.client, session_id, filter).await
+}
+
+/// Install the Fetch-level half of the network controls on an auto-attached
+/// session. Must run BEFORE the session is resumed: the browser process
+/// answers `Fetch.enable` even while the renderer is frozen, and a
+/// renderer-initiated popup issues its first navigation request the moment it
+/// is resumed, so interception has to be in place first or that request
+/// escapes the domain filter.
+async fn install_fetch_interception(
     client: &CdpClient,
     session_id: &str,
     filter: Option<&DomainFilter>,
     handle_auth_requests: bool,
-    paused_before_document: bool,
+) -> Result<(), String> {
+    if filter.is_none() && !handle_auth_requests {
+        return Ok(());
+    }
+    network::install_domain_filter_fetch(client, session_id, handle_auth_requests).await
+}
+
+/// Install the in-page half of the domain filter. Must run AFTER the session
+/// is resumed: `Page.addScriptToEvaluateOnNewDocument` and `Runtime.evaluate`
+/// are renderer-bound and a frozen renderer never answers them. The script
+/// still covers the popup's next document, and the Fetch interception
+/// installed before the resume keeps every request fail-closed.
+async fn install_domain_filter_script_for_session(
+    client: &CdpClient,
+    session_id: &str,
+    filter: Option<&DomainFilter>,
 ) -> Result<(), String> {
     if let Some(filter) = filter {
-        network::install_domain_filter(
-            client,
-            session_id,
-            &filter.allowed_domains,
-            handle_auth_requests,
-            paused_before_document,
-        )
-        .await?;
-    } else if handle_auth_requests {
-        network::install_domain_filter_fetch(client, session_id, true).await?;
+        // The session is resumed by the time this runs, so the current
+        // document gets patched too and `paused_before_document` does not
+        // apply.
+        network::install_domain_filter_script(client, session_id, &filter.allowed_domains, false)
+            .await?;
     }
-
     Ok(())
 }
 
@@ -4591,13 +4641,11 @@ async fn install_active_network_controls(
     let session_ids = network_control_session_ids(mgr)?;
 
     for session_id in session_ids {
-        mgr.prepare_domains_pub(&session_id).await?;
         install_network_controls_for_session(
-            &mgr.client,
+            mgr,
             &session_id,
             filter.as_ref(),
             handle_auth_requests,
-            false,
         )
         .await?;
         mgr.resume_if_waiting_pub(&session_id).await?;
@@ -18958,7 +19006,7 @@ mod tests {
                 let target = setup_test_target(target_id, target_type);
                 let outcome = tokio::time::timeout(
                     std::time::Duration::from_secs(2),
-                    setup_auto_attached_session(&client, sid, Some(&target), true, None, true),
+                    setup_auto_attached_session(&client, sid, Some(&target), None, true),
                 )
                 .await
                 .unwrap_or_else(|_| panic!("{target_type} {sid}: setup must not stall"));
@@ -19026,9 +19074,13 @@ mod tests {
                 "{name}: {error}"
             );
             assert!(state.browser.is_none(), "{name}: the browser must close");
+            // The resume precedes the renderer-bound commands (see the note in
+            // `prepare_domains`), so a filter script that throws cannot retract
+            // it; closing the browser is what keeps the target from running
+            // uncontrolled.
             assert!(
-                !resumed.lock().unwrap().contains(&"S-THROWS".to_string()),
-                "{name}: an uncontrolled target is not resumed"
+                resumed.lock().unwrap().contains(&"S-THROWS".to_string()),
+                "{name}: the resume went out before the failing script"
             );
         }
 
@@ -19043,7 +19095,6 @@ mod tests {
                     &client,
                     "S-THROWS",
                     Some(&target),
-                    false,
                     Some(&filter),
                     false,
                 ),
@@ -19056,7 +19107,14 @@ mod tests {
                 "auto-attached {target_type}"
             );
         }
-        assert!(resumed.lock().unwrap().is_empty());
+        // The resume precedes the renderer-bound commands, so the failing
+        // script cannot retract it; the Fetch-level interception installed
+        // before the resume still contains the target.
+        let resumed = resumed.lock().unwrap();
+        assert!(
+            !resumed.is_empty() && resumed.iter().all(|sid| sid == "S-THROWS"),
+            "{resumed:?}"
+        );
     }
 
     #[test]
