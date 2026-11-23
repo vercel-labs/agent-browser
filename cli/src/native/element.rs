@@ -1096,7 +1096,7 @@ pub(super) fn extract_ax_string(value: &Option<AXValue>) -> String {
     }
 }
 
-/// Build a JS expression that finds a DOM element by CSS selector or XPath.
+/// Build a JS expression that finds a DOM element by CSS selector, text selector, or XPath.
 fn build_find_element_js(selector: &str) -> String {
     build_find_element_js_in("document", selector)
 }
@@ -1104,7 +1104,12 @@ fn build_find_element_js(selector: &str) -> String {
 /// Same as build_find_element_js but rooted at an arbitrary Document
 /// expression (e.g. an iframe's contentDocument).
 fn build_find_element_js_in(root: &str, selector: &str) -> String {
-    if let Some(xpath) = selector.strip_prefix("xpath=") {
+    if let Some(text) = selector.strip_prefix("text=") {
+        format!(
+            "Array.from({root}.querySelectorAll('*')).find(el => el.children.length === 0 && el.textContent.includes({text}))",
+            text = serde_json::to_string(text).unwrap_or_default(),
+        )
+    } else if let Some(xpath) = selector.strip_prefix("xpath=") {
         format!(
             "{root}.evaluate({xpath}, {root}, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue",
             xpath = serde_json::to_string(xpath).unwrap_or_default(),
@@ -1117,9 +1122,14 @@ fn build_find_element_js_in(root: &str, selector: &str) -> String {
     }
 }
 
-/// Build a JS expression that counts matching DOM elements by CSS selector or XPath.
+/// Build a JS expression that counts DOM elements by CSS selector, text selector, or XPath.
 fn build_count_elements_js(selector: &str) -> String {
-    if let Some(xpath) = selector.strip_prefix("xpath=") {
+    if let Some(text) = selector.strip_prefix("text=") {
+        format!(
+            "Array.from(document.querySelectorAll('*')).filter(el => el.children.length === 0 && el.textContent.includes({text})).length",
+            text = serde_json::to_string(text).unwrap_or_default(),
+        )
+    } else if let Some(xpath) = selector.strip_prefix("xpath=") {
         format!(
             "document.evaluate({}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength",
             serde_json::to_string(xpath).unwrap_or_default()
@@ -2149,6 +2159,15 @@ mod tests {
     }
 
     #[test]
+    fn test_build_selector_js_text() {
+        let js = build_selector_js("text=Submit");
+        assert!(js.contains(
+            "Array.from(document.querySelectorAll('*')).find(el => el.children.length === 0 && el.textContent.includes(\"Submit\"))"
+        ));
+        assert!(!js.contains("document.evaluate"));
+    }
+
+    #[test]
     fn test_build_selector_js_xpath_empty() {
         let js = build_selector_js("xpath=");
         assert!(js.contains("document.evaluate"));
@@ -2173,6 +2192,15 @@ mod tests {
         let js = build_count_elements_js("xpath=//li");
         assert!(js.contains("document.evaluate(\"//li\", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"));
         assert!(!js.contains("querySelectorAll"));
+    }
+
+    #[test]
+    fn test_build_count_elements_js_text() {
+        let js = build_count_elements_js("text=Submit");
+        assert!(js.contains(
+            "Array.from(document.querySelectorAll('*')).filter(el => el.children.length === 0 && el.textContent.includes(\"Submit\")).length"
+        ));
+        assert!(!js.contains("document.evaluate"));
     }
 
     // -----------------------------------------------------------------------
