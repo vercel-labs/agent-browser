@@ -647,6 +647,7 @@ pub struct DaemonState {
     pub restore_validation_pending: bool,
     pub restore_save_status: String,
     pub restore_saved_path: Option<String>,
+    pub restore_identity_unresolved: bool,
     /// When the most recent browser-touching command finished. Periodic
     /// autosaves wait for a quiet period after this so a multi-second save
     /// never lands in the middle of an active command burst.
@@ -880,6 +881,7 @@ impl DaemonState {
             restore_validation_pending: false,
             restore_save_status: "not_attempted".to_string(),
             restore_saved_path: None,
+            restore_identity_unresolved: false,
             last_command_finished: None,
             last_autosave_attempt: None,
             session_id,
@@ -2691,6 +2693,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     if let Some(err) = close_error {
         return Err(err);
     }
+    state.restore_identity_unresolved = false;
     Ok(())
 }
 
@@ -3364,8 +3367,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 match apply_settings_patch(state, patch, true).await {
                     Ok(outcome) => settings_outcome.absorb(outcome),
                     Err(e) => {
-                        rollback_restore_unit(state, &restore_applied, &mut settings_outcome);
-                        let mut resp = error_response(&id, &e);
+                        let cleanup = Box::pin(rollback_restore_unit(
+                            state,
+                            &restore_applied,
+                            &mut settings_outcome,
+                        ))
+                        .await;
+                        let mut resp = error_response(&id, &with_rollback_error(&e, cleanup));
                         attach_settings_outcome(&mut resp, &settings_outcome);
                         return resp;
                     }
@@ -3396,9 +3404,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     state.settings.connection(),
                     Connection::Cdp(_)
                 ));
-                let rollback = rollback_launch_settings(state, &mut settings_outcome, &e).await;
-                rollback_restore_unit(state, &restore_applied, &mut settings_outcome);
-                let e = with_rollback_error(&e, rollback);
+                let e = Box::pin(rollback_launch(
+                    state,
+                    &restore_applied,
+                    &mut settings_outcome,
+                    &e,
+                ))
+                .await;
                 let mut resp = error_response(&id, &format!("{}: {}", context, e));
                 attach_settings_outcome(&mut resp, &settings_outcome);
                 return resp;
@@ -3512,11 +3524,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     state.webmcp_enabled = state.settings.webmcp();
                     Ok(data)
                 }
-                Err(e) => {
-                    let rollback = rollback_launch_settings(state, &mut settings_outcome, &e).await;
-                    rollback_restore_unit(state, &restore_applied, &mut settings_outcome);
-                    Err(with_rollback_error(&e, rollback))
-                }
+                Err(e) => Err(Box::pin(rollback_launch(
+                    state,
+                    &restore_applied,
+                    &mut settings_outcome,
+                    &e,
+                ))
+                .await),
             }
         }
         "navigate" => handle_navigate(cmd, state).await,
@@ -5582,6 +5596,12 @@ pub(crate) async fn auto_save_restore_state(
         }
     }
 
+    if state.restore_identity_unresolved {
+        state.restore_save_status = "skipped_identity_unresolved".to_string();
+        state.restore_saved_path = None;
+        return Ok(None);
+    }
+
     let Some(ref mgr) = state.browser else {
         state.restore_save_status = "no_browser".to_string();
         state.restore_saved_path = None;
@@ -6052,6 +6072,7 @@ async fn rollback_launch_settings(
 /// that follows fails.
 struct RestoreUnitApplied {
     before: Running,
+    attached: Option<AttachedTarget>,
     changes: Vec<Value>,
     relaunched_browser: bool,
 }
@@ -6063,20 +6084,38 @@ async fn apply_restore_unit(
     unit: &Patch,
 ) -> Result<RestoreUnitApplied, String> {
     let before = state.settings.clone();
+    let attached = state.attached_target.clone();
     let outcome = apply_settings_patch(state, unit, true).await?;
     Ok(RestoreUnitApplied {
         before,
+        attached,
         changes: outcome.changes,
         relaunched_browser: outcome.relaunched_browser,
     })
 }
 
 /// Puts the whole restore unit back and re-derives the restore state from it.
-fn rollback_restore_unit(
+async fn rollback_restore_unit(
     state: &mut DaemonState,
     applied: &RestoreUnitApplied,
     outcome: &mut SettingsOutcome,
-) {
+) -> Option<String> {
+    let cleanup = if state.session_name != applied.before.restore().key
+        && has_active_browser_session(state)
+    {
+        let closed = Box::pin(close_all_browser_backends(state)).await;
+        state.ref_map.invalidate_all_documents();
+        state.attached_target = applied.attached.clone();
+        closed.err().map(|e| {
+            state.restore_identity_unresolved = true;
+            format!(
+                "the browser attached under the new restore key could not be closed, so saving is blocked until a close succeeds: {}",
+                e
+            )
+        })
+    } else {
+        None
+    };
     for key in RESTORE_UNIT {
         state
             .settings
@@ -6084,6 +6123,18 @@ fn rollback_restore_unit(
     }
     apply_restore_settings(state, &RESTORE_UNIT);
     outcome.mark_rolled_back(&RESTORE_UNIT);
+    cleanup
+}
+
+async fn rollback_launch(
+    state: &mut DaemonState,
+    applied: &RestoreUnitApplied,
+    outcome: &mut SettingsOutcome,
+    error: &str,
+) -> String {
+    let rollback = rollback_launch_settings(state, outcome, error).await;
+    let cleanup = rollback_restore_unit(state, applied, outcome).await;
+    with_rollback_error(&with_rollback_error(error, rollback), cleanup)
 }
 
 /// The launch error with the rollback problem, if any, appended.
@@ -19081,7 +19132,9 @@ mod tests {
         assert_eq!(state.session_name.as_deref(), Some("new-key"));
         assert_eq!(state.restore_save, "never");
 
-        rollback_restore_unit(&mut state, &applied, &mut outcome);
+        assert!(rollback_restore_unit(&mut state, &applied, &mut outcome)
+            .await
+            .is_none());
 
         assert_eq!(state.session_name.as_deref(), Some("old-key"));
         assert_eq!(state.settings.restore().key.as_deref(), Some("old-key"));
@@ -19104,7 +19157,9 @@ mod tests {
         .await;
         assert_eq!(state.restore_status, "pending");
 
-        rollback_restore_unit(&mut state, &applied, &mut outcome);
+        assert!(rollback_restore_unit(&mut state, &applied, &mut outcome)
+            .await
+            .is_none());
 
         assert!(state.session_name.is_none());
         assert_eq!(state.restore_save, "auto");
@@ -19427,6 +19482,178 @@ mod tests {
         assert_eq!(state.restore_save, "auto");
         assert!(state.restore_check_text.is_none());
         assert_ne!(state.restore_status, "not_configured");
+    }
+
+    async fn spawn_capture_rejecting_cdp_server() -> String {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let command: Value = serde_json::from_str(&text).unwrap();
+                        let method = command["method"].as_str().unwrap_or_default();
+                        let reply = match method {
+                            "Network.enable"
+                                if command["params"]["maxTotalBufferSize"].is_number() =>
+                            {
+                                json!({
+                                    "id": command["id"],
+                                    "error": { "code": -32000, "message": "rejected" }
+                                })
+                            }
+                            "Target.getTargets" => {
+                                json!({ "id": command["id"], "result": { "targetInfos": [] } })
+                            }
+                            "Target.createTarget" => {
+                                json!({ "id": command["id"], "result": { "targetId": "T-EVIL" } })
+                            }
+                            "Target.attachToTarget" => {
+                                json!({ "id": command["id"], "result": { "sessionId": "S-EVIL" } })
+                            }
+                            "Network.getAllCookies" => json!({
+                                "id": command["id"],
+                                "result": { "cookies": [{
+                                    "name": "sid",
+                                    "value": "attacker",
+                                    "domain": "example.com",
+                                    "path": "/",
+                                    "expires": -1,
+                                    "size": 11,
+                                    "httpOnly": false,
+                                    "secure": false,
+                                    "session": true
+                                }] }
+                            }),
+                            _ => json!({ "id": command["id"], "result": {} }),
+                        };
+                        if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    fn isolated_home_restore_session(key: &str) -> (IsolatedEnv, DaemonState, PathBuf, Vec<u8>) {
+        let mut names: Vec<String> = std::env::vars()
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("AGENT_BROWSER_"))
+            .collect();
+        for name in [
+            "AGENT_BROWSER_SOCKET_DIR",
+            "HOME",
+            "USERPROFILE",
+            "BROWSER_USE_API_KEY",
+        ] {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let guard = EnvGuard::new(&refs);
+        for name in &refs {
+            guard.remove(name);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.set("HOME", dir.path().to_str().unwrap());
+        guard.set("USERPROFILE", dir.path().to_str().unwrap());
+        let mut state = DaemonState::new();
+        state.settings.set(Key::RestoreKey, json!(key));
+        state.session_name = Some(key.to_string());
+        let sessions = state::get_sessions_dir();
+        fs::create_dir_all(&sessions).unwrap();
+        let saved = sessions.join(format!("{}-{}.json", key, state.session_id));
+        let original = br#"{"cookies":[{"name":"sid","value":"victim","domain":"example.com","path":"/","expires":-1,"size":9,"httpOnly":true,"secure":true,"session":true}],"origins":[]}"#.to_vec();
+        fs::write(&saved, &original).unwrap();
+        (
+            IsolatedEnv {
+                _guard: guard,
+                _dir: dir,
+            },
+            state,
+            saved,
+            original,
+        )
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_failed_capture_after_attach_drops_the_browser_before_restoring_the_key() {
+        for action in ["navigate", "launch"] {
+            let (_env, mut state, saved, original) = isolated_home_restore_session("key-a");
+            let url = spawn_capture_rejecting_cdp_server().await;
+
+            let resp = execute_command(
+                &json!({
+                    "id": "1",
+                    "action": action,
+                    "url": "https://example.com",
+                    "settings": {
+                        "cdp": url,
+                        "restore-key": "key-b",
+                        "capture": ["flow"]
+                    }
+                }),
+                &mut state,
+            )
+            .await;
+
+            assert_eq!(resp["success"], false, "{action}: {resp}");
+            assert_eq!(state.session_name.as_deref(), Some("key-a"), "{action}");
+            assert_eq!(
+                state.settings.restore().key.as_deref(),
+                Some("key-a"),
+                "{action}"
+            );
+            assert!(state.browser.is_none(), "{action}: browser kept: {resp}");
+            assert!(state.attached_target.is_none(), "{action}");
+
+            state.last_autosave_attempt = None;
+            maybe_autosave_restore_state(&mut state, 0).await;
+            let _ = auto_save_restore_state(&mut state).await;
+            let _ = handle_close(&mut state).await;
+            assert_eq!(fs::read(&saved).unwrap(), original, "{action}");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_failed_cleanup_after_a_restore_key_rollback_blocks_autosave() {
+        let (_env, mut state, saved, original) = isolated_home_restore_session("key-a");
+        let (applied, mut outcome) =
+            apply_unit(&mut state, json!({ "restore-key": "key-b" })).await;
+        assert_eq!(state.session_name.as_deref(), Some("key-b"));
+        let url = spawn_capture_rejecting_cdp_server().await;
+        state.browser = Some(BrowserManager::connect_cdp(&url).await.unwrap());
+        state.active_provider_connection = true;
+        state.active_provider_session = Some(pending_browser_use_session());
+
+        let cleanup = rollback_restore_unit(&mut state, &applied, &mut outcome).await;
+
+        assert!(cleanup.is_some());
+        assert_eq!(state.session_name.as_deref(), Some("key-a"));
+        assert!(state.restore_identity_unresolved);
+        state.browser = Some(BrowserManager::connect_cdp(&url).await.unwrap());
+        assert_eq!(auto_save_restore_state(&mut state).await, Ok(None));
+        assert_eq!(state.restore_save_status, "skipped_identity_unresolved");
+        state.last_autosave_attempt = None;
+        maybe_autosave_restore_state(&mut state, 0).await;
+        assert_eq!(fs::read(&saved).unwrap(), original);
+
+        state.active_provider_session = None;
+        state.active_provider_connection = false;
+        close_current_browser(&mut state).await.unwrap();
+        assert!(!state.restore_identity_unresolved);
     }
 
     #[test]
