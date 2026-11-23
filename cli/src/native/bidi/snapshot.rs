@@ -799,11 +799,15 @@ pub async fn snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
 /// Handles the `diff_snapshot` action.
 pub async fn diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let options = SnapshotOptions {
-        interactive: false,
-        urls: false,
-        ..chrome::snapshot_options(cmd)
-    };
+    let session_id = state
+        .firefox
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .contexts
+        .active_tab()
+        .to_string();
+    let scope = chrome::diff_snapshot_scope(cmd, state, &session_id)?;
+    let options = scope.options();
     let ff = state.firefox.as_mut().ok_or("Browser not launched")?;
     let checkpoint = SnapshotCheckpoint::capture(ff);
     let mut current_ref_map = state.ref_map.clone();
@@ -815,7 +819,8 @@ pub async fn diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             return Err(error);
         }
     };
-    let result = chrome::diff_snapshot_response(cmd, state, current, current_ref_map);
+    let result =
+        chrome::diff_snapshot_response(cmd, state, session_id, scope, current, current_ref_map);
     if result.is_err() {
         if let Some(ff) = state.firefox.as_mut() {
             recover_failed_capture(ff, checkpoint);

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use serde_json::{json, Value};
 use std::process::Command;
 use tempfile::TempDir;
@@ -35,13 +37,14 @@ fn mcp_batch_rejects_invalid_commands() {
     assert!(
         batch["structuredContent"]["response"][0]["error"]
             .as_str()
-            .is_some_and(|error| error.contains("Unknown subcommand: delete")),
+            .unwrap_or_else(|| panic!("{batch}"))
+            .contains("Unknown subcommand: delete"),
         "{batch}"
     );
     assert!(
         batch["structuredContent"]["response"][1]["error"]
             .as_str()
-            .unwrap()
+            .unwrap_or_else(|| panic!("{batch}"))
             .contains("close --all is only supported outside a batch"),
         "{batch}"
     );
