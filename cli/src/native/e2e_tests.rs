@@ -19980,3 +19980,72 @@ async fn e2e_flow_a_route_limited_by_resource_type_applies_the_same_on_both_tier
     }
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
+
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_timeout_env_bounds_eval() {
+    const SCRIPT: &str = "new Promise(r => setTimeout(() => r('done'), 3000))";
+
+    let mut slow_state = {
+        let env = EnvGuard::new(&["AGENT_BROWSER_CDP_TIMEOUT_MS"]);
+        env.remove("AGENT_BROWSER_CDP_TIMEOUT_MS");
+
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        // A script under the default 30s wait answers normally.
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "evaluate", "script": SCRIPT }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["result"], "done");
+        state
+    };
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut slow_state).await;
+    assert_success(&resp);
+
+    let env = EnvGuard::new(&["AGENT_BROWSER_CDP_TIMEOUT_MS"]);
+    env.set("AGENT_BROWSER_CDP_TIMEOUT_MS", "1500");
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The same script now outlives the budget the env var sets.
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "evaluate", "script": SCRIPT }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(Value::as_bool), Some(false));
+    let error = resp
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        error.contains("CDP command timed out: Runtime.evaluate"),
+        "{error}"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "1 + 1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], 2);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}

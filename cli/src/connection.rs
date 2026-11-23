@@ -1413,25 +1413,25 @@ fn has_os_error(error: &str, code: u32) -> bool {
     error.contains(&format!("(os error {})", code))
 }
 
-/// Socket read timeout for one request. Ordinary commands get a 30s floor.
-/// Commands carrying an operation timeout (the wait family, which
+/// Socket read timeout for one request. Ordinary commands get a floor of the
+/// daemon's CDP wait plus margin, so the daemon reports its own timeout
+/// (`CDP command timed out: <method>`) instead of the client dying with EAGAIN
+/// first and a mutating command failing with outcome_unknown while it still
+/// runs. Commands carrying an operation timeout (the wait family, which
 /// parse_command stamps with AGENT_BROWSER_DEFAULT_TIMEOUT when no explicit
-/// --timeout is given) get that timeout plus margin, so the daemon can report
-/// a proper operation timeout instead of the client dying with EAGAIN at 30s
-/// and a mutating command failing with outcome_unknown while it still runs.
+/// --timeout is given) get that timeout plus margin, whichever is larger.
 ///
-/// The env var is deliberately NOT consulted here. Reading it would apply a
-/// long wait budget to every command, so a genuinely hung daemon on a simple
-/// `url`/`title`/`snapshot` call would take the full budget to surface
-/// instead of 30s. Only commands that actually carry a `timeout` field get
-/// the extended budget, and that field is set client-side per invocation,
-/// avoiding the daemon's spawn-time env snapshot drifting from the client.
+/// `AGENT_BROWSER_CDP_TIMEOUT_MS` raises the daemon's CDP wait and the floor
+/// here follows it. It is not a blanket longer budget: a command that carries
+/// no `timeout` field is still bounded, so a genuinely hung daemon surfaces on
+/// the daemon's own timeout instead of waiting indefinitely.
 pub(crate) fn read_timeout_for(cmd: &Value) -> Duration {
     let mut op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
     if cmd.get("action").and_then(Value::as_str) == Some("mousemove") {
         op_ms = op_ms.max(cmd.get("duration").and_then(Value::as_u64).unwrap_or(0));
     }
-    Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
+    let cdp_floor = crate::native::cdp::client::response_timeout() + Duration::from_secs(10);
+    Duration::from_millis(op_ms.saturating_add(10_000)).max(cdp_floor)
 }
 
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, SendError> {
@@ -1687,6 +1687,23 @@ mod tests {
         assert!(!is_read_only(&json!({"action": "evaluate"})));
         assert!(!is_read_only(&json!({"action": "some_future_action"})));
         assert!(!is_read_only(&json!({})));
+    }
+
+    #[test]
+    fn the_daemon_cdp_wait_raises_the_client_read_floor() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_CDP_TIMEOUT_MS"]);
+
+        guard.remove("AGENT_BROWSER_CDP_TIMEOUT_MS");
+        assert_eq!(
+            read_timeout_for(&json!({"action": "evaluate"})),
+            Duration::from_secs(40)
+        );
+
+        guard.set("AGENT_BROWSER_CDP_TIMEOUT_MS", "120000");
+        assert_eq!(
+            read_timeout_for(&json!({"action": "evaluate"})),
+            Duration::from_secs(130)
+        );
     }
 
     #[test]
