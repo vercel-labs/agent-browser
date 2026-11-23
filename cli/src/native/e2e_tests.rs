@@ -12301,6 +12301,383 @@ async fn e2e_upload_with_css_selector() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_rejects_unmet_preconditions() {
+    let mut state = DaemonState::new();
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("upload_probe") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let missing = std::env::temp_dir().join(format!("ab-upload-ghost-{}.txt", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "upload", "selector": "#fileInput", "files": [missing.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(resp["code"], "file_not_found", "{resp}");
+
+    let real = std::env::temp_dir().join(format!("ab-upload-real-{}.txt", std::process::id()));
+    std::fs::write(&real, "test").unwrap();
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "upload", "selector": "#result", "files": [real.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(resp["code"], "not_file_input", "{resp}");
+
+    let _ = std::fs::remove_file(&real);
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_diff_snapshot_without_baseline_uses_last_snapshot() {
+    let mut state = DaemonState::new();
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("snapshot_diff_probe") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let resp = execute_command(&json!({ "id": "3", "action": "diff_snapshot" }), &mut state).await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(resp["code"], "no_baseline", "{resp}");
+
+    assert_success(&execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await);
+    let resp = execute_command(&json!({ "id": "5", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+    assert_eq!(get_data(&resp)["additions"], 0);
+
+    assert_success(
+        &execute_command(
+            &json!({
+                "id": "6",
+                "action": "evaluate",
+                "script": "document.querySelector('#primary-action').textContent = 'Updated action'"
+            }),
+            &mut state,
+        )
+        .await,
+    );
+    let resp = execute_command(&json!({ "id": "7", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], true, "{resp}");
+
+    // The diff itself becomes the next baseline.
+    let resp = execute_command(&json!({ "id": "8", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_bare_diff_snapshot_is_kept_per_tab() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Tab A</h1>" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await);
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "tab_new", "url": "data:text/html,<h1>Tab B</h1>" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "5", "action": "snapshot" }), &mut state).await);
+    assert_eq!(state.tracked_snapshot_tabs(), 2);
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "tab_switch", "tabId": "t1" }),
+            &mut state,
+        )
+        .await,
+    );
+    let resp = execute_command(&json!({ "id": "7", "action": "diff_snapshot" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+
+    // Closing a tab drops its baseline at the next snapshot.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "8", "action": "tab_close", "tabId": "t2" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "9", "action": "snapshot" }), &mut state).await);
+    assert_eq!(state.tracked_snapshot_tabs(), 1);
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_diff_url_reports_snapshot_and_screenshot_diffs() {
+    let mut state = DaemonState::new();
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let url_a = "data:text/html,<h1>Page A</h1><button>Alpha</button>";
+    let url_b = "data:text/html,<h1>Page B</h1><button>Alpha</button><button>Beta</button>";
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "diff_url", "url1": url_a, "url2": url_b }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["snapshot"]["changed"], true, "{resp}");
+    assert!(data["snapshot"]["diff"].as_str().unwrap().contains("Beta"));
+    assert!(data.get("screenshot").is_none(), "{resp}");
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "diff_url", "url1": url_a, "url2": url_b, "screenshot": true, "fullPage": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let shot = &get_data(&resp)["screenshot"];
+    assert!(shot["totalPixels"].as_u64().unwrap() > 0, "{resp}");
+
+    // --selector scopes both snapshots.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "diff_url", "url1": url_a, "url2": url_b, "selector": "h1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let diff = get_data(&resp)["snapshot"]["diff"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!diff.contains("Beta"), "{diff}");
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_attaches_content_and_directories() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let page = "data:text/html,<input type=file id=f><input type=file id=d webkitdirectory>";
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": page }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("real.txt");
+    std::fs::write(&file, "hello world\n").unwrap();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "upload", "selector": "#f", "files": [file.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.querySelector('#f').files[0].size" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], 12, "{resp}");
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "upload", "selector": "#d", "files": [dir.path().to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "wait", "function": "document.querySelector('#d').files.length === 1", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "document.querySelector('#d').files.length" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], 1, "{resp}");
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+/// A session whose `--cdp` setting names a non-local browser treats it as
+/// remote: a path missing on this host only warns.
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_over_cdp_setting_treats_non_local_browser_as_remote() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let ws_url = ws_url.replacen("127.0.0.1", "0.0.0.0", 1);
+    assert!(ws_url.contains("0.0.0.0"), "{ws_url}");
+
+    guard.set("AGENT_BROWSER_SESSION", "e2e-upload-cdp-client");
+    let mut state = DaemonState::new();
+    let page = "data:text/html,<input type=file id=f>";
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "navigate",
+            "url": page,
+            "settings": { "cdp": ws_url }
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let missing =
+        std::env::temp_dir().join(format!("ab-upload-cdp-ghost-{}.txt", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "upload", "selector": "#f", "files": [missing.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_ne!(resp["code"], "file_not_found", "{resp}");
+    assert!(resp["warning"].is_string(), "{resp}");
+
+    let _ = execute_command(&json!({ "id": "98", "action": "close" }), &mut state).await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut host).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_bare_diff_snapshot_reuses_snapshot_options_and_frame() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("snapshot_diff_probe") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let mut n = 10;
+    let mut run = |cmd: Value| {
+        n += 1;
+        let mut cmd = cmd;
+        cmd["id"] = json!(n.to_string());
+        cmd
+    };
+    for snapshot in [
+        json!({ "action": "snapshot", "interactive": true }),
+        json!({ "action": "snapshot", "selector": "#target" }),
+        json!({ "action": "snapshot", "compact": true, "maxDepth": 1 }),
+    ] {
+        assert_success(&execute_command(&run(snapshot), &mut state).await);
+        let resp = execute_command(&run(json!({ "action": "diff_snapshot" })), &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+    }
+
+    // An option the baseline lacks is refused instead of diffing mismatched trees.
+    let resp = execute_command(
+        &run(json!({ "action": "diff_snapshot", "selector": "#primary-action" })),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["code"], "baseline_mismatch", "{resp}");
+
+    // A missing baseline file is an error, not a literal baseline.
+    let resp = execute_command(
+        &run(json!({ "action": "diff_snapshot", "baseline": "/nonexistent/baseline.txt" })),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["code"], "file_not_found", "{resp}");
+
+    // Frame: a snapshot taken inside a frame is the baseline only for that frame.
+    assert_success(
+        &execute_command(
+            &run(json!({ "action": "navigate", "url": "data:text/html,<iframe id='child' srcdoc='<button>Inner</button>'></iframe>" })),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &run(json!({ "action": "frame", "selector": "#child" })),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&run(json!({ "action": "snapshot" })), &mut state).await);
+    let resp = execute_command(&run(json!({ "action": "diff_snapshot" })), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false, "{resp}");
+    assert_success(&execute_command(&run(json!({ "action": "mainframe" })), &mut state).await);
+    let resp = execute_command(&run(json!({ "action": "diff_snapshot" })), &mut state).await;
+    assert_eq!(resp["code"], "baseline_mismatch", "{resp}");
+
+    assert_success(&execute_command(&run(json!({ "action": "close" })), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Recording: default records the current active page
 // ---------------------------------------------------------------------------
