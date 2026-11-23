@@ -169,6 +169,43 @@ fn explicit_dashboard_start_accepts_mcp_style_arguments() {
 }
 
 #[test]
+fn dashboard_start_on_port_zero_reports_a_listening_port() {
+    let tmp = TempDir::new().unwrap();
+    let _cleanup = DashboardCleanup(&tmp);
+
+    let started = run_dashboard(&tmp, &["dashboard", "start", "--port", "0", "--json"]);
+    assert!(
+        started.status.success(),
+        "dashboard start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let port = json_output(&started)["data"]["port"].as_u64().unwrap();
+    assert_ne!(port, 0);
+
+    // No retry: the command returns only after the server is listening.
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port as u16)).unwrap();
+    stream
+        .write_all(
+            format!(
+                "GET /api/sessions HTTP/1.1\r\nHost: localhost:{port}\r\nOrigin: http://localhost:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "unexpected dashboard response: {response}"
+    );
+
+    let repeated = run_dashboard(&tmp, &["dashboard", "start", "--port", "0", "--json"]);
+    let payload = json_output(&repeated);
+    assert_eq!(payload["data"]["already_running"], true);
+    assert_eq!(payload["data"]["port"], port);
+}
+
+#[test]
 fn dashboard_listens_on_and_authorizes_ipv6_loopback() {
     // Some minimal CI/container kernels disable IPv6 entirely. In that case
     // the production server deliberately remains available on IPv4 only.
@@ -207,7 +244,7 @@ fn invalid_dashboard_options_fail_without_starting_a_server() {
             "--json",
         ],
         &["dashboard", "start", "--port", "nope", "--json"],
-        &["dashboard", "start", "--port", "0", "--json"],
+        &["dashboard", "start", "--port", "65536", "--json"],
         &["dashboard", "start", "--port", "--json"],
         &[
             "dashboard",
