@@ -3704,7 +3704,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             )
         })
     });
-    let policy_actions = policy_actions_for_command(
+    let effective_settings = launch_plan
+        .as_ref()
+        .map_or(&state.settings, |plan| &plan.next);
+    let mut policy_actions = policy_actions_for_command(
         cmd,
         action,
         needs_launch,
@@ -3713,10 +3716,26 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             .as_ref()
             .filter(|_| !switches_connection),
         run_flow.as_deref(),
-        launch_plan
-            .as_ref()
-            .map_or(&state.settings, |plan| &plan.next),
+        effective_settings,
     );
+    if launches || (!skip_launch && needs_launch) {
+        if let Some(("provider", value)) = settings_launch_target(effective_settings) {
+            if let Some(provider) = value.as_str() {
+                let plugins = plugins_from_command_or_env(cmd);
+                let mut provider_actions = Vec::new();
+                append_browser_provider_policy_action_for(
+                    &mut provider_actions,
+                    provider,
+                    &plugins,
+                );
+                for policy_action in provider_actions {
+                    if !policy_actions.contains(&policy_action) {
+                        policy_actions.push(policy_action);
+                    }
+                }
+            }
+        }
+    }
 
     // Hot-reload and check action policy
     if let Some(ref mut policy) = state.policy {
@@ -27150,6 +27169,147 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 );
             }
             assert!(state.browser.is_none(), "the plugin must not run: {resp}");
+            assert_eq!(state.settings.get(Key::Provider), None, "{resp}");
+        }
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn conflicting_connect_and_settings_keep_the_positional_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker_path = dir.path().join("provider-plugin-invoked");
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+printf invoked > "$1"
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:1/devtools/browser/x"}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+        let plugins = json!([
+            {
+                "name": "browserbox",
+                "command": plugin_path.to_string_lossy(),
+                "args": [marker_path.to_string_lossy()],
+                "capabilities": ["browser.provider"]
+            }
+        ]);
+
+        for rule in ["deny", "confirm"] {
+            let policy = dir.path().join(format!("{rule}.json"));
+            fs::write(
+                &policy,
+                format!(r#"{{"{rule}": ["plugin:browserbox:browser.provider"]}}"#),
+            )
+            .unwrap();
+            let (_env, mut state) = isolated_state();
+            state.settings = Running::defaults();
+            let cmd = json!({
+                "id": "1",
+                "action": "launch",
+                "cdpUrl": "ws://127.0.0.1:1/devtools/browser/x",
+                "plugins": plugins.clone(),
+                "settings": {
+                    "provider": "browserbox",
+                    "action-policy": policy.to_str().unwrap()
+                }
+            });
+
+            let resp = execute_command(&cmd, &mut state).await;
+
+            assert_ne!(
+                resp["data"]["confirmation_required"], true,
+                "{rule}: {resp}"
+            );
+            assert!(
+                !resp["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("denied by policy"),
+                "{rule}: {resp}"
+            );
+            assert!(
+                !marker_path.exists(),
+                "{rule}: the plugin must not run: {resp}"
+            );
+            assert_ne!(
+                state.settings.connection(),
+                Connection::Provider("browserbox".to_string()),
+                "{rule}: {resp}"
+            );
+        }
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn conflicting_connect_and_settings_gate_the_positional_provider() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker_path = dir.path().join("provider-plugin-invoked");
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+printf invoked > "$1"
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:1/devtools/browser/x"}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+        let plugins = json!([
+            {
+                "name": "browserbox",
+                "command": plugin_path.to_string_lossy(),
+                "args": [marker_path.to_string_lossy()],
+                "capabilities": ["browser.provider"]
+            }
+        ]);
+
+        for rule in ["deny", "confirm"] {
+            let policy = dir.path().join(format!("{rule}.json"));
+            fs::write(
+                &policy,
+                format!(r#"{{"{rule}": ["plugin:browserbox:browser.provider"]}}"#),
+            )
+            .unwrap();
+            let (_env, mut state) = isolated_state();
+            state.settings = Running::defaults();
+            let cmd = json!({
+                "id": "1",
+                "action": "launch",
+                "provider": "browserbox",
+                "plugins": plugins.clone(),
+                "settings": {
+                    "cdp": "9222",
+                    "action-policy": policy.to_str().unwrap()
+                }
+            });
+
+            let resp = execute_command(&cmd, &mut state).await;
+
+            if rule == "deny" {
+                assert_eq!(resp["success"], false, "{resp}");
+                assert!(
+                    resp["error"].as_str().unwrap().contains("denied by policy"),
+                    "{resp}"
+                );
+            } else {
+                assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
+                assert_eq!(resp["data"]["action"], "plugin:browserbox:browser.provider");
+            }
+            assert!(
+                !marker_path.exists(),
+                "{rule}: the plugin must not run: {resp}"
+            );
             assert_eq!(state.settings.get(Key::Provider), None, "{resp}");
         }
     }

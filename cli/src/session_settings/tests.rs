@@ -2380,3 +2380,31 @@ fn an_envelope_target_wins_and_is_never_ambient() {
     assert_eq!(changed_keys(&plan), vec![Key::Cdp, Key::DownloadPath]);
     assert_eq!(plan.next.connection(), Connection::Cdp("9333".to_string()));
 }
+
+#[test]
+fn an_envelope_target_displaces_the_other_connection_keys() {
+    let wire = patch_of(&[
+        is(Key::Provider, json!("browserbox")),
+        is(Key::AutoConnect, json!(true)),
+        is(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer x"}"#)),
+    ]);
+    let merged = wire.with_envelope(&patch_of(&[is(Key::Cdp, json!("9333"))]));
+    assert_eq!(merged.value(Key::Provider), None);
+    assert_eq!(merged.value(Key::AutoConnect), None);
+    assert!(merged.get(Key::CdpHeaders).is_some());
+    let plan = Running::defaults().plan(&merged);
+    assert_eq!(plan.next.connection(), Connection::Cdp("9333".to_string()));
+
+    let wire = patch_of(&[
+        is(Key::Cdp, json!("9333")),
+        is(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer x"}"#)),
+    ]);
+    let merged = wire.with_envelope(&patch_of(&[is(Key::Provider, json!("browserbox"))]));
+    assert_eq!(merged.value(Key::Cdp), None);
+    assert_eq!(merged.get(Key::CdpHeaders), None);
+    let plan = Running::defaults().plan(&merged);
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Provider("browserbox".to_string())
+    );
+}
