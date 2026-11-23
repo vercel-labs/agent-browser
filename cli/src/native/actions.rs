@@ -8891,7 +8891,7 @@ impl SnapshotScope {
         }
     }
 
-    fn options(&self) -> SnapshotOptions {
+    pub(crate) fn options(&self) -> SnapshotOptions {
         SnapshotOptions {
             selector: self.selector.clone(),
             interactive: self.interactive,
