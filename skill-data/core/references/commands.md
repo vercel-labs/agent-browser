@@ -584,6 +584,7 @@ agent-browser --cdp <url> --cdp-headers '{"Authorization":"Bearer <token>"}' ...
 agent-browser --pin-tab ...           # Pin the session to its bound tab (strict tab binding)
 agent-browser --no-pin-tab ...        # Disable a sticky pin previously enabled with --pin-tab
 agent-browser -p <provider> ...       # Browser provider or configured provider plugin
+agent-browser -p ladybird ...         # Ladybird over WebDriver: CSS selectors, no snapshot refs
 agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
@@ -652,7 +653,7 @@ agent-browser pushstate <url>                       # SPA client-side nav (auto-
 
 ## Accessibility audit
 
-Runs an embedded axe-core audit with no CDN fetch. The vendored engine runs private partial audits through CDP across the page's frame tree and merges serialized results without page messaging, so page CSP does not block it, page-provided `window.axe` values remain intact, and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions. Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
+Runs an embedded axe-core audit with no CDN fetch. The vendored engine runs private partial audits through CDP across the page's frame tree and merges serialized results without page messaging, so page CSP does not block it, page-provided `window.axe` values remain intact, and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari, iOS, or Ladybird WebDriver sessions. Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
 
 ```bash
 agent-browser a11y                                  # Audit the current page

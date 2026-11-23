@@ -49,8 +49,8 @@ use super::tab_binding;
 use super::tracing::{self as native_tracing, TracingState};
 use super::webdriver::appium::AppiumManager;
 use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSUPPORTED_ACTIONS};
+use super::webdriver::driver::{DriverProcess, LocalDriver};
 use super::webdriver::ios;
-use super::webdriver::safari;
 use super::webmcp;
 
 /// Wait strategy used by `auth_login` when navigating to the login page.
@@ -349,11 +349,11 @@ impl AttachedTarget {
         Some(Self::Provider(provider.to_ascii_lowercase()))
     }
 
-    /// The target a successful launch leaves the session attached to. The iOS and
-    /// Safari providers are WebDriver-backed and have no CDP attach to resume.
+    /// The target a successful launch leaves the session attached to. The iOS,
+    /// Safari, and Ladybird providers are WebDriver-backed and have no CDP attach to resume.
     fn from_launch_command(cmd: &Value) -> Option<Self> {
         Self::named_by(cmd)
-            .filter(|target| !matches!(target, Self::Provider(p) if p == "ios" || p == "safari"))
+            .filter(|target| !matches!(target, Self::Provider(p) if is_webdriver_provider(p)))
     }
 
     /// Whether the browser runs on another machine than the daemon, so it
@@ -649,7 +649,7 @@ impl SessionSetup {
 pub struct DaemonState {
     pub browser: Option<BrowserManager>,
     pub appium: Option<AppiumManager>,
-    pub safari_driver: Option<safari::SafariDriverProcess>,
+    pub local_driver: Option<DriverProcess>,
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
@@ -818,11 +818,11 @@ pub struct DaemonState {
 }
 
 fn default_idle_shutdown_is_blocked(
-    is_webdriver: bool,
+    headed_webdriver: bool,
     provider_owned: bool,
     browser_blocks_shutdown: bool,
 ) -> bool {
-    is_webdriver || (!provider_owned && browser_blocks_shutdown)
+    headed_webdriver || (!provider_owned && browser_blocks_shutdown)
 }
 
 impl DaemonState {
@@ -891,7 +891,7 @@ impl DaemonState {
         Self {
             browser: None,
             appium: None,
-            safari_driver: None,
+            local_driver: None,
             webdriver_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
@@ -996,12 +996,14 @@ impl DaemonState {
     }
 
     /// True when the default idle timeout must not shut down this session.
-    /// WebDriver-backed Safari and iOS sessions are always headed, while CDP
-    /// sessions delegate the decision to BrowserManager. Provider-owned CDP
+    /// WebDriver-backed sessions block it unless they run headless Ladybird
+    /// (Safari and iOS are always headed), while CDP sessions delegate the
+    /// decision to BrowserManager. Provider-owned CDP
     /// connections remain eligible because the daemon owns their lifecycle.
     pub(crate) fn blocks_default_idle_shutdown(&self) -> bool {
         default_idle_shutdown_is_blocked(
-            matches!(self.backend_type, BackendType::WebDriver),
+            matches!(self.backend_type, BackendType::WebDriver)
+                && !self.local_driver.as_ref().is_some_and(|d| d.headless),
             self.active_provider_connection,
             self.browser
                 .as_ref()
@@ -2645,7 +2647,7 @@ fn has_active_browser_session(state: &DaemonState) -> bool {
         || state.active_provider_session.is_some()
         || state.webdriver_backend.is_some()
         || state.appium.is_some()
-        || state.safari_driver.is_some()
+        || state.local_driver.is_some()
 }
 
 async fn close_before_implicit_relaunch(state: &mut DaemonState) -> Result<(), String> {
@@ -2802,10 +2804,10 @@ pub(crate) async fn close_all_browser_backends(state: &mut DaemonState) -> Resul
         let _ = tokio::time::timeout(std::time::Duration::from_secs(3), appium.close()).await;
     }
     state.appium = None;
-    if let Some(ref mut driver) = state.safari_driver {
+    if let Some(ref mut driver) = state.local_driver {
         driver.kill();
     }
-    state.safari_driver = None;
+    state.local_driver = None;
     state.backend_type = BackendType::Cdp;
 
     close_result
@@ -3055,7 +3057,7 @@ fn policy_actions_for_command(
         let provider_launch = settings
             .provider()
             .map(|provider| provider.to_lowercase())
-            .filter(|provider| !provider.is_empty() && provider != "ios" && provider != "safari");
+            .filter(|provider| !provider.is_empty() && !is_webdriver_provider(provider));
         if let Some(provider) = provider_launch {
             append_browser_provider_policy_action_for(&mut actions, &provider, &plugins);
         } else {
@@ -3065,12 +3067,17 @@ fn policy_actions_for_command(
     actions
 }
 
+/// Whether a lowercase provider name is driven over WebDriver instead of CDP.
+fn is_webdriver_provider(provider: &str) -> bool {
+    provider == "ios" || LocalDriver::from_provider(provider).is_some()
+}
+
 /// The external browser the session's settings connect to, as the launch field
 /// that names it. Local sessions and the WebDriver providers name none.
 fn settings_launch_target(settings: &Running) -> Option<(&'static str, Value)> {
     match settings.connection() {
         Connection::Provider(provider)
-            if !matches!(provider.to_lowercase().as_str(), "" | "ios" | "safari") =>
+            if !provider.is_empty() && !is_webdriver_provider(&provider.to_lowercase()) =>
         {
             Some(("provider", json!(provider.to_lowercase())))
         }
@@ -4255,13 +4262,14 @@ fn ensure_allowed_domains_supported_for_launch(
                         .to_string(),
                 );
             }
-            "safari" => {
-                return Err(
-                    "--allowed-domains is not supported with the Safari provider because WebRTC containment cannot be enforced"
-                        .to_string(),
-                );
+            p => {
+                if let Some(local) = LocalDriver::from_provider(p) {
+                    return Err(format!(
+                        "--allowed-domains is not supported with the {} provider because WebRTC containment cannot be enforced",
+                        local.label()
+                    ));
+                }
             }
-            _ => {}
         }
     }
 
@@ -5174,7 +5182,7 @@ async fn launch_browser_from_settings(
             restore_key: restore_key.as_deref(),
             storage_state,
         })?;
-        // ios and safari are WebDriver-backed device providers.
+        // ios, safari, and ladybird are WebDriver-backed providers.
         if p == "ios" {
             // A relaunch keeps the device the session was set up with.
             let mut ios_cmd = if cmd.is_object() {
@@ -5193,8 +5201,8 @@ async fn launch_browser_from_settings(
             }
             return result;
         }
-        if p == "safari" {
-            let result = launch_safari(cmd, state).await;
+        if let Some(local) = LocalDriver::from_provider(&p) {
+            let result = launch_local_driver(cmd, state, local, options.headless).await;
             if result.is_ok() {
                 state.effective_ca_cert = effective_ca_cert;
             }
@@ -6566,7 +6574,12 @@ async fn launch_ios(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     }))
 }
 
-async fn launch_safari(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn launch_local_driver(
+    cmd: &Value,
+    state: &mut DaemonState,
+    local: LocalDriver,
+    headless: bool,
+) -> Result<Value, String> {
     let port: u16 = cmd
         .get("port")
         .and_then(|v| v.as_u64())
@@ -6587,27 +6600,27 @@ async fn launch_safari(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .port()
     };
 
-    let driver = safari::launch_safaridriver(actual_port)?;
+    let driver = local.launch(actual_port, headless)?;
     let mut client = super::webdriver::client::WebDriverClient::new(actual_port);
 
     client
         .create_session(serde_json::json!({
-            "browserName": "safari",
+            "browserName": local.name(),
         }))
         .await?;
 
-    state.safari_driver = Some(driver);
+    state.local_driver = Some(driver);
     state.webdriver_backend = Some(WebDriverBackend::new(client));
     state.backend_type = BackendType::WebDriver;
-    state.engine = "safari".to_string();
+    state.engine = local.name().to_string();
     write_engine_file(&state.session_id, &state.engine);
-    write_provider_file(&state.session_id, "safari");
+    write_provider_file(&state.session_id, local.name());
     write_extensions_file(&state.session_id, &state.settings);
     state.reset_input_state();
 
     Ok(json!({
         "launched": true,
-        "provider": "safari",
+        "provider": local.name(),
         "port": actual_port,
         "backend": "webdriver",
     }))
@@ -21764,7 +21777,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
         guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
 
-        for provider in ["ios", "safari"] {
+        for provider in ["ios", "safari", "ladybird"] {
             let mut state = DaemonState::new();
             let error = handle_launch(
                 &json!({

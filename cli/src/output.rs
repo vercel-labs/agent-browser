@@ -4414,8 +4414,8 @@ Audits the current page, or navigates to the optional URL first. The vendored
 axe-core engine runs private partial audits without a network request across
 the page frame tree, does not trust or replace page-owned window.axe values,
 and merges serialized results without page messaging. Accessibility audits
-require a CDP browser and are not available with Safari or iOS WebDriver
-sessions.
+require a CDP browser and are not available with Safari, iOS, or Ladybird
+WebDriver sessions.
 
 Options:
   --tags <tag1,tag2>    Run only rules matching these axe tags
@@ -4991,7 +4991,7 @@ Options:
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
   --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
                              Use --hide-scrollbars false to keep scrollbars visible
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name
+  -p, --provider <name>      Browser provider: ios, ladybird, browserbase, kernel, browseruse, browserless, agentcore, or plugin name
                              A plugin provider that returns directPage: true connects to a page socket;
                              console messages, network requests, HAR recording, tracing, and profiling apply to that page
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
@@ -5020,7 +5020,7 @@ Options:
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
                              Invalid values warn and leave the existing output limit unchanged.
-  --allowed-domains <list>   Restrict network domains; must list at least one; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --allowed-domains <list>   Restrict network domains; must list at least one; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari/Ladybird (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --capture <list>           Record the session as it runs; only flow is supported (or AGENT_BROWSER_CAPTURE)
                              On a running session without capture, passing it relaunches with capture on
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
@@ -5113,7 +5113,7 @@ Environment:
   AGENT_BROWSER_CA_CERT          Path to CA certificate to trust (HTTPS interception proxies)
   AGENT_BROWSER_CLEAR_CA_CERT    Clear CA trust retained by the running browser session
   AGENT_BROWSER_USE_SYSTEM_CA    Use the OS trust store for CLI requests
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, ladybird, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
   BROWSER_USE_API_KEY            Browser Use Cloud API key
   BROWSER_USE_PROFILE_ID         Browser Use profile UUID
   BROWSER_USE_PROXY_COUNTRY      Managed proxy country; none/direct disables proxy
