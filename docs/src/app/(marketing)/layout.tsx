@@ -11,7 +11,7 @@ import { DocsProvider } from '@/components/geistdocs-provider';
 import { ProductProvider } from '@/components/landing/product-context';
 import page from '../../../content/landing/home';
 import '@/components/landing/landing.css';
-import '@/components/navbar-labs-wordmark.css';
+import '@/components/navbar-labs-lockup.css';
 
 export { metadata, viewport } from '@/lib/site-metadata';
 
