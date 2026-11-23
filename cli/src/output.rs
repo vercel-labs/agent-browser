@@ -4855,7 +4855,10 @@ Personal Agent Protocol (experimental):
                              started on a loopback host. Until the join ends, every request
                              the tab makes, redirects included, is held to the same rules
                              before it is sent, and a refused request fails the join with
-                             request_blocked
+                             request_blocked. The browser resolves hosts again, so a
+                             response it receives directly from a loopback or private
+                             address is also refused before the page sees it. Errors show
+                             only the scheme and host of a refused URL, never the code
 
 Saved flows (experimental, open the session with --capture flow):
   flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed

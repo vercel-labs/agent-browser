@@ -1176,6 +1176,42 @@ impl DaemonState {
                         )
                         .await;
                     }
+                    Some(event)
+                        if event.method == "Fetch.requestPaused"
+                            && (event.params.get("responseStatusCode").is_some()
+                                || event.params.get("responseErrorReason").is_some()) =>
+                    {
+                        let sid = event.session_id.clone().unwrap_or_default();
+                        let guard = poppy_guard.read().await.clone().filter(|g| g.guards(&sid));
+                        let client = client.clone();
+                        tokio::spawn(async move {
+                            let request_id = event.params.get("requestId").cloned();
+                            let admitted = match guard {
+                                Some(guard) => {
+                                    let network_id = event
+                                        .params
+                                        .get("networkId")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default();
+                                    let status = event
+                                        .params
+                                        .get("responseStatusCode")
+                                        .and_then(|v| v.as_i64());
+                                    guard.admits_response(network_id, status).await
+                                }
+                                None => true,
+                            };
+                            let (method, params) = if admitted {
+                                ("Fetch.continueRequest", json!({ "requestId": request_id }))
+                            } else {
+                                (
+                                    "Fetch.failRequest",
+                                    json!({ "requestId": request_id, "errorReason": "BlockedByClient" }),
+                                )
+                            };
+                            let _ = client.send_command(method, Some(params), Some(&sid)).await;
+                        });
+                    }
                     Some(event) if event.method == "Fetch.requestPaused" => {
                         let request_id = event
                             .params
@@ -14670,6 +14706,9 @@ async fn build_fetch_patterns(state: &DaemonState) -> Vec<Value> {
         && !patterns.iter().any(|p| p["urlPattern"] == "*")
     {
         patterns.push(json!({ "urlPattern": "*" }));
+    }
+    if has_poppy_guard {
+        patterns.push(json!({ "urlPattern": "*", "requestStage": "Response" }));
     }
     patterns
 }

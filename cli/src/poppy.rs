@@ -65,6 +65,10 @@ pub(crate) static TEST_PUBLIC_ADDRESS: std::sync::Mutex<Option<IpAddr>> =
     std::sync::Mutex::new(None);
 
 #[cfg(test)]
+pub(crate) static TEST_REBOUND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
 fn public_for_test(ip: IpAddr) -> bool {
     *TEST_PUBLIC_ADDRESS
         .lock()
@@ -79,6 +83,13 @@ fn public_for_test(_ip: IpAddr) -> bool {
 
 fn non_public(ip: IpAddr) -> bool {
     is_non_public(ip) && !public_for_test(ip)
+}
+
+fn redacted(url: &Url) -> String {
+    match host_with_port(url) {
+        Some(host) => format!("{}://{}", url.scheme(), host),
+        None => format!("a {} URL", url.scheme()),
+    }
 }
 
 fn host_ip(url: &Url) -> Option<IpAddr> {
@@ -97,7 +108,10 @@ fn check_scheme(url: &Url, local: bool) -> Result<(), JoinError> {
     match url.scheme() {
         "https" => Ok(()),
         "http" if (loopback && local) || test_public => Ok(()),
-        _ => Err(discovery_failed(format!("{} is not an HTTPS URL", url))),
+        _ => Err(discovery_failed(format!(
+            "{} is not an HTTPS URL",
+            redacted(url)
+        ))),
     }
 }
 
@@ -204,7 +218,7 @@ async fn check_endpoint(
     check_scheme(url, local)?;
     let host = url
         .host_str()
-        .ok_or_else(|| discovery_failed(format!("{} has no host", url)))?;
+        .ok_or_else(|| discovery_failed(format!("{} has no host", redacted(url))))?;
     match url.host() {
         Some(url::Host::Ipv4(ip)) => check_address(host, IpAddr::V4(ip), local),
         Some(url::Host::Ipv6(ip)) => check_address(host, IpAddr::V6(ip), local),
@@ -389,8 +403,13 @@ pub async fn check_request(
     local: bool,
     deadline: tokio::time::Instant,
 ) -> Result<(), JoinError> {
-    let mut url = Url::parse(raw)
-        .map_err(|e| request_blocked(format!("The join would request {}: {}", raw, e)))?;
+    let mut url = Url::parse(raw).map_err(|e| {
+        request_blocked(format!(
+            "The join would request a URL that is not valid: {}",
+            e
+        ))
+    })?;
+    let shown = redacted(&url);
     let http_scheme = match url.scheme() {
         "http" | "https" => None,
         "ws" => Some("http"),
@@ -399,11 +418,38 @@ pub async fn check_request(
     };
     if let Some(scheme) = http_scheme {
         url.set_scheme(scheme)
-            .map_err(|_| request_blocked(format!("The join would request {}", raw)))?;
+            .map_err(|_| request_blocked(format!("The join would request {}", shown)))?;
     }
     check_endpoint(&url, local, deadline)
         .await
-        .map_err(|e| request_blocked(format!("The join would request {}: {}", raw, e.message)))
+        .map_err(|e| request_blocked(format!("The join would request {}: {}", shown, e.message)))
+}
+
+#[cfg(test)]
+fn browser_address_trusted_for_test() -> bool {
+    TEST_PUBLIC_ADDRESS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+        && !TEST_REBOUND.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(not(test))]
+fn browser_address_trusted_for_test() -> bool {
+    false
+}
+
+pub fn check_address_space(space: &str, local: bool) -> Result<(), JoinError> {
+    if local || browser_address_trusted_for_test() {
+        return Ok(());
+    }
+    match space {
+        "Loopback" | "Local" | "Private" => Err(request_blocked(format!(
+            "The browser connected to a non-public address ({}) during the join",
+            space
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Refuses a response the browser received from a link-local or cloud metadata
@@ -418,10 +464,13 @@ pub fn check_connected_address(url: &str, remote: &str) -> Result<(), JoinError>
         return Ok(());
     };
     if is_link_local_or_metadata(ip) {
+        let shown = Url::parse(url)
+            .map(|u| redacted(&u))
+            .unwrap_or_else(|_| "a page".to_string());
         return Err(request_blocked(format!(
             "The browser connected to the link-local or cloud metadata address {} for {}",
             ip.to_canonical(),
-            url
+            shown
         )));
     }
     Ok(())
@@ -729,6 +778,42 @@ mod tests {
             ("blob:https://example.com/1", false),
         ] {
             assert_eq!(check_request(url, local, deadline).await, Ok(()), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_join_request_does_not_repeat_its_url() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        for (url, local) in [
+            (
+                "http://127.0.0.1:8080/steal/bc_secret?c=bc_secret#bc_secret",
+                false,
+            ),
+            ("https://169.254.169.254/bc_secret?c=bc_secret", true),
+            ("ws://user:bc_secret@127.0.0.1:9222/bc_secret", false),
+            ("bc_secret not a url", false),
+        ] {
+            let err = check_request(url, local, deadline).await.unwrap_err();
+            assert_eq!(err.code, "request_blocked", "{url}");
+            assert!(!err.message.contains("bc_secret"), "{url}: {err:?}");
+        }
+        let err = check_connected_address(
+            "https://example.com/bc_secret?c=bc_secret",
+            "169.254.169.254",
+        )
+        .unwrap_err();
+        assert!(!err.message.contains("bc_secret"), "{err:?}");
+    }
+
+    #[test]
+    fn a_direct_response_from_a_non_public_address_space_is_refused() {
+        for space in ["Loopback", "Local", "Private"] {
+            let err = check_address_space(space, false).unwrap_err();
+            assert_eq!(err.code, "request_blocked", "{space}");
+            assert_eq!(check_address_space(space, true), Ok(()), "{space}");
+        }
+        for space in ["Public", "Unknown", ""] {
+            assert_eq!(check_address_space(space, false), Ok(()), "{space}");
         }
     }
 

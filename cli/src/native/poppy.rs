@@ -5,6 +5,7 @@
 //! daemon. Discovery runs inside the normal dispatch, so action policy,
 //! confirmation and the session's domain allowlist apply before any request.
 
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,6 +28,10 @@ const READ_CODE: &str = "(() => ({ href: location.href, \
 const SUBMIT: &str = "(() => { const i = document.querySelector('form input[name=code]'); \
                       if (!i || !i.form) return false; i.form.submit(); return true; })()";
 
+type AddressSpaces = HashMap<String, Vec<(i64, bool)>>;
+
+const RESPONSE_WAIT: Duration = Duration::from_secs(1);
+
 fn fail(code: &str, message: impl std::fmt::Display) -> String {
     format!("{}{}: {}", ERROR_PREFIX, code, message)
 }
@@ -41,6 +46,9 @@ pub struct JoinGuard {
     local: bool,
     deadline: Instant,
     blocked: Arc<Mutex<Option<String>>>,
+    spaces: Arc<Mutex<AddressSpaces>>,
+    recorded: Arc<tokio::sync::Notify>,
+    code: Arc<Mutex<Option<String>>>,
 }
 
 impl JoinGuard {
@@ -50,6 +58,76 @@ impl JoinGuard {
             local,
             deadline,
             blocked: Arc::default(),
+            spaces: Arc::default(),
+            recorded: Arc::default(),
+            code: Arc::default(),
+        }
+    }
+
+    fn redact(&self, message: String) -> String {
+        match self
+            .code
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+        {
+            Some(code) => message.replace(code, "[redacted]"),
+            None => message,
+        }
+    }
+
+    fn record_address_space(&self, params: &Value) {
+        let Some(network_id) = params.get("requestId").and_then(Value::as_str) else {
+            return;
+        };
+        let status = params
+            .get("statusCode")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let space = params
+            .get("resourceIPAddressSpace")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let admitted = match crate::poppy::check_address_space(space, self.local) {
+            Ok(()) => true,
+            Err(e) => {
+                self.block(e.message);
+                false
+            }
+        };
+        self.spaces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(network_id.to_string())
+            .or_default()
+            .push((status, admitted));
+        self.recorded.notify_waiters();
+    }
+
+    fn response_verdict(&self, network_id: &str, status: i64) -> Option<bool> {
+        let spaces = self.spaces.lock().unwrap_or_else(|e| e.into_inner());
+        let hops = spaces.get(network_id)?;
+        if hops.iter().any(|(_, admitted)| !admitted) {
+            return Some(false);
+        }
+        hops.iter().any(|(s, _)| *s == status).then_some(true)
+    }
+
+    pub(super) async fn admits_response(&self, network_id: &str, status: Option<i64>) -> bool {
+        let Some(status) = status.filter(|_| !self.local) else {
+            return true;
+        };
+        let wait_until = self.deadline.min(Instant::now() + RESPONSE_WAIT);
+        loop {
+            let recorded = self.recorded.notified();
+            tokio::pin!(recorded);
+            recorded.as_mut().enable();
+            if let Some(verdict) = self.response_verdict(network_id, status) {
+                return verdict;
+            }
+            if timeout_at(wait_until, recorded).await.is_err() {
+                return self.response_verdict(network_id, status) != Some(false);
+            }
         }
     }
 
@@ -190,6 +268,22 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
         .to_string();
 
     let guard = JoinGuard::new(&session_id, discovery.local, deadline);
+    let mut infos = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .client
+        .subscribe_methods(&["Network.responseReceivedExtraInfo"]);
+    let recorder = {
+        let guard = guard.clone();
+        tokio::spawn(async move {
+            while let Some(event) = infos.recv().await {
+                if event.session_id.as_deref() == Some(guard.session_id.as_str()) {
+                    guard.record_address_space(&event.params);
+                }
+            }
+        })
+    };
     *state.poppy_guard.write().await = Some(guard.clone());
     let result = match super::actions::sync_fetch_interception(state, &session_id).await {
         Err(e) => Err(fail("join_failed", e)),
@@ -218,11 +312,13 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
         Some(message) => Err(fail("request_blocked", message)),
         None => result,
     };
+    let result = result.map_err(|e| guard.redact(e));
     if result.is_err() {
         leave_join_page(state, &session_id).await;
     }
     *state.poppy_guard.write().await = None;
     let _ = super::actions::sync_fetch_interception(state, &session_id).await;
+    recorder.abort();
     result
 }
 
@@ -242,13 +338,18 @@ async fn run_join(
         .client
         .subscribe_methods(&["Network.responseReceived"]);
     let navigated = super::actions::handle_navigate(&json!({ "url": endpoint }), state).await;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let page = mgr.evaluate(READ_CODE, None).await;
+    *guard.code.lock().unwrap_or_else(|e| e.into_inner()) = page
+        .as_ref()
+        .ok()
+        .and_then(|p| p.get("code"))
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string);
     guard.checkpoint(&mut responses)?;
     navigated.map_err(|e| fail("join_failed", e))?;
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let page = mgr
-        .evaluate(READ_CODE, None)
-        .await
-        .map_err(|e| fail("join_failed", e))?;
+    let page = page.map_err(|e| fail("join_failed", e))?;
     let href = page.get("href").and_then(Value::as_str).unwrap_or_default();
     // The code is read only from the endpoint the Company published.
     if !same_resource(href, endpoint) {
@@ -272,6 +373,7 @@ async fn run_join(
         "poppy_version": "1.0",
     });
     let signed_in = run_authorizer(authorizer, cwd, &input, &code, deadline).await?;
+    guard.checkpoint(&mut responses)?;
 
     // Subscribe before submitting so the navigation cannot be missed.
     let session_id = mgr.active_session_id()?.to_string();

