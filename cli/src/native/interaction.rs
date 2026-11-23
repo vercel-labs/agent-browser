@@ -627,58 +627,29 @@ pub async fn select_option(
     Ok(())
 }
 
+/// What a check or uncheck did. `verified` is false when the page navigated
+/// before the toggle could be read back.
+pub struct ToggleOutcome {
+    pub position: Option<(f64, f64)>,
+    pub verified: bool,
+}
+
 pub async fn check(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<Option<(f64, f64)>, String> {
-    let mut position = None;
-    let is_checked = super::element::is_element_checked(
+) -> Result<ToggleOutcome, String> {
+    Box::pin(toggle(
         client,
         session_id,
         ref_map,
         selector_or_ref,
         iframe_sessions,
-    )
-    .await?;
-    if !is_checked {
-        let result = click_element(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            ClickSpec::default(),
-            iframe_sessions,
-            false,
-        )
-        .await?;
-        position = Some(result.position);
-
-        // Verify the click changed the state (Playwright parity: _setChecked re-checks).
-        // If the coordinate-based click missed (e.g. hidden input, overlay), retry
-        // with a JS .click() on the element and its associated input.
-        if !super::element::is_element_checked(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            iframe_sessions,
-        )
-        .await?
-        {
-            js_click_checkbox(
-                client,
-                session_id,
-                ref_map,
-                selector_or_ref,
-                iframe_sessions,
-            )
-            .await?;
-        }
-    }
-    Ok(position)
+        true,
+    ))
+    .await
 }
 
 pub async fn uncheck(
@@ -687,8 +658,31 @@ pub async fn uncheck(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<Option<(f64, f64)>, String> {
-    let mut position = None;
+) -> Result<ToggleOutcome, String> {
+    Box::pin(toggle(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+        false,
+    ))
+    .await
+}
+
+async fn toggle(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+    want_checked: bool,
+) -> Result<ToggleOutcome, String> {
+    use super::element::read_after_action;
+    let mut outcome = ToggleOutcome {
+        position: None,
+        verified: true,
+    };
     let is_checked = super::element::is_element_checked(
         client,
         session_id,
@@ -697,51 +691,52 @@ pub async fn uncheck(
         iframe_sessions,
     )
     .await?;
-    if is_checked {
-        let result = click_element(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            ClickSpec::default(),
-            iframe_sessions,
-            false,
-        )
-        .await?;
-        position = Some(result.position);
+    if is_checked == want_checked {
+        return Ok(outcome);
+    }
+    let result = click_element(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        ClickSpec::default(),
+        iframe_sessions,
+        false,
+    )
+    .await?;
+    outcome.position = Some(result.position);
 
-        // Same verify-and-retry as check().
-        if super::element::is_element_checked(
-            client,
-            session_id,
-            ref_map,
-            selector_or_ref,
-            iframe_sessions,
-        )
-        .await?
-        {
-            js_click_checkbox(
+    // Verify the click changed the state (Playwright parity: _setChecked re-checks).
+    // If the coordinate-based click missed (e.g. hidden input, overlay), retry
+    // with a JS .click() on the element and its associated input. The click has
+    // already happened, so a document replaced by it ends the verification
+    // without failing the action.
+    let after = read_after_action(super::element::is_element_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    ))
+    .await?;
+    match after {
+        None => outcome.verified = false,
+        Some(checked) if checked != want_checked => {
+            let retried = read_after_action(js_click_checkbox(
                 client,
                 session_id,
                 ref_map,
                 selector_or_ref,
                 iframe_sessions,
-            )
+            ))
             .await?;
+            outcome.verified = retried.is_some();
         }
+        Some(_) => {}
     }
-    Ok(position)
+    Ok(outcome)
 }
 
-/// Fallback for when the coordinate-based CDP click did not toggle the
-/// checkbox/radio state. This mirrors how Playwright dispatches clicks
-/// through the DOM rather than via raw Input.dispatchMouseEvent coordinates.
-///
-/// Uses the same follow-label resolution as `is_element_checked`:
-/// 1. If the element is a native input → `.click()` it directly.
-/// 2. If the element is inside a `<label>` → `.click()` the label's `.control`.
-/// 3. If the element has a nested `<input>` → `.click()` that input.
-/// 4. Otherwise → `.click()` the element itself (handles ARIA role controls).
 async fn js_click_checkbox(
     client: &CdpClient,
     session_id: &str,

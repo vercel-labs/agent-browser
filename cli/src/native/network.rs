@@ -76,6 +76,39 @@ pub async fn set_content(client: &CdpClient, session_id: &str, html: &str) -> Re
 // Domain filter
 // ---------------------------------------------------------------------------
 
+/// Error shared by every entry point that accepts an allowlist.
+pub const EMPTY_ALLOWED_DOMAINS_ERROR: &str =
+    "Allowed domains list is empty. Pass at least one domain pattern, or unset \
+AGENT_BROWSER_ALLOWED_DOMAINS or remove allowedDomains from the config to run without containment.";
+
+/// Checks the allowlist the daemon inherited from its environment. A variable
+/// that is set but lists no domain stops the daemon from starting.
+pub fn check_allowed_domains_env() -> Result<(), String> {
+    match std::env::var("AGENT_BROWSER_ALLOWED_DOMAINS") {
+        Ok(raw) => ensure_allowed_domains_not_empty(&[raw])
+            .map_err(|e| format!("AGENT_BROWSER_ALLOWED_DOMAINS: {e}")),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("AGENT_BROWSER_ALLOWED_DOMAINS: the value is not valid UTF-8".to_string())
+        }
+        Err(std::env::VarError::NotPresent) => Ok(()),
+    }
+}
+
+/// Rejects an allowlist that was supplied but holds no domain. An absent
+/// allowlist is not passed here; it means no containment was requested.
+pub fn ensure_allowed_domains_not_empty<S: AsRef<str>>(domains: &[S]) -> Result<(), String> {
+    // Entries may themselves hold comma-separated lists, as DomainFilter reads them.
+    if domains
+        .iter()
+        .flat_map(|d| d.as_ref().split(','))
+        .any(|d| !d.trim().is_empty())
+    {
+        Ok(())
+    } else {
+        Err(EMPTY_ALLOWED_DOMAINS_ERROR.to_string())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DomainFilter {
     pub allowed_domains: Vec<String>,
@@ -89,10 +122,9 @@ impl DomainFilter {
         }
     }
 
+    /// A filter exists only when containment was requested, so an empty list
+    /// allows nothing.
     pub fn is_allowed(&self, hostname: &str) -> bool {
-        if self.allowed_domains.is_empty() {
-            return true;
-        }
         let hostname = hostname.to_lowercase();
         for pattern in &self.allowed_domains {
             if let Some(suffix) = pattern.strip_prefix("*.") {
@@ -108,7 +140,7 @@ impl DomainFilter {
 
     pub fn check_url(&self, url: &str) -> Result<(), String> {
         if self.allowed_domains.is_empty() {
-            return Ok(());
+            return Err(EMPTY_ALLOWED_DOMAINS_ERROR.to_string());
         }
         let parsed = url::Url::parse(url).map_err(|_| format!("Invalid URL: {}", url))?;
         let hostname = parsed
@@ -164,10 +196,6 @@ pub async fn install_domain_filter_script(
     allowed_domains: &[String],
     paused_before_document: bool,
 ) -> Result<(), String> {
-    if allowed_domains.is_empty() {
-        return Ok(());
-    }
-
     let script = domain_filter_script(allowed_domains);
 
     client
@@ -195,30 +223,19 @@ async fn install_domain_filter_runtime_script(
     allowed_domains: &[String],
     paused_before_document: bool,
 ) -> Result<(), String> {
-    if allowed_domains.is_empty() {
+    // An auto-attached target is paused before its first document, so it
+    // has no context to patch; the new-document script above covers it.
+    if paused_before_document {
         return Ok(());
     }
-
     let script = domain_filter_script(allowed_domains);
-    let evaluation = match client
+    let evaluation = client
         .send_command(
             "Runtime.evaluate",
             Some(json!({ "expression": &script })),
             Some(session_id),
         )
-        .await
-    {
-        Ok(evaluation) => evaluation,
-        // An auto-attached target is paused before its first document, so it
-        // has no context to patch; the new-document script above covers it.
-        Err(error)
-            if paused_before_document
-                && error.contains("Cannot find default execution context") =>
-        {
-            return Ok(())
-        }
-        Err(error) => return Err(error),
-    };
+        .await?;
     if let Some(details) = evaluation.get("exceptionDetails") {
         let message = details
             .get("exception")
@@ -694,16 +711,30 @@ mod tests {
         message: &'static str,
         paused_before_document: bool,
     ) -> Result<(), String> {
+        install_script_recording_methods(message, paused_before_document)
+            .await
+            .0
+    }
+
+    async fn install_script_recording_methods(
+        message: &'static str,
+        paused_before_document: bool,
+    ) -> (Result<(), String>, Vec<String>) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
+        let methods = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = methods.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             while let Some(Ok(Message::Text(text))) = ws.next().await {
                 let request: Value = serde_json::from_str(&text).unwrap();
+                seen.lock()
+                    .unwrap()
+                    .push(request["method"].as_str().unwrap_or("").to_string());
                 let mut response = json!({ "id": request["id"] });
                 if request["method"] == "Runtime.evaluate" {
                     response["error"] = json!({ "code": -32000, "message": message });
@@ -724,15 +755,16 @@ mod tests {
         .await;
         drop(client);
         server.abort();
-        result
+        let methods = methods.lock().unwrap().clone();
+        (result, methods)
     }
 
     #[tokio::test]
-    async fn domain_filter_script_skips_targets_without_a_context() {
-        assert_eq!(
-            install_script_with_runtime_error("Cannot find default execution context", true).await,
-            Ok(())
-        );
+    async fn domain_filter_script_does_not_evaluate_in_a_paused_target() {
+        let (result, methods) =
+            install_script_recording_methods("Execution context was destroyed.", true).await;
+        assert_eq!(result, Ok(()));
+        assert_eq!(methods, ["Page.addScriptToEvaluateOnNewDocument"]);
     }
 
     #[tokio::test]
@@ -750,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn domain_filter_script_fails_closed_on_other_runtime_errors() {
-        let error = install_script_with_runtime_error("Execution context was destroyed.", true)
+        let error = install_script_with_runtime_error("Execution context was destroyed.", false)
             .await
             .unwrap_err();
         assert!(
@@ -777,9 +809,26 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_filter_empty() {
-        let filter = DomainFilter::new("");
-        assert!(filter.is_allowed("anything.com"));
+    fn test_domain_filter_empty_allows_nothing() {
+        for list in ["", ",", " , "] {
+            let filter = DomainFilter::new(list);
+            assert!(!filter.is_allowed("anything.com"), "{list:?}");
+            assert_eq!(
+                filter.check_url("http://anything.com/").unwrap_err(),
+                EMPTY_ALLOWED_DOMAINS_ERROR
+            );
+        }
+    }
+
+    #[test]
+    fn test_ensure_allowed_domains_not_empty() {
+        let empty: Vec<String> = Vec::new();
+        assert!(ensure_allowed_domains_not_empty(&empty).is_err());
+        assert!(ensure_allowed_domains_not_empty(&["", "  "]).is_err());
+        assert!(ensure_allowed_domains_not_empty(&[","]).is_err());
+        assert!(ensure_allowed_domains_not_empty(&[" , "]).is_err());
+        assert!(ensure_allowed_domains_not_empty(&["a.example,"]).is_ok());
+        assert!(ensure_allowed_domains_not_empty(&["", "example.com"]).is_ok());
     }
 
     #[test]
