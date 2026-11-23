@@ -5,6 +5,7 @@
 //! waits for the attach, or is ignored, and the Firefox attach code applies
 //! what `reach` calls in place.
 
+use super::running::Connection;
 use super::spec::Key;
 
 /// The engine whose attached browser agent-browser drives over WebDriver BiDi.
@@ -117,5 +118,54 @@ pub fn reach(key: Key, engine: Engine, selects_firefox: bool) -> Reach {
         },
         Where::Engine if selects_firefox => Reach::Launch,
         Where::Engine => Reach::Ignored,
+    }
+}
+
+/// Whether a patch leaves the session on the browser it already drives, or
+/// moves it to another one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transition {
+    Reuse,
+    Replace,
+}
+
+/// The browser a patch lands the session on, decided once before any setting
+/// is, so every setting sees the same destination whatever order the patch
+/// names them in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Destination {
+    pub transition: Transition,
+    pub to: Connection,
+    pub engine: Engine,
+    pub selects_firefox: bool,
+    pub ambient_targets: bool,
+}
+
+impl Destination {
+    /// Whether the patch leaves the session on another browser.
+    pub fn replaces(&self) -> bool {
+        self.transition == Transition::Replace
+    }
+
+    /// Whether the destination is a browser agent-browser does not launch.
+    pub fn is_external(&self) -> bool {
+        self.to != Connection::Local
+    }
+
+    /// What a session attached to the destination does with `key`.
+    pub fn reach(&self, key: Key) -> Reach {
+        if self.to == Connection::Local {
+            return Reach::Launch;
+        }
+        reach(key, self.engine, self.selects_firefox)
+    }
+
+    /// The destination with the engine an attach or a preflight found.
+    pub fn with_engine(&self, engine: Engine) -> Destination {
+        Destination {
+            engine,
+            selects_firefox: self.selects_firefox || engine == Engine::Firefox,
+            ..self.clone()
+        }
     }
 }

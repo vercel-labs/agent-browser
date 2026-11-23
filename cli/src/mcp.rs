@@ -5564,6 +5564,23 @@ mod tests {
     }
 
     #[test]
+    fn open_webgpu_parity_with_an_attached_cdp_session() {
+        let guard =
+            crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_CDP", "AGENT_BROWSER_WEBGPU"]);
+        guard.set("AGENT_BROWSER_CDP", "9222");
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        let args = open_args(&json!({ "webgpu": true, "url": "https://example.com" }))
+            .unwrap()
+            .0;
+        let cli = cli_tool_args(&json!({}), args, None).unwrap();
+        let mut flags = crate::flags::parse_flags(&cli);
+        assert_eq!(flags.cdp.as_deref(), Some("9222"));
+        assert!(flags.webgpu);
+        flags.ca_cert = None;
+        assert_eq!(crate::incompatible_launch_mode_error(&flags), None);
+    }
+
+    #[test]
     fn open_uses_cli_headless_selection_with_custom_windows_chrome() {
         let guard = crate::test_utils::EnvGuard::new(&[
             "AGENT_BROWSER_HEADED",

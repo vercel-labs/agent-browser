@@ -215,7 +215,12 @@ fn media_config(media: &EmulatedMedia) -> Result<Value, String> {
 
 /// Sends an emulation command for the tab `context` in the scope the session uses.
 async fn send_scoped(ff: &FirefoxSession, context: &str, command: Command) -> Result<(), String> {
-    let scope = ff.emulation.settings.read().unwrap().scope(ff.contexts.jar(context));
+    let scope = ff
+        .emulation
+        .settings
+        .read()
+        .unwrap()
+        .scope(ff.contexts.jar(context));
     send_scoped_bidi(&ff.bidi, context, scope, command).await
 }
 
