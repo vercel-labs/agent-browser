@@ -2587,9 +2587,10 @@ exec sleep 60
             .iter()
             .find(|arg| arg.starts_with("--enable-features="))
             .unwrap();
-        assert!(features.contains("WebMCP"));
-        assert!(features.contains("WebMCPTesting"));
-        assert!(features.contains("DevToolsWebMCPSupport"));
+        let features: Vec<&str> = features["--enable-features=".len()..].split(',').collect();
+        for feature in ["WebMCP", "WebMCPTesting", "DevToolsWebMCPSupport"] {
+            assert!(features.contains(&feature), "{features:?}");
+        }
     }
 
     #[test]
@@ -2604,9 +2605,7 @@ exec sleep 60
             .iter()
             .find(|arg| arg.starts_with("--enable-features="))
             .unwrap();
-        assert!(!features.contains("WebMCP"));
-        assert!(!features.contains("WebMCPTesting"));
-        assert!(!features.contains("DevToolsWebMCPSupport"));
+        assert!(!features.contains("WebMCP"), "{features}");
     }
 
     #[test]
