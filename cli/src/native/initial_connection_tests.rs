@@ -510,7 +510,7 @@ async fn frame_fixture() -> (String, tokio::task::JoinHandle<()>) {
 async fn e2e_initial_connection_reads_and_clicks_preloaded_iframes() {
     use super::super::cdp::chrome::{launch_chrome, LaunchOptions};
     let dir = tempfile::tempdir().unwrap();
-    let guard = isolated_env(dir.path());
+    let _guard = isolated_env(dir.path());
     let (url, server) = frame_fixture().await;
     let chrome = tokio::task::spawn_blocking(|| {
         launch_chrome(&LaunchOptions {
@@ -582,11 +582,17 @@ async fn e2e_initial_connection_reads_and_clicks_preloaded_iframes() {
     );
     producer.close().await;
 
-    guard.set("AGENT_BROWSER_CDP", &chrome.ws_url);
+    // Startup ignores AGENT_BROWSER_CDP. Each attaching snapshot names this
+    // preloaded browser, the same way the CLI sends the endpoint on the command.
     let mut state = DaemonState::new();
     for attempt in 0..2 {
-        let snapshot = execute_command(&json!({"action":"snapshot"}), &mut state).await;
+        let snapshot = execute_command(&snapshot_on_cdp(&chrome.ws_url), &mut state).await;
         assert_eq!(snapshot["success"], true, "{snapshot}");
+        assert_eq!(
+            state.browser.as_ref().unwrap().get_cdp_url(),
+            chrome.ws_url.as_str(),
+            "snapshot must attach to the preloaded Chrome"
+        );
         let text = snapshot["data"]["snapshot"].as_str().unwrap();
         let label = if attempt == 0 {
             "Choose metrics"
