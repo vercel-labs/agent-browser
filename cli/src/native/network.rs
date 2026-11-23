@@ -230,19 +230,14 @@ async fn install_domain_filter_runtime_script(
     if paused_before_document {
         return Ok(());
     }
-
     let script = domain_filter_script(allowed_domains);
-    let evaluation = match client
+    let evaluation = client
         .send_command(
             "Runtime.evaluate",
             Some(json!({ "expression": &script })),
             Some(session_id),
         )
-        .await
-    {
-        Ok(evaluation) => evaluation,
-        Err(error) => return Err(error),
-    };
+        .await?;
     if let Some(details) = evaluation.get("exceptionDetails") {
         let message = details
             .get("exception")
@@ -717,6 +712,15 @@ mod tests {
     async fn install_script_with_runtime_error(
         message: &'static str,
         paused_before_document: bool,
+    ) -> Result<(), String> {
+        install_script_recording_methods(message, paused_before_document)
+            .await
+            .0
+    }
+
+    async fn install_script_recording_methods(
+        message: &'static str,
+        paused_before_document: bool,
     ) -> (Result<(), String>, Vec<String>) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
@@ -724,14 +728,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let methods = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let observed_methods = methods.clone();
+        let seen = methods.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             while let Some(Ok(Message::Text(text))) = ws.next().await {
                 let request: Value = serde_json::from_str(&text).unwrap();
-                let method = request["method"].as_str().unwrap().to_string();
-                observed_methods.lock().unwrap().push(method.clone());
+                let method = request["method"].as_str().unwrap_or("").to_string();
+                seen.lock().unwrap().push(method.clone());
                 let mut response = json!({ "id": request["id"] });
                 if method == "Runtime.evaluate" {
                     response["error"] = json!({ "code": -32000, "message": message });
@@ -752,25 +756,22 @@ mod tests {
         .await;
         drop(client);
         server.abort();
-        let recorded = methods.lock().unwrap().clone();
-        (result, recorded)
+        let methods = methods.lock().unwrap().clone();
+        (result, methods)
     }
 
     #[tokio::test]
-    async fn domain_filter_script_skips_targets_without_a_context() {
+    async fn domain_filter_script_does_not_evaluate_in_a_paused_target() {
         let (result, methods) =
-            install_script_with_runtime_error("Cannot find default execution context", true).await;
+            install_script_recording_methods("Execution context was destroyed.", true).await;
         assert_eq!(result, Ok(()));
-        assert_eq!(
-            methods,
-            vec!["Page.addScriptToEvaluateOnNewDocument".to_string()]
-        );
+        assert_eq!(methods, ["Page.addScriptToEvaluateOnNewDocument"]);
     }
 
     #[tokio::test]
     async fn domain_filter_script_fails_closed_without_a_context_on_live_targets() {
         let (result, methods) =
-            install_script_with_runtime_error("Cannot find default execution context", false).await;
+            install_script_recording_methods("Cannot find default execution context", false).await;
         let error = result.unwrap_err();
         assert!(
             error.contains("Cannot find default execution context"),
@@ -788,9 +789,9 @@ mod tests {
 
     #[tokio::test]
     async fn domain_filter_script_fails_closed_on_other_runtime_errors() {
-        let (result, _) =
-            install_script_with_runtime_error("Execution context was destroyed.", false).await;
-        let error = result.unwrap_err();
+        let error = install_script_with_runtime_error("Execution context was destroyed.", false)
+            .await
+            .unwrap_err();
         assert!(
             error.contains("Execution context was destroyed"),
             "{}",

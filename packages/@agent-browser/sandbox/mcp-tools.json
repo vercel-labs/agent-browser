@@ -978,7 +978,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Diff current snapshot against last or baseline.",
+      "description": "Diff current snapshot against the last snapshot or a baseline file. Without a baseline the last snapshot's options are reused; an option that differs fails with baseline_mismatch, and no earlier snapshot fails with no_baseline. A missing baseline file fails with file_not_found; a relative baseline path resolves against the working directory of the caller.",
       "inputSchema": {
         "properties": {
           "baseline": {
@@ -990,12 +990,18 @@
           "depth": {
             "type": "integer"
           },
+          "interactive": {
+            "type": "boolean"
+          },
           "selector": {
             "type": "string"
           },
           "session": {
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
+          },
+          "urls": {
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -1011,7 +1017,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Compare two URLs.",
+      "description": "Compare two URLs. fullPage applies to the screenshot diff and requires screenshot.",
       "inputSchema": {
         "properties": {
           "compact": {
@@ -2302,7 +2308,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Stop HAR capture.",
+      "description": "Stop HAR capture and save it. Fails with no_har_recording when no recording is active, for example after a daemon restart. A relative path resolves against the working directory of the caller.",
       "inputSchema": {
         "properties": {
           "path": {
@@ -4602,7 +4608,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Upload files through a file input.",
+      "description": "Upload files through a file input. Relative paths resolve against the working directory of the caller and `~` expands to the home directory. A missing path fails with file_not_found, a target that is not a file input with not_file_input. A directory is accepted for webkitdirectory inputs. With a browser on another machine, a path missing locally only warns.",
       "inputSchema": {
         "properties": {
           "files": {
