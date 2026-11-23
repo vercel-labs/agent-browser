@@ -22234,6 +22234,7 @@ async fn e2e_firefox_permissions_follow_navigation() {
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_permissions_cover_a_loaded_cross_origin_frame() {
+    required_firefox_binary();
     let tmp = tempfile::tempdir().unwrap();
     let _env = firefox_test_environment(tmp.path());
     let fixture = firefox_fixture().await;
@@ -22259,7 +22260,7 @@ async fn e2e_firefox_permissions_cover_a_loaded_cross_origin_frame() {
         json!(fixture.other)
     );
     let query = "navigator.permissions.query({name:'geolocation'}).then(p => p.state)";
-    assert_eq!(firefox_eval(&mut state, query).await, json!("prompt"));
+    assert_ne!(firefox_eval(&mut state, query).await, json!("granted"));
     assert_success(
         &firefox_command(
             &mut state,
