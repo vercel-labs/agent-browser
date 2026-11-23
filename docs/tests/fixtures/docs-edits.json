@@ -88,6 +88,10 @@
       {
         "from": "agent-browser set device <name>       # Emulate device (\"iPhone 14\")",
         "to": "agent-browser set device <name>       # Emulate a device (\"iPhone 14\"): viewport, user agent and touch input (touch events exist after the next navigation)"
+      },
+      {
+        "from": "not available with Safari or iOS WebDriver sessions",
+        "to": "not available with Safari, iOS, or Ladybird WebDriver sessions"
       }
     ],
     "/configuration": [
@@ -234,6 +238,10 @@
       {
         "from": "All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.",
         "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust."
+      },
+      {
+        "from": "iOS, Safari, and direct-page provider plugins",
+        "to": "iOS, Safari, Ladybird, and direct-page provider plugins"
       }
     ],
     "/init-scripts": [
@@ -434,6 +442,10 @@
       {
         "from": "they fetch the selected tool's schema with webmcp list <tool> --frame <frame-id> --json and invoke it with the same --frame.",
         "to": "they use an announced tool directly, fetch its schema with webmcp list <tool> --frame <frame-id> --json when the description does not show the arguments, and invoke it with the same --frame."
+      },
+      {
+        "from": "Lightpanda, Safari, iOS,",
+        "to": "Lightpanda, Safari, iOS, Ladybird,"
       }
     ],
     "/native-mode": [

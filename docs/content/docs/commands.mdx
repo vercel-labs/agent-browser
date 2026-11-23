@@ -367,7 +367,7 @@ In a browser that agent-browser didn't launch (`--cdp` or `--auto-connect`), a l
 
 `tab keep frozen <tab>` does the opposite: it pauses a background tab completely. Timers, network callbacks, and scripts stop until you switch back to it, which returns it to `throttled`. Freezing five busy background tabs took them from 0.05 CPU cores to zero and reduced memory from 1.70 GB to 1.55 GB. The active tab can't be frozen, and neither can a tab that is still visible, such as one in its own window: switch to another tab first, then freeze it by ref. A session that closes unfreezes the tabs it froze, so a browser you attached to with `--cdp` or `--auto-connect` isn't left with paused tabs. If one can't be unfrozen, the JSON result of `close` names it in `unfreezeError`. Chrome also resumes a frozen tab when anything else shows it, such as another session switching to it or a person clicking it. The session that froze it isn't told, so its `tab list` keeps showing the tab as frozen; run `tab keep throttled <tab>` and then `tab keep frozen <tab>` to freeze it again.
 
-`tab list` marks a tab with `(live)` or `(frozen)`, and `tab list --json` reports `"keep": "live" | "throttled" | "frozen"` for every tab. `tab keep` uses the Chrome DevTools Protocol, so it isn't available on the WebDriver backend (Safari, iOS).
+`tab list` marks a tab with `(live)` or `(frozen)`, and `tab list --json` reports `"keep": "live" | "throttled" | "frozen"` for every tab. `tab keep` uses the Chrome DevTools Protocol, so it isn't available on the WebDriver backend (Safari, iOS, Ladybird).
 
 ### Snapshot deltas
 
@@ -665,7 +665,7 @@ See [React & Web Vitals](/react) for full command details and examples.
 
 ## Accessibility audits
 
-Run an embedded axe-core audit against the current page or navigate to a URL first. The vendored engine works without a CDN request and runs under strict page CSP. It runs private partial audits across the page's frame tree and merges serialized results without page messaging, so page-provided `window.axe` values remain intact and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions.
+Run an embedded axe-core audit against the current page or navigate to a URL first. The vendored engine works without a CDN request and runs under strict page CSP. It runs private partial audits across the page's frame tree and merges serialized results without page messaging, so page-provided `window.axe` values remain intact and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari, iOS, or Ladybird WebDriver sessions.
 
 ```bash
 agent-browser a11y                                 # Audit the current page
