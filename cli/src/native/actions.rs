@@ -737,6 +737,9 @@ pub struct DaemonState {
     /// Last document URL the domain filter blocked, keyed by frame ID, so
     /// navigation can report a redirect that landed on the blocked page.
     pub blocked_documents: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    /// Address rules for the tab a `poppy join` is running in, checked by the
+    /// fetch handler before each of its requests is sent.
+    pub poppy_guard: Arc<RwLock<Option<super::poppy::JoinGuard>>>,
     /// Proxy authentication credentials (username, password) for handling
     /// Fetch.authRequired events from authenticated proxies.
     pub proxy_credentials: Arc<RwLock<Option<(String, String)>>>,
@@ -975,6 +978,7 @@ impl DaemonState {
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             blocked_documents: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            poppy_guard: Arc::new(RwLock::new(None)),
             proxy_credentials: Arc::new(RwLock::new(None)),
             fetch_handler_task: None,
             dialog_handler_task: None,
@@ -1084,6 +1088,7 @@ impl DaemonState {
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
         let blocked_documents = self.blocked_documents.clone();
+        let poppy_guard = self.poppy_guard.clone();
         let proxy_credentials = self.proxy_credentials.clone();
         let capture_session = self.recording_state.capture_session.clone();
 
@@ -1210,6 +1215,23 @@ impl DaemonState {
                             session_id: sid,
                             request_headers,
                         };
+
+                        let guard = poppy_guard.read().await.clone();
+                        if let Some(guard) = guard.filter(|g| g.guards(&paused.session_id)) {
+                            if !guard.admits(&paused.url).await {
+                                let _ = client
+                                    .send_command(
+                                        "Fetch.failRequest",
+                                        Some(json!({
+                                            "requestId": paused.request_id,
+                                            "errorReason": "BlockedByClient"
+                                        })),
+                                        Some(&paused.session_id),
+                                    )
+                                    .await;
+                                continue;
+                            }
+                        }
 
                         let df = domain_filter.read().await;
                         let rt = routes.read().await;
@@ -14572,7 +14594,8 @@ async fn build_fetch_patterns(state: &DaemonState) -> Vec<Value> {
     let has_domain_filter = state.domain_filter.read().await.is_some();
     let has_origin_headers = !state.origin_headers.read().await.is_empty();
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-    if (has_domain_filter || has_origin_headers || has_proxy_creds)
+    let has_poppy_guard = state.poppy_guard.read().await.is_some();
+    if (has_domain_filter || has_origin_headers || has_proxy_creds || has_poppy_guard)
         && !patterns.iter().any(|p| p["urlPattern"] == "*")
     {
         patterns.push(json!({ "urlPattern": "*" }));
@@ -14589,6 +14612,28 @@ async fn build_fetch_enable_params(state: &DaemonState, patterns: Vec<Value>) ->
     } else {
         json!({ "patterns": patterns })
     }
+}
+
+/// Enables or disables Fetch interception on `session_id` to match the
+/// current routes, domain filter, origin headers, proxy credentials and
+/// `poppy join` guard.
+pub(super) async fn sync_fetch_interception(
+    state: &DaemonState,
+    session_id: &str,
+) -> Result<(), String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let patterns = build_fetch_patterns(state).await;
+    if patterns.is_empty() {
+        mgr.client
+            .send_command("Fetch.disable", None, Some(session_id))
+            .await?;
+    } else {
+        let params = build_fetch_enable_params(state, patterns).await;
+        mgr.client
+            .send_command("Fetch.enable", Some(params), Some(session_id))
+            .await?;
+    }
+    Ok(())
 }
 
 fn parse_route_response(cmd: &Value) -> Option<RouteResponse> {

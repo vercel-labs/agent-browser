@@ -4802,7 +4802,10 @@ Personal Agent Protocol (experimental):
                              and browser-bound, and may appear spent in network requests
                              and HAR. Discovery refuses a document or endpoint that is not
                              HTTPS or that reaches a non-public address, unless the join
-                             started on a loopback host
+                             started on a loopback host. Until the join ends, every request
+                             the tab makes, redirects included, is held to the same rules
+                             before it is sent, and a refused request fails the join with
+                             request_blocked
 
 Saved flows (experimental, open the session with --capture flow):
   flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed

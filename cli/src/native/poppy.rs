@@ -6,6 +6,7 @@
 //! confirmation and the session's domain allowlist apply before any request.
 
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::{timeout_at, Instant};
 
@@ -28,6 +29,87 @@ const SUBMIT: &str = "(() => { const i = document.querySelector('form input[name
 
 fn fail(code: &str, message: impl std::fmt::Display) -> String {
     format!("{}{}: {}", ERROR_PREFIX, code, message)
+}
+
+/// Holds every request of the join tab to the endpoint's address rules while
+/// the join runs. The fetch handler asks it before a request, a redirect hop
+/// included, is sent, and fails a refused one, so nothing reaches the refused
+/// address. The first refusal fails the join.
+#[derive(Clone)]
+pub struct JoinGuard {
+    session_id: String,
+    local: bool,
+    deadline: Instant,
+    blocked: Arc<Mutex<Option<String>>>,
+}
+
+impl JoinGuard {
+    fn new(session_id: &str, local: bool, deadline: Instant) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            local,
+            deadline,
+            blocked: Arc::default(),
+        }
+    }
+
+    pub(super) fn guards(&self, session_id: &str) -> bool {
+        self.session_id == session_id
+    }
+
+    /// Whether the tab may request `url`; a refusal is recorded for the join.
+    pub(super) async fn admits(&self, url: &str) -> bool {
+        match crate::poppy::check_request(url, self.local, self.deadline).await {
+            Ok(()) => true,
+            Err(e) => {
+                self.block(e.message);
+                false
+            }
+        }
+    }
+
+    fn block(&self, message: String) {
+        let mut blocked = self.blocked.lock().unwrap_or_else(|e| e.into_inner());
+        if blocked.is_none() {
+            *blocked = Some(message);
+        }
+    }
+
+    fn blocked(&self) -> Option<String> {
+        self.blocked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Fails the join if a request was refused or a response came from a
+    /// refused address, so the join stops before its next step.
+    fn checkpoint(
+        &self,
+        responses: &mut tokio::sync::mpsc::UnboundedReceiver<super::cdp::types::CdpEvent>,
+    ) -> Result<(), String> {
+        while let Ok(event) = responses.try_recv() {
+            if event.session_id.as_deref() != Some(self.session_id.as_str()) {
+                continue;
+            }
+            let response = event.params.get("response");
+            let url = response
+                .and_then(|r| r.get("url"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let remote = response
+                .and_then(|r| r.get("remoteIPAddress"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Err(e) = crate::poppy::check_connected_address(url, remote) {
+                self.block(e.message);
+            }
+        }
+        match self.blocked() {
+            Some(message) => Err(fail("request_blocked", message)),
+            None => Ok(()),
+        }
+    }
 }
 
 fn same_resource(a: &str, b: &str) -> bool {
@@ -107,40 +189,61 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
         .active_session_id()?
         .to_string();
 
-    let join = run_join(
-        state,
-        &discovery.endpoint,
-        &authorizer,
-        &discovery.origin,
-        cwd,
-        deadline,
-    );
-    let result = timeout_at(deadline, join).await.unwrap_or_else(|_| {
-        Err(fail(
-            "join_failed",
-            format!(
-                "Timed out after {}ms waiting for the join to finish",
-                timeout_ms
-            ),
-        ))
-    });
+    let guard = JoinGuard::new(&session_id, discovery.local, deadline);
+    *state.poppy_guard.write().await = Some(guard.clone());
+    let result = match super::actions::sync_fetch_interception(state, &session_id).await {
+        Err(e) => Err(fail("join_failed", e)),
+        Ok(()) => {
+            let join = run_join(
+                state,
+                &guard,
+                &discovery.endpoint,
+                &authorizer,
+                &discovery.origin,
+                cwd,
+                deadline,
+            );
+            timeout_at(deadline, join).await.unwrap_or_else(|_| {
+                Err(fail(
+                    "join_failed",
+                    format!(
+                        "Timed out after {}ms waiting for the join to finish",
+                        timeout_ms
+                    ),
+                ))
+            })
+        }
+    };
+    let result = match guard.blocked() {
+        Some(message) => Err(fail("request_blocked", message)),
+        None => result,
+    };
     if result.is_err() {
         leave_join_page(state, &session_id).await;
     }
+    *state.poppy_guard.write().await = None;
+    let _ = super::actions::sync_fetch_interception(state, &session_id).await;
     result
 }
 
 async fn run_join(
     state: &mut DaemonState,
+    guard: &JoinGuard,
     endpoint: &str,
     authorizer: &str,
     origin: &str,
     cwd: Option<&str>,
     deadline: Instant,
 ) -> Result<Value, String> {
-    super::actions::handle_navigate(&json!({ "url": endpoint }), state)
-        .await
-        .map_err(|e| fail("join_failed", e))?;
+    let mut responses = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .client
+        .subscribe_methods(&["Network.responseReceived"]);
+    let navigated = super::actions::handle_navigate(&json!({ "url": endpoint }), state).await;
+    guard.checkpoint(&mut responses)?;
+    navigated.map_err(|e| fail("join_failed", e))?;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let page = mgr
         .evaluate(READ_CODE, None)
@@ -160,6 +263,7 @@ async fn run_join(
         .filter(|c| !c.is_empty())
         .map(str::to_string)
         .ok_or_else(|| fail("join_failed", "The browser session page has no code form"))?;
+    guard.checkpoint(&mut responses)?;
 
     let input = json!({
         "code": code,
@@ -207,6 +311,7 @@ async fn run_join(
     let url = timeout_at(deadline, wait)
         .await
         .map_err(|_| fail("join_failed", "Timed out waiting for the join to finish"))??;
+    guard.checkpoint(&mut responses)?;
     // A Company's error page stays on the endpoint; success leaves it.
     if same_resource(&url, endpoint) {
         return Err(fail(

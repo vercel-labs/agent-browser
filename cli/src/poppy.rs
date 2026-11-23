@@ -46,6 +46,9 @@ pub struct Target {
 pub struct Discovery {
     pub origin: String,
     pub endpoint: String,
+    /// Whether discovery started on this machine, which admits plain HTTP to
+    /// loopback hosts and non-public addresses for local testing.
+    pub local: bool,
 }
 
 /// `host` plus `:port` when the port is explicit and not the scheme default.
@@ -57,13 +60,43 @@ fn host_with_port(url: &Url) -> Option<String> {
     })
 }
 
+#[cfg(test)]
+pub(crate) static TEST_PUBLIC_ADDRESS: std::sync::Mutex<Option<IpAddr>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn public_for_test(ip: IpAddr) -> bool {
+    *TEST_PUBLIC_ADDRESS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        == Some(ip)
+}
+
+#[cfg(not(test))]
+fn public_for_test(_ip: IpAddr) -> bool {
+    false
+}
+
+fn non_public(ip: IpAddr) -> bool {
+    is_non_public(ip) && !public_for_test(ip)
+}
+
+fn host_ip(url: &Url) -> Option<IpAddr> {
+    match url.host()? {
+        url::Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
+        url::Host::Ipv6(ip) => Some(IpAddr::V6(ip)),
+        url::Host::Domain(_) => None,
+    }
+}
+
 /// HTTPS, or plain HTTP to a loopback host when the join started on this
 /// machine, for local testing.
 fn check_scheme(url: &Url, local: bool) -> Result<(), JoinError> {
     let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1"));
+    let test_public = host_ip(url).is_some_and(public_for_test);
     match url.scheme() {
         "https" => Ok(()),
-        "http" if loopback && local => Ok(()),
+        "http" if (loopback && local) || test_public => Ok(()),
         _ => Err(discovery_failed(format!("{} is not an HTTPS URL", url))),
     }
 }
@@ -76,8 +109,8 @@ fn started_locally(start: &Url) -> bool {
             let name = name.trim_end_matches('.').to_ascii_lowercase();
             name == "localhost" || name.ends_with(".localhost")
         }
-        Some(url::Host::Ipv4(ip)) => is_non_public(IpAddr::V4(ip)),
-        Some(url::Host::Ipv6(ip)) => is_non_public(IpAddr::V6(ip)),
+        Some(url::Host::Ipv4(ip)) => non_public(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => non_public(IpAddr::V6(ip)),
         None => false,
     }
 }
@@ -85,7 +118,7 @@ fn started_locally(start: &Url) -> bool {
 /// A hop reaches public addresses only, unless discovery started locally, and
 /// never a link-local or cloud metadata address.
 fn admitted(ip: IpAddr, local: bool) -> bool {
-    !is_link_local_or_metadata(ip) && (local || !is_non_public(ip))
+    !is_link_local_or_metadata(ip) && (local || !non_public(ip))
 }
 
 fn check_address(host: &str, ip: IpAddr, local: bool) -> Result<(), JoinError> {
@@ -333,7 +366,65 @@ pub async fn fetch(
     // The caller's guard runs before the address check resolves the name.
     check(&endpoint_url)?;
     check_endpoint(&endpoint_url, local, deadline).await?;
-    Ok(Discovery { origin, endpoint })
+    Ok(Discovery {
+        origin,
+        endpoint,
+        local,
+    })
+}
+
+fn request_blocked(message: String) -> JoinError {
+    JoinError {
+        code: "request_blocked",
+        message,
+    }
+}
+
+/// Holds a request the browser makes during the join to the rules the
+/// endpoint passed in discovery, before it is sent: HTTPS (or WSS) to public
+/// addresses unless the join started locally, and never a link-local or cloud
+/// metadata address. Schemes that make no network request are not checked.
+pub async fn check_request(
+    raw: &str,
+    local: bool,
+    deadline: tokio::time::Instant,
+) -> Result<(), JoinError> {
+    let mut url = Url::parse(raw)
+        .map_err(|e| request_blocked(format!("The join would request {}: {}", raw, e)))?;
+    let http_scheme = match url.scheme() {
+        "http" | "https" => None,
+        "ws" => Some("http"),
+        "wss" => Some("https"),
+        _ => return Ok(()),
+    };
+    if let Some(scheme) = http_scheme {
+        url.set_scheme(scheme)
+            .map_err(|_| request_blocked(format!("The join would request {}", raw)))?;
+    }
+    check_endpoint(&url, local, deadline)
+        .await
+        .map_err(|e| request_blocked(format!("The join would request {}: {}", raw, e.message)))
+}
+
+/// Refuses a response the browser received from a link-local or cloud metadata
+/// address. Other non-public addresses are not refused here, because a proxy
+/// the browser uses can be on one.
+pub fn check_connected_address(url: &str, remote: &str) -> Result<(), JoinError> {
+    let Ok(ip) = remote
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+    else {
+        return Ok(());
+    };
+    if is_link_local_or_metadata(ip) {
+        return Err(request_blocked(format!(
+            "The browser connected to the link-local or cloud metadata address {} for {}",
+            ip.to_canonical(),
+            url
+        )));
+    }
+    Ok(())
 }
 
 /// Reads the document, refusing one larger than `BODY_LIMIT`.
@@ -609,5 +700,50 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, "discovery_failed");
         assert!(err.message.contains("larger than"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_join_request_is_held_to_the_endpoint_rules() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        for (url, local) in [
+            ("http://127.0.0.1:8080/steal", false),
+            ("http://93.184.216.34/", false),
+            ("https://10.0.0.1/", false),
+            ("https://169.254.169.254/latest/meta-data", false),
+            ("https://169.254.169.254/latest/meta-data", true),
+            ("ws://127.0.0.1:9222/devtools", false),
+            ("http://192.168.1.10/", true),
+            ("not a url", false),
+        ] {
+            let err = check_request(url, local, deadline).await.unwrap_err();
+            assert_eq!(err.code, "request_blocked", "{url}");
+            assert!(err.message.contains("The join would request"), "{url}");
+        }
+        for (url, local) in [
+            ("https://93.184.216.34/join", false),
+            ("wss://93.184.216.34/socket", false),
+            ("http://127.0.0.1:8080/after", true),
+            ("ws://127.0.0.1:8080/socket", true),
+            ("https://10.0.0.1/", true),
+            ("data:text/html,hi", false),
+            ("blob:https://example.com/1", false),
+        ] {
+            assert_eq!(check_request(url, local, deadline).await, Ok(()), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_response_from_a_metadata_address_is_refused() {
+        for remote in ["169.254.169.254", "[fe80::1]", "100.100.100.200"] {
+            let err = check_connected_address("https://example.com/", remote).unwrap_err();
+            assert_eq!(err.code, "request_blocked", "{remote}");
+        }
+        for remote in ["93.184.216.34", "127.0.0.1", "10.0.0.5", "[::1]", ""] {
+            assert_eq!(
+                check_connected_address("https://example.com/", remote),
+                Ok(()),
+                "{remote}"
+            );
+        }
     }
 }

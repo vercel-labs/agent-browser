@@ -19980,3 +19980,269 @@ async fn e2e_flow_a_route_limited_by_resource_type_applies_the_same_on_both_tier
     }
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
+
+struct PublicAddressForTest;
+
+impl PublicAddressForTest {
+    fn set(ip: std::net::IpAddr) -> Self {
+        *crate::poppy::TEST_PUBLIC_ADDRESS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(ip);
+        Self
+    }
+}
+
+impl Drop for PublicAddressForTest {
+    fn drop(&mut self) {
+        *crate::poppy::TEST_PUBLIC_ADDRESS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+async fn read_http_request(stream: &mut tokio::net::TcpStream) -> String {
+    let mut data = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let text = String::from_utf8_lossy(&data).to_string();
+        if let Some(end) = text.find("\r\n\r\n") {
+            let length = text[..end]
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            if data.len() >= end + 4 + length {
+                return text;
+            }
+        }
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => return String::from_utf8_lossy(&data).to_string(),
+            Ok(n) => data.extend_from_slice(&buf[..n]),
+        }
+    }
+}
+
+fn http_response(status: &str, headers: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+struct ForbiddenTarget {
+    origin: String,
+    connections: Arc<AtomicUsize>,
+    requests: Arc<AtomicUsize>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+async fn poppy_forbidden_target() -> ForbiddenTarget {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let connections = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let (connected, requested) = (connections.clone(), requests.clone());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            connected.fetch_add(1, Ordering::SeqCst);
+            let connected_requests = requested.clone();
+            tokio::spawn(async move {
+                if read_http_request(&mut stream).await.is_empty() {
+                    return;
+                }
+                connected_requests.fetch_add(1, Ordering::SeqCst);
+                let response = http_response(
+                    "200 OK",
+                    "Content-Type: text/html\r\n",
+                    "<p>internal service</p>",
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    ForbiddenTarget {
+        origin,
+        connections,
+        requests,
+        server,
+    }
+}
+
+enum PoppyJoinPage {
+    Redirect(String),
+    Html(String),
+}
+
+const POPPY_FORM: &str =
+    r#"<form method="post" action="/join"><input name="code" value="bc_e2e_code"></form>"#;
+
+async fn poppy_site(
+    bind: &str,
+    join_page: PoppyJoinPage,
+    submit_location: String,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let origin = format!("http://{host}");
+    let discovery = json!({
+        "protocol_version": "1.0",
+        "organization": { "domain": host },
+        "web": { "browser_session_endpoint": format!("{origin}/join") },
+    })
+    .to_string();
+    let join_page = Arc::new(join_page);
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let request = read_http_request(&mut stream).await;
+            let response = if request.starts_with("GET /.well-known/poppy.json ") {
+                http_response("200 OK", "Content-Type: application/json\r\n", &discovery)
+            } else if request.starts_with("GET /join ") {
+                match join_page.as_ref() {
+                    PoppyJoinPage::Redirect(location) => {
+                        http_response("302 Found", &format!("Location: {location}\r\n"), "")
+                    }
+                    PoppyJoinPage::Html(html) => {
+                        http_response("200 OK", "Content-Type: text/html\r\n", html)
+                    }
+                }
+            } else if request.starts_with("POST /join ") {
+                http_response("302 Found", &format!("Location: {submit_location}\r\n"), "")
+            } else {
+                http_response("200 OK", "Content-Type: text/html\r\n", "<p>joined</p>")
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    (origin, server)
+}
+
+async fn run_poppy_join(origin: &str) -> Value {
+    run_poppy_join_with(origin, "echo '{\"signed_in\":true}'").await
+}
+
+async fn run_poppy_join_with(origin: &str, authorizer: &str) -> Value {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "poppy_join",
+            "url": origin,
+            "authorizer": authorizer,
+        }),
+        &mut state,
+    )
+    .await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    resp
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_blocks_endpoint_redirect_to_private_address() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    let (origin, site) = poppy_site(
+        "[::1]:0",
+        PoppyJoinPage::Redirect(format!("{}/steal", target.origin)),
+        format!("{}/after", target.origin),
+    )
+    .await;
+    let resp = run_poppy_join(&origin).await;
+    site.abort();
+    target.server.abort();
+    assert_eq!(target.connections.load(Ordering::SeqCst), 0, "{resp}");
+    assert_error_code(&resp, "request_blocked");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_blocks_form_redirect_to_private_address() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    let (origin, site) = poppy_site(
+        "[::1]:0",
+        PoppyJoinPage::Html(POPPY_FORM.to_string()),
+        format!("{}/after", target.origin),
+    )
+    .await;
+    let resp = run_poppy_join(&origin).await;
+    site.abort();
+    target.server.abort();
+    assert_eq!(target.connections.load(Ordering::SeqCst), 0, "{resp}");
+    assert_error_code(&resp, "request_blocked");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_blocks_private_subresources_on_the_endpoint() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    let page = format!(
+        r#"{POPPY_FORM}<img src="{0}/pixel"><iframe src="{0}/frame"></iframe>"#,
+        target.origin
+    );
+    let (origin, site) =
+        poppy_site("[::1]:0", PoppyJoinPage::Html(page), "/done".to_string()).await;
+    let resp = run_poppy_join(&origin).await;
+    site.abort();
+    target.server.abort();
+    assert_eq!(target.requests.load(Ordering::SeqCst), 0, "{resp}");
+    assert_error_code(&resp, "request_blocked");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_blocks_meta_refresh_to_private_address() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    let page = format!(
+        r#"<meta http-equiv="refresh" content="0.3;url={}/refresh">{POPPY_FORM}"#,
+        target.origin
+    );
+    let (origin, site) =
+        poppy_site("[::1]:0", PoppyJoinPage::Html(page), "/done".to_string()).await;
+    let resp = run_poppy_join_with(&origin, "sleep 1; echo '{\"signed_in\":true}'").await;
+    site.abort();
+    target.server.abort();
+    assert_eq!(target.requests.load(Ordering::SeqCst), 0, "{resp}");
+    assert_error_code(&resp, "request_blocked");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_keeps_the_local_testing_exception() {
+    let target = poppy_forbidden_target().await;
+    let (origin, site) = poppy_site(
+        "127.0.0.1:0",
+        PoppyJoinPage::Html(POPPY_FORM.to_string()),
+        format!("{}/after", target.origin),
+    )
+    .await;
+    let resp = run_poppy_join(&origin).await;
+    site.abort();
+    target.server.abort();
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["joined"], true);
+    assert_eq!(get_data(&resp)["url"], format!("{}/after", target.origin));
+    assert!(target.requests.load(Ordering::SeqCst) >= 1, "{resp}");
+}
