@@ -6590,6 +6590,29 @@ async fn prepare_transition(
 ) -> Result<(Option<AttachConnection>, Option<Engine>), String> {
     let provisional = state.settings.plan(patch);
     let connection = provisional.next.connection();
+    let contained = state.settings.security().allowed_domains.is_some()
+        || provisional.next.security().allowed_domains.is_some()
+        || state.domain_filter.read().await.is_some();
+    if let Connection::Cdp(target) = &connection {
+        ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+            contained,
+            cdp_url: Some(target.as_str()),
+            cdp_port: None,
+            auto_connect: false,
+            profile: None,
+            provider_name: None,
+            args: &[],
+            restore_key: None,
+            storage_state: None,
+        })?;
+        let mut options = provisional.next.launch_options();
+        options.ca_cert = provisional
+            .next
+            .get(Key::CaCert)
+            .and_then(Value::as_str)
+            .map(String::from);
+        validate_ca_cert_launch_mode(&options, provisional.next.engine().as_deref(), true)?;
+    }
     let prepared = match &connection {
         Connection::Cdp(target) => {
             let headers = cdp_headers_from_settings(&provisional.next);
@@ -28244,6 +28267,64 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
                     .await
                     .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_under_allowed_domains_never_contacts_the_target() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cases = [
+            json!({
+                "id": "1",
+                "action": "launch",
+                "cdpUrl": format!("ws://127.0.0.1:{port}/devtools/browser/leak?secret=token"),
+            }),
+            json!({
+                "id": "2",
+                "action": "launch",
+                "cdpUrl": format!("ws://127.0.0.1:{port}/session?secret=token"),
+            }),
+            json!({
+                "id": "3",
+                "action": "launch",
+                "cdpPort": port,
+            }),
+            json!({
+                "id": "4",
+                "action": "navigate",
+                "url": "https://example.com",
+                "settings": {
+                    "allowedDomains": ["example.com"],
+                    "cdp": format!("ws://127.0.0.1:{port}/devtools/browser/leak?secret=token"),
+                },
+            }),
+        ];
+
+        for (index, cmd) in cases.iter().enumerate() {
+            let (_env, mut state) = isolated_state();
+            if index < 3 {
+                state
+                    .settings
+                    .set(Key::AllowedDomains, json!(["example.com"]));
+                *state.domain_filter.write().await =
+                    Some(crate::native::network::DomainFilter::new("example.com"));
+            }
+            let resp = execute_command(cmd, &mut state).await;
+            assert_eq!(resp["success"], false, "{resp}");
+            assert!(
+                resp["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("--allowed-domains"),
+                "{resp}"
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "allowlisted connect contacted the target endpoint for {cmd}"
             );
         }
     }
