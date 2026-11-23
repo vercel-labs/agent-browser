@@ -352,6 +352,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .emulation
+                    .settings
                     .read()
                     .unwrap()
                     .user_agent

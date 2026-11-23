@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -28,11 +28,36 @@ pub struct ClickResult {
 
 pub struct PendingRelease {
     pub session_id: String,
+    pub owner_tab: Option<String>,
+    pub blocked: bool,
+    pub owner_position: (f64, f64),
     pub x: f64,
     pub y: f64,
     pub button: MouseButton,
     pub click_count: u8,
     pub modifiers: Modifiers,
+}
+
+impl PendingRelease {
+    /// The tab that owns this hold: the cached tab, or the context itself when none was cached.
+    pub fn owner_tab(&self) -> &str {
+        self.owner_tab.as_deref().unwrap_or(&self.session_id)
+    }
+
+    /// True when this hold's owning tab is among the contexts that left the tree.
+    pub fn tab_removed(&self, removed: &HashSet<String>) -> bool {
+        removed.contains(self.owner_tab())
+    }
+
+    /// True when the context this hold was recorded for left the tree while its tab stayed.
+    pub fn context_removed(&self, removed: &HashSet<String>) -> bool {
+        removed.contains(&self.session_id)
+    }
+
+    /// Clears the bit this hold kept pressed.
+    pub fn clear_pressed(&self, buttons: &mut i32) {
+        *buttons &= !self.button.mask();
+    }
 }
 
 pub async fn click(
@@ -1219,6 +1244,9 @@ async fn dispatch_click(
                 pending_release: match current {
                     ClickPhase::Press(n) => Some(PendingRelease {
                         session_id: session_id.to_string(),
+                        owner_tab: None,
+                        blocked: true,
+                        owner_position: (x, y),
                         x,
                         y,
                         button: spec.button,

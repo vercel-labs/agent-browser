@@ -181,6 +181,25 @@ impl Patch {
         patch
     }
 
+    /// This patch with a launch envelope layered over it. The envelope is what
+    /// the command itself asked for, so it wins on a key both name, and a
+    /// target it names is never left ambient.
+    pub fn with_envelope(&self, envelope: &Patch) -> Patch {
+        let mut patch = self.clone();
+        for key in envelope.entries.keys() {
+            patch.ambient.remove(key);
+        }
+        patch.entries.extend(
+            envelope
+                .entries
+                .iter()
+                .map(|(key, value)| (*key, value.clone())),
+        );
+        patch.ambient.extend(envelope.ambient.iter().copied());
+        patch.relaunch |= envelope.relaunch;
+        patch
+    }
+
     fn retain_ambient(&mut self) {
         let entries = &self.entries;
         self.ambient.retain(|key| entries.contains_key(key));

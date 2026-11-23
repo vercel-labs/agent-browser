@@ -3,13 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 use super::client::BidiClient;
 use super::contexts::Contexts;
 use super::input::{self, Origin};
 use super::tabs;
-use crate::native::stream::{FrameMetadata, StreamServer};
+use crate::native::stream::{FirefoxTabs, FrameMetadata, StreamServer};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TAB_INTERVAL: Duration = Duration::from_secs(1);
@@ -25,11 +25,13 @@ pub struct FirefoxLive {
     pub modifiers: Arc<Mutex<HashMap<String, u8>>>,
 }
 
-/// Owns the only task that serves the Firefox dashboard, and the channel that tells it what to show.
+/// Owns the only task that serves the Firefox dashboard, and the channels that tell it what to show.
 pub struct Poller {
     task: tokio::task::JoinHandle<()>,
     target: watch::Sender<Option<FirefoxLive>>,
     bidi: Arc<BidiClient>,
+    tabs: Arc<FirefoxTabs>,
+    registration: u64,
 }
 
 impl Poller {
@@ -47,6 +49,7 @@ impl Poller {
 impl Drop for Poller {
     fn drop(&mut self) {
         self.task.abort();
+        self.tabs.detach(self.registration);
     }
 }
 
@@ -54,10 +57,15 @@ impl Drop for Poller {
 pub fn spawn_poller(live: FirefoxLive, server: Arc<StreamServer>) -> Poller {
     let bidi = Arc::clone(&live.bidi);
     let (target, receiver) = watch::channel(Some(live));
+    let tabs = server.firefox_tabs();
+    let (requests, request_rx) = mpsc::unbounded_channel();
+    let registration = tabs.attach(requests);
     Poller {
-        task: tokio::spawn(poll(server, receiver)),
+        task: tokio::spawn(poll(server, receiver, request_rx)),
         target,
         bidi,
+        tabs,
+        registration,
     }
 }
 
@@ -68,15 +76,35 @@ struct Shot {
     height: u32,
 }
 
-/// Publishes frames, viewport, tabs and dialog state for the dashboard, and only while one is connected.
-async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<FirefoxLive>>) {
+/// The browsing-context events the live view acts on, so page logs and network traffic cannot
+/// crowd them out of the subscription.
+fn live_view_event(event: &Value) -> bool {
+    matches!(
+        event["method"].as_str(),
+        Some(
+            "browsingContext.contextCreated"
+                | "browsingContext.contextDestroyed"
+                | "browsingContext.userPromptOpened"
+                | "browsingContext.userPromptClosed"
+        )
+    )
+}
+
+/// Publishes frames, viewport, tabs and dialog state for the dashboard: frames only while one is
+/// connected, tabs also whenever `/api/tabs` asks for them.
+async fn poll(
+    server: Arc<StreamServer>,
+    mut target: watch::Receiver<Option<FirefoxLive>>,
+    mut requests: mpsc::UnboundedReceiver<oneshot::Sender<Option<Vec<Value>>>>,
+) {
     let Some(mut live) = target.borrow_and_update().clone() else {
         return;
     };
-    let mut events = live.bidi.subscribe_buffered();
+    let mut events = live.bidi.subscribe_matching(live_view_event);
     let mut prompts = HashSet::<String>::new();
     let mut frame: Option<tokio::task::JoinHandle<Option<Shot>>> = None;
     let mut listing: Option<tokio::task::JoinHandle<Option<Vec<Value>>>> = None;
+    let mut waiting: Vec<oneshot::Sender<Option<Vec<Value>>>> = Vec::new();
     let mut frame_tick = tokio::time::interval(POLL_INTERVAL);
     frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut tab_tick = tokio::time::interval(TAB_INTERVAL);
@@ -130,9 +158,19 @@ async fn poll(server: Arc<StreamServer>, mut target: watch::Receiver<Option<Fire
                     }
                 }
             }
+            Some(reply) = requests.recv() => {
+                waiting.push(reply);
+                if listing.is_none() {
+                    listing = Some(list_tabs(&live));
+                }
+            }
             result = async { listing.as_mut().unwrap().await }, if listing.is_some() => {
                 listing = None;
-                if let Ok(Some(tabs)) = result {
+                let tabs = result.ok().flatten();
+                for reply in waiting.drain(..) {
+                    let _ = reply.send(tabs.clone());
+                }
+                if let Some(tabs) = tabs {
                     server.broadcast_tabs(&tabs).await;
                 }
             }
@@ -352,6 +390,9 @@ pub async fn dispatch_input(live: &FirefoxLive, msg_type: &str, msg: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::native::actions::DaemonState;
+    use crate::native::stream::IdleActivity;
 
     #[test]
     fn a_frame_larger_than_the_cap_is_shrunk_in_proportion() {
@@ -629,5 +670,159 @@ mod tests {
                 ])
             );
         }
+    }
+
+    async fn firefox_http_server(name: &str) -> (Arc<StreamServer>, DaemonState) {
+        let activity = Arc::new(IdleActivity::new());
+        let (server, slot) =
+            StreamServer::start_without_client(0, name.into(), true, Arc::clone(&activity))
+                .await
+                .unwrap();
+        let server = Arc::new(server);
+        let state = DaemonState::new_with_stream(
+            crate::session_settings::Running::defaults(),
+            Arc::new(crate::session_settings::MemStore::default()),
+            Some(slot),
+            Some(Arc::clone(&server)),
+            activity,
+        );
+        (server, state)
+    }
+
+    async fn api_tabs(server: &StreamServer) -> Vec<Value> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .expect("api should connect");
+        let request = format!(
+            "GET /api/tabs HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+            server.port()
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8(response).unwrap();
+        let body = response.split("\r\n\r\n").nth(1).unwrap_or("[]");
+        serde_json::from_str(body).unwrap_or_default()
+    }
+
+    fn titled(request: &Value) -> FakeReply {
+        match request["method"].as_str() {
+            Some("script.callFunction") => FakeReply::Result(json!({
+                "type": "success",
+                "result": {"type": "string", "value": "Title"}
+            })),
+            _ => FakeReply::Result(json!({})),
+        }
+    }
+
+    #[tokio::test]
+    async fn api_tabs_lists_firefox_tabs_without_a_dashboard_client() {
+        let (mut ff, _events, _) = fake_session_with_replies(|request| {
+            if request["method"] == "browsingContext.getTree" {
+                FakeReply::Result(json!({"contexts": [
+                    {"context": "ctx-active", "url": "https://one.test/"},
+                    {"context": "ctx-other", "url": "https://two.test/"}
+                ]}))
+            } else {
+                titled(request)
+            }
+        })
+        .await;
+        ff.contexts
+            .record(&json!({"context": "ctx-other", "url": "https://two.test/"}));
+        let (server, mut state) = firefox_http_server("firefox-api-tabs").await;
+        state.engine = "firefox".into();
+        state.firefox = Some(ff);
+        state.update_stream_client().await;
+
+        let tabs = api_tabs(&server).await;
+
+        assert_eq!(tabs.len(), 2, "{tabs:?}");
+        assert_eq!(tabs[0]["tabId"], json!("t1"));
+        assert_eq!(tabs[0]["active"], json!(true));
+        assert_eq!(tabs[1]["url"], json!("https://two.test/"));
+        assert_eq!(server.cached_tabs().await, tabs);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn api_tabs_replaces_stale_chrome_tabs_after_switching_to_firefox() {
+        let (ff, _events, _) = fake_session_with_replies(|request| {
+            if request["method"] == "browsingContext.getTree" {
+                FakeReply::Result(json!({
+                    "contexts": [{"context": "ctx-active", "url": "https://firefox.test/"}]
+                }))
+            } else {
+                titled(request)
+            }
+        })
+        .await;
+        let (server, mut state) = firefox_http_server("firefox-stale-tabs").await;
+        server
+            .broadcast_tabs(&[json!({
+                "tabId": "t1",
+                "targetId": "chrome-tab",
+                "url": "https://chrome.test/"
+            })])
+            .await;
+
+        state.engine = "firefox".into();
+        state.firefox = Some(ff);
+        state.update_stream_client().await;
+
+        let tabs = api_tabs(&server).await;
+
+        assert_eq!(tabs.len(), 1, "{tabs:?}");
+        assert_eq!(tabs[0]["url"], json!("https://firefox.test/"));
+        assert!(tabs
+            .iter()
+            .all(|tab| tab["targetId"] != json!("chrome-tab")));
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn api_tabs_reflects_new_popup_tabs_without_a_dashboard_client() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let popup_open = Arc::new(AtomicBool::new(false));
+        let opened = Arc::clone(&popup_open);
+        let (ff, events, _) = fake_session_with_replies(move |request| {
+            if request["method"] != "browsingContext.getTree" {
+                return titled(request);
+            }
+            let mut contexts = vec![json!({"context": "ctx-active", "url": "https://one.test/"})];
+            if opened.load(Ordering::Relaxed) {
+                contexts.push(json!({"context": "ctx-popup", "url": "https://popup.test/"}));
+            }
+            FakeReply::Result(json!({ "contexts": contexts }))
+        })
+        .await;
+        let (server, mut state) = firefox_http_server("firefox-popup-tabs").await;
+        state.engine = "firefox".into();
+        state.firefox = Some(ff);
+        state.update_stream_client().await;
+        assert_eq!(api_tabs(&server).await.len(), 1);
+
+        popup_open.store(true, Ordering::Relaxed);
+        events
+            .send(json!({
+                "type": "event",
+                "method": "browsingContext.contextCreated",
+                "params": {"context": "ctx-popup", "url": "https://popup.test/", "parent": null}
+            }))
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut tabs = api_tabs(&server).await;
+        while tabs.len() < 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            tabs = api_tabs(&server).await;
+        }
+
+        assert_eq!(tabs.len(), 2, "{tabs:?}");
+        assert!(tabs.iter().any(|tab| tab["targetId"] == json!("ctx-popup")));
+        server.shutdown().await;
     }
 }

@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 #[cfg(windows)]
 use crate::connection::resolve_port;
@@ -16,6 +16,7 @@ use super::discovery::discover_sessions;
 use super::origin::{
     is_loopback_authority, normalize_host_authority, origin_matches_host, request_header_value,
 };
+use super::FirefoxTabs;
 
 #[derive(Embed)]
 #[folder = "../packages/dashboard/out/"]
@@ -115,6 +116,8 @@ pub(super) async fn handle_http_request(
     peeked: &[u8],
     last_tabs: &Arc<RwLock<Vec<Value>>>,
     last_engine: &Arc<RwLock<String>>,
+    clients: &Arc<Mutex<usize>>,
+    firefox_tabs: &Arc<FirefoxTabs>,
     session_name: &str,
 ) {
     let peeked_len = peeked.len();
@@ -228,11 +231,11 @@ pub(super) async fn handle_http_request(
             discover_sessions().into_bytes(),
         )
     } else if path == "/api/tabs" {
-        let tabs = last_tabs.read().await;
+        let tabs = tabs_for_request(last_tabs, clients, firefox_tabs).await;
         (
             "200 OK",
             "application/json; charset=utf-8",
-            serde_json::to_string(&*tabs)
+            serde_json::to_string(&tabs)
                 .unwrap_or_else(|_| "[]".to_string())
                 .into_bytes(),
         )
@@ -266,6 +269,23 @@ pub(super) async fn handle_http_request(
     );
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.write_all(&body).await;
+}
+
+/// Chrome publishes its tabs as it works, so its cache is authoritative. Firefox is read on demand
+/// whenever no dashboard client is keeping the cache current.
+async fn tabs_for_request(
+    last_tabs: &Arc<RwLock<Vec<Value>>>,
+    clients: &Arc<Mutex<usize>>,
+    firefox_tabs: &Arc<FirefoxTabs>,
+) -> Vec<Value> {
+    let cached = last_tabs.read().await.clone();
+    if *clients.lock().await > 0 && !cached.is_empty() {
+        return cached;
+    }
+    let Some(refresher) = firefox_tabs.refresher() else {
+        return cached;
+    };
+    refresher.request().await.unwrap_or(cached)
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -455,11 +475,22 @@ mod tests {
         let peeked = request.as_bytes().to_vec();
         let last_tabs = Arc::new(RwLock::new(Vec::new()));
         let last_engine = Arc::new(RwLock::new("chrome".to_string()));
+        let clients = Arc::new(Mutex::new(0));
+        let firefox_tabs = Arc::new(FirefoxTabs::default());
         let session_name = session_name.to_string();
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_http_request(stream, &peeked, &last_tabs, &last_engine, &session_name).await;
+            handle_http_request(
+                stream,
+                &peeked,
+                &last_tabs,
+                &last_engine,
+                &clients,
+                &firefox_tabs,
+                &session_name,
+            )
+            .await;
         });
 
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
