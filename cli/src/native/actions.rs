@@ -5378,22 +5378,29 @@ async fn auto_launch_with(
     prepared: Option<AttachConnection>,
 ) -> Result<Value, String> {
     let resumed = state.attached_target.is_some() && cmd.is_null();
-    let result = Box::pin(auto_launch_with_settings(state, plugins, cmd, strict_state)).await;
+    let result = Box::pin(auto_launch_with_settings(
+        state,
+        plugins,
+        cmd,
+        strict_state,
+        prepared,
+    ))
+    .await;
     if result.is_ok() && !resumed {
-        state.attached_target = attached_target_for(&state.settings.connection());
+        state.attached_target = attached_target_for(&state.settings.connection(), &state.engine);
     }
     result
 }
 
 /// The external browser a session's connection setting attaches to, if any.
-fn attached_target_for(connection: &Connection) -> Option<AttachedTarget> {
+fn attached_target_for(connection: &Connection, engine: &str) -> Option<AttachedTarget> {
     let named = match connection {
         Connection::Local => return None,
         Connection::Cdp(cdp) => json!({ "cdpUrl": cdp }),
         Connection::AutoConnect => json!({ "autoConnect": true }),
         Connection::Provider(provider) => json!({ "provider": provider }),
     };
-    AttachedTarget::from_launch_command(&named)
+    AttachedTarget::from_successful_launch(&named, engine)
 }
 
 async fn auto_launch_with_settings(
@@ -5401,6 +5408,7 @@ async fn auto_launch_with_settings(
     plugins: Vec<crate::plugins::PluginConfig>,
     cmd: &Value,
     strict_state: bool,
+    prepared: Option<AttachConnection>,
 ) -> Result<Value, String> {
     if state.attached_target.is_some() && cmd.is_null() {
         let launch = json!({ "action": "launch", "plugins": plugins });
@@ -21505,8 +21513,10 @@ mod tests {
             Vec::new(),
             &cmd,
             false,
+            None,
         ));
-        let outer = std::mem::size_of_val(&auto_launch_with(&mut state, Vec::new(), &cmd, false));
+        let outer =
+            std::mem::size_of_val(&auto_launch_with(&mut state, Vec::new(), &cmd, false, None));
         assert!(
             outer < inner,
             "auto_launch_with embeds the launch future ({outer} >= {inner} bytes)"
