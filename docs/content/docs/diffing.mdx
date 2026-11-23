@@ -38,7 +38,9 @@ agent-browser diff snapshot --baseline before.txt
 agent-browser diff snapshot --selector "#main" --compact
 ```
 
-Without `--baseline`, the command automatically compares against the most recent snapshot taken in the current session. This is the primary use case for agents verifying that an action had the intended effect.
+Without `--baseline`, the command automatically compares against the most recent snapshot taken on this tab. This is the primary use case for agents verifying that an action had the intended effect.
+
+Each `diff snapshot` becomes the baseline for the next one. A bare `diff snapshot` captures with the options of the last snapshot (`-i`, `-s`, `-c`, `-d`, `-u`), so it compares like with like. Naming an option that differs fails with `baseline_mismatch`, and so does a snapshot taken in another frame. With no earlier snapshot on the tab it fails with `no_baseline`. A `--baseline` file that does not exist fails with `file_not_found`, and a relative path resolves against the directory the command runs in.
 
 ### Options
 
@@ -49,8 +51,10 @@ Without `--baseline`, the command automatically compares against the most recent
   <tbody>
     <tr><td><code>-b, --baseline &lt;file&gt;</code></td><td>Path to a saved snapshot file to compare against</td></tr>
     <tr><td><code>-s, --selector &lt;sel&gt;</code></td><td>Scope the current snapshot to a CSS selector or @ref</td></tr>
+    <tr><td><code>-i, --interactive</code></td><td>Interactive elements only</td></tr>
     <tr><td><code>-c, --compact</code></td><td>Use compact snapshot format</td></tr>
     <tr><td><code>-d, --depth &lt;n&gt;</code></td><td>Limit snapshot tree depth</td></tr>
+    <tr><td><code>-u, --urls</code></td><td>Include link URLs</td></tr>
   </tbody>
 </table>
 
@@ -118,6 +122,8 @@ agent-browser diff url https://v1.example.com https://v2.example.com --screensho
 The command navigates to the first URL, captures state, then navigates to the second URL and captures again. Snapshot diff is always included. Screenshot diff requires the `--screenshot` flag.
 
 After completion, the browser remains on the second URL.
+
+`--full` applies to the screenshot diff and fails without `--screenshot`.
 
 ### Options
 
