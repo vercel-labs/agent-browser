@@ -24,14 +24,18 @@ const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(30);
 const SETTLE_JS: &str =
     "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(0))))";
 
-/// Resolves selectors across all open roots, marking collisions for exact accessible-actor lookup.
+/// Resolves selectors across every shadow root, marking collisions for exact accessible-actor lookup.
 /// A text leaf resolves to the element that holds the text when that element has no node of its own.
+/// `closed` pairs each closed shadow root's host with the root, which the page itself cannot reach.
 /// It returns frame windows, so it must run in the sandbox, where a page cannot replace `contentWindow`.
-const RESOLVE_JS: &str = r#"(tree) => {
+const RESOLVE_JS: &str = r#"(tree, closed) => {
+  const closedRoots = new Map(closed || []);
+  const shadowOf = (el) => el.shadowRoot || closedRoots.get(el) || null;
   const roots = [document];
   for (let i = 0; i < roots.length; i++) {
     for (const el of roots[i].querySelectorAll('*')) {
-      if (el.shadowRoot) roots.push(el.shadowRoot);
+      const sr = shadowOf(el);
+      if (sr) roots.push(sr);
     }
   }
   const out = [];
@@ -39,10 +43,11 @@ const RESOLVE_JS: &str = r#"(tree) => {
     for (let node = el; node; node = node.parentNode || node.host) if (node === owner) return true;
     return false;
   };
-  const walk = ([sel, role, kids], owner) => {
+  const walk = ([sel, role, nodeType, kids], owner) => {
     let el = role === 'document' ? document : null;
     let ambiguous = false;
-    if (role !== 'document' && sel && !sel.endsWith('#text')) {
+    const text = nodeType === 3 || (nodeType == null && role === 'text leaf');
+    if (role !== 'document' && sel && !text) {
       for (const root of roots) {
         try {
           const hit = root.querySelector(sel);
@@ -54,8 +59,8 @@ const RESOLVE_JS: &str = r#"(tree) => {
       }
     }
     if (el && owner && !within(el, owner)) { el = null; ambiguous = true; }
-    const text = !!sel && sel.endsWith('#text');
-    out.push([el, role === 'internal frame' && el ? el.contentWindow : null, !!el && el.getRootNode() instanceof ShadowRoot, ambiguous, text ? sel.slice(0, -5) : null]);
+    const holder = text && sel && sel.endsWith('#text') ? sel.slice(0, -5) || null : null;
+    out.push([el, role === 'internal frame' && el ? el.contentWindow : null, !!el && el.getRootNode() instanceof ShadowRoot, ambiguous, holder, owner]);
     for (const k of kids) walk(k, el || owner);
   };
   walk(JSON.parse(tree), null);
@@ -69,15 +74,34 @@ const RESOLVE_JS: &str = r#"(tree) => {
       try { return [...root.querySelectorAll(entry[4])].slice(0, 2); } catch (_) { return []; }
     });
     if (hits.length !== 1 || resolved.has(hits[0])) continue;
+    if (entry[5] && !within(hits[0], entry[5])) continue;
     resolved.add(hits[0]);
     entry[0] = hits[0];
+    entry[2] = hits[0].getRootNode() instanceof ShadowRoot;
   }
-  return out;
+  return out.map(entry => entry.slice(0, 4));
 }"#;
 
-/// Resolves an exact sequence of root-local selectors through shadow hosts.
+/// Lists the hosts that can carry a shadow root below `roots`, which pairs hosts with roots.
+/// A closed root is invisible to the page, so the caller reads it through `includeShadowTree`.
+const CLOSED_SHADOW_HOSTS_JS: &str = r#"(roots) => {
+  const tags = new Set(['article', 'aside', 'blockquote', 'body', 'div', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'main', 'nav', 'p', 'section', 'span']);
+  const queue = roots && roots.length ? roots.map((pair) => pair[1]) : [document];
+  const hosts = [];
+  for (let i = 0; i < queue.length; i++) {
+    for (const el of queue[i].querySelectorAll('*')) {
+      const sr = el.shadowRoot;
+      if (sr) queue.push(sr);
+      else if (el.localName && (el.localName.includes('-') || tags.has(el.localName))) hosts.push(el);
+    }
+  }
+  return hosts;
+}"#;
+
+/// Resolves an exact sequence of root-local selectors through shadow hosts, closed roots included.
 /// It returns a frame window, so it must run in the sandbox like `RESOLVE_JS`.
-const RESOLVE_CHAIN_JS: &str = r#"(input) => {
+const RESOLVE_CHAIN_JS: &str = r#"(input, closed) => {
+  const closedRoots = new Map(closed || []);
   const [chain, role] = JSON.parse(input);
   let root = document;
   let el = null;
@@ -85,12 +109,83 @@ const RESOLVE_CHAIN_JS: &str = r#"(input) => {
     el = root.querySelector(chain[i]);
     if (!el) return [null];
     if (i + 1 < chain.length) {
-      root = el.shadowRoot;
+      root = el.shadowRoot || closedRoots.get(el);
       if (!root) return [null];
     }
   }
   return [el, role === 'internal frame' ? el.contentWindow : null, el.getRootNode() instanceof ShadowRoot];
 }"#;
+
+/// Encodes host and root pairs as the BiDi array of node pairs the resolver scripts read.
+fn closed_shadow_pairs_arg(pairs: &[(String, String)]) -> Value {
+    json!({
+        "type": "array",
+        "value": pairs
+            .iter()
+            .map(|(host, root)| json!({
+                "type": "array",
+                "value": [{"sharedId": host}, {"sharedId": root}],
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Finds the closed shadow roots below `context` and pairs each host with its root.
+/// It walks the hosts of roots it has already found so nested closed roots are covered.
+async fn closed_shadow_roots(
+    ff: &FirefoxSession,
+    context: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for _ in 0..16 {
+        let raw = ff
+            .bidi
+            .send(
+                "script.callFunction",
+                json!({
+                    "functionDeclaration": CLOSED_SHADOW_HOSTS_JS,
+                    "target": {"context": context, "sandbox": SANDBOX},
+                    "arguments": [closed_shadow_pairs_arg(&pairs)],
+                    "awaitPromise": true,
+                    "resultOwnership": "none",
+                    "serializationOptions": {"maxDomDepth": 0, "includeShadowTree": "all"},
+                }),
+            )
+            .await?;
+        if raw["type"] == "exception" {
+            let text = raw["exceptionDetails"]["text"]
+                .as_str()
+                .unwrap_or("script exception");
+            return Err(format!(
+                "Firefox could not read closed shadow roots: {text}"
+            ));
+        }
+        let mut next = Vec::new();
+        for item in raw["result"]["value"].as_array().into_iter().flatten() {
+            if item["value"]["shadowRoot"]["value"]["mode"] != "closed" {
+                continue;
+            }
+            let (Some(host), Some(root)) = (
+                item["sharedId"].as_str(),
+                item["value"]["shadowRoot"]["sharedId"].as_str(),
+            ) else {
+                continue;
+            };
+            if !seen.insert(root.to_string()) {
+                continue;
+            }
+            found.push((host.to_string(), root.to_string()));
+            next.push((host.to_string(), root.to_string()));
+        }
+        if next.is_empty() {
+            break;
+        }
+        pairs = next;
+    }
+    Ok(found)
+}
 
 /// Converts a Firefox DevTools `accessible.snapshot` tree into Chrome-shaped accessibility nodes.
 /// `durable_id` supplies the stable integer stored as `backend_d_o_m_node_id` for each node.
@@ -295,7 +390,12 @@ fn shape(node: &Value) -> Value {
         ("internal frame", _) | (_, None) => Vec::new(),
         (_, Some(c)) => c.iter().map(shape).collect(),
     };
-    json!([node["nodeCssSelector"].as_str().unwrap_or(""), role, kids])
+    json!([
+        node["nodeCssSelector"].as_str().unwrap_or(""),
+        role,
+        node["nodeType"],
+        kids
+    ])
 }
 
 fn resolution_paths(node: &Value, path: &mut Vec<usize>, paths: &mut Vec<Vec<usize>>) {
@@ -422,6 +522,7 @@ async fn resolve_collisions(
     context: &str,
     doc: &mut Value,
     source: &AccessibleSource,
+    closed: &[(String, String)],
     results: &mut [Value],
 ) -> Result<(), String> {
     if !results.iter().any(|result| result[3] == true) {
@@ -451,7 +552,10 @@ async fn resolve_collisions(
                 context,
                 SANDBOX,
                 RESOLVE_CHAIN_JS,
-                vec![json!({"type": "string", "value": json!([chain, role]).to_string()})],
+                vec![
+                    json!({"type": "string", "value": json!([chain, role]).to_string()}),
+                    closed_shadow_pairs_arg(closed),
+                ],
             )
             .await?;
     }
@@ -510,18 +614,29 @@ fn find_context_root<'a>(node: &'a Value, context: &str) -> Option<&'a Value> {
         .find_map(|c| find_context_root(c, context))
 }
 
-/// Runs the shared cursor detection over the document and its open shadow roots, keyed by BiDi `sharedId`.
-async fn cursor_detections(ff: &FirefoxSession, context: &str) -> HashMap<String, Value> {
+/// Runs the shared cursor detection over the document and its shadow roots, keyed by BiDi `sharedId`.
+async fn cursor_detections(
+    ff: &FirefoxSession,
+    context: &str,
+    closed: &[(String, String)],
+) -> HashMap<String, Value> {
     let js = format!(
-        r#"() => {{
-      const scopes = document.body ? [document.body] : [];
+        r#"(closedRoots) => {{
+      const scopes = document.body ? [document.body, ...(closedRoots || [])] : [...(closedRoots || [])];
       for (let i = 0; i < scopes.length; i++)
         for (const el of scopes[i].querySelectorAll('*')) if (el.shadowRoot) scopes.push(el.shadowRoot);
       return scopes.flatMap(scope => ({CURSOR_DETECTION_JS})(scope, null, true));
     }}"#
     );
+    let closed_roots = json!({
+        "type": "array",
+        "value": closed
+            .iter()
+            .map(|(_, root)| json!({"sharedId": root}))
+            .collect::<Vec<_>>(),
+    });
     ff.bidi
-        .call_function(context, &js, None, vec![])
+        .call_function(context, &js, None, vec![closed_roots])
         .await
         .ok()
         .and_then(|found| found.as_array().cloned())
@@ -553,13 +668,19 @@ async fn annotate(
     tab: &str,
     deadline: tokio::time::Instant,
 ) -> Result<(), String> {
+    let closed = closed_shadow_roots(ff, context).await?;
     let arg = json!({"type": "string", "value": shape(doc).to_string()});
     let resolved = ff
         .bidi
-        .call_function_in_sandbox(context, SANDBOX, RESOLVE_JS, vec![arg])
+        .call_function_in_sandbox(
+            context,
+            SANDBOX,
+            RESOLVE_JS,
+            vec![arg, closed_shadow_pairs_arg(&closed)],
+        )
         .await?;
     let mut results = resolved.as_array().cloned().unwrap_or_default();
-    resolve_collisions(ff, context, doc, source, &mut results).await?;
+    resolve_collisions(ff, context, doc, source, &closed, &mut results).await?;
     let mut frames = Vec::new();
     apply(
         doc,
@@ -572,7 +693,7 @@ async fn annotate(
     if annotated.is_none() || document_ids.get(context).map(String::as_str) != annotated {
         return Err("The page changed during the snapshot. Run snapshot again.".into());
     }
-    attach_cursor(doc, &cursor_detections(ff, context).await);
+    attach_cursor(doc, &cursor_detections(ff, context, &closed).await);
     if !frames.is_empty() {
         ff.refresh_frame_tree().await?;
     }
@@ -676,7 +797,7 @@ pub(crate) async fn capture_tree(ff: &mut FirefoxSession, context: &str) -> Resu
         .ok_or_else(|| "The selected frame is no longer in the page. Run frame again.".to_string())
 }
 
-/// Renders the active tab as a Chrome-format snapshot, including iframes and open shadow roots.
+/// Renders the active tab as a Chrome-format snapshot, including iframes and shadow roots.
 pub async fn take_snapshot(
     ff: &mut FirefoxSession,
     options: &SnapshotOptions,
@@ -1298,7 +1419,7 @@ mod tests {
             ]}),
         ]);
         assert_eq!(
-            shape(&tree)[2][1][2],
+            shape(&tree)[3][1][3],
             json!([]),
             "frame children are pruned"
         );
@@ -1428,5 +1549,194 @@ mod tests {
             "The page changed during the snapshot. Run snapshot again."
         );
         assert!(ff.refs.is_empty());
+    }
+
+    fn closed_root(host: &str, root: &str) -> Value {
+        json!({
+            "type": "node",
+            "sharedId": host,
+            "value": {
+                "nodeType": 1,
+                "shadowRoot": {"type": "node", "sharedId": root, "value": {"nodeType": 11, "mode": "closed"}},
+            },
+        })
+    }
+
+    fn open_root(host: &str, root: &str) -> Value {
+        json!({
+            "type": "node",
+            "sharedId": host,
+            "value": {
+                "nodeType": 1,
+                "shadowRoot": {"type": "node", "sharedId": root, "value": {"nodeType": 11, "mode": "open"}},
+            },
+        })
+    }
+
+    #[test]
+    fn shape_keeps_node_type_for_an_element_and_a_text_leaf() {
+        let mut button = leaf("button", "Press", "#text", &[]);
+        button["nodeType"] = json!(1);
+        let mut text = leaf("text leaf", "Press", "#text#text", &[]);
+        text["nodeType"] = json!(3);
+
+        let shaped = shape(&page(vec![button, text]));
+
+        assert_eq!(shaped[3][0], json!(["#text", "button", 1, []]));
+        assert_eq!(shaped[3][1], json!(["#text#text", "text leaf", 3, []]));
+    }
+
+    #[tokio::test]
+    async fn closed_shadow_roots_finds_nested_closed_roots_and_skips_open_ones() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = calls.clone();
+        let level = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (ff, _tx, _methods) =
+            crate::native::firefox::session::tests::fake_session_with_script(move |params| {
+                log.lock().unwrap().push(params.clone());
+                let hosts = match level.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    0 => json!([closed_root("host-1", "sr-1"), open_root("open-host", "sr-open")]),
+                    1 => json!([closed_root("host-2", "sr-2"), closed_root("host-1", "sr-1")]),
+                    _ => json!([]),
+                };
+                json!({"type": "success", "result": {"type": "array", "value": hosts}, "realm": "r"})
+            })
+            .await;
+
+        let roots = closed_shadow_roots(&ff, "ctx-active").await.unwrap();
+
+        assert_eq!(
+            roots,
+            vec![
+                ("host-1".to_string(), "sr-1".to_string()),
+                ("host-2".to_string(), "sr-2".to_string()),
+            ]
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0]["serializationOptions"]["includeShadowTree"], "all");
+        assert_eq!(calls[0]["arguments"][0]["value"], json!([]));
+        assert_eq!(
+            calls[1]["arguments"][0]["value"][0]["value"][1]["sharedId"],
+            "sr-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn annotate_resolves_collisions_through_closed_shadow_roots() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = calls.clone();
+        let (mut ff, _tx, _methods) =
+            crate::native::firefox::session::tests::fake_session_with_script(move |params| {
+                log.lock().unwrap().push(params.clone());
+                let value = match params["functionDeclaration"].as_str().unwrap_or("") {
+                    CLOSED_SHADOW_HOSTS_JS => json!([closed_root("host-1", "sr-1")]),
+                    RESOLVE_JS => json!([
+                        {"type": "array", "value": [
+                            {"type": "node", "sharedId": "doc"},
+                            {"type": "null"},
+                            {"type": "boolean", "value": false},
+                            {"type": "boolean", "value": false},
+                            {"type": "null"},
+                            {"type": "null"}
+                        ]},
+                        {"type": "array", "value": [
+                            {"type": "null"},
+                            {"type": "null"},
+                            {"type": "boolean", "value": false},
+                            {"type": "boolean", "value": true},
+                            {"type": "null"},
+                            {"type": "null"}
+                        ]}
+                    ]),
+                    RESOLVE_CHAIN_JS => json!([
+                        {"type": "node", "sharedId": "closed-btn"},
+                        {"type": "null"},
+                        {"type": "boolean", "value": true}
+                    ]),
+                    _ => json!([]),
+                };
+                json!({"type": "success", "result": {"type": "array", "value": value}, "realm": "r"})
+            })
+            .await;
+        let (rdp, mut peer) = crate::native::firefox::rdp::tests::pair().await;
+        tokio::spawn(async move {
+            use crate::native::firefox::rdp::tests::{get, put};
+            loop {
+                let request = get(&mut peer).await;
+                let reply = match (request["to"].as_str(), request["type"].as_str()) {
+                    (Some("i"), Some("getWalker")) => {
+                        json!({"from": "i", "walker": {"actor": "w"}})
+                    }
+                    (Some("a"), Some("children")) => {
+                        json!({"from": "a", "children": [{"actor": "n0"}]})
+                    }
+                    (Some("w"), Some("getNodeFromActor")) => {
+                        json!({"from": "w", "node": {
+                            "node": {"actor": "d0", "nodeType": 1, "parent": "sr0"},
+                            "newParents": [
+                                {"actor": "sr0", "nodeType": 11, "isShadowRoot": true, "host": "h0"},
+                                {"actor": "h0", "nodeType": 1, "parent": "doc0"},
+                                {"actor": "doc0", "nodeType": 9}
+                            ]
+                        }})
+                    }
+                    (Some("d0"), Some("getUniqueSelector")) => {
+                        json!({"from": "d0", "value": ".btn"})
+                    }
+                    (Some("h0"), Some("getUniqueSelector")) => {
+                        json!({"from": "h0", "value": "#host"})
+                    }
+                    _ => json!({"from": request["to"]}),
+                };
+                let last = request["to"] == "h0" && request["type"] == "getUniqueSelector";
+                put(&mut peer, reply).await;
+                if last {
+                    break;
+                }
+            }
+        });
+        ff.rdp = rdp;
+        let document_ids = HashMap::from([("ctx-active".to_string(), "doc".to_string())]);
+        let source = AccessibleSource {
+            actor: "a".into(),
+            inspector: "i".into(),
+            path: Vec::new(),
+        };
+        let mut doc = page(vec![leaf("button", "Shadow", ".btn", &[])]);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+
+        annotate(
+            &mut ff,
+            "ctx-active",
+            &document_ids,
+            &mut doc,
+            &source,
+            "tab",
+            deadline,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(doc["abSid"], "doc");
+        assert_eq!(doc["children"][0]["abSid"], "closed-btn");
+        assert_eq!(doc["children"][0]["abShadow"], true);
+        let calls = calls.lock().unwrap();
+        let resolved = calls
+            .iter()
+            .find(|call| call["functionDeclaration"] == RESOLVE_JS)
+            .unwrap();
+        assert_eq!(
+            resolved["arguments"][1]["value"][0]["value"][1]["sharedId"],
+            "sr-1"
+        );
+        let chained = calls
+            .iter()
+            .find(|call| call["functionDeclaration"] == RESOLVE_CHAIN_JS)
+            .unwrap();
+        assert_eq!(
+            chained["arguments"][1]["value"][0]["value"][1]["sharedId"],
+            "sr-1"
+        );
     }
 }

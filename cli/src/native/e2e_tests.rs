@@ -21120,6 +21120,106 @@ async fn e2e_firefox_window_new_starts_with_an_empty_cookie_jar() {
     );
 }
 
+/// Closed shadow controls resolve to the shadow node despite light namesakes, elements with
+/// `id="text"` keep working refs, and `upload` reports `file_not_found` and `not_file_input`.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_closed_shadow_id_text_and_upload_preconditions() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(
+        &mut state,
+        "data:text/html,\
+        <div id=host><span class=btn>Light</span></div>\
+        <button id=text onclick=\"document.title='id-text-clicked'\">Press text</button>\
+        <input type=file id=file-input>\
+        <div id=not-input></div>\
+        <input type=text id=text-input>\
+        <script>\
+          const s = document.getElementById('host').attachShadow({ mode: 'closed' });\
+          s.innerHTML = '<button class=btn onclick=\"document.title=\\'closed-clicked\\'\">Closed button</button><div class=cursor-target style=\"cursor:pointer\" onclick=\"document.title=\\'cursor-clicked\\'\">Closed cursor</div>';\
+        </script>",
+    )
+    .await;
+
+    let closed_ref = firefox_ref(&mut state, "Closed button").await;
+    let text_resp = firefox_act(&mut state, "gettext", &closed_ref, json!({})).await;
+    assert_success(&text_resp);
+    assert_eq!(get_data(&text_resp)["text"], "Closed button");
+    assert_success(&firefox_act(&mut state, "click", &closed_ref, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "closed-clicked");
+
+    let snap = firefox_command(
+        &mut state,
+        json!({ "id": "snap-cursor", "action": "snapshot", "cursor": true }),
+    )
+    .await;
+    assert_success(&snap);
+    assert!(
+        get_data(&snap)["snapshot"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Closed cursor"),
+        "cursor-interactive element in closed shadow root should appear in snapshot: {snap}"
+    );
+
+    let id_text_ref = firefox_ref(&mut state, "Press text").await;
+    let id_text = firefox_act(&mut state, "gettext", &id_text_ref, json!({})).await;
+    assert_success(&id_text);
+    assert_eq!(get_data(&id_text)["text"], "Press text");
+    assert_success(&firefox_act(&mut state, "click", &id_text_ref, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "id-text-clicked");
+
+    let missing = tmp.path().join("missing-upload.txt");
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "u1", "action": "upload", "selector": "#file-input", "files": [missing.to_string_lossy()] }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert_eq!(resp["code"], "file_not_found", "{resp}");
+
+    let real = tmp.path().join("sample.txt");
+    std::fs::write(&real, "hello").unwrap();
+    for (selector, expected) in [
+        ("#not-input", "<div>"),
+        ("#text-input", "<input type=text>"),
+    ] {
+        let resp = firefox_command(
+            &mut state,
+            json!({ "id": "u2", "action": "upload", "selector": selector, "files": [real.to_string_lossy()] }),
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(resp["code"], "not_file_input", "{resp}");
+        assert!(
+            resp["error"].as_str().unwrap_or("").contains(expected),
+            "{resp}"
+        );
+    }
+
+    let ok = firefox_command(
+        &mut state,
+        json!({ "id": "u3", "action": "upload", "selector": "#file-input", "files": [real.to_string_lossy()] }),
+    )
+    .await;
+    assert_success(&ok);
+    assert_eq!(get_data(&ok)["uploaded"], 1);
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "document.getElementById('file-input').files[0].name"
+        )
+        .await,
+        "sample.txt"
+    );
+
+    firefox_close(&mut state).await;
+}
+
 /// A cookie set without a path uses the source URL's default path, so it stays scoped to that directory; an explicit path stays scoped.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]

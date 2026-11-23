@@ -14,7 +14,8 @@ use super::input::{
 use super::interact::{act_element, perform_actions, PointerAction};
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
-use crate::native::actions::{raw_key, DaemonState};
+use crate::native::actions::{check_upload_files, raw_key, upload_browser_is_remote, DaemonState};
+use crate::native::browser::ensure_file_input_shape;
 use crate::native::element::{
     click_checkbox_js, decide_check_plan, element_check_probe_js, not_checkable_error, CheckPlan,
     CheckProbe, ELEMENT_CHECKED_JS, ELEMENT_CHECK_CONTROL_JS,
@@ -87,6 +88,9 @@ const FOCUSED_FRAME_CONTEXT_JS: &str = r#"() => {
     while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
     return el && el.matches('iframe,frame') ? el.contentWindow : null;
 }"#;
+
+/// Reads a node's tag name and raw `type` attribute for the file-input check.
+const FILE_INPUT_PROBE_JS: &str = "function() { return { name: this.tagName || '', type: this.getAttribute ? this.getAttribute('type') : null }; }";
 
 fn require<'a>(cmd: &'a Value, key: &str) -> Result<&'a str, String> {
     cmd.get(key)
@@ -542,11 +546,27 @@ pub async fn setvalue(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
 /// Uploads files to a file input with `input.setFiles`.
 pub async fn upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let _ = session(state)?;
     let selector = require(cmd, "selector")?;
     let files = upload_files(cmd);
     let paths = absolute_files(&files);
+    let warning = check_upload_files(&files, upload_browser_is_remote(state))?;
     let target = resolve_target(state, selector).await?;
     let ff = session(state)?;
+    let shape = ff
+        .bidi
+        .call_function_on_in_sandbox(
+            &target.context,
+            SANDBOX,
+            FILE_INPUT_PROBE_JS,
+            target.node_ref(),
+        )
+        .await?;
+    ensure_file_input_shape(
+        selector,
+        shape["name"].as_str().unwrap_or(""),
+        shape["type"].as_str(),
+    )?;
     let params = json!({
         "context": target.context,
         "element": target.node_ref(),
@@ -555,12 +575,16 @@ pub async fn upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     let _ = ff
         .race_prompt(&target.context, ff.bidi.send("input.setFiles", params))
         .await?;
+    if let Some(warning) = warning {
+        state.push_action_warning(&warning);
+    }
     Ok(json!({ "uploaded": files.len(), "selector": selector }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::browser::precondition_code;
     use crate::native::firefox::session::tests::{fake_session, fake_session_with, Calls};
 
     fn state_with(ff: FirefoxSession) -> DaemonState {
@@ -571,6 +595,36 @@ mod tests {
 
     fn script(remote: Value) -> Value {
         json!({ "type": "success", "result": remote })
+    }
+
+    fn file_input_shape(name: &str, input_type: Option<&str>) -> Value {
+        let input_type = match input_type {
+            Some(value) => json!({ "type": "string", "value": value }),
+            None => json!({ "type": "null" }),
+        };
+        json!({
+            "type": "object",
+            "value": [
+                ["name", { "type": "string", "value": name }],
+                ["type", input_type],
+            ],
+        })
+    }
+
+    fn upload_responder(shape: Value) -> impl Fn(&Value) -> Value + Send + 'static {
+        move |req: &Value| match req["method"].as_str() {
+            Some("script.callFunction") => {
+                let js = req["params"]["functionDeclaration"].as_str().unwrap_or("");
+                if js == FILE_INPUT_PROBE_JS {
+                    script(shape.clone())
+                } else if js.starts_with("() =>") {
+                    script(json!({ "type": "node", "sharedId": "node-1" }))
+                } else {
+                    script(json!({ "type": "undefined" }))
+                }
+            }
+            _ => json!({}),
+        }
     }
 
     fn node_responder(req: &Value) -> Value {
@@ -1102,10 +1156,19 @@ mod tests {
 
     #[tokio::test]
     async fn upload_resolves_files_and_reports_how_many_were_set() {
-        let (ff, _tx, calls) = fake_session_with(node_responder).await;
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        std::fs::write(&first, "one").unwrap();
+        std::fs::write(&second, "two").unwrap();
+        let (ff, _tx, calls) =
+            fake_session_with(upload_responder(file_input_shape("INPUT", Some("file")))).await;
         let mut state = state_with(ff);
         let result = upload(
-            &json!({"selector": "input[type=file]", "files": ["a.txt", "/b.txt"]}),
+            &json!({
+                "selector": "input[type=file]",
+                "files": [first.to_string_lossy(), second.to_string_lossy()],
+            }),
             &mut state,
         )
         .await
@@ -1114,6 +1177,61 @@ mod tests {
             result,
             json!({"uploaded": 2, "selector": "input[type=file]"})
         );
-        assert_all(&calls, &["script.callFunction", "input.setFiles"]);
+        assert_all(
+            &calls,
+            &[
+                "script.callFunction",
+                "script.callFunction",
+                "input.setFiles",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_missing_file_returns_file_not_found_without_bidi_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("ghost.txt");
+        let (ff, _tx, calls) =
+            fake_session_with(upload_responder(file_input_shape("INPUT", Some("file")))).await;
+        let mut state = state_with(ff);
+        let error = upload(
+            &json!({
+                "selector": "#f",
+                "files": [missing.to_string_lossy()],
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(precondition_code(&error), Some("file_not_found"), "{error}");
+        assert!(error.contains("does not exist"), "{error}");
+        let made = calls.lock().unwrap().clone();
+        assert!(made.is_empty(), "{made:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_non_file_element_returns_not_file_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("real.txt");
+        std::fs::write(&file, "content").unwrap();
+        for (shape, found) in [
+            (file_input_shape("DIV", None), "<div>"),
+            (file_input_shape("INPUT", Some("text")), "<input type=text>"),
+        ] {
+            let (ff, _tx, calls) = fake_session_with(upload_responder(shape)).await;
+            let mut state = state_with(ff);
+            let error = upload(
+                &json!({
+                    "selector": "#target",
+                    "files": [file.to_string_lossy()],
+                }),
+                &mut state,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(precondition_code(&error), Some("not_file_input"), "{error}");
+            assert!(error.contains(found), "{error}");
+            assert_all(&calls, &["script.callFunction", "script.callFunction"]);
+        }
     }
 }
