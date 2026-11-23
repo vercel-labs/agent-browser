@@ -113,7 +113,7 @@ On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that requ
 
 Firefox cancels an HTTP auth challenge that the session has no credentials for, so the page loads the server's 401 response instead of waiting on a browser prompt. Run `set credentials` before you open the page.
 
-Snapshots list controls inside closed shadow roots, but Firefox cannot act on them, so a command that uses such a ref fails. Pointer commands inside an iframe that has a CSS transform can miss their target.
+Pointer commands inside an iframe that has a CSS transform can miss their target.
 
 `type` focuses the element without clearing its current value. Printable characters are inserted as text; Enter, Tab, and line breaks use key events. Use `fill` to replace the current value.
 
