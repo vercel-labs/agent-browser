@@ -568,3 +568,35 @@ fn close_all_clears_a_corrupt_file_of_a_dead_session() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(!session.settings().exists());
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn daemon_environment_has_no_proxy_credentials() {
+    let session = Session::new();
+    session
+        .command()
+        .env("AGENT_BROWSER_PROXY", "http://proxy.example:8080")
+        .env("AGENT_BROWSER_PROXY_USERNAME", "proxy-user")
+        .env("AGENT_BROWSER_PROXY_PASSWORD", "proxy-pass")
+        .args(["read", "http://127.0.0.1:1/", "--timeout", "1000"])
+        .output()
+        .unwrap();
+    // The read itself fails (the daemon runs without a browser), but it must
+    // still have started the daemon and handed it the settings patch.
+    let pid = session.pid();
+    let environ = fs::read(format!("/proc/{pid}/environ")).unwrap();
+    let env = String::from_utf8_lossy(&environ).replace('\0', "\n");
+    assert!(
+        !env.contains("AGENT_BROWSER_PROXY_USERNAME"),
+        "daemon env leaks the proxy username:\n{env}"
+    );
+    assert!(
+        !env.contains("AGENT_BROWSER_PROXY_PASSWORD"),
+        "daemon env leaks the proxy password:\n{env}"
+    );
+    assert!(
+        env.contains("AGENT_BROWSER_PROXY=http://proxy.example:8080"),
+        "the daemon env should still carry the proxy server URL:\n{env}"
+    );
+    session.kill_daemon();
+}
