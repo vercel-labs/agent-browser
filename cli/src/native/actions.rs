@@ -24152,21 +24152,30 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[test]
     fn test_connection_setting_maps_to_attached_target() {
-        assert_eq!(attached_target_for(&Connection::Local), None);
+        assert_eq!(attached_target_for(&Connection::Local, "chrome"), None);
         assert_eq!(
-            attached_target_for(&Connection::AutoConnect),
+            attached_target_for(&Connection::AutoConnect, "chrome"),
             Some(AttachedTarget::AutoConnect)
         );
         assert_eq!(
-            attached_target_for(&Connection::Cdp("http://0.0.0.0:9222".to_string())),
+            attached_target_for(&Connection::Cdp("http://0.0.0.0:9222".to_string()), "chrome"),
             Some(AttachedTarget::CdpUrl("http://0.0.0.0:9222".to_string()))
         );
         assert_eq!(
-            attached_target_for(&Connection::Provider("Browserless".to_string())),
+            attached_target_for(
+                &Connection::Cdp("ws://127.0.0.1:9222/session".to_string()),
+                "firefox"
+            ),
+            Some(AttachedTarget::Firefox(
+                "ws://127.0.0.1:9222/session".to_string()
+            ))
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Provider("Browserless".to_string()), "chrome"),
             Some(AttachedTarget::Provider("browserless".to_string()))
         );
         assert_eq!(
-            attached_target_for(&Connection::Provider("ios".to_string())),
+            attached_target_for(&Connection::Provider("ios".to_string()), "chrome"),
             None
         );
     }
