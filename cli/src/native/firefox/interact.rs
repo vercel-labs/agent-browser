@@ -730,16 +730,23 @@ pub async fn focus(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         .and_then(Value::as_str)
         .ok_or("Missing 'selector' parameter")?;
     let target = resolve_target(state, selector).await?;
-    session(state)?
-        .bidi
-        .call_function(
+    let ff = session(state)?;
+    let completed = ff
+        .race_prompt(
             &target.context,
-            FOCUS_JS,
-            Some(target.node_ref()),
-            Vec::new(),
+            ff.bidi.call_function(
+                &target.context,
+                FOCUS_JS,
+                Some(target.node_ref()),
+                Vec::new(),
+            ),
         )
         .await?;
-    Ok(json!({ "focused": selector }))
+    let mut value = json!({ "focused": selector });
+    if completed.is_none() {
+        value["dialogOpened"] = json!(true);
+    }
+    Ok(value)
 }
 
 /// Taps a ref or selector with a touch pointer.
@@ -3450,5 +3457,56 @@ mod tests {
             .unwrap();
             assert!(!release.as_ref().unwrap().blocked, "{tracked:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn focus_returns_when_onfocus_opens_a_prompt() {
+        let prompt = json!({
+            "type": "event",
+            "method": "browsingContext.userPromptOpened",
+            "params": { "context": "ctx-active", "type": "alert", "message": "focus" },
+        });
+        let events: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>> =
+            Arc::new(Mutex::new(None));
+        let sender = events.clone();
+        let (mut ff, tx, _) = fake_session_with_replies(move |request| {
+            if request["method"] == "script.callFunction"
+                && request["params"]["functionDeclaration"] == FOCUS_JS
+            {
+                if let Some(tx) = sender.lock().unwrap().as_ref() {
+                    tx.send(prompt.clone()).unwrap();
+                }
+                return None;
+            }
+            if request["method"] == "script.callFunction"
+                && request["params"]["functionDeclaration"] == "() => document"
+            {
+                return Some(
+                    json!({ "type": "success", "result": { "type": "node", "sharedId": "doc" } }),
+                );
+            }
+            Some(json!({ "type": "success", "result": { "type": "boolean", "value": true } }))
+        })
+        .await;
+        *events.lock().unwrap() = Some(tx);
+        ff.auto_dialog
+            .store(false, std::sync::atomic::Ordering::Release);
+        ff.refs
+            .insert(("ctx-active".into(), "sid-1".into(), "doc".into()), 7);
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state
+            .ref_map
+            .add_with_frame("e1".into(), Some(7), "textbox", "Name", None, None);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            focus(&json!({ "selector": "@e1" }), &mut state),
+        )
+        .await
+        .expect("focus must not stall when onfocus opens a prompt")
+        .unwrap();
+        assert_eq!(result["focused"], "@e1");
+        assert_eq!(result["dialogOpened"], true);
     }
 }
