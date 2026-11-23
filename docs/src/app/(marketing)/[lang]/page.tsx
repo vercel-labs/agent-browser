@@ -6,10 +6,14 @@ import { Container } from '@/components/landing/compat';
 import { AgentTweetWall } from '@/components/landing/agent-tweet-wall';
 import { AgentUseCaseTabs, type AgentUseCasesProps } from '@/components/landing/agent-use-case-tabs';
 import { pageMetadata } from '@/lib/page-metadata';
+import { versionedOgImage } from '@/lib/og-version';
 import { siteUrl } from '@/lib/site';
 
 const baseMetadata = pageMetadata('');
-const homeOgImage = '/landing/home-og.png';
+const homeOgAlt = 'Browser automation for any agent';
+// The art is a static file, so its version tracks the card's title; bump the
+// generator version when the artwork itself changes.
+const homeOgImage = versionedOgImage('/landing/home-og.png', homeOgAlt);
 // Messages can download and autoplay a direct MP4 linked from og:video (Apple TN3156).
 // The file name carries a content hash so link preview caches pick up new cuts.
 // Next.js does not resolve og:video against metadataBase, so the URL is absolute.
@@ -27,7 +31,7 @@ export const metadata = {
         url: homeOgImage,
         width: 2400,
         height: 1256,
-        alt: 'Browser automation for any agent',
+        alt: homeOgAlt,
       },
     ],
     videos: [
