@@ -401,9 +401,33 @@ fn known(list: &'static [&'static str], value: &str) -> Option<&'static str> {
         .find(|item| item.eq_ignore_ascii_case(value))
 }
 
+/// Rejects a node that is not `<input type=file>`. The message names the node
+/// only through the fixed tag and input type lists, never through text the page
+/// controls.
+pub(crate) fn ensure_file_input_shape(
+    selector: &str,
+    name: &str,
+    input_type: Option<&str>,
+) -> Result<(), String> {
+    let tag = known(HTML_TAGS, name);
+    if tag == Some("input") && input_type.and_then(|t| known(INPUT_TYPES, t)) == Some("file") {
+        return Ok(());
+    }
+    let found = match (tag, input_type) {
+        (Some("input"), Some(t)) => format!(
+            "<input type={}>",
+            known(INPUT_TYPES, t).unwrap_or("<unknown>")
+        ),
+        (Some(tag), _) => format!("<{tag}>"),
+        (None, _) => "<unknown>".to_string(),
+    };
+    Err(format!(
+        "not_file_input: '{selector}' matched {found}, not an <input type=file>"
+    ))
+}
+
 /// Rejects a node that is not `<input type=file>`; `describe` is the
-/// `DOM.describeNode` result. The message names the node only through the fixed
-/// tag and input type lists, never through text the page controls.
+/// `DOM.describeNode` result.
 fn ensure_file_input(selector: &str, describe: &Value) -> Result<(), String> {
     let node = describe.get("node");
     let name = node
@@ -420,21 +444,7 @@ fn ensure_file_input(selector: &str, describe: &Value) -> Result<(), String> {
                 .and_then(|pair| pair.get(1))
                 .and_then(|v| v.as_str())
         });
-    let tag = known(HTML_TAGS, name);
-    if tag == Some("input") && input_type.and_then(|t| known(INPUT_TYPES, t)) == Some("file") {
-        return Ok(());
-    }
-    let found = match (tag, input_type) {
-        (Some("input"), Some(t)) => format!(
-            "<input type={}>",
-            known(INPUT_TYPES, t).unwrap_or("<unknown>")
-        ),
-        (Some(tag), _) => format!("<{tag}>"),
-        (None, _) => "<unknown>".to_string(),
-    };
-    Err(format!(
-        "not_file_input: '{selector}' matched {found}, not an <input type=file>"
-    ))
+    ensure_file_input_shape(selector, name, input_type)
 }
 
 /// Converts common error messages into AI-friendly, actionable descriptions.
@@ -3446,6 +3456,16 @@ mod tests {
         assert_eq!(precondition_code(&button), Some("not_file_input"));
         // A bare input defaults to type=text.
         assert!(ensure_file_input("#i", &node("INPUT", json!([]))).is_err());
+    }
+
+    #[test]
+    fn ensure_file_input_shape_accepts_a_case_insensitive_type() {
+        assert!(ensure_file_input_shape("#f", "INPUT", Some("FILE")).is_ok());
+        let div = ensure_file_input_shape("#d", "DIV", None).unwrap_err();
+        assert_eq!(
+            div,
+            "not_file_input: '#d' matched <div>, not an <input type=file>"
+        );
     }
 
     #[test]
