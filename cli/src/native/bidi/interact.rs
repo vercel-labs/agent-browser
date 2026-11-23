@@ -3519,16 +3519,18 @@ mod tests {
                 if let Some(tx) = sender.lock().unwrap().as_ref() {
                     tx.send(prompt.clone()).unwrap();
                 }
-                return None;
+                return FakeReply::Silent;
             }
             if request["method"] == "script.callFunction"
                 && request["params"]["functionDeclaration"] == "() => document"
             {
-                return Some(
+                return FakeReply::Result(
                     json!({ "type": "success", "result": { "type": "node", "sharedId": "doc" } }),
                 );
             }
-            Some(json!({ "type": "success", "result": { "type": "boolean", "value": true } }))
+            FakeReply::Result(
+                json!({ "type": "success", "result": { "type": "boolean", "value": true } }),
+            )
         })
         .await;
         *events.lock().unwrap() = Some(tx);
