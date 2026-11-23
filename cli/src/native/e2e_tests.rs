@@ -3738,6 +3738,161 @@ async fn e2e_fill_color_accepts_every_value_chrome_accepts() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_fill_color_refuses_value_a_six_digit_only_input_turns_black() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body><input id='c' type='color' value='%23123456'><script>",
+        "const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');",
+        "Object.defineProperty(HTMLInputElement.prototype, 'value', { configurable: true, get: d.get,",
+        "set(v) { d.set.call(this, this.type === 'color' && !/^%23[0-9a-f]{6}$/i.test(v) ? '' : v); } });",
+        "</script></body></html>"
+    );
+    let mut failures = Vec::new();
+    for (value, expected) in [
+        ("red", None),
+        ("#fff", None),
+        ("#c", None),
+        ("rgb(1, 2, 3)", None),
+        ("#FF0000", Some("#ff0000")),
+        ("black", Some("#000000")),
+        ("#000", Some("#000000")),
+        ("#000000", Some("#000000")),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": "n", "action": "navigate", "url": html }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(
+            &json!({ "id": "x", "action": "fill", "selector": "#c", "value": value }),
+            &mut state,
+        )
+        .await;
+        let held = evaluate_value(&mut state, "c.value").await;
+        let ok = match expected {
+            Some(expected) => {
+                resp["success"] == true && resp["warning"].is_null() && held == expected
+            }
+            None => {
+                resp["success"] == false && resp["code"] == "malformed_value" && held == "#123456"
+            }
+        };
+        if !ok {
+            failures.push(format!("fill {value:?}: {resp} value={held}"));
+        }
+    }
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_form_actions_refuse_control_inside_editable_region() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body><div id='ed' contenteditable>keep",
+        "<select id='s'><option value='a'>A</option></select>",
+        "<button id='b'>B</button></div></body></html>"
+    );
+    let state_js = "JSON.stringify([!!document.getElementById('s'), !!document.getElementById('b'), document.getElementById('s')?.value, document.getElementById('b')?.textContent, [...ed.childNodes].filter(n => n.nodeType === 3).map(n => n.data).join('')])";
+    let mut failures = Vec::new();
+    for selector in ["#s", "#b"] {
+        for (label, cmd) in [
+            (
+                "fill",
+                json!({ "id": "x", "action": "fill", "selector": selector, "value": "WRITTEN" }),
+            ),
+            (
+                "type",
+                json!({ "id": "x", "action": "type", "selector": selector, "text": "WRITTEN" }),
+            ),
+            (
+                "type --clear",
+                json!({ "id": "x", "action": "type", "selector": selector, "text": "WRITTEN", "clear": true }),
+            ),
+        ] {
+            let resp = execute_command(
+                &json!({ "id": "n", "action": "navigate", "url": html }),
+                &mut state,
+            )
+            .await;
+            assert_success(&resp);
+            let resp = execute_command(&cmd, &mut state).await;
+            let after = evaluate_value(&mut state, state_js).await;
+            if resp["success"] != false
+                || resp["code"] != "not_editable"
+                || after != json!("[true,true,\"a\",\"B\",\"keep\"]")
+            {
+                failures.push(format!("{label} {selector}: {resp} -> {after}"));
+            }
+        }
+    }
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_range_compares_with_the_value_the_browser_stored() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body><input id='r' type='range' value='10'>",
+        "<input id='p' type='range' value='10' oninput='this.value = 20'></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "n", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let mut failures = Vec::new();
+    for (selector, value, held, warns) in [
+        ("#r", "50.0", "50", false),
+        ("#r", "3e1", "30", false),
+        ("#p", "50.0", "20", true),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": "x", "action": "fill", "selector": selector, "value": value }),
+            &mut state,
+        )
+        .await;
+        let got = evaluate_value(
+            &mut state,
+            &format!("document.querySelector('{selector}').value"),
+        )
+        .await;
+        if resp["success"] != true || got != held || resp["warning"].is_string() != warns {
+            failures.push(format!("fill {selector} {value:?}: {resp} -> {got}"));
+        }
+    }
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_select_option_label_override_names() {
     let mut state = DaemonState::new();
     let resp = execute_command(

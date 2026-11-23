@@ -156,13 +156,17 @@ pub fn form_error(code: &str, message: impl std::fmt::Display) -> String {
 }
 
 /// An input or textarea is a text control, found by tag first: it inherits
-/// `isContentEditable` from an editable ancestor but uses its value. Only
-/// another element with `isContentEditable` is an editor.
+/// `isContentEditable` from an editable ancestor but uses its value. A select,
+/// option or button inside an editable region keeps its own type; it is an
+/// editor only when it is itself an editing host. Any other element with
+/// `isContentEditable` is an editor.
 macro_rules! editor_js {
     () => {
         r#"
         const isTextControl = (n) => n.localName === 'input' || n.localName === 'textarea';
-        const isEditor = (n) => !isTextControl(n) && !!n.isContentEditable;
+        const isOwnControl = (n) => ['select', 'option', 'optgroup', 'button'].includes(n.localName)
+            && n.contentEditable !== 'true' && n.contentEditable !== 'plaintext-only';
+        const isEditor = (n) => !isTextControl(n) && !isOwnControl(n) && !!n.isContentEditable;
 "#
     };
 }
@@ -658,7 +662,9 @@ struct ValueSet {
 
 /// Sets date, time, color and range inputs directly: Chrome drops inserted
 /// text there. Refuses a value the input would sanitize away. A color input
-/// takes any CSS color Chrome parses and stores it as `#rrggbb`.
+/// takes any CSS color it stores as that color's `#rrggbb`; one it stores as
+/// another color is refused. The result is later compared with the value the
+/// browser stored, not the text given.
 async fn set_value_input(
     client: &CdpClient,
     session_id: &str,
@@ -679,16 +685,27 @@ async fn set_value_input(
         // A range value inside its bounds is set as the browser does, snapped
         // to the step; unparsable or out-of-range values are refused.
         const number = Number(text);
-        const parsesAsColor = () => {
+        const colorAccepted = () => {
             const context = el.ownerDocument.createElement('canvas').getContext('2d');
             if (!context) {
-                return CSS.supports('color', text);
+                return CSS.supports('color', text) && (got !== '#000000' || /^(black|#000|#000000)$/i.test(text));
             }
-            context.fillStyle = '#010203';
-            context.fillStyle = text;
-            return context.fillStyle !== '#010203';
+            const parse = (sentinel) => {
+                context.fillStyle = sentinel;
+                context.fillStyle = text;
+                return context.fillStyle;
+            };
+            const parsed = parse('#010203');
+            if (parsed !== parse('#040506')) {
+                return false;
+            }
+            const rgb = /^rgba?\((\d+), (\d+), (\d+)/.exec(parsed);
+            const hex = parsed.startsWith('#') ? parsed
+                : rgb ? '#' + rgb.slice(1, 4).map((c) => Number(c).toString(16).padStart(2, '0')).join('')
+                : null;
+            return hex !== null ? got === hex : got !== '#000000';
         };
-        const accepted = type === 'color' ? got !== '#000000' || parsesAsColor()
+        const accepted = type === 'color' ? colorAccepted()
             : type === 'range' ? /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(text) && number >= minimum && number <= maximum
             : got !== '' || text === '';
         if (!accepted) {
@@ -697,10 +714,10 @@ async fn set_value_input(
         set.call(el, text);
         el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
-        if (type === 'range' && Number(el.value) !== number) {
+        if (type === 'range' && Number(got) !== number) {
             return { snapped: true };
         }
-        return type === 'color' ? { ok: true, stored: got } : { ok: true };
+        return { ok: true, stored: got };
     }"#
     .replace("/*RETARGET*/", RETARGET_JS);
     let result = call_on(
