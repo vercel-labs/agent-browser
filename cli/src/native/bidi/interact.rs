@@ -2927,13 +2927,16 @@ mod tests {
                 Some("browsingContext.locateNodes") => FakeReply::Result(json!({
                     "nodes": [{ "sharedId": "frame" }]
                 })),
-                Some("script.callFunction")
-                    if params["functionDeclaration"] == FRAME_ORIGIN_JS =>
-                {
-                    FakeReply::Result(frame_origin_reply((0.0, 0.0)))
-                }
                 Some("script.callFunction") if params["this"]["sharedId"] == "frame" => {
-                    FakeReply::Result(located(None))
+                    FakeReply::Result(hop_reply(plain_hop(), false))
+                }
+                Some("script.callFunction")
+                    if params.get("this").is_none()
+                        && params["functionDeclaration"]
+                            .as_str()
+                            .is_some_and(|source| source.contains("innerWidth")) =>
+                {
+                    FakeReply::Result(viewport_reply())
                 }
                 Some("script.callFunction") if params.get("this").is_none() => {
                     FakeReply::Result(json!({
@@ -2941,16 +2944,7 @@ mod tests {
                         "result": { "type": "node", "sharedId": "iframe-btn" }
                     }))
                 }
-                Some("script.callFunction") => FakeReply::Result(json!({
-                    "type": "success",
-                    "result": {
-                        "type": "object",
-                        "value": [
-                            ["x", { "type": "number", "value": 10 }],
-                            ["y", { "type": "number", "value": 12 }],
-                        ]
-                    }
-                })),
+                Some("script.callFunction") => FakeReply::Result(located_at((10.0, 12.0), None)),
                 Some("input.performActions") => {
                     let context = request["params"]["context"].as_str().unwrap_or("");
                     let is_key_up = request["params"]["actions"]
