@@ -57,8 +57,34 @@ impl Drop for PendingCommand<'_> {
 
 type EventPredicate = fn(&Value) -> bool;
 
+#[derive(Clone, Copy)]
+enum EventBuffer {
+    Bounded,
+    Lossless,
+}
+
+/// A subscriber's sending half: bounded by capacity and bytes, or lossless.
+enum EventSender {
+    Bounded(mpsc::Sender<(Value, usize)>),
+    Lossless(mpsc::UnboundedSender<Value>),
+}
+
+impl EventSender {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Bounded(tx) => tx.is_closed(),
+            Self::Lossless(tx) => tx.is_closed(),
+        }
+    }
+}
+
+enum EventReceiver {
+    Bounded(mpsc::Receiver<(Value, usize)>),
+    Lossless(mpsc::UnboundedReceiver<Value>),
+}
+
 struct Subscriber {
-    tx: mpsc::Sender<(Value, usize)>,
+    tx: EventSender,
     queued_bytes: Arc<[AtomicUsize; 2]>,
     lost: Arc<AtomicBool>,
     predicate: Option<EventPredicate>,
@@ -66,18 +92,26 @@ struct Subscriber {
 
 /// A subscriber's event queue. Reading an event frees its share of the queue's byte budget.
 pub struct Events {
-    rx: mpsc::Receiver<(Value, usize)>,
+    rx: EventReceiver,
     queued_bytes: Arc<[AtomicUsize; 2]>,
     lost: Arc<AtomicBool>,
 }
 
 impl Events {
     pub(crate) async fn recv(&mut self) -> Option<Value> {
-        self.rx.recv().await.map(|queued| self.release(queued))
+        let queued = match &mut self.rx {
+            EventReceiver::Bounded(rx) => rx.recv().await,
+            EventReceiver::Lossless(rx) => return rx.recv().await,
+        }?;
+        Some(self.release(queued))
     }
 
     pub(crate) fn try_recv(&mut self) -> Result<Value, mpsc::error::TryRecvError> {
-        self.rx.try_recv().map(|queued| self.release(queued))
+        let queued = match &mut self.rx {
+            EventReceiver::Bounded(rx) => rx.try_recv(),
+            EventReceiver::Lossless(rx) => return rx.try_recv(),
+        }?;
+        Ok(self.release(queued))
     }
 
     pub(crate) fn has_lost_events(&self) -> bool {
@@ -154,21 +188,26 @@ impl BidiClient {
                             if subscriber.predicate.is_some_and(|matches| !matches(&v)) {
                                 return true;
                             }
-                            let queued = &subscriber.queued_bytes[class];
-                            let fits = queued.fetch_add(size, Ordering::Relaxed) + size
-                                <= BUFFERED_EVENT_BYTES[class];
-                            if fits && subscriber.tx.try_send((v.clone(), size)).is_ok() {
-                                return true;
+                            match &subscriber.tx {
+                                EventSender::Lossless(tx) => tx.send(v.clone()).is_ok(),
+                                EventSender::Bounded(tx) => {
+                                    let queued = &subscriber.queued_bytes[class];
+                                    let fits = queued.fetch_add(size, Ordering::Relaxed) + size
+                                        <= BUFFERED_EVENT_BYTES[class];
+                                    if fits && tx.try_send((v.clone(), size)).is_ok() {
+                                        return true;
+                                    }
+                                    queued.fetch_sub(size, Ordering::Relaxed);
+                                    if tx.is_closed() {
+                                        return false;
+                                    }
+                                    if class == 0 {
+                                        lost.store(true, Ordering::Release);
+                                        subscriber.lost.store(true, Ordering::Release);
+                                    }
+                                    class != 0 || subscriber.predicate.is_none()
+                                }
                             }
-                            queued.fetch_sub(size, Ordering::Relaxed);
-                            if subscriber.tx.is_closed() {
-                                return false;
-                            }
-                            if class == 0 {
-                                lost.store(true, Ordering::Release);
-                                subscriber.lost.store(true, Ordering::Release);
-                            }
-                            class != 0 || subscriber.predicate.is_none()
                         });
                     }
                     Some(kind @ ("success" | "error")) => {
@@ -217,18 +256,32 @@ impl BidiClient {
 
     #[allow(dead_code)]
     pub(crate) fn subscribe_buffered(&self) -> Events {
-        self.subscribe_events(None)
+        self.subscribe_events(None, EventBuffer::Bounded)
     }
 
     /// Subscribes to matching events. A non-log overflow closes the subscription.
     pub(crate) fn subscribe_matching(&self, predicate: fn(&Value) -> bool) -> Events {
-        self.subscribe_events(Some(predicate))
+        self.subscribe_events(Some(predicate), EventBuffer::Bounded)
     }
 
-    fn subscribe_events(&self, predicate: Option<EventPredicate>) -> Events {
-        let (tx, rx) = mpsc::channel(BUFFERED_EVENT_CAPACITY);
+    /// Subscribes to matching events that are never dropped and never evict the subscriber.
+    pub(crate) fn subscribe_matching_lossless(&self, predicate: EventPredicate) -> Events {
+        self.subscribe_events(Some(predicate), EventBuffer::Lossless)
+    }
+
+    fn subscribe_events(&self, predicate: Option<EventPredicate>, buffer: EventBuffer) -> Events {
         let queued_bytes = Arc::<[AtomicUsize; 2]>::default();
         let lost = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = match buffer {
+            EventBuffer::Bounded => {
+                let (tx, rx) = mpsc::channel(BUFFERED_EVENT_CAPACITY);
+                (EventSender::Bounded(tx), EventReceiver::Bounded(rx))
+            }
+            EventBuffer::Lossless => {
+                let (tx, rx) = mpsc::unbounded_channel();
+                (EventSender::Lossless(tx), EventReceiver::Lossless(rx))
+            }
+        };
         let mut subscribers = self.buffered_events.lock().unwrap();
         if !self.closed.load(Ordering::Acquire) {
             subscribers.push(Subscriber {
@@ -556,6 +609,45 @@ mod tests {
         }
         assert!(!c.take_event_loss());
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_lossless_subscription_keeps_every_matching_event_past_the_capacity() {
+        let (url, l) = mock().await;
+        let server = tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
+            let m: Value =
+                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            for index in 0..=BUFFERED_EVENT_CAPACITY {
+                let event =
+                    json!({"type":"event","method":"blocked.request","params":{"index":index}});
+                ws.send(Message::Text(event.to_string())).await.unwrap();
+                if index % 1024 == 0 {
+                    let log =
+                        json!({"type":"event","method":"log.entryAdded","params":{"index":index}});
+                    ws.send(Message::Text(log.to_string())).await.unwrap();
+                }
+            }
+            let reply = json!({"type":"success","id":m["id"],"result":{}});
+            ws.send(Message::Text(reply.to_string())).await.unwrap();
+            let _ = ws.next().await;
+        });
+        let c = BidiClient::connect(&url).await.unwrap();
+        let mut events =
+            c.subscribe_matching_lossless(|event| event["method"] == "blocked.request");
+        c.send("a.b", json!({})).await.unwrap();
+        let mut indexes = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            assert_eq!(event["method"], "blocked.request");
+            indexes.push(event["params"]["index"].as_u64().unwrap());
+        }
+        assert_eq!(indexes.len(), BUFFERED_EVENT_CAPACITY + 1);
+        assert_eq!(indexes.first(), Some(&0));
+        assert_eq!(indexes.last(), Some(&(BUFFERED_EVENT_CAPACITY as u64)));
+        assert!(!events.has_lost_events());
+        server.abort();
     }
 
     #[tokio::test]
