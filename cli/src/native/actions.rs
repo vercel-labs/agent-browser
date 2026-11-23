@@ -6492,6 +6492,21 @@ async fn detect_attach_connection(
     }
 }
 
+async fn resolve_firefox_attach_target(target: &str) -> Result<bidi::attach::AttachTarget, String> {
+    if let Some(parsed) = bidi::attach::parse_attach_url(target)? {
+        return Ok(parsed);
+    }
+    bidi::attach::probe_attach_target(target)
+        .await
+        .map_err(|reason| {
+            format!(
+                "No Firefox WebDriver BiDi endpoint at {}; {}",
+                target_label(target),
+                reason
+            )
+        })
+}
+
 async fn prepare_transition(
     state: &DaemonState,
     patch: &Patch,
@@ -6503,11 +6518,7 @@ async fn prepare_transition(
         Connection::Cdp(target) => {
             let headers = cdp_headers_from_settings(&provisional.next);
             let target = if provisional.next.engine().as_deref() == Some("firefox") {
-                let target = match bidi::attach::parse_attach_url(target)? {
-                    Some(target) => target,
-                    None => bidi::attach::probe_attach_target(target).await?,
-                };
-                AttachConnection::Firefox(target)
+                AttachConnection::Firefox(resolve_firefox_attach_target(target).await?)
             } else {
                 detect_attach_connection(target, headers).await?
             };
@@ -6688,21 +6699,7 @@ async fn launch_firefox_prepared(
     let attached = cdp.is_some();
     let attach_target = match (prepared, cdp.as_deref()) {
         (Some(target), _) => Some(target),
-        (None, Some(target)) => Some(
-            if let Some(parsed) = bidi::attach::parse_attach_url(target)? {
-                parsed
-            } else {
-                bidi::attach::probe_attach_target(target)
-                    .await
-                    .map_err(|reason| {
-                        format!(
-                            "No Firefox WebDriver BiDi endpoint at {}; {}",
-                            target_label(target),
-                            reason
-                        )
-                    })?
-            },
-        ),
+        (None, Some(target)) => Some(resolve_firefox_attach_target(target).await?),
         (None, None) => None,
     };
     options.restrict_webrtc = contained;
