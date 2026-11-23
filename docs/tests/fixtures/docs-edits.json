@@ -84,6 +84,14 @@
       {
         "from": "agent-browser set device <name>       # Emulate device (\"iPhone 14\")",
         "to": "agent-browser set device <name>       # Emulate a device (\"iPhone 14\"): viewport, user agent and touch input (touch events exist after the next navigation)"
+      },
+      {
+        "from": "By default, tool invocations use the same config discovery and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.",
+        "to": "By default, tool invocations use the same config discovery and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state. When the server sets `AGENT_BROWSER_SESSION`, a tool `session` is scoped under it as `<server>--<session>`, so two servers sharing a socket directory cannot drive the same browser; a `session` naming the server session itself is used as-is."
+      },
+      {
+        "from": "By default, tool invocations use the same config discovery and environment variables as the CLI. Use session in the tool arguments, or set AGENT_BROWSER_SESSION, to isolate browser state.",
+        "to": "By default, tool invocations use the same config discovery and environment variables as the CLI. Use session in the tool arguments, or set AGENT_BROWSER_SESSION, to isolate browser state. When the server sets AGENT_BROWSER_SESSION, a tool session is scoped under it as <server>--<session>, so two servers sharing a socket directory cannot drive the same browser; a session naming the server session itself is used as-is."
       }
     ],
     "/configuration": [
