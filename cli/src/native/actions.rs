@@ -6594,6 +6594,12 @@ async fn prepare_transition(
         || provisional.next.security().allowed_domains.is_some()
         || state.domain_filter.read().await.is_some();
     if let Connection::Cdp(target) = &connection {
+        if provisional.next.pin_tab()
+            && (provisional.next.engine().as_deref() == Some("firefox")
+                || matches!(bidi::attach::parse_attach_url(target), Ok(Some(_))))
+        {
+            return Err(FIREFOX_ATTACH_PIN_TAB_ERROR.to_string());
+        }
         ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
             contained,
             cdp_url: Some(target.as_str()),
