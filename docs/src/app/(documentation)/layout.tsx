@@ -11,7 +11,7 @@ import { DocsProvider } from '@/components/geistdocs-provider';
 import { DocsChat } from '@/components/docs-chat';
 import { config } from '@/lib/geistdocs/config';
 import '../globals.css';
-import '@/components/navbar-labs-wordmark.css';
+import '@/components/navbar-labs-lockup.css';
 
 export { metadata, viewport } from '@/lib/site-metadata';
 
