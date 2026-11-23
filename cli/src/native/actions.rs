@@ -2093,6 +2093,9 @@ impl DaemonState {
                                     frame.get("id").and_then(Value::as_str),
                                     webmcp::frame_origin(frame),
                                 ) {
+                                    if frame.get("parentId").is_none() {
+                                        self.webmcp.update_page_origin(session_id, &origin);
+                                    }
                                     self.webmcp
                                         .update_frame_origin(session_id, frame_id, &origin);
                                 }
@@ -11163,6 +11166,9 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
         .unwrap_or_else(|_| json!({}));
     if let Some(tree) = frame_tree.get("frameTree") {
         collect_origins(tree, &mut frame_origins);
+        if let Some(origin) = webmcp::frame_origin(&tree["frame"]) {
+            state.webmcp.update_page_origin(&session_id, &origin);
+        }
     }
     for (frame_id, frame_origin) in &frame_origins {
         state
@@ -11249,6 +11255,9 @@ async fn enable_webmcp_events(state: &mut DaemonState) -> Result<(), String> {
             }
         }
         update_origins(&mut state.webmcp, &session_id, &tree["frameTree"]);
+        if let Some(origin) = webmcp::frame_origin(&tree["frameTree"]["frame"]) {
+            state.webmcp.update_page_origin(&session_id, &origin);
+        }
         Ok::<(), String>(())
     })
     .await
