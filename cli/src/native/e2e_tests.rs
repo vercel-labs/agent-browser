@@ -2355,6 +2355,22 @@ async fn e2e_fill_date_and_time_inputs() {
     .await;
     assert_eq!(get_data(&resp)["value"], "");
 
+    for command in [
+        json!({ "action": "setcontent", "html": r#"<iframe id='child' srcdoc="<input type='date' id='in-frame'>"></iframe>"# }),
+        json!({ "action": "frame", "selector": "#child" }),
+        json!({ "action": "fill", "selector": "#in-frame", "value": "2026-09-26" }),
+    ] {
+        let resp = execute_command(&command, &mut state).await;
+        assert_success(&resp);
+    }
+    let resp = execute_command(
+        &json!({ "action": "inputvalue", "selector": "#in-frame" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["value"], "2026-09-26");
+
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
