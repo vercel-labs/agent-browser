@@ -3794,6 +3794,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         lifecycle_relaunched_browser,
     );
     attach_settings_outcome(&mut resp, &settings_outcome);
+    attach_failed_lifecycle(&mut resp, lifecycle_launched, lifecycle_relaunched_browser);
 
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
@@ -3808,6 +3809,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_relaunched_browser,
         );
         attach_settings_outcome(&mut resp, &settings_outcome);
+        attach_failed_lifecycle(&mut resp, lifecycle_launched, lifecycle_relaunched_browser);
     }
     attach_webmcp_availability(&mut resp, action, state).await;
     attach_flow_availability(&mut resp, action, state).await;
@@ -15988,6 +15990,20 @@ fn inject_lifecycle(
     );
 }
 
+fn attach_failed_lifecycle(resp: &mut Value, launched: bool, relaunched_browser: bool) {
+    if resp.get("success").and_then(Value::as_bool) != Some(false) {
+        return;
+    }
+    if let Some(lifecycle) = resp
+        .get_mut("data")
+        .and_then(|data| data.get_mut("lifecycle"))
+        .and_then(Value::as_object_mut)
+    {
+        lifecycle.insert("launched".to_string(), json!(launched));
+        lifecycle.insert("relaunchedBrowser".to_string(), json!(relaunched_browser));
+    }
+}
+
 fn error_response(id: &str, error: &str) -> Value {
     let mut resp = json!({
         "id": id,
@@ -19180,6 +19196,63 @@ mod tests {
             notices
                 .iter()
                 .all(|line| !line.contains("relaunched browser")),
+            "{notices:?}"
+        );
+    }
+
+    /// `read` of the active tab after a new restore key fails once the old
+    /// browser is closed, and its report still says the browser was closed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_failed_read_with_a_new_restore_key_reports_a_closed_browser() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env, mut state) = restore_session("old-key");
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        std::fs::write(
+            &plugin_path,
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s' '{\"protocol\":\"agent-browser.plugin.v1\",\"success\":true,\"data\":{}}'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+        state.active_provider_connection = true;
+        state.active_provider_session = Some(ActiveProviderSession {
+            session: providers::ProviderSession {
+                provider: "plugin:cloud-browser".to_string(),
+                session_id: r#"{"sessionId":"s1"}"#.to_string(),
+            },
+            plugins: vec![crate::plugins::PluginConfig {
+                name: "cloud-browser".to_string(),
+                command: plugin_path.to_string_lossy().to_string(),
+                capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
+                ..crate::plugins::PluginConfig::default()
+            }],
+        });
+
+        let resp = execute_command(
+            &json!({
+                "id": "read-new-key",
+                "action": "read",
+                "settings": { "restore-key": "new-key" }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(state.session_name.as_deref(), Some("new-key"), "{resp}");
+        let lifecycle = &resp["data"]["lifecycle"];
+        assert_eq!(lifecycle["relaunchedBrowser"], false, "{resp}");
+        assert_eq!(lifecycle["launched"], false, "{resp}");
+        let notices = crate::output::settings_notices(&resp["data"]);
+        assert!(
+            notices.iter().any(
+                |line| line.contains("restore-key: old-key \u{2192} new-key")
+                    && line.ends_with("closed browser")
+            ),
             "{notices:?}"
         );
     }

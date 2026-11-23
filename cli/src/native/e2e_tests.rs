@@ -19727,6 +19727,108 @@ async fn e2e_restore_key_switch_saves_the_old_browser_under_the_old_key() {
     );
 }
 
+/// The stderr line for a launch setting names what happened to the browser:
+/// launched fresh, relaunched for a new key, or closed by a command that never
+/// launches.
+#[tokio::test]
+#[ignore]
+async fn e2e_launch_setting_notices_follow_the_browser_lifecycle() {
+    let (_env, _home) = isolated_restore_env();
+    let (page, server) = restore_fixture_page().await;
+    let mut state = DaemonState::new();
+    let notice = |resp: &Value, option: &str| -> String {
+        let lines = crate::output::settings_notices(&resp["data"]);
+        lines
+            .iter()
+            .find(|line| line.contains(&format!("{option}:")))
+            .cloned()
+            .unwrap_or_else(|| panic!("no {option} notice in {lines:?}: {resp}"))
+    };
+
+    let resp = execute_command(
+        &json!({ "id": "0", "action": "read", "url": page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.browser.is_none());
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "navigate", "url": page,
+                 "settings": { "allowed-domains": ["127.0.0.1"] } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["lifecycle"]["launched"], true, "{resp}");
+    let line = notice(&resp, "allowed-domains");
+    assert!(line.ends_with("launched browser"), "{line}");
+    assert_success(&execute_command(&json!({ "id": "c", "action": "close" }), &mut state).await);
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": page,
+                 "settings": { "restore-key": "notice-a" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": page,
+                 "settings": { "restore-key": "notice-b" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let line = notice(&resp, "restore-key");
+    assert!(line.ends_with("relaunched browser"), "{line}");
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "read", "url": page,
+                 "settings": { "restore-key": "notice-c" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.browser.is_none());
+    let line = notice(&resp, "restore-key");
+    assert!(line.ends_with("closed browser"), "{line}");
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "navigate", "url": page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "read",
+                 "settings": { "restore-key": "notice-d" } }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(state.browser.is_none());
+    let line = notice(&resp, "restore-key");
+    assert!(line.ends_with("closed browser"), "{line}");
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "navigate", "url": page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "close",
+                 "settings": { "restore-key": "notice-e" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let line = notice(&resp, "restore-key");
+    assert!(line.ends_with("closed browser"), "{line}");
+    server.abort();
+}
+
 /// New checks sent with a new key belong to the new key's browser. The old
 /// browser must not be validated against them before it is saved, or `auto`
 /// skips its save.
