@@ -1,5 +1,6 @@
 export const PAGE_TITLES: Record<string, string> = {
   "": "Browser\nAutomation for AI",
+  introduction: "Introduction",
   installation: "Installation",
   "quick-start": "Quick Start",
   skills: "Skills",
