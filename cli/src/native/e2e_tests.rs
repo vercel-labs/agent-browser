@@ -679,6 +679,103 @@ async fn e2e_webmcp_context_follows_actions_without_explicit_discovery() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_webmcp_announcement_marks_cross_origin_frame_tools() {
+    let (url, server) = start_webmcp_server().await;
+    let (child_origin, child_server) = start_webmcp_server().await;
+    let child_port = child_origin.rsplit(':').next().unwrap().to_string();
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({"id": "launch", "action": "launch", "headless": true}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({"id": "nav", "action": "navigate", "url": format!("{url}/cross-origin.html?child={child_port}")}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let mut context = get_data(&resp)["webmcp"].clone();
+    let has_child = |context: &Value| {
+        context["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["origin"] == child_origin))
+    };
+    if !has_child(&context) {
+        context = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let update = execute_command(
+                    &json!({"id": "wait", "action": "wait", "timeout": 50}),
+                    &mut state,
+                )
+                .await;
+                assert_success(&update);
+                let context = &get_data(&update)["webmcp"];
+                if has_child(context) {
+                    break context.clone();
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("No cross-origin WebMCP tool was announced: {resp}"));
+    }
+    assert_eq!(context["pageOrigin"], url, "{context}");
+    let tools = context["tools"].as_array().unwrap();
+    let top = tools
+        .iter()
+        .find(|tool| tool["name"] == "top_search")
+        .expect("top-level tool");
+    assert_eq!(top["origin"], url);
+    let child = tools
+        .iter()
+        .find(|tool| tool["origin"] == child_origin)
+        .expect("cross-origin tool");
+    let top_frame = top["frameId"].as_str().unwrap();
+    let child_frame = child["frameId"].as_str().unwrap();
+    assert_ne!(top_frame, child_frame);
+
+    let text = crate::output::format_webmcp_context(
+        &json!({"webmcp": context}),
+        &crate::output::OutputOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        text.starts_with(&format!("This page ({url}) provides")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("[origin {url}] top_search [frame {top_frame}]: ")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "[cross-origin {child_origin}] {} [frame {child_frame}]: ",
+            child["name"].as_str().unwrap()
+        )),
+        "{text}"
+    );
+    let instructions = text
+        .lines()
+        .last()
+        .filter(|line| line.contains("webmcp invoke"))
+        .or_else(|| text.lines().find(|line| line.contains("webmcp invoke")))
+        .unwrap();
+    assert!(
+        instructions.contains(&format!("from this page's origin ({url})")),
+        "{text}"
+    );
+    assert!(!instructions.contains(child_frame), "{text}");
+    assert!(instructions.contains("marked cross-origin"), "{text}");
+
+    let resp = execute_command(&json!({"id": "close", "action": "close"}), &mut state).await;
+    assert_success(&resp);
+    server.abort();
+    child_server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_webmcp_same_document_navigation_preserves_catalog_and_invocations() {
     let (url, server) = start_webmcp_server().await;
     let mut state = DaemonState::new();
@@ -10887,6 +10984,14 @@ async fn start_webmcp_server() -> (String, tokio::task::JoinHandle<()>) {
                 let body = if request.starts_with("GET /frame.html ") {
                     native_test_fixture_html("webmcp_frame_probe")
                         .replace("__PORT__", &port.to_string())
+                } else if let Some(child) = request
+                    .strip_prefix("GET /cross-origin.html?child=")
+                    .and_then(|rest| rest.split(' ').next())
+                    .filter(|child| child.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    format!(
+                        "<!doctype html><body><script>document.modelContext.registerTool({{name: \"top_search\", description: \"Searches this page\", inputSchema: {{type: \"object\", properties: {{}}}}, execute: async () => ({{}})}});</script><iframe id=\"tool-frame\" src=\"http://127.0.0.1:{child}/frame.html\" allow=\"tools\"></iframe></body>"
+                    )
                 } else if request.starts_with("GET /context.html ") {
                     native_test_fixture_html("webmcp_context_probe").to_string()
                 } else if request.starts_with("GET /empty.html ") {
