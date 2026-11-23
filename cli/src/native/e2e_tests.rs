@@ -912,7 +912,7 @@ async fn create_restore_state_with_cookie(
             "id": "1",
             "action": "navigate",
             "url": "https://example.com",
-            "restoreKey": restore_key
+            "settings": { "restore-key": restore_key }
         }),
         &mut state,
     )
@@ -15952,7 +15952,7 @@ async fn e2e_restore_loads_during_explicit_launch_before_navigation() {
                 "id": "1",
                 "action": "launch",
                 "headless": true,
-                "restoreKey": restore_key
+                "settings": { "restore-key": restore_key }
             }),
             &mut state,
         )
@@ -15996,7 +15996,7 @@ async fn e2e_restore_loads_during_explicit_launch_before_navigation() {
                 "id": "10",
                 "action": "launch",
                 "headless": true,
-                "restoreKey": restore_key
+                "settings": { "restore-key": restore_key }
             }),
             &mut state,
         )
@@ -16063,7 +16063,7 @@ async fn e2e_periodic_autosave_survives_abrupt_browser_exit() {
                 "id": "1",
                 "action": "launch",
                 "headless": true,
-                "restoreKey": restore_key
+                "settings": { "restore-key": restore_key }
             }),
             &mut state,
         )
@@ -16158,7 +16158,7 @@ async fn e2e_periodic_autosave_survives_abrupt_browser_exit() {
                 "id": "10",
                 "action": "launch",
                 "headless": true,
-                "restoreKey": restore_key
+                "settings": { "restore-key": restore_key }
             }),
             &mut state,
         )
@@ -16225,7 +16225,7 @@ async fn e2e_restore_preserves_cookie_login_after_close_and_reopen() {
                 "id": "1",
                 "action": "navigate",
                 "url": base_url.clone(),
-                "restoreKey": restore_key
+                "settings": { "restore-key": restore_key }
             }),
             &mut state,
         )
@@ -16253,7 +16253,7 @@ async fn e2e_restore_preserves_cookie_login_after_close_and_reopen() {
                 "id": "3",
                 "action": "navigate",
                 "url": format!("{}/login", base_url),
-                "restoreKey": restore_key
+                "settings": { "restore-key": restore_key }
             }),
             &mut state,
         )
@@ -16265,7 +16265,7 @@ async fn e2e_restore_preserves_cookie_login_after_close_and_reopen() {
                 "id": "4",
                 "action": "navigate",
                 "url": base_url.clone(),
-                "restoreKey": restore_key
+                "settings": { "restore-key": restore_key }
             }),
             &mut state,
         )
@@ -16302,7 +16302,7 @@ async fn e2e_restore_preserves_cookie_login_after_close_and_reopen() {
                 "id": "10",
                 "action": "navigate",
                 "url": base_url.clone(),
-                "restoreKey": restore_key
+                "settings": { "restore-key": restore_key }
             }),
             &mut state,
         )
@@ -16349,7 +16349,7 @@ async fn e2e_restore_validation_failure_does_not_overwrite_state() {
                 "id": "1",
                 "action": "navigate",
                 "url": "https://example.com",
-                "restoreKey": restore_key
+                "settings": { "restore-key": restore_key }
             }),
             &mut state,
         )
@@ -16387,8 +16387,7 @@ async fn e2e_restore_validation_failure_does_not_overwrite_state() {
                 "id": "10",
                 "action": "navigate",
                 "url": "https://example.com",
-                "restoreKey": restore_key,
-                "restoreCheckText": "text-that-does-not-exist-in-the-page"
+                "settings": { "restore-key": restore_key, "restore-check-text": "text-that-does-not-exist-in-the-page" }
             }),
             &mut state,
         )
@@ -16451,7 +16450,7 @@ async fn e2e_restore_key_switch_reloads_instead_of_reusing_live_browser() {
             "id": "10",
             "action": "navigate",
             "url": "https://example.com",
-            "restoreKey": restore_key_a
+            "settings": { "restore-key": restore_key_a }
         }),
         &mut state,
     )
@@ -16474,7 +16473,7 @@ async fn e2e_restore_key_switch_reloads_instead_of_reusing_live_browser() {
             "id": "20",
             "action": "navigate",
             "url": "https://example.com",
-            "restoreKey": restore_key_b
+            "settings": { "restore-key": restore_key_b }
         }),
         &mut state,
     )
@@ -21254,6 +21253,320 @@ async fn e2e_flow_a_route_limited_by_resource_type_applies_the_same_on_both_tier
         }
     }
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+/// A local page for restore tests: cookies need an http origin.
+async fn restore_fixture_page() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let body = "<!doctype html><title>restore</title><body>restore fixture</body>";
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    (url, server)
+}
+
+/// The command the CLI sends for `args`: parsed flags, parsed command and the
+/// settings patch it carries.
+fn cli_command(id: &str, args: &[&str]) -> Value {
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let mut flags = crate::flags::parse_flags(&args);
+    if flags.restore_uses_session {
+        flags.restore = Some(flags.session.clone());
+    }
+    let mut cmd = crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+    cmd["id"] = json!(id);
+    if let Some(wire) = crate::command_settings(&flags, &cmd).to_wire() {
+        cmd["settings"] = wire;
+    }
+    cmd
+}
+
+/// What every state file saved under `restore_key` holds.
+fn saved_restore_states(restore_key: &str) -> String {
+    let sessions = super::state::get_sessions_dir();
+    let mut saved = String::new();
+    for entry in std::fs::read_dir(sessions).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&format!("{restore_key}-")) && name.ends_with(".json") {
+            saved.push_str(&std::fs::read_to_string(entry.path()).unwrap());
+        }
+    }
+    saved
+}
+
+fn isolated_restore_env() -> (EnvGuard<'static>, tempfile::TempDir) {
+    let env = EnvGuard::new(&[
+        "HOME",
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+    ]);
+    // Chrome is looked up under HOME: pin it before HOME moves.
+    let chrome = std::env::var("AGENT_BROWSER_EXECUTABLE_PATH")
+        .ok()
+        .or_else(|| {
+            super::cdp::chrome::find_chrome().map(|path| path.to_string_lossy().into_owned())
+        });
+    let home = tempfile::tempdir().unwrap();
+    env.set("HOME", home.path().to_str().unwrap());
+    for key in [
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+    ] {
+        env.remove(key);
+    }
+    if let Some(chrome) = chrome {
+        env.set("AGENT_BROWSER_EXECUTABLE_PATH", &chrome);
+    }
+    (env, home)
+}
+
+/// Switching the restore key saves the browser that is running under the key
+/// it ran with: its cookies must not land under the new key.
+#[tokio::test]
+#[ignore]
+async fn e2e_restore_key_switch_saves_the_old_browser_under_the_old_key() {
+    let (_env, _home) = isolated_restore_env();
+    let (page, server) = restore_fixture_page().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "navigate", "url": page,
+                 "settings": { "restore-key": "switch-old" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "cookies_set", "name": "old_only", "value": "from-old" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": page,
+                 "settings": { "restore-key": "switch-new" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["lifecycle"]["relaunchedBrowser"], true);
+    assert_eq!(state.session_name.as_deref(), Some("switch-new"));
+
+    let resp = execute_command(&json!({ "id": "4", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    server.abort();
+
+    assert!(
+        saved_restore_states("switch-old").contains("from-old"),
+        "the old browser's cookies must be saved under the old key"
+    );
+    assert!(
+        !saved_restore_states("switch-new").contains("from-old"),
+        "the old browser's cookies must not be saved under the new key"
+    );
+}
+
+/// The stderr line for a launch setting names what happened to the browser:
+/// launched fresh, relaunched for a new key, or closed by a command that never
+/// launches.
+#[tokio::test]
+#[ignore]
+async fn e2e_launch_setting_notices_follow_the_browser_lifecycle() {
+    let (_env, _home) = isolated_restore_env();
+    let (page, server) = restore_fixture_page().await;
+    let mut state = DaemonState::new();
+    let notice = |resp: &Value, option: &str| -> String {
+        let lines = crate::output::settings_notices(&resp["data"]);
+        lines
+            .iter()
+            .find(|line| line.contains(&format!("{option}:")))
+            .cloned()
+            .unwrap_or_else(|| panic!("no {option} notice in {lines:?}: {resp}"))
+    };
+
+    let resp = execute_command(
+        &json!({ "id": "0", "action": "read", "url": page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.browser.is_none());
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "navigate", "url": page,
+                 "settings": { "allowed-domains": ["127.0.0.1"] } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["lifecycle"]["launched"], true, "{resp}");
+    let line = notice(&resp, "allowed-domains");
+    assert!(line.ends_with("launched browser"), "{line}");
+    assert_success(&execute_command(&json!({ "id": "c", "action": "close" }), &mut state).await);
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": page,
+                 "settings": { "restore-key": "notice-a" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": page,
+                 "settings": { "restore-key": "notice-b" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let line = notice(&resp, "restore-key");
+    assert!(line.ends_with("relaunched browser"), "{line}");
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "read", "url": page,
+                 "settings": { "restore-key": "notice-c" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.browser.is_none());
+    let line = notice(&resp, "restore-key");
+    assert!(line.ends_with("closed browser"), "{line}");
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "navigate", "url": page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "read",
+                 "settings": { "restore-key": "notice-d" } }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(state.browser.is_none());
+    let line = notice(&resp, "restore-key");
+    assert!(line.ends_with("closed browser"), "{line}");
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "navigate", "url": page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "close",
+                 "settings": { "restore-key": "notice-e" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let line = notice(&resp, "restore-key");
+    assert!(line.ends_with("closed browser"), "{line}");
+    server.abort();
+}
+
+/// New checks sent with a new key belong to the new key's browser. The old
+/// browser must not be validated against them before it is saved, or `auto`
+/// skips its save.
+#[tokio::test]
+#[ignore]
+async fn e2e_restore_key_switch_does_not_check_the_old_browser_against_the_new_checks() {
+    let (_env, _home) = isolated_restore_env();
+    let (page, server) = restore_fixture_page().await;
+
+    // A saved state for the old key, so the old browser starts out loaded.
+    let mut seed = DaemonState::new();
+    for command in [
+        json!({ "id": "s1", "action": "navigate", "url": page,
+                "settings": { "restore-key": "check-old" } }),
+        json!({ "id": "s2", "action": "cookies_set", "name": "seeded", "value": "1" }),
+        json!({ "id": "s3", "action": "close" }),
+    ] {
+        assert_success(&execute_command(&command, &mut seed).await);
+    }
+
+    let mut state = DaemonState::new();
+    for command in [
+        json!({ "id": "1", "action": "navigate", "url": page,
+                "settings": { "restore-key": "check-old" } }),
+        json!({ "id": "2", "action": "cookies_set", "name": "added_after_load", "value": "2" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    assert_eq!(state.restore_status, "loaded");
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": page,
+                 "settings": { "restore-key": "check-new",
+                               "restore-check-text": "text that is not on the page" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_success(&execute_command(&json!({ "id": "4", "action": "close" }), &mut state).await);
+    server.abort();
+
+    assert!(
+        saved_restore_states("check-old").contains("added_after_load"),
+        "the old browser must be saved before the new key's checks apply"
+    );
+}
+
+/// `close` carries settings like any other command: a save policy sent with it
+/// governs the save the close performs.
+#[tokio::test]
+#[ignore]
+async fn e2e_close_honors_the_restore_save_policy_it_carries() {
+    for (name, close_args) in [
+        ("close-never", vec!["--restore-save", "never", "close"]),
+        (
+            "close-never-same",
+            vec![
+                "--restore=close-never-same",
+                "--restore-save",
+                "never",
+                "close",
+            ],
+        ),
+    ] {
+        let (_env, _home) = isolated_restore_env();
+        let (page, server) = restore_fixture_page().await;
+        let mut state = DaemonState::new();
+        let restore = format!("--restore={name}");
+        assert_success(
+            &execute_command(&cli_command("1", &[&restore, "open", &page]), &mut state).await,
+        );
+        assert_success(
+            &execute_command(
+                &json!({ "id": "2", "action": "cookies_set", "name": "kept", "value": "1" }),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(&execute_command(&cli_command("3", &close_args), &mut state).await);
+        server.abort();
+
+        assert!(
+            saved_restore_states(name).is_empty(),
+            "{name}: close saved state although the policy it carried is never"
+        );
+    }
 }
 
 /// An empty value list matches nothing, so the selection stays as it was.

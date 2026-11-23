@@ -990,6 +990,15 @@ fn recording_fps_suffix(data: &serde_json::Value) -> String {
 pub fn settings_notices(data: &serde_json::Value) -> Vec<String> {
     let lifecycle = &data["lifecycle"];
     let settings = &lifecycle["settings"];
+    let launch_effect = match (
+        lifecycle["relaunchedBrowser"].as_bool(),
+        lifecycle["launched"].as_bool(),
+    ) {
+        (Some(true), _) => "relaunched browser",
+        (_, Some(true)) => "launched browser",
+        (Some(false), Some(false)) => "closed browser",
+        _ => "applied",
+    };
     let show = |value: &serde_json::Value| match value {
         serde_json::Value::Null => "default".to_string(),
         serde_json::Value::String(text) => text.clone(),
@@ -1014,7 +1023,7 @@ pub fn settings_notices(data: &serde_json::Value) -> Vec<String> {
                         .map(|flag| format!(" ({flag})"))
                         .unwrap_or_default();
                     let effect = if change["effect"] == "relaunch" {
-                        "relaunched browser"
+                        launch_effect
                     } else {
                         "applied"
                     };
@@ -1043,9 +1052,13 @@ pub fn settings_notices(data: &serde_json::Value) -> Vec<String> {
 /// True when the lifecycle report names a setting change or `--relaunch` as the
 /// reason for a relaunch, and the notices therefore printed it.
 fn settings_notices_explain_relaunch(lifecycle: &serde_json::Value) -> bool {
-    let settings = &lifecycle["settings"];
-    settings["forcedRelaunch"] == true
-        || settings["changes"].as_array().is_some_and(|changes| {
+    lifecycle["settings"]["forcedRelaunch"] == true || settings_notices_explain_launch(lifecycle)
+}
+
+fn settings_notices_explain_launch(lifecycle: &serde_json::Value) -> bool {
+    lifecycle["settings"]["changes"]
+        .as_array()
+        .is_some_and(|changes| {
             changes
                 .iter()
                 .any(|c| c["effect"] == "relaunch" && c["applied"] == true)
@@ -2185,8 +2198,15 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
 }
 
 fn print_lifecycle_note(data: &serde_json::Value) {
+    let parts = lifecycle_note_parts(data);
+    if !parts.is_empty() {
+        eprintln!("{} {}", color::dim("[agent-browser]"), parts.join("; "));
+    }
+}
+
+fn lifecycle_note_parts(data: &serde_json::Value) -> Vec<String> {
     let Some(lifecycle) = data.get("lifecycle") else {
-        return;
+        return Vec::new();
     };
 
     let mut parts: Vec<String> = Vec::new();
@@ -2208,7 +2228,7 @@ fn print_lifecycle_note(data: &serde_json::Value) {
         if !settings_notices_explain_relaunch(lifecycle) {
             parts.push("relaunched browser".to_string());
         }
-    } else if launched && !reused {
+    } else if launched && !reused && !settings_notices_explain_launch(lifecycle) {
         parts.push("launched browser".to_string());
     }
 
@@ -2224,9 +2244,7 @@ fn print_lifecycle_note(data: &serde_json::Value) {
         }
     }
 
-    if !parts.is_empty() {
-        eprintln!("{} {}", color::dim("[agent-browser]"), parts.join("; "));
-    }
+    parts
 }
 
 fn print_warning(resp: &Response) {
@@ -6225,6 +6243,108 @@ hydration: -  phases: 0  hydratedComponents: 0"
         );
         let lines = settings_notices(&data).join("\n");
         assert!(lines.contains("cdp?<redacted>") && !lines.contains("SECRET"));
+    }
+
+    fn lifecycle_with(
+        launched: Option<bool>,
+        relaunched: Option<bool>,
+        option: &str,
+        running: serde_json::Value,
+        requested: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut lifecycle = serde_json::json!({
+            "settings": {
+                "changes": [{
+                    "option": option, "running": running, "requested": requested,
+                    "effect": "relaunch", "applied": true,
+                }],
+                "forcedRelaunch": false,
+            }
+        });
+        if let Some(launched) = launched {
+            lifecycle["launched"] = launched.into();
+            lifecycle["reused"] = false.into();
+        }
+        if let Some(relaunched) = relaunched {
+            lifecycle["relaunchedBrowser"] = relaunched.into();
+        }
+        serde_json::json!({ "lifecycle": lifecycle })
+    }
+
+    #[test]
+    fn test_settings_notice_for_a_fresh_launch_does_not_claim_a_close() {
+        let data = lifecycle_with(
+            Some(true),
+            Some(false),
+            "allowed-domains",
+            serde_json::Value::Null,
+            serde_json::json!(["127.0.0.1"]),
+        );
+        let lines = settings_notices(&data);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].ends_with(
+                "allowed-domains: default \u{2192} 127.0.0.1 (--allowed-domains), launched browser"
+            ),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            super::lifecycle_note_parts(&data).is_empty(),
+            "{:?}",
+            super::lifecycle_note_parts(&data)
+        );
+    }
+
+    #[test]
+    fn test_settings_notice_for_a_key_change_that_relaunched() {
+        let data = lifecycle_with(
+            Some(true),
+            Some(true),
+            "restore-key",
+            serde_json::json!("old"),
+            serde_json::json!("new"),
+        );
+        let lines = settings_notices(&data);
+        assert!(
+            lines[0].ends_with("restore-key: old \u{2192} new (--restore), relaunched browser"),
+            "{}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn test_settings_notice_for_a_key_change_that_only_closed() {
+        let data = lifecycle_with(
+            Some(false),
+            Some(false),
+            "restore-key",
+            serde_json::json!("old"),
+            serde_json::json!("new"),
+        );
+        let lines = settings_notices(&data);
+        assert!(
+            lines[0].ends_with("restore-key: old \u{2192} new (--restore), closed browser"),
+            "{}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn test_settings_notice_without_lifecycle_flags_claims_no_browser_effect() {
+        let data = lifecycle_with(
+            None,
+            None,
+            "restore-key",
+            serde_json::json!("old"),
+            serde_json::json!("new"),
+        );
+        let lines = settings_notices(&data);
+        assert!(
+            lines[0].ends_with("restore-key: old \u{2192} new (--restore), applied"),
+            "{}",
+            lines[0]
+        );
     }
 
     #[test]
