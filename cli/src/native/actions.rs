@@ -24158,7 +24158,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             Some(AttachedTarget::AutoConnect)
         );
         assert_eq!(
-            attached_target_for(&Connection::Cdp("http://0.0.0.0:9222".to_string()), "chrome"),
+            attached_target_for(
+                &Connection::Cdp("http://0.0.0.0:9222".to_string()),
+                "chrome"
+            ),
             Some(AttachedTarget::CdpUrl("http://0.0.0.0:9222".to_string()))
         );
         assert_eq!(
