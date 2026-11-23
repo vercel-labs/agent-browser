@@ -283,7 +283,7 @@ pub struct DispatchEvents {
 
 pub fn subscribe_dispatcher(bidi: &BidiClient) -> DispatchEvents {
     DispatchEvents {
-        control: bidi.subscribe_matching(|event| {
+        control: bidi.subscribe_matching_lossless(|event| {
             let method = event["method"].as_str();
             match method {
                 Some("browsingContext.contextCreated") => event["params"]["parent"].is_null(),
@@ -2096,6 +2096,92 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dispatcher_control_survives_a_burst_past_the_byte_budget() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let messages: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+        let log = messages.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let m: Value =
+                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            let event = json!({
+                "type": "event",
+                "method": "network.beforeRequestSent",
+                "params": {
+                    "isBlocked": true,
+                    "context": "ctx",
+                    "padding": "x".repeat(1 << 20),
+                    "request": {
+                        "request": "big",
+                        "url": "https://allowed.example/big",
+                        "method": "GET",
+                        "headers": []
+                    }
+                }
+            })
+            .to_string();
+            for _ in 0..65 {
+                ws.send(Message::Text(event.clone())).await.unwrap();
+            }
+            let reply = json!({"type":"success","id":m["id"],"result":{}});
+            ws.send(Message::Text(reply.to_string())).await.unwrap();
+            loop {
+                tokio::select! {
+                    message = ws.next() => {
+                        let Some(Ok(Message::Text(text))) = message else { break };
+                        let message: Value = serde_json::from_str(&text).unwrap();
+                        log.lock().unwrap().push(message.clone());
+                        let reply = json!({"type":"success","id":message["id"],"result":{}});
+                        ws.send(Message::Text(reply.to_string())).await.unwrap();
+                    }
+                    Some(event) = rx.recv() => {
+                        ws.send(Message::Text(event.to_string())).await.unwrap();
+                    }
+                }
+            }
+        });
+
+        let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+        let net = NetContext::default();
+        *net.domain_filter.write().await = Some(DomainFilter::new("allowed.example"));
+        let events = subscribe_dispatcher(&bidi);
+        bidi.send("barrier", json!({})).await.unwrap();
+        let _dispatcher =
+            spawn_dispatcher(bidi.clone(), net, events, Arc::default(), Arc::default());
+        tx.send(request_event(
+            "network.beforeRequestSent",
+            "final",
+            "https://blocked.example/final",
+            true,
+        ))
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|message| message["method"] == "network.failRequest")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        server.abort();
     }
 
     #[tokio::test]
