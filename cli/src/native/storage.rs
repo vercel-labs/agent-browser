@@ -23,18 +23,33 @@ pub async fn storage_get(
         let js = format!(
             r#"(() => {{
                 const s = {};
-                const data = {{}};
+                const entries = [];
                 for (let i = 0; i < s.length; i++) {{
                     const key = s.key(i);
-                    data[key] = s.getItem(key);
+                    entries.push([key, s.getItem(key)]);
                 }}
-                return data;
+                return entries;
             }})()"#,
             st
         );
         let result = eval_simple(client, session_id, &js).await?;
-        Ok(json!({ "data": result }))
+        Ok(json!({ "data": storage_entries_to_object(result) }))
     }
+}
+
+fn storage_entries_to_object(entries: Value) -> Value {
+    let mut map = serde_json::Map::new();
+    if let Some(items) = entries.as_array() {
+        for item in items {
+            if let Some(pair) = item.as_array() {
+                if let (Some(key), Some(val)) = (pair.first().and_then(Value::as_str), pair.get(1))
+                {
+                    map.insert(key.to_string(), val.clone());
+                }
+            }
+        }
+    }
+    Value::Object(map)
 }
 
 pub async fn storage_set(
@@ -91,4 +106,26 @@ async fn eval_simple(client: &CdpClient, session_id: &str, js: &str) -> Result<V
     }
 
     Ok(result.result.value.unwrap_or(Value::Null))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_entries_to_object_preserves_proto_and_constructor_keys() {
+        let entries = json!([
+            ["ordinary", "control"],
+            ["__proto__", "fixture"],
+            ["constructor", "ctor"],
+            ["toString", "str"]
+        ]);
+        let obj = storage_entries_to_object(entries);
+        let map = obj.as_object().expect("should build JSON object");
+        assert_eq!(map.len(), 4);
+        assert_eq!(map.get("ordinary"), Some(&json!("control")));
+        assert_eq!(map.get("__proto__"), Some(&json!("fixture")));
+        assert_eq!(map.get("constructor"), Some(&json!("ctor")));
+        assert_eq!(map.get("toString"), Some(&json!("str")));
+    }
 }

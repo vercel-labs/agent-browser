@@ -1866,6 +1866,12 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             }
             return;
         }
+        // State show summary (must run before the generic download/path branches
+        // because state_show payloads also include `filename` and `path`).
+        if let Some(text) = format_state_show_text(data) {
+            print!("{}", text);
+            return;
+        }
         // Download response (has "suggestedFilename" or "filename" field)
         if data.get("suggestedFilename").is_some() || data.get("filename").is_some() {
             if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
@@ -2031,7 +2037,7 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 for file in files {
                     let filename = file.get("filename").and_then(|v| v.as_str()).unwrap_or("");
                     let size = file.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let modified = file.get("modified").and_then(|v| v.as_str()).unwrap_or("");
+                    let date_str = format_state_modified_date(file.get("modified"));
                     let encrypted = file
                         .get("encrypted")
                         .and_then(|v| v.as_bool())
@@ -2041,7 +2047,6 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                     } else {
                         format!("{}B", size)
                     };
-                    let date_str = modified.split('T').next().unwrap_or(modified);
                     let enc_str = if encrypted { " [encrypted]" } else { "" };
                     println!(
                         "  {} {}",
@@ -2073,21 +2078,6 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 color::success_indicator(),
                 cleared
             );
-            return;
-        }
-
-        // State show summary
-        if let Some(summary) = data.get("summary") {
-            let cookies = summary.get("cookies").and_then(|v| v.as_i64()).unwrap_or(0);
-            let origins = summary.get("origins").and_then(|v| v.as_i64()).unwrap_or(0);
-            let encrypted = data
-                .get("encrypted")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let enc_str = if encrypted { " (encrypted)" } else { "" };
-            println!("State file summary{}:", enc_str);
-            println!("  Cookies: {}", cookies);
-            println!("  Origins with localStorage: {}", origins);
             return;
         }
 
@@ -5370,6 +5360,42 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
     );
 }
 
+fn format_state_modified_date(value: Option<&serde_json::Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if let Some(s) = value.as_str() {
+        return s.split('T').next().unwrap_or(s).to_string();
+    }
+    let secs = value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|u| i64::try_from(u).ok()));
+    secs.and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
+fn format_state_show_text(data: &serde_json::Value) -> Option<String> {
+    let summary = data.get("summary")?;
+    let encrypted = data
+        .get("encrypted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let enc_str = if encrypted { " (encrypted)" } else { "" };
+    if let Some(s) = summary.as_str() {
+        return Some(format!("State file summary{}:\n  {}\n", enc_str, s));
+    }
+    if summary.is_object() {
+        let cookies = summary.get("cookies").and_then(|v| v.as_i64()).unwrap_or(0);
+        let origins = summary.get("origins").and_then(|v| v.as_i64()).unwrap_or(0);
+        return Some(format!(
+            "State file summary{}:\n  Cookies: {}\n  Origins with localStorage: {}\n",
+            enc_str, cookies, origins
+        ));
+    }
+    None
+}
+
 pub fn print_version() {
     println!("agent-browser {}", env!("CARGO_PKG_VERSION"));
 }
@@ -6542,5 +6568,67 @@ hydration: -  phases: 0  hydratedComponents: 0"
     fn test_settings_notice_needs_a_settings_report() {
         assert!(settings_notices(&serde_json::json!({"lifecycle": {}})).is_empty());
         assert!(settings_notices(&serde_json::json!({"url": "x"})).is_empty());
+    }
+
+    #[test]
+    fn test_format_state_modified_date_handles_unix_seconds_and_iso_strings() {
+        assert_eq!(
+            super::format_state_modified_date(Some(&serde_json::json!(1764000000))),
+            "2025-11-24"
+        );
+        assert_eq!(
+            super::format_state_modified_date(Some(&serde_json::json!(0))),
+            "1970-01-01"
+        );
+        assert_eq!(
+            super::format_state_modified_date(Some(&serde_json::json!("2026-05-01T12:34:56Z"))),
+            "2026-05-01"
+        );
+        assert_eq!(super::format_state_modified_date(None), "");
+        assert_eq!(
+            super::format_state_modified_date(Some(&serde_json::json!(null))),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_format_state_show_text_formats_counts_and_legacy_strings() {
+        let payload = serde_json::json!({
+            "filename": "demo-default.json",
+            "path": "/tmp/demo-default.json",
+            "encrypted": false,
+            "summary": { "cookies": 3, "origins": 2 }
+        });
+        assert_eq!(
+            super::format_state_show_text(&payload).as_deref(),
+            Some("State file summary:\n  Cookies: 3\n  Origins with localStorage: 2\n")
+        );
+
+        let encrypted = serde_json::json!({
+            "filename": "sec.json",
+            "path": "/tmp/sec.json",
+            "encrypted": true,
+            "summary": { "cookies": 1, "origins": 0 }
+        });
+        assert_eq!(
+            super::format_state_show_text(&encrypted).as_deref(),
+            Some("State file summary (encrypted):\n  Cookies: 1\n  Origins with localStorage: 0\n")
+        );
+
+        let legacy = serde_json::json!({
+            "filename": "old.json",
+            "path": "/tmp/old.json",
+            "summary": "4 cookies, 1 origins"
+        });
+        assert_eq!(
+            super::format_state_show_text(&legacy).as_deref(),
+            Some("State file summary:\n  4 cookies, 1 origins\n")
+        );
+
+        let download = serde_json::json!({
+            "filename": "report.pdf",
+            "path": "/tmp/report.pdf"
+        });
+        assert!(super::format_state_show_text(&download).is_none());
     }
 }

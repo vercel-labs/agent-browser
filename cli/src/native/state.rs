@@ -634,7 +634,10 @@ pub fn state_show(path: &str) -> Result<Value, String> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
         "encrypted": encrypted,
-        "summary": format!("{} cookies, {} origins", state.cookies.len(), state.origins.len()),
+        "summary": {
+            "cookies": state.cookies.len(),
+            "origins": state.origins.len(),
+        },
         "state": state,
     }))
 }
@@ -1062,5 +1065,48 @@ mod tests {
         let result = dispatch_state_command(&cmd).unwrap();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Missing 'name' parameter");
+    }
+
+    #[test]
+    fn test_state_show_returns_structured_summary_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("demo-default.json");
+        let fixture = serde_json::json!({
+            "cookies": [
+                {
+                    "name": "a",
+                    "value": "1",
+                    "domain": "example.com",
+                    "path": "/",
+                    "expires": -1.0,
+                    "httpOnly": false,
+                    "secure": false,
+                    "sameSite": "Lax"
+                },
+                {
+                    "name": "b",
+                    "value": "2",
+                    "domain": "example.com",
+                    "path": "/",
+                    "expires": -1.0,
+                    "httpOnly": false,
+                    "secure": false,
+                    "sameSite": "Lax"
+                }
+            ],
+            "origins": [
+                {
+                    "origin": "https://example.com",
+                    "localStorage": [{ "name": "k", "value": "v" }],
+                    "sessionStorage": []
+                }
+            ]
+        });
+        fs::write(&path, serde_json::to_string(&fixture).unwrap()).unwrap();
+
+        let shown = state_show(path.to_str().unwrap()).expect("state_show");
+        assert_eq!(shown["summary"]["cookies"], 2);
+        assert_eq!(shown["summary"]["origins"], 1);
+        assert_eq!(shown["filename"], "demo-default.json");
     }
 }
