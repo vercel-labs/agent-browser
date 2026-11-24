@@ -1431,6 +1431,46 @@ impl DaemonState {
         self.apply_drained_events(drained).await
     }
 
+    /// Discard `Runtime.consoleAPICalled` and `Runtime.exceptionThrown` events
+    /// replayed for `session_id` by a `Runtime.disable` -> `Runtime.enable`
+    /// cycle, while keeping `frame_contexts` updated from the replayed
+    /// `Runtime.executionContextCreated` burst.
+    fn discard_replayed_runtime_events(&mut self, session_id: &str) {
+        let Some(ref mut rx) = self.event_rx else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    let sid = event.session_id.as_deref().unwrap_or_default();
+                    if event.method == "Runtime.executionContextCreated" {
+                        if let Some((frame_id, id)) =
+                            super::browser::parse_default_execution_context(&event.params)
+                        {
+                            self.frame_contexts.insert((sid.to_string(), frame_id), id);
+                        }
+                    } else if sid == session_id
+                        && matches!(
+                            event.method.as_str(),
+                            "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+                        )
+                    {
+                        continue;
+                    }
+                }
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                    self.frame_contexts.clear();
+                    continue;
+                }
+                Err(broadcast::error::TryRecvError::Closed) => {
+                    self.event_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
     async fn refresh_active_iframe_sessions(&mut self) {
         let Some(ref browser) = self.browser else {
             self.active_iframe_sessions.clear();
@@ -2112,15 +2152,10 @@ impl DaemonState {
                     match event.method.as_str() {
                         "Runtime.executionContextCreated" => {
                             let sid = event.session_id.as_deref().unwrap_or_default();
-                            let context = &event.params["context"];
-                            let aux = &context["auxData"];
-                            if aux["isDefault"].as_bool() == Some(true) {
-                                if let (Some(frame_id), Some(id)) =
-                                    (aux["frameId"].as_str(), context["id"].as_i64())
-                                {
-                                    self.frame_contexts
-                                        .insert((sid.to_string(), frame_id.to_string()), id);
-                                }
+                            if let Some((frame_id, id)) =
+                                super::browser::parse_default_execution_context(&event.params)
+                            {
+                                self.frame_contexts.insert((sid.to_string(), frame_id), id);
                             }
                         }
                         "Runtime.executionContextsCleared" => {
@@ -7050,7 +7085,7 @@ async fn handle_content(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "html": html, "origin": url }))
 }
 
-async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let script = cmd
@@ -7062,7 +7097,6 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
             return Ok(json!({ "result": result, "origin": url }));
         }
     }
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let script = cmd
         .get("script")
         .and_then(|v| v.as_str())
@@ -7070,47 +7104,103 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 
     let frame_id = state
         .active_frame_id
-        .as_deref()
+        .clone()
         .filter(|_| state.engine == "chrome");
-    let (result, url) = match frame_id {
+    let (result, origin) = match frame_id {
         Some(frame_id) => {
-            let session_id = mgr.active_session_id()?.to_string();
-            let host = super::a11y::frame_host_info(
-                &mgr.client,
-                &session_id,
-                &state.iframe_sessions,
-                frame_id,
-            )
-            .await?
-            .ok_or_else(|| "Could not locate the selected frame".to_string())?;
+            let (session_id, host) = {
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                let session_id = mgr.active_session_id()?.to_string();
+                let host = super::a11y::frame_host_info(
+                    &mgr.client,
+                    &session_id,
+                    &state.iframe_sessions,
+                    &frame_id,
+                )
+                .await?
+                .ok_or_else(|| "Could not locate the selected frame".to_string())?;
+                (session_id, host)
+            };
             let result = if host.is_dedicated_session {
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
                 mgr.evaluate_remote_object_in(script, &host.session_id)
                     .await?
             } else {
                 let known = state
                     .frame_contexts
-                    .get(&(host.session_id.clone(), frame_id.to_string()))
+                    .get(&(host.session_id.clone(), frame_id.clone()))
                     .copied();
-                mgr.evaluate_in_same_process_frame(script, &host.session_id, frame_id, known)
-                    .await?
+                let fast = match known {
+                    Some(id) => {
+                        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                        match mgr
+                            .eval_remote_object_in_context(&host.session_id, script, id)
+                            .await
+                        {
+                            Ok(obj) => Some(obj),
+                            Err(err) if err.contains("Cannot find context") => None,
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    None => None,
+                };
+                match fast {
+                    Some(obj) => obj,
+                    None => {
+                        // Drain pending events before cycling Runtime so legitimate
+                        // prior console/error logs are kept, then discard only the
+                        // replayed console/exception burst emitted by Runtime.enable.
+                        let _ = state.drain_cdp_events_background().await;
+                        let fresh_id = {
+                            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                            mgr.frame_execution_context(&host.session_id, &frame_id)
+                                .await?
+                        };
+                        state.discard_replayed_runtime_events(&host.session_id);
+                        state
+                            .frame_contexts
+                            .insert((host.session_id.clone(), frame_id.clone()), fresh_id);
+                        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                        mgr.eval_remote_object_in_context(&host.session_id, script, fresh_id)
+                            .await?
+                    }
+                }
             };
-            let origin = if host.url.is_empty() {
-                mgr.get_url().await.unwrap_or_default()
-            } else {
-                host.url
+            // Refresh the frame URL after eval so in-frame pushState/navigations
+            // are reflected, and omit `origin` when empty so content boundaries
+            // fail closed to `origin=unknown`.
+            let post_url = {
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                super::a11y::frame_host_info(
+                    &mgr.client,
+                    &session_id,
+                    &state.iframe_sessions,
+                    &frame_id,
+                )
+                .await
+                .ok()
+                .flatten()
+                .map(|h| h.url)
+                .unwrap_or(host.url)
             };
+            let origin = (!post_url.is_empty()).then_some(post_url);
             (result, origin)
         }
-        None => (
-            mgr.evaluate_remote_object(script).await?,
-            mgr.get_url().await.unwrap_or_default(),
-        ),
+        None => {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            let result = mgr.evaluate_remote_object(script).await?;
+            let url = mgr.get_url().await.unwrap_or_default();
+            (result, Some(url))
+        }
     };
     let unserializable = result
         .unserializable_value
         .clone()
         .or_else(|| (result.object_type == "undefined").then(|| "undefined".to_string()));
-    let mut data = json!({ "result": result.value.unwrap_or(Value::Null), "origin": url });
+    let mut data = json!({ "result": result.value.unwrap_or(Value::Null) });
+    if let Some(url) = origin {
+        data["origin"] = json!(url);
+    }
     if let Some(token) = unserializable {
         data["unserializable"] = json!(token);
     }
