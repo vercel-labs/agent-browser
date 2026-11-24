@@ -86,6 +86,10 @@
         "to": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser click <sel> --button right # Right-click (fires contextmenu) agent-browser click <sel> --modifiers control,shift # Hold keys during the click agent-browser dblclick <sel> # Double-click agent-browser dblclick <sel> --modifiers shift # Double-click with Shift held"
       },
       {
+        "from": "agent-browser select <sel> <val>      # Select dropdown by value or visible label",
+        "to": "agent-browser select <sel> <val> [--by value|label]  # Select dropdown by value or visible label"
+      },
+      {
         "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
         "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
       },
@@ -100,6 +104,10 @@
       {
         "from": "agent-browser set device <name>       # Emulate device (\"iPhone 14\")",
         "to": "agent-browser set device <name>       # Emulate a device (\"iPhone 14\"): viewport, user agent and touch input (touch events exist after the next navigation)"
+      },
+      {
+        "from": "not available with Safari or iOS WebDriver sessions",
+        "to": "not available with Safari, iOS, or Ladybird WebDriver sessions"
       }
     ],
     "/configuration": [
@@ -262,6 +270,10 @@
       {
         "from": "All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.",
         "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust."
+      },
+      {
+        "from": "iOS, Safari, and direct-page provider plugins",
+        "to": "iOS, Safari, Ladybird, and direct-page provider plugins"
       }
     ],
     "/init-scripts": [
@@ -487,11 +499,11 @@
       },
       {
         "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
-        "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+        "to": "The announcement names the top-level page's origin and lists each tool's origin, name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. Each record starts with the browser-reported origin that receives the tool's inputs: `[origin <origin>]` when it matches the page's origin, or `[cross-origin <origin>]` when the tool comes from an embedded frame on another origin. Direct `webmcp invoke` examples cover only tools from the page's own origin. Before invoking a cross-origin tool, confirm that its origin matches the user's task. When every tool is listed and the page's own tools share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
       },
       {
         "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
-        "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to agent-browser webmcp list --json. If a description does not show the arguments, fetch the schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+        "to": "The announcement names the top-level page's origin and lists each tool's origin, name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. Each record starts with the browser-reported origin that receives the tool's inputs: [origin <origin>] when it matches the page's origin, or [cross-origin <origin>] when the tool comes from an embedded frame on another origin. Direct webmcp invoke examples cover only tools from the page's own origin. Before invoking a cross-origin tool, confirm that its origin matches the user's task. When every tool is listed and the page's own tools share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to agent-browser webmcp list --json. If a description does not show the arguments, fetch the schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
       },
       {
         "from": "they fetch the selected tool's schema with `webmcp list <tool> --frame <frame-id> --json` and invoke it with the same `--frame`.",
@@ -500,6 +512,26 @@
       {
         "from": "they fetch the selected tool's schema with webmcp list <tool> --frame <frame-id> --json and invoke it with the same --frame.",
         "to": "they use an announced tool directly, fetch its schema with webmcp list <tool> --frame <frame-id> --json when the description does not show the arguments, and invoke it with the same --frame."
+      },
+      {
+        "from": "\"toolCount\": 1,\n      \"tools\": [{",
+        "to": "\"toolCount\": 1,\n      \"pageOrigin\": \"https://example.com\",\n      \"tools\": [{"
+      },
+      {
+        "from": "JSON exposes updates as `data.webmcp`; CLI and MCP text use the same summaries. An omitted field",
+        "to": "JSON exposes updates as `data.webmcp`; CLI and MCP text use the same summaries. `pageOrigin` is the browser-reported origin of the top-level page and is omitted until the browser reports it. Each tool's `origin` comes from the frame that registered it. A tool whose origin differs from `pageOrigin`, or any tool when `pageOrigin` is missing or opaque (`null`), is announced as cross-origin. An omitted field"
+      },
+      {
+        "from": "JSON exposes updates as data.webmcp; CLI and MCP text use the same summaries. An omitted field",
+        "to": "JSON exposes updates as data.webmcp; CLI and MCP text use the same summaries. pageOrigin is the browser-reported origin of the top-level page and is omitted until the browser reports it. Each tool's origin comes from the frame that registered it. A tool whose origin differs from pageOrigin, or any tool when pageOrigin is missing or opaque (null), is announced as cross-origin. An omitted field"
+      },
+      {
+        "from": "they use an announced tool directly, fetch its schema",
+        "to": "they use an announced tool from the page's own origin directly, check a cross-origin tool's origin against the request before using it, fetch its schema"
+      },
+      {
+        "from": "Lightpanda, Safari, iOS,",
+        "to": "Lightpanda, Safari, iOS, Ladybird,"
       }
     ],
     "/native-mode": [

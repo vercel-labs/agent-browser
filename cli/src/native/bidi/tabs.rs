@@ -283,13 +283,16 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         ff.forget_context(&context, &mut state.pending_dialog)
     };
     session(state)?.release_unused_user_contexts().await;
-    if was_active {
+    let pinned_gone = session(state)?.contexts.pinned_gone().is_some();
+    if was_active && !pinned_gone {
         match successor {
             Some(successor) => {
                 let _ = activate(state, &successor).await;
             }
             None => reset_page(state),
         }
+    } else if was_active {
+        reset_page(state);
     }
 
     Ok(json!({
@@ -810,5 +813,38 @@ mod tests {
         assert_eq!(successor_tab(&tabs, 1).as_deref(), Some("c"));
         assert_eq!(successor_tab(&tabs, 2).as_deref(), Some("b"));
         assert_eq!(successor_tab(&tabs[..1], 0), None);
+    }
+
+    #[tokio::test]
+    async fn closing_the_pinned_tab_leaves_tab_gone_without_activating_a_neighbor() {
+        let tree = json!({"contexts": [
+            {"context": "ctx-active", "url": "https://a.test/page?secret=1"},
+            {"context": "ctx-b", "url": "https://b.test/"}
+        ]});
+        let (mut ff, _events, calls) =
+            super::super::session::tests::fake_session_with_trees(vec![tree.clone(), tree]).await;
+        ff.set_pin(true);
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.active_frame_id = Some("old-frame".into());
+
+        let result = tab_close(&json!({}), &mut state).await.unwrap();
+        assert_eq!(result["closed"], true);
+        assert_eq!(result["targetId"], "ctx-active");
+        assert!(state.active_frame_id.is_none());
+        let contexts = &state.firefox.as_ref().unwrap().contexts;
+        assert_eq!(contexts.active(), "");
+        assert_eq!(
+            contexts.pinned_gone(),
+            Some(("ctx-active", "https://a.test/page"))
+        );
+        assert!(
+            !calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == "browsingContext.activate"),
+            "must not activate a neighbor after closing a pinned tab"
+        );
     }
 }

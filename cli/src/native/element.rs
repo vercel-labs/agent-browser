@@ -1734,132 +1734,12 @@ pub(crate) fn decide_check_plan<T>(
     CheckPlan::Pointer(target)
 }
 
-/// Evaluates `CHECK_CONTROL_FN_JS`, click geometry, and check-mode hit-testing on Chrome and
-/// returns the explicit `CheckPlan` for `toggle`.
-pub(crate) async fn plan_chrome_check(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-    want_checked: bool,
-) -> Result<CheckPlan<(f64, f64, String)>, String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
-
-    let js = format!(
-        r#"async function() {{
-            const ctrl = ({CHECK_CONTROL_FN_JS})(this);
-            if (!ctrl) return null;
-            const isNative = !!(ctrl.tagName && ctrl.tagName.toUpperCase() === 'INPUT' && (ctrl.type === 'checkbox' || ctrl.type === 'radio'));
-            const checked = isNative ? !!ctrl.checked : ctrl.getAttribute('aria-checked') === 'true';
-            const r = ctrl.getClientRects && ctrl.getClientRects()[0];
-            const s = getComputedStyle(ctrl);
-            const clickable = !!(r && r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && parseFloat(s.opacity) > 0 && s.pointerEvents !== 'none');
-            if (!clickable) {{
-                return {{ checked: checked, native: isNative, clickable: false, blocker: null, x: null, y: null }};
-            }}
-            const clickPoint = {CLICK_POINT_JS};
-            const doc = ctrl.ownerDocument || document;
-            const point = await clickPoint(ctrl, doc);
-            const blockerAt = {BLOCKER_AT_JS};
-            const topDoc = (point.view && point.view.document) || doc;
-            const blocker = blockerAt(doc, ctrl, point.lx, point.ly, true) || blockerAt(topDoc, ctrl, point.x, point.y, true);
-            return {{ checked: checked, native: isNative, clickable: true, blocker: blocker, x: point.x, y: point.y }};
-        }}"#
-    );
-
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: js,
-                object_id: Some(object_id),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(true),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
-    let val = result.result.value.unwrap_or(Value::Null);
-    if val.is_null() {
-        return Ok(decide_check_plan(
-            selector_or_ref,
-            want_checked,
-            None,
-            (0.0, 0.0, effective_session_id),
-        ));
-    }
-    let probe = CheckProbe {
-        checked: val.get("checked").and_then(Value::as_bool).unwrap_or(false),
-        native: val.get("native").and_then(Value::as_bool).unwrap_or(false),
-        clickable: val
-            .get("clickable")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        blocker: val.get("blocker").and_then(Value::as_str).map(String::from),
-    };
-    let coords = (
-        val.get("x").and_then(Value::as_f64).unwrap_or(0.0),
-        val.get("y").and_then(Value::as_f64).unwrap_or(0.0),
-        effective_session_id,
-    );
-    Ok(decide_check_plan(
-        selector_or_ref,
-        want_checked,
-        Some(probe),
-        coords,
-    ))
-}
-
 /// Formats the error when `check` or `uncheck` targets a non-checkable element.
 pub(crate) fn not_checkable_error(target: &str) -> String {
     format!(
         "Element '{}' is not a checkbox, radio button, or checkable control",
         target
     )
-}
-
-/// Evaluates whether the target is checkable and returns its checked state, or `None` if it is not.
-pub async fn element_checked_state(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<Option<bool>, String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
-
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: ELEMENT_CHECKED_JS.to_string(),
-                object_id: Some(object_id),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
-    Ok(result.result.value.and_then(|v| v.as_bool()))
 }
 
 pub async fn is_element_checked(
@@ -1869,15 +1749,65 @@ pub async fn is_element_checked(
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<bool, String> {
-    Ok(element_checked_state(
+    let (object_id, effective_session_id) = resolve_element_object_id(
         client,
         session_id,
         ref_map,
         selector_or_ref,
         iframe_sessions,
     )
-    .await?
-    .unwrap_or(false))
+    .await?;
+
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: r#"function() {
+                    var el = this;
+                    // Native checkbox/radio input
+                    var tag = el.tagName && el.tagName.toUpperCase();
+                    if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+                        return el.checked;
+                    }
+                    // ARIA role-based checked state
+                    var ariaCheckedRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'];
+                    var role = ((el.getAttribute && el.getAttribute('role')) || '').split(/\s+/).filter(function(r) { return ariaCheckedRoles.indexOf(r) !== -1; })[0];
+                    if (role) {
+                        if ((role === 'option' || role === 'treeitem') && !el.hasAttribute('aria-checked')) {
+                            return el.getAttribute('aria-selected') === 'true';
+                        }
+                        return el.getAttribute('aria-checked') === 'true';
+                    }
+                    // Follow label association (Playwright follow-label retarget)
+                    var label = el;
+                    if (tag !== 'LABEL') {
+                        label = el.closest && el.closest('label');
+                    }
+                    if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
+                        var ctrl = label.control;
+                        if (ctrl.type === 'checkbox' || ctrl.type === 'radio') {
+                            return ctrl.checked;
+                        }
+                    }
+                    // Check for nested native input
+                    var input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
+                    if (input) return input.checked;
+                    return false;
+                }"#.to_string(),
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    Ok(result
+        .result
+        .value
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
 }
 
 pub(crate) const ELEMENT_INNER_TEXT_JS: &str = "function() { return this.innerText || ''; }";
