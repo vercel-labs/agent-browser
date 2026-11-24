@@ -20099,24 +20099,42 @@ fn firefox_test_environment(tmp: &std::path::Path) -> EnvGuard<'static> {
     let env = EnvGuard::new(
         &[
             &ENGINE_TEST_ENV_KEYS[..],
-            &["TMPDIR", "HOME", "AGENT_BROWSER_ENCRYPTION_KEY"],
+            &[
+                "TMPDIR",
+                "TMP",
+                "TEMP",
+                "HOME",
+                "AGENT_BROWSER_ENCRYPTION_KEY",
+            ],
         ]
         .concat(),
     );
     for key in ENGINE_TEST_ENV_KEYS {
         env.remove(key);
     }
-    env.set("TMPDIR", tmp.to_str().unwrap());
+    // Unix reads TMPDIR for the temp dir, Windows reads TMP, then TEMP.
+    for key in ["TMPDIR", "TMP", "TEMP"] {
+        env.set(key, tmp.to_str().unwrap());
+    }
     env
 }
 
 /// True when any process command line mentions `dir`, which is how an owned Firefox shows up.
 fn firefox_processes_using(dir: &std::path::Path) -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-f", dir.to_str().unwrap()])
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    let dir = dir.to_str().unwrap();
+    let list = "Get-CimInstance Win32_Process | ForEach-Object CommandLine";
+    let out = match cfg!(windows) {
+        true => std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", list])
+            .output(),
+        false => std::process::Command::new("pgrep")
+            .args(["-f", dir])
+            .output(),
+    };
+    out.is_ok_and(|out| {
+        out.status.success()
+            && (!cfg!(windows) || String::from_utf8_lossy(&out.stdout).contains(dir))
+    })
 }
 
 async fn launch_firefox(state: &mut DaemonState, extra: Value) {
@@ -20281,12 +20299,13 @@ async fn e2e_firefox_click_buttons_modifiers_and_double_click() {
 
     assert_eq!(firefox_eval(&mut state, reset).await, json!(true));
     assert_success(&firefox_act(&mut state, "dblclick", "#target", json!({})).await);
-    let clicks = firefox_log(&mut state)
-        .await
-        .into_iter()
-        .filter(|line| line.starts_with("click:"))
-        .count();
+    let log = firefox_log(&mut state).await;
+    let clicks = log.iter().filter(|line| line.starts_with("click:")).count();
     assert_eq!(clicks, 2, "a double click must send two full clicks");
+    assert!(
+        log.contains(&"dblclick:0:2:00".into()),
+        "no dblclick: {log:?}"
+    );
 
     let rejected = firefox_act(&mut state, "click", "#target", json!({ "button": "bogus" })).await;
     assert!(

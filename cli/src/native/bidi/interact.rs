@@ -445,8 +445,11 @@ async fn move_mouse(
     Ok(dialog_opened)
 }
 
-/// Performs a pointer batch. With motion, the shared path moves the pointer first and the
-/// batch's own moves are dropped.
+/// Performs a pointer batch. With motion, the shared path moves the pointer first and drops the
+/// batch's own moves. Single-press gestures send one request per step so a dialog stops later
+/// steps. Multi-press gestures (`dblclick`) share one request because Firefox resets its click
+/// count between `input.performActions` calls; WebDriver BiDi cannot cancel an in-flight chain,
+/// so with `--no-auto-dialog` any press queued after a dialog opens runs once the dialog closes.
 async fn perform_pointer(
     ff: &FirefoxSession,
     state: PointerState<'_>,
@@ -474,31 +477,36 @@ async fn perform_pointer(
         _ => false,
     };
     if let Some(source) = mouse_source {
-        for pointer_action in source["actions"].as_array().cloned().unwrap_or_default() {
+        let steps = source["actions"].as_array().cloned().unwrap_or_default();
+        let multi = steps.iter().filter(|s| s["type"] == "pointerDown").count() > 1;
+        let pressing = |s: &Value| multi && s["type"] != "pointerMove";
+        for batch in steps.chunk_by(|a, b| pressing(a) && pressing(b)) {
             if dialog_opened {
                 break;
             }
-            if motion.is_some() && pointer_action["type"] == "pointerMove" {
+            if motion.is_some() && batch[0]["type"] == "pointerMove" {
                 continue;
             }
             let request = json!([{
                 "type": "pointer",
                 "id": source["id"],
                 "parameters": source["parameters"],
-                "actions": [pointer_action],
+                "actions": batch,
             }]);
-            let point = if pointer_action["type"] == "pointerMove" {
-                if pointer_action["origin"] == "viewport" {
-                    match (pointer_action["x"].as_f64(), pointer_action["y"].as_f64()) {
-                        (Some(x), Some(y)) => Some((x, y)),
-                        _ => Some(position),
+            let point = batch
+                .iter()
+                .rev()
+                .find(|a| a["type"] == "pointerMove")
+                .map(|a| {
+                    if a["origin"] == "viewport" {
+                        match (a["x"].as_f64(), a["y"].as_f64()) {
+                            (Some(x), Some(y)) => (x, y),
+                            _ => position,
+                        }
+                    } else {
+                        position
                     }
-                } else {
-                    Some(position)
-                }
-            } else {
-                None
-            };
+                });
             let root = match point {
                 Some(point) => Some(to_root_position(ff, &context, point).await?),
                 None => None,
@@ -507,30 +515,32 @@ async fn perform_pointer(
             if let Some(root) = root {
                 commit_mouse_position(state.mouse, root);
             }
-            apply_mouse_action(state.mouse, &pointer_action);
-            if let Some(button) = state
-                .pending_release
-                .as_ref()
-                .and_then(|release| release.button)
-            {
-                state.mouse.buttons |= button.mask();
-            }
-            match pointer_action["type"].as_str() {
-                Some("pointerDown") if dialog_opened && state.pending_release.is_none() => {
-                    if let Some(button) = pointer_action["button"].as_u64() {
-                        let button =
-                            MouseButton::parse(mouse_button_name(button as u8)).unwrap_or_default();
-                        *state.pending_release = Some(hold_release(
-                            &context,
-                            &owner_tab,
-                            position,
-                            (state.mouse.x, state.mouse.y),
-                            Some(button),
-                            Modifiers::default(),
-                        ));
+            for pointer_action in batch {
+                apply_mouse_action(state.mouse, pointer_action);
+                match pointer_action["type"].as_str() {
+                    Some("pointerDown") if dialog_opened && state.pending_release.is_none() => {
+                        if let Some(button) = pointer_action["button"].as_u64() {
+                            let button = MouseButton::parse(mouse_button_name(button as u8))
+                                .unwrap_or_default();
+                            *state.pending_release = Some(hold_release(
+                                &context,
+                                &owner_tab,
+                                position,
+                                (state.mouse.x, state.mouse.y),
+                                Some(button),
+                                Modifiers::default(),
+                            ));
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
+                if let Some(button) = state
+                    .pending_release
+                    .as_ref()
+                    .and_then(|release| release.button)
+                {
+                    state.mouse.buttons |= button.mask();
+                }
             }
         }
     } else {

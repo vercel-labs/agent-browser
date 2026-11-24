@@ -174,10 +174,13 @@ pub fn check_firefox_version(version: &str) -> Result<(), String> {
     }
 }
 
+/// The prefs of an owned profile. `dom.confirm_repost` lets `reload` resend a POST the way Chrome
+/// does; without it Firefox asks to resend through a prompt WebDriver BiDi does not report.
 fn user_js(nonce: &str, download_path: Option<&str>, restrict_webrtc: bool) -> String {
     let nonce = serde_json::to_string(nonce).unwrap_or_default();
     let mut js = format!(
         "user_pref(\"{NONCE_PREF}\", {nonce});\n\
+         user_pref(\"dom.confirm_repost.testing.always_accept\", true);\n\
          user_pref(\"devtools.debugger.remote-enabled\", true);\n\
          user_pref(\"devtools.chrome.enabled\", true);\n\
          user_pref(\"devtools.debugger.prompt-connection\", false);\n\

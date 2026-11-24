@@ -29,6 +29,7 @@ pub const CHROME_ONLY_ACTIONS: &[&str] = &[
     "react_renders_start",
     "react_renders_stop",
     "react_suspense",
+    "cdp_url",
 ];
 
 const SAFE_DURING_DIALOG: &[&str] = &[

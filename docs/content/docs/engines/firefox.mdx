@@ -61,6 +61,8 @@ Navigation, tabs, `eval`, snapshots and refs (including iframes and shadow roots
 
 On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
 
+With `--no-auto-dialog`, if the first click of `dblclick` opens a JavaScript dialog, Firefox delivers the second click after the dialog closes. Firefox resets its click count between `input.performActions` requests, so both presses share one WebDriver BiDi action chain and cannot be canceled mid-chain.
+
 Firefox cancels an HTTP auth challenge that the session has no credentials for, so the page loads the server's 401 response instead of waiting on a browser prompt. Run `set credentials` before you open the page.
 
 Pointer commands inside an iframe that has a CSS transform can miss their target.
@@ -93,6 +95,7 @@ These commands return a clear "Chrome-only" error on Firefox. Any other command 
     <tr><td>Screencast, recording, and video</td><td>Chrome-only</td></tr>
     <tr><td>Accessibility audit (<code>a11y</code>)</td><td>Chrome-only</td></tr>
     <tr><td><code>react_*</code> commands</td><td>Chrome-only</td></tr>
+    <tr><td><code>get cdp-url</code></td><td>Chrome-only</td></tr>
   </tbody>
 </table>
 
