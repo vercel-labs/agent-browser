@@ -2348,6 +2348,23 @@ async fn e2e_same_site_cross_origin_iframe_selectors_overlay_and_scale() {
     .await;
     assert_success(&initial);
     assert_eq!(get_data(&initial)["text"], "frame idle");
+    assert!(
+        state.iframe_sessions.is_empty(),
+        "same-site cross-origin fixture should stay in-process: {:?}",
+        state.iframe_sessions
+    );
+
+    // Invalid selector in a same-process frame must report an evaluation error
+    // instead of returning the thrown DOMException as a matched node.
+    let invalid = execute_command(
+        &json!({"id": "4b", "action": "gettext", "selector": "[[["}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        invalid["success"], false,
+        "invalid selector should fail in same-process frame: {invalid}"
+    );
 
     // Parent overlay must block selector click inside the same-site cross-origin frame.
     assert_success(
@@ -2439,9 +2456,12 @@ async fn e2e_semantic_find_honors_selected_frame() {
     );
     let html = concat!(
         "data:text/html,<iframe id='f' srcdoc=\"",
-        "<button onclick=&quot;this.textContent='Done'&quot;>Next Page</button>",
-        "<label for='u'>Username</label><input id='u' placeholder='Enter user'>",
-        "<img alt='Logo' title='Brand' data-testid='badge'>",
+        "<button id='stale' data-agent-browser-located='true'>Stale</button>",
+        "<button id='next' onclick=&quot;this.textContent='Done'&quot;>Next Page</button>",
+        "<label for='u'>Username</label><input id='u' placeholder=&quot;User's name&quot;>",
+        "<span alt='Logo'>Alt text</span>",
+        "<span title='Brand'>Brand title</span>",
+        "<span data-testid='badge'>Badge text</span>",
         "\"></iframe>"
     );
     assert_success(
@@ -2466,7 +2486,7 @@ async fn e2e_semantic_find_honors_selected_frame() {
         .await,
     );
     let btn = execute_command(
-        &json!({"id": "5", "action": "gettext", "selector": "button"}),
+        &json!({"id": "5", "action": "gettext", "selector": "#next"}),
         &mut state,
     )
     .await;
@@ -2480,9 +2500,18 @@ async fn e2e_semantic_find_honors_selected_frame() {
         )
         .await,
     );
+    let after_label = execute_command(
+        &json!({"id": "6b", "action": "inputvalue", "selector": "#u"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&after_label);
+    assert_eq!(get_data(&after_label)["value"], "alice");
+
+    // Apostrophe in placeholder value must match without syntax error.
     assert_success(
         &execute_command(
-            &json!({"id": "7", "action": "getbyplaceholder", "placeholder": "Enter user", "subaction": "fill", "value": "bob"}),
+            &json!({"id": "7", "action": "getbyplaceholder", "placeholder": "User's name", "subaction": "fill", "value": "bob"}),
             &mut state,
         )
         .await,
@@ -2495,24 +2524,53 @@ async fn e2e_semantic_find_honors_selected_frame() {
     assert_success(&val);
     assert_eq!(get_data(&val)["value"], "bob");
 
-    for (id, cmd) in [
+    // Single quotes in semantic locator values must stay literal and never execute JS.
+    let crafted = "'); globalThis.__ab_injected = 1; //";
+    let resp = execute_command(
+        &json!({"id": "7c", "action": "getbyplaceholder", "placeholder": crafted, "subaction": "text"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    assert_evaluate(
+        &mut state,
+        "7d",
+        "document.querySelector('#f').contentWindow.__ab_injected === undefined",
+        json!(true),
+    )
+    .await;
+
+    for (id, cmd, expected) in [
         (
             "8",
             json!({"action": "getbyalttext", "text": "Logo", "subaction": "text"}),
+            "Alt text",
         ),
         (
             "9",
             json!({"action": "getbytitle", "text": "Brand", "subaction": "text"}),
+            "Brand title",
         ),
         (
             "10",
             json!({"action": "getbytestid", "testId": "badge", "subaction": "text"}),
+            "Badge text",
         ),
     ] {
         let mut cmd = cmd;
         cmd["id"] = json!(id);
-        assert_success(&execute_command(&cmd, &mut state).await);
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["text"], expected);
     }
+
+    assert_evaluate(
+        &mut state,
+        "11",
+        "document.querySelector('#f').contentDocument.querySelectorAll('[data-agent-browser-located]').length",
+        json!(0),
+    )
+    .await;
 
     assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
 }
@@ -2586,6 +2644,20 @@ async fn e2e_wait_selector_in_same_site_and_oopif_frames() {
             )
             .await,
         );
+        let active_fid = state.active_frame_id.as_deref().unwrap();
+        if host == "localhost" {
+            assert!(
+                !state.iframe_sessions.contains_key(active_fid),
+                "same-site localhost fixture must exercise in-process path: {:?}",
+                state.iframe_sessions
+            );
+        } else {
+            assert!(
+                state.iframe_sessions.contains_key(active_fid),
+                "cross-site 127.0.0.1 fixture must exercise OOPIF path: {:?}",
+                state.iframe_sessions
+            );
+        }
         assert_success(
             &execute_command(
                 &json!({"id": format!("wait-{idx}"), "action": "wait", "selector": "#late", "timeout": 5000}),
@@ -2766,7 +2838,7 @@ async fn e2e_snapshot_expands_in_process_child_inside_oopif() {
                     "<!doctype html><button id='deep-btn' onclick=\"this.textContent='Deep clicked'\">Deep action</button>".to_string()
                 } else {
                     format!(
-                        "<!doctype html><iframe id='middle' src='http://localhost:{port}/oopif' width='400' height='220'></iframe>"
+                        "<!doctype html><div id='scope'><iframe id='middle' src='http://localhost:{port}/oopif' width='400' height='220'></iframe></div>"
                     )
                 };
                 let resp = format!(
@@ -2795,7 +2867,11 @@ async fn e2e_snapshot_expands_in_process_child_inside_oopif() {
         .await,
     );
 
-    let snap = execute_command(&json!({"id": "3", "action": "snapshot"}), &mut state).await;
+    let snap = execute_command(
+        &json!({"id": "3", "action": "snapshot", "selector": "#scope"}),
+        &mut state,
+    )
+    .await;
     assert_success(&snap);
     let refs = get_data(&snap)["refs"].as_object().unwrap();
     let btn_ref = refs

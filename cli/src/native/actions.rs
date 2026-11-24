@@ -8292,22 +8292,11 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 // Wait helpers
 // ---------------------------------------------------------------------------
 
-async fn wait_for_selector(
-    client: &super::cdp::client::CdpClient,
-    session_id: &str,
-    selector: &str,
-    state: &str,
-    timeout_ms: u64,
-) -> Result<(), String> {
-    let check_fn = match state {
-        "attached" => format!(
-            "!!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
-        "detached" => format!(
-            "!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
+fn selector_state_check_js(selector: &str, state: &str) -> String {
+    let sel = serde_json::to_string(selector).unwrap_or_default();
+    match state {
+        "attached" => format!("!!document.querySelector({sel})"),
+        "detached" => format!("!document.querySelector({sel})"),
         "hidden" => format!(
             r#"(() => {{
                 const el = document.querySelector({sel});
@@ -8315,7 +8304,6 @@ async fn wait_for_selector(
                 const s = window.getComputedStyle(el);
                 return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
             }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
         ),
         _ => format!(
             r#"(() => {{
@@ -8325,10 +8313,25 @@ async fn wait_for_selector(
                 const s = window.getComputedStyle(el);
                 return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
             }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
         ),
-    };
+    }
+}
 
+fn is_transient_frame_nav_error(err: &str) -> bool {
+    err.contains("No frame for given id found")
+        || err.contains("Cannot find context with specified id")
+        || err.contains("Execution context was destroyed")
+        || err.contains("Inspected target navigated or closed")
+}
+
+async fn wait_for_selector(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    selector: &str,
+    state: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let check_fn = selector_state_check_js(selector, state);
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
@@ -8383,39 +8386,29 @@ async fn wait_for_selector_in_frame(
     state: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let sel = serde_json::to_string(selector).unwrap_or_default();
-    let check = match state {
-        "attached" => format!("!!document.querySelector({sel})"),
-        "detached" => format!("!document.querySelector({sel})"),
-        "hidden" => format!(
-            r#"(() => {{
-                const el = document.querySelector({sel});
-                if (!el) return true;
-                const s = window.getComputedStyle(el);
-                return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
-            }})()"#,
-        ),
-        _ => format!(
-            r#"(() => {{
-                const el = document.querySelector({sel});
-                if (!el) return false;
-                const r = el.getBoundingClientRect();
-                const s = window.getComputedStyle(el);
-                return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-            }})()"#,
-        ),
-    };
+    let check = selector_state_check_js(selector, state);
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
     let mut ctx_id: Option<i64> = None;
     loop {
         let context_id = match ctx_id {
             Some(id) => id,
             None => {
-                let id =
-                    super::element::create_frame_isolated_world(client, host_session, frame_id)
-                        .await?;
-                ctx_id = Some(id);
-                id
+                match super::element::create_frame_isolated_world(client, host_session, frame_id)
+                    .await
+                {
+                    Ok(id) => {
+                        ctx_id = Some(id);
+                        id
+                    }
+                    Err(err) if is_transient_frame_nav_error(&err) => {
+                        if tokio::time::Instant::now() >= deadline {
+                            return Err(format!("Wait timed out after {}ms", timeout_ms));
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
             }
         };
         let result = client
@@ -8436,10 +8429,11 @@ async fn wait_for_selector_in_frame(
                 .and_then(|r| r.get("value"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
-            Err(_) => {
+            Err(err) if is_transient_frame_nav_error(&err) => {
                 ctx_id = None;
                 false
             }
+            Err(err) => return Err(err),
         };
         if satisfied {
             return Ok(());
@@ -11718,41 +11712,8 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         return Err("At least one of 'selector', 'name', or 'url' is required".to_string());
     }
 
-    let tree_result = mgr
-        .client
-        .send_command_no_params("Page.getFrameTree", Some(&session_id))
-        .await?;
-
-    fn find_frame(tree: &Value, name: Option<&str>, url: Option<&str>) -> Option<String> {
-        let frame = tree.get("frame")?;
-        let frame_name = frame.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let frame_url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        let frame_id = frame.get("id").and_then(|v| v.as_str())?;
-
-        if let Some(n) = name {
-            if frame_name == n {
-                return Some(frame_id.to_string());
-            }
-        }
-        if let Some(u) = url {
-            if frame_url.contains(u) {
-                return Some(frame_id.to_string());
-            }
-        }
-
-        if let Some(children) = tree.get("childFrames").and_then(|v| v.as_array()) {
-            for child in children {
-                if let Some(id) = find_frame(child, name, url) {
-                    return Some(id);
-                }
-            }
-        }
-        None
-    }
-
-    let frame_tree = &tree_result["frameTree"];
-
-    // If selector is a ref (@e1), resolve the iframe element from the ref map
+    // If selector is a ref (@e1) or CSS/XPath selector, resolve directly without
+    // fetching Page.getFrameTree up front.
     if let Some(sel) = selector {
         if let Some(ref_id) = super::element::parse_ref(sel) {
             let entry = state
@@ -11806,87 +11767,15 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             return Ok(json!({ "frame": label }));
         }
 
-        // CSS selector path: resolve inside the active frame (or top document
-        // when no frame is selected) and read the child frame ID via DOM.describeNode.
-        let (object_id, elem_session) = if let Some(cur_fid) = state.active_frame_id.as_deref() {
-            let host_session = super::element::find_frame_host_session(
-                &mgr.client,
-                &session_id,
-                cur_fid,
-                &state.iframe_sessions,
-            )
-            .await?;
-            if state.iframe_sessions.get(cur_fid).map(String::as_str) == Some(host_session.as_str())
-            {
-                let lookup: Value = mgr
-                    .client
-                    .send_command(
-                        "Runtime.evaluate",
-                        Some(json!({
-                            "expression": format!(
-                                "document.querySelector({})",
-                                serde_json::to_string(sel).unwrap_or_default()
-                            ),
-                            "returnByValue": false,
-                        })),
-                        Some(&host_session),
-                    )
-                    .await?;
-                if let Some(details) = lookup.get("exceptionDetails") {
-                    let msg = details
-                        .pointer("/exception/description")
-                        .or_else(|| details.get("text"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("selector lookup failed");
-                    return Err(format!("Evaluation error: {}", msg));
-                }
-                let oid = lookup
-                    .pointer("/result/objectId")
-                    .and_then(|v| v.as_str())
-                    .ok_or("Could not find frame for selector")?
-                    .to_string();
-                (oid, host_session)
-            } else {
-                let oid = super::element::resolve_object_in_same_process_frame(
-                    &mgr.client,
-                    &host_session,
-                    cur_fid,
-                    sel,
-                )
-                .await
-                .map_err(|_| "Could not find frame for selector".to_string())?;
-                (oid, host_session)
-            }
-        } else {
-            let lookup: Value = mgr
-                .client
-                .send_command(
-                    "Runtime.evaluate",
-                    Some(json!({
-                        "expression": format!(
-                            "document.querySelector({})",
-                            serde_json::to_string(sel).unwrap_or_default()
-                        ),
-                        "returnByValue": false,
-                    })),
-                    Some(&session_id),
-                )
-                .await?;
-            if let Some(details) = lookup.get("exceptionDetails") {
-                let msg = details
-                    .pointer("/exception/description")
-                    .or_else(|| details.get("text"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("selector lookup failed");
-                return Err(format!("Evaluation error: {}", msg));
-            }
-            let oid = lookup
-                .pointer("/result/objectId")
-                .and_then(|v| v.as_str())
-                .ok_or("Could not find frame for selector")?
-                .to_string();
-            (oid, session_id.clone())
-        };
+        let (object_id, elem_session) = super::element::query_selector_object_in_frame(
+            &mgr.client,
+            &session_id,
+            state.active_frame_id.as_deref(),
+            sel,
+            &state.iframe_sessions,
+        )
+        .await?
+        .ok_or("Could not find frame for selector")?;
 
         let describe = mgr
             .client
@@ -11922,23 +11811,49 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         return Ok(json!({ "frame": label }));
     }
 
-    if let Some(frame_id) = find_frame(frame_tree, name, url) {
-        let label = name.or(url).unwrap_or("frame");
-        state.active_frame_id = Some(frame_id);
-        return Ok(json!({ "frame": label }));
+    fn find_frame(tree: &Value, name: Option<&str>, url: Option<&str>) -> Option<String> {
+        let frame = tree.get("frame")?;
+        let frame_name = frame.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let frame_url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let frame_id = frame.get("id").and_then(|v| v.as_str())?;
+
+        if let Some(n) = name {
+            if frame_name == n {
+                return Some(frame_id.to_string());
+            }
+        }
+        if let Some(u) = url {
+            if frame_url.contains(u) {
+                return Some(frame_id.to_string());
+            }
+        }
+
+        if let Some(children) = tree.get("childFrames").and_then(|v| v.as_array()) {
+            for child in children {
+                if let Some(id) = find_frame(child, name, url) {
+                    return Some(id);
+                }
+            }
+        }
+        None
     }
 
-    let active_iframe_sids =
+    let mut active_iframe_sids: Vec<String> =
         a11y::active_iframe_session_ids(&mgr.client, &session_id, &state.iframe_sessions)
             .await
-            .unwrap_or_default();
-    for iframe_sid in active_iframe_sids {
-        if let Ok(sub_tree) = mgr
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+    active_iframe_sids.sort_unstable();
+    for sid in
+        std::iter::once(session_id.as_str()).chain(active_iframe_sids.iter().map(String::as_str))
+    {
+        if let Ok(tree_result) = mgr
             .client
-            .send_command_no_params("Page.getFrameTree", Some(&iframe_sid))
+            .send_command_no_params("Page.getFrameTree", Some(sid))
             .await
         {
-            if let Some(frame_id) = find_frame(&sub_tree["frameTree"], name, url) {
+            if let Some(frame_id) = find_frame(&tree_result["frameTree"], name, url) {
                 let label = name.or(url).unwrap_or("frame");
                 state.active_frame_id = Some(frame_id);
                 return Ok(json!({ "frame": label }));
@@ -12214,6 +12129,29 @@ async fn handle_presentational_getbyrole(
         }}"#
     );
 
+    run_marked_locator_subaction(
+        cmd,
+        state,
+        &locate_body,
+        format!(
+            "No element found: {}",
+            build_role_selector(role, name, exact)
+        ),
+    )
+    .await
+}
+
+const CLEAR_LOCATED_MARKERS_JS: &str = "(root) => { root.querySelectorAll('[data-agent-browser-located]').forEach(el => el.removeAttribute('data-agent-browser-located')); }";
+
+async fn run_marked_locator_subaction(
+    cmd: &Value,
+    state: &mut DaemonState,
+    locate_body: &str,
+    not_found_err: String,
+) -> Result<Value, String> {
+    let wrapped_locate = format!(
+        "(root) => {{ root.querySelectorAll('[data-agent-browser-located]').forEach(el => el.removeAttribute('data-agent-browser-located')); return ({locate_body})(root); }}"
+    );
     let located = {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         let top_session = mgr.active_session_id()?.to_string();
@@ -12222,33 +12160,34 @@ async fn handle_presentational_getbyrole(
             state.active_frame_id.as_deref(),
             &top_session,
             &state.iframe_sessions,
-            &locate_body,
+            &wrapped_locate,
         )
         .await?
     };
 
     if !located.as_bool().unwrap_or(false) {
-        return Err(format!(
-            "No element found: {}",
-            build_role_selector(role, name, exact)
-        ));
+        return Err(not_found_err);
     }
 
     let selector = "[data-agent-browser-located='true']";
     let action_result = execute_subaction(cmd, state, selector).await;
 
-    // Clean up the marker in whichever document it was set in.
-    if let Some(mgr) = state.browser.as_ref() {
-        if let Ok(top_session) = mgr.active_session_id() {
-            let top_session = top_session.to_string();
-            let _ = eval_body_in_active_frame(
-                mgr,
-                state.active_frame_id.as_deref(),
-                &top_session,
-                &state.iframe_sessions,
-                "(root) => { root.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located'); }",
-            )
-            .await;
+    let dialog_opened = action_result
+        .as_ref()
+        .is_ok_and(|v| v.get("dialogOpened") == Some(&Value::Bool(true)));
+    if !dialog_opened {
+        if let Some(mgr) = state.browser.as_ref() {
+            if let Ok(top_session) = mgr.active_session_id() {
+                let top_session = top_session.to_string();
+                let _ = eval_body_in_active_frame(
+                    mgr,
+                    state.active_frame_id.as_deref(),
+                    &top_session,
+                    &state.iframe_sessions,
+                    CLEAR_LOCATED_MARKERS_JS,
+                )
+                .await;
+            }
         }
     }
 
@@ -12351,9 +12290,21 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     // Query the accessibility tree via CDP: the browser engine is the
     // authoritative source for implicit roles (e.g. <h2> -> "heading",
     // <a href> -> "link"), which a CSS selector cannot approximate.
+    let host_session = match state.active_frame_id.as_deref() {
+        Some(fid) => {
+            super::element::find_frame_host_session(
+                &mgr.client,
+                &session_id,
+                fid,
+                &state.iframe_sessions,
+            )
+            .await?
+        }
+        None => session_id.clone(),
+    };
     let (ax_params, effective_session_id) = super::element::resolve_ax_session(
         state.active_frame_id.as_deref(),
-        &session_id,
+        &host_session,
         &state.iframe_sessions,
     );
 
@@ -12578,7 +12529,9 @@ async fn handle_semantic_locator(
         }
         "placeholder" => format!(
             r#"(root) => {{
-                const el = root.querySelector('input[placeholder={val}], textarea[placeholder={val}]');
+                const target = {val};
+                const el = Array.from(root.querySelectorAll('input[placeholder], textarea[placeholder]'))
+                    .find(e => e.getAttribute('placeholder') === target);
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
             }}"#,
@@ -12586,7 +12539,9 @@ async fn handle_semantic_locator(
         ),
         "alttext" => format!(
             r#"(root) => {{
-                const el = root.querySelector('img[alt={val}], [alt={val}]');
+                const target = {val};
+                const el = Array.from(root.querySelectorAll('img[alt], [alt]'))
+                    .find(e => e.getAttribute('alt') === target);
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
             }}"#,
@@ -12594,7 +12549,9 @@ async fn handle_semantic_locator(
         ),
         "title" => format!(
             r#"(root) => {{
-                const el = root.querySelector('[title={val}]');
+                const target = {val};
+                const el = Array.from(root.querySelectorAll('[title]'))
+                    .find(e => e.getAttribute('title') === target);
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
             }}"#,
@@ -12602,7 +12559,9 @@ async fn handle_semantic_locator(
         ),
         "testid" => format!(
             r#"(root) => {{
-                const el = root.querySelector('[data-testid={val}]');
+                const target = {val};
+                const el = Array.from(root.querySelectorAll('[data-testid]'))
+                    .find(e => e.getAttribute('data-testid') === target);
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
             }}"#,
@@ -12623,41 +12582,13 @@ async fn handle_semantic_locator(
         ),
     };
 
-    let located = {
-        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-        let top_session = mgr.active_session_id()?.to_string();
-        eval_body_in_active_frame(
-            mgr,
-            state.active_frame_id.as_deref(),
-            &top_session,
-            &state.iframe_sessions,
-            &locate_body,
-        )
-        .await?
-    };
-
-    if !located.as_bool().unwrap_or(false) {
-        return Err(format!("No element found by {} '{}'", strategy, value));
-    }
-
-    let selector = "[data-agent-browser-located='true']";
-    let action_result = execute_subaction(cmd, state, selector).await;
-
-    if let Some(mgr) = state.browser.as_ref() {
-        if let Ok(top_session) = mgr.active_session_id() {
-            let top_session = top_session.to_string();
-            let _ = eval_body_in_active_frame(
-                mgr,
-                state.active_frame_id.as_deref(),
-                &top_session,
-                &state.iframe_sessions,
-                "(root) => { root.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located'); }",
-            )
-            .await;
-        }
-    }
-
-    action_result
+    run_marked_locator_subaction(
+        cmd,
+        state,
+        &locate_body,
+        format!("No element found by {} '{}'", strategy, value),
+    )
+    .await
 }
 
 async fn handle_getbytext(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

@@ -433,9 +433,79 @@ async fn resolve_center_in_same_process_frame(
     result
 }
 
+async fn extract_object_id_checking_exception(
+    client: &CdpClient,
+    session_id: &str,
+    result: &Value,
+) -> Result<Option<String>, String> {
+    let object_id = result
+        .pointer("/result/objectId")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if let Some(details) = result.get("exceptionDetails") {
+        if let Some(oid) = object_id {
+            let _ = client
+                .send_command(
+                    "Runtime.releaseObject",
+                    Some(serde_json::json!({ "objectId": oid })),
+                    Some(session_id),
+                )
+                .await;
+        }
+        let msg = details
+            .pointer("/exception/description")
+            .or_else(|| details.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("selector lookup failed");
+        return Err(format!("Evaluation error: {}", msg));
+    }
+    Ok(object_id)
+}
+
+/// Resolve a CSS/XPath selector to `(objectId, host_session)` in the active
+/// frame (or top document when `active_frame_id` is `None`). Returns `Ok(None)`
+/// only when the selector matches nothing; propagates CDP and evaluation errors.
+pub(super) async fn query_selector_object_in_frame(
+    client: &CdpClient,
+    top_session: &str,
+    active_frame_id: Option<&str>,
+    selector: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Option<(String, String)>, String> {
+    let js = build_find_element_js(selector);
+    let (host_session, context_id) = match active_frame_id {
+        Some(fid) => {
+            let host = find_frame_host_session(client, top_session, fid, iframe_sessions).await?;
+            if iframe_sessions.get(fid).map(String::as_str) == Some(host.as_str()) {
+                (host, None)
+            } else {
+                let ctx = create_frame_isolated_world(client, &host, fid).await?;
+                (host, Some(ctx))
+            }
+        }
+        None => (top_session.to_string(), None),
+    };
+    let mut params = serde_json::json!({
+        "expression": js,
+        "returnByValue": false,
+        "awaitPromise": false,
+    });
+    if let Some(ctx) = context_id {
+        params["contextId"] = serde_json::json!(ctx);
+    }
+    let result = client
+        .send_command("Runtime.evaluate", Some(params), Some(&host_session))
+        .await?;
+    Ok(
+        extract_object_id_checking_exception(client, &host_session, &result)
+            .await?
+            .map(|oid| (oid, host_session)),
+    )
+}
+
 /// Find a selector inside a same-process iframe (same-origin or same-site
 /// cross-origin) and return its object handle in `host_session`.
-pub(super) async fn resolve_object_in_same_process_frame(
+async fn resolve_object_in_same_process_frame(
     client: &CdpClient,
     host_session: &str,
     frame_id: &str,
@@ -455,11 +525,8 @@ pub(super) async fn resolve_object_in_same_process_frame(
             Some(host_session),
         )
         .await?;
-    result
-        .get("result")
-        .and_then(|r| r.get("objectId"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    extract_object_id_checking_exception(client, host_session, &result)
+        .await?
         .ok_or_else(|| format!("Element not found in the selected frame: {}", selector))
 }
 
