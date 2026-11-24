@@ -20,6 +20,7 @@ pub trait BrowserBackend: Send + Sync {
     async fn back(&self) -> Result<(), String>;
     async fn forward(&self) -> Result<(), String>;
     async fn reload(&self) -> Result<(), String>;
+    async fn set_window_size(&self, width: i32, height: i32) -> Result<(), String>;
     async fn get_cookies(&self) -> Result<Value, String>;
     fn backend_type(&self) -> &str;
 
@@ -113,6 +114,10 @@ impl BrowserBackend for WebDriverBackend {
 
     async fn reload(&self) -> Result<(), String> {
         self.client.refresh().await
+    }
+
+    async fn set_window_size(&self, width: i32, height: i32) -> Result<(), String> {
+        self.client.set_window_rect(width, height).await
     }
 
     async fn get_cookies(&self) -> Result<Value, String> {

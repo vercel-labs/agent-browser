@@ -9447,6 +9447,18 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .unwrap_or(1.0);
     let mobile = cmd.get("mobile").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    if let Some(ref wb) = state.webdriver_backend {
+        if state.browser.is_none() {
+            if scale != 1.0 || mobile {
+                return Err(wb.unsupported_error("viewport scale or mobile emulation"));
+            }
+            wb.set_window_size(width, height).await?;
+            return Ok(
+                json!({ "width": width, "height": height, "deviceScaleFactor": 1.0, "mobile": false }),
+            );
+        }
+    }
+
     let warning = apply_viewport(
         state,
         ViewportSetup {
@@ -20704,6 +20716,75 @@ mod tests {
             !restarted_path.exists(),
             "failed preflight must not create the replacement output"
         );
+    }
+
+    #[tokio::test]
+    async fn test_viewport_sets_the_window_size_on_a_webdriver_session() {
+        let (port, server) = start_webdriver_response_server(vec![(
+            "POST /session/test-session/window/rect",
+            json!({ "value": { "x": 0, "y": 0, "width": 1440, "height": 1000 } }),
+        )])
+        .await;
+        let mut state = DaemonState::new();
+        state.backend_type = BackendType::WebDriver;
+        state.webdriver_backend = Some(WebDriverBackend::new(
+            crate::native::webdriver::client::WebDriverClient::new_with_session(
+                port,
+                "test-session".to_string(),
+            ),
+        ));
+        let cmd = json!({ "action": "viewport", "id": "vp", "width": 1440, "height": 1000 });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], true);
+        assert_eq!(resp["data"]["width"], 1440);
+        assert_eq!(resp["data"]["height"], 1000);
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_viewport_reports_a_window_resize_the_driver_rejects() {
+        let (port, server) = start_webdriver_response_server(vec![(
+            "POST /session/test-session/window/rect",
+            json!({ "value": { "error": "unsupported operation", "message": "cannot resize", "stacktrace": "" } }),
+        )])
+        .await;
+        let mut state = DaemonState::new();
+        state.backend_type = BackendType::WebDriver;
+        state.webdriver_backend = Some(WebDriverBackend::new(
+            crate::native::webdriver::client::WebDriverClient::new_with_session(
+                port,
+                "test-session".to_string(),
+            ),
+        ));
+        let cmd = json!({ "action": "viewport", "id": "vp", "width": 1440, "height": 1000 });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"].as_str().unwrap().contains("cannot resize"));
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_viewport_scale_is_refused_on_a_webdriver_session() {
+        let mut state = DaemonState::new();
+        state.backend_type = BackendType::WebDriver;
+        state.webdriver_backend = Some(WebDriverBackend::new(
+            crate::native::webdriver::client::WebDriverClient::new_with_session(
+                1,
+                "test-session".to_string(),
+            ),
+        ));
+        let cmd = json!({
+            "action": "viewport", "id": "vp", "width": 1440, "height": 1000, "deviceScaleFactor": 2.0
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"].as_str().unwrap().contains("not supported"));
     }
 
     #[tokio::test]

@@ -584,7 +584,7 @@ agent-browser --cdp <url> --cdp-headers '{"Authorization":"Bearer <token>"}' ...
 agent-browser --pin-tab ...           # Pin the session to its bound tab (strict tab binding)
 agent-browser --no-pin-tab ...        # Disable a sticky pin previously enabled with --pin-tab
 agent-browser -p <provider> ...       # Browser provider or configured provider plugin
-agent-browser -p ladybird ...         # Ladybird over WebDriver: CSS selectors, no snapshot refs
+agent-browser -p ladybird ...         # Ladybird over WebDriver: CSS selectors, set viewport <w> <h> (no scale), no snapshot refs
 agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin

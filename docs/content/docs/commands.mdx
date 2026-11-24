@@ -231,7 +231,7 @@ See [Files & Clipboard](/files) for clipboard, upload, download, local file, scr
 ## Settings
 
 ```bash
-agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2); kept across relaunches and new tabs
+agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2); kept across relaunches and new tabs; WebDriver providers such as Ladybird resize the window and take no scale
 agent-browser set device <name>       # Emulate a device ("iPhone 14"): viewport, user agent and touch input (touch events exist after the next navigation)
 agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
