@@ -125,9 +125,11 @@ const READ_AND_CUT_SELECTION_SCRIPT: &str = r#"(() => {
         const end = el.selectionEnd;
         if (typeof start === 'number' && typeof end === 'number' && end > start) {
             const text = el.value.slice(start, end);
-            if (!doc.execCommand || !doc.execCommand('cut')) {
-                el.setRangeText('', start, end, 'start');
-                el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteByCut' }));
+            if (!el.readOnly && !el.disabled) {
+                if (!doc.execCommand || !doc.execCommand('cut')) {
+                    el.setRangeText('', start, end, 'start');
+                    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteByCut' }));
+                }
             }
             return text;
         }
@@ -135,7 +137,7 @@ const READ_AND_CUT_SELECTION_SCRIPT: &str = r#"(() => {
     }
     const win = doc.defaultView || window;
     const text = (win.getSelection && win.getSelection().toString()) || '';
-    if (text && doc.execCommand) {
+    if (text && el && el.isContentEditable && doc.execCommand) {
         doc.execCommand('cut');
     }
     return text;

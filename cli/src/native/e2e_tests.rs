@@ -13889,6 +13889,9 @@ async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
     let page_body = "<!doctype html><html><body>\
         <textarea id='ta'>hello world</textarea>\
         <textarea id='ta2'>second field</textarea>\
+        <input id='ro' readonly value='keep-me'>\
+        <textarea id='ro_ta' readonly>keep-ta</textarea>\
+        <input id='ro_cancel' readonly value='keep-cancel' oncut='event.preventDefault()'>\
         <input id='pw' type='password' value='secret123'>\
         </body></html>";
     let page_server = tokio::spawn(async move {
@@ -14170,6 +14173,64 @@ async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
         alt_typed,
         "Option/AltGr keyDown events with text should type å@"
     );
+
+    // 4c. Cut and insertText on readonly inputs/textareas must not modify their value; cut still copies.
+    assert_evaluate(
+        &mut state,
+        "ro-refuse-exec",
+        "(() => { const orig = document.execCommand?.bind(document); window.__origExec = orig; document.execCommand = () => false; return true; })()",
+        json!(true),
+    )
+    .await;
+    for (id, expected) in [
+        ("ro", "keep-me"),
+        ("ro_ta", "keep-ta"),
+        ("ro_cancel", "keep-cancel"),
+    ] {
+        assert_evaluate(
+            &mut state,
+            id,
+            &format!(
+                "(() => {{ const r = document.getElementById('{id}'); r.focus(); r.select(); return true; }})()"
+            ),
+            json!(true),
+        )
+        .await;
+        ws.send(Message::Text(
+            json!({ "type": "input_read_clipboard", "cut": true, "modifiers": 4 }).to_string(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(recv_clipboard(&mut ws).await, expected);
+        assert_evaluate(
+            &mut state,
+            &format!("{id}-after-cut"),
+            &format!("document.getElementById('{id}').value"),
+            json!(expected),
+        )
+        .await;
+    }
+    assert_evaluate(
+        &mut state,
+        "ro-restore-exec",
+        "(() => { if (window.__origExec) document.execCommand = window.__origExec; return true; })()",
+        json!(true),
+    )
+    .await;
+
+    ws.send(Message::Text(
+        json!({ "type": "input_insert_text", "text": "overwrite" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    assert_evaluate(
+        &mut state,
+        "ro-after-paste",
+        "document.getElementById('ro_cancel').value",
+        json!("keep-cancel"),
+    )
+    .await;
 
     // 5. Password inputs must never leak their value via input_read_clipboard.
     assert_evaluate(
