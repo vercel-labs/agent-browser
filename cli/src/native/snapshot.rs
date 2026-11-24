@@ -366,42 +366,6 @@ pub async fn take_snapshot(
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
-    let mut visited = HashSet::new();
-    let parent_session = match frame_id {
-        Some(fid) => {
-            visited.insert(fid.to_string());
-            super::element::find_frame_host_session(client, session_id, fid, iframe_sessions)
-                .await
-                .unwrap_or_else(|_| session_id.to_string())
-        }
-        None => session_id.to_string(),
-    };
-    take_snapshot_inner(
-        client,
-        session_id,
-        &parent_session,
-        options,
-        ref_map,
-        frame_id,
-        iframe_sessions,
-        0,
-        &mut visited,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn take_snapshot_inner(
-    client: &CdpClient,
-    session_id: &str,
-    parent_session_id: &str,
-    options: &SnapshotOptions,
-    ref_map: &mut RefMap,
-    frame_id: Option<&str>,
-    iframe_sessions: &HashMap<String, String>,
-    depth: usize,
-    visited: &mut HashSet<String>,
-) -> Result<String, String> {
     client
         .send_command_no_params("DOM.enable", Some(session_id))
         .await?;
@@ -409,10 +373,6 @@ async fn take_snapshot_inner(
         .send_command_no_params("Accessibility.enable", Some(session_id))
         .await?;
 
-    // If a CSS selector is provided, resolve the set of backendNodeIds that
-    // belong to the DOM subtrees rooted at every matched element.  We use this
-    // set to pick the right AX subtree root(s) later.  Hidden matches have no
-    // AX nodes, so they drop out without failing the snapshot.
     let selector_backend_ids: Option<HashMap<i64, usize>> =
         if let Some(ref selector) = options.selector {
             let resolved = resolve_selector_backend_ids(client, session_id, selector).await;
@@ -428,6 +388,44 @@ async fn take_snapshot_inner(
             None
         };
 
+    let mut visited = HashSet::new();
+    let parent_session = match frame_id {
+        Some(fid) => {
+            visited.insert(fid.to_string());
+            super::element::find_frame_host_session(client, session_id, fid, iframe_sessions)
+                .await
+                .unwrap_or_else(|_| session_id.to_string())
+        }
+        None => session_id.to_string(),
+    };
+    take_snapshot_inner(
+        client,
+        session_id,
+        &parent_session,
+        options,
+        selector_backend_ids.as_ref(),
+        ref_map,
+        frame_id,
+        iframe_sessions,
+        0,
+        &mut visited,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn take_snapshot_inner(
+    client: &CdpClient,
+    session_id: &str,
+    parent_session_id: &str,
+    options: &SnapshotOptions,
+    selector_backend_ids: Option<&HashMap<i64, usize>>,
+    ref_map: &mut RefMap,
+    frame_id: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+    depth: usize,
+    visited: &mut HashSet<String>,
+) -> Result<String, String> {
     let (ax_params, effective_session_id) =
         resolve_ax_session(frame_id, parent_session_id, iframe_sessions);
     // Same-origin children share a CDP session but have separate loaders;
@@ -483,7 +481,7 @@ async fn take_snapshot_inner(
 
     // When a selector is given, find AX nodes whose backendDOMNodeId falls
     // within the target DOM subtree and pick the top-level ones as roots.
-    let effective_roots = if let Some(ref id_set) = selector_backend_ids {
+    let effective_roots = if let Some(id_set) = selector_backend_ids {
         // Mark which tree_nodes belong to the target DOM subtree.
         let in_subtree: Vec<bool> = tree_nodes
             .iter()
@@ -533,11 +531,15 @@ async fn take_snapshot_inner(
 
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
-    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
-    let mut cursor_elements: HashMap<i64, CursorElementInfo> =
+    // Pre-collect cursor-interactive elements for the top document only;
+    // child frames don't share the top document's DOM or backendNodeIds.
+    let mut cursor_elements: HashMap<i64, CursorElementInfo> = if frame_id.is_none() {
         find_cursor_interactive_elements(client, session_id)
             .await
-            .unwrap_or_default();
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
     drop_natively_interactive(&mut cursor_elements, &tree_nodes);
 
     promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
@@ -699,6 +701,7 @@ async fn take_snapshot_inner(
                     session_id,
                     effective_session_id,
                     options,
+                    None,
                     ref_map,
                     Some(&child_fid),
                     iframe_sessions,

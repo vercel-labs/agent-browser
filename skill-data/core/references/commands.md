@@ -364,7 +364,7 @@ agent-browser frame main          # Back to main frame
 
 ### Iframe support
 
-Iframes are detected automatically during snapshots. When the main-frame snapshot runs, `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the output (one level of nesting; iframes within iframes are not expanded).
+Iframes are detected automatically during snapshots. When the snapshot runs, `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the output (nested iframes are expanded up to 4 levels deep).
 
 ```bash
 agent-browser snapshot -i
