@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -356,6 +356,8 @@ pub async fn stage_snapshot(
     Ok((tree, staged))
 }
 
+const MAX_IFRAME_SNAPSHOT_DEPTH: usize = 4;
+
 pub async fn take_snapshot(
     client: &CdpClient,
     session_id: &str,
@@ -363,6 +365,34 @@ pub async fn take_snapshot(
     ref_map: &mut RefMap,
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
+) -> Result<String, String> {
+    let mut visited = HashSet::new();
+    if let Some(fid) = frame_id {
+        visited.insert(fid.to_string());
+    }
+    take_snapshot_inner(
+        client,
+        session_id,
+        options,
+        ref_map,
+        frame_id,
+        iframe_sessions,
+        0,
+        &mut visited,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn take_snapshot_inner(
+    client: &CdpClient,
+    session_id: &str,
+    options: &SnapshotOptions,
+    ref_map: &mut RefMap,
+    frame_id: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+    depth: usize,
+    visited: &mut HashSet<String>,
 ) -> Result<String, String> {
     client
         .send_command_no_params("DOM.enable", Some(session_id))
@@ -639,11 +669,9 @@ pub async fn take_snapshot(
         render_tree(&tree_nodes, root_idx, 0, &mut output, options);
     }
 
-    // Recurse into child iframes: for each Iframe node with a backend_node_id,
-    // resolve the child frame ID and take a snapshot of its content.
-    // We only recurse from the main frame (frame_id == None) to avoid
-    // unbounded depth; nested iframes within iframes are not expanded.
-    if frame_id.is_none() {
+    // Recurse into child iframes up to MAX_IFRAME_SNAPSHOT_DEPTH, guarding
+    // against cycles with `visited`.
+    if depth < MAX_IFRAME_SNAPSHOT_DEPTH {
         let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
         for node in tree_nodes.iter() {
             if node.role != "Iframe" || !node.has_ref {
@@ -653,16 +681,20 @@ pub async fn take_snapshot(
                 continue;
             };
             let ref_id = node.ref_id.as_deref().unwrap_or("");
-            if let Ok(child_fid) = resolve_iframe_frame_id(client, session_id, bid).await {
-                // Snapshot the child frame; errors are silently ignored
-                // (e.g. cross-origin iframes)
-                if let Ok(child_text) = Box::pin(take_snapshot(
+            if let Ok(child_fid) = resolve_iframe_frame_id(client, effective_session_id, bid).await
+            {
+                if !visited.insert(child_fid.clone()) {
+                    continue;
+                }
+                if let Ok(child_text) = Box::pin(take_snapshot_inner(
                     client,
                     session_id,
                     options,
                     ref_map,
                     Some(&child_fid),
                     iframe_sessions,
+                    depth + 1,
+                    visited,
                 ))
                 .await
                 {

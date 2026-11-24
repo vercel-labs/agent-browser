@@ -2086,6 +2086,437 @@ async fn e2e_presentational_cross_origin_iframe_refs_support_fill_and_inputvalue
     server.abort();
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_frame_css_selector_and_nested_cross_origin_iframes() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/outer");
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.starts_with("GET /middle ") {
+                    format!(
+                        "<!doctype html><iframe name='inner' src='http://127.0.0.1:{port}/inner' width='300' height='150'></iframe>"
+                    )
+                } else if request.starts_with("GET /inner ") {
+                    "<!doctype html><button id='next' onclick=\"this.textContent='Clicked'\">Next</button>".to_string()
+                } else if request.starts_with("GET /child ") {
+                    "<!doctype html><button>Child button</button>".to_string()
+                } else {
+                    format!(
+                        "<!doctype html><div id='not-a-frame'></div>\
+                        <iframe name='middle' src='http://localhost:{port}/middle' width='400' height='250'></iframe>\
+                        <iframe id='static-cross' src='http://localhost:{port}/child' width='300' height='120'></iframe>"
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": url}),
+            &mut state,
+        )
+        .await,
+    );
+
+    let snap = execute_command(&json!({"id": "3", "action": "snapshot"}), &mut state).await;
+    assert_success(&snap);
+    let refs = get_data(&snap)["refs"].as_object().unwrap();
+    assert!(
+        refs.values()
+            .any(|n| n["role"] == "button" && n["name"] == "Next"),
+        "nested cross-origin inner button should appear in snapshot: {snap}"
+    );
+
+    // Find refs for middle and inner iframes (first two iframes in order).
+    let iframe_refs: Vec<String> = refs
+        .iter()
+        .filter(|(_, n)| n["role"] == "Iframe")
+        .map(|(k, _)| format!("@{k}"))
+        .collect();
+    assert!(
+        iframe_refs.len() >= 2,
+        "expected nested iframe refs: {refs:?}"
+    );
+
+    // Cross-origin frame by CSS selector without `name` attribute.
+    let resp = execute_command(
+        &json!({"id": "4", "action": "frame", "selector": "#static-cross"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["frame"], "static-cross");
+    assert_success(&execute_command(&json!({"id": "4b", "action": "mainframe"}), &mut state).await);
+
+    // Select middle by CSS selector, then inner by CSS selector from inside middle.
+    let resp = execute_command(
+        &json!({"id": "5", "action": "frame", "selector": "iframe[name=middle]"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({"id": "6", "action": "frame", "selector": "iframe[name=inner]"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let text = execute_command(
+        &json!({"id": "7", "action": "gettext", "selector": "#next"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&text);
+    assert_eq!(get_data(&text)["text"], "Next");
+
+    // Return to main and select nested inner directly by its @ref.
+    assert_success(&execute_command(&json!({"id": "8", "action": "mainframe"}), &mut state).await);
+    let snap2 = execute_command(&json!({"id": "9", "action": "snapshot"}), &mut state).await;
+    assert_success(&snap2);
+    let tree = get_data(&snap2)["snapshot"].as_str().unwrap();
+    // Line immediately preceding `button "Next"` is the inner iframe ref.
+    let inner_ref = tree
+        .lines()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|w| {
+            if w[1].contains("button \"Next\"") {
+                w[0].split("[ref=")
+                    .nth(1)
+                    .and_then(|s| s.split(']').next())
+                    .map(|r| format!("@{r}"))
+            } else {
+                None
+            }
+        })
+        .expect("inner iframe ref before button Next");
+    let resp = execute_command(
+        &json!({"id": "10", "action": "frame", "selector": inner_ref}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_success(
+        &execute_command(
+            &json!({"id": "11", "action": "click", "selector": "#next"}),
+            &mut state,
+        )
+        .await,
+    );
+    let text2 = execute_command(
+        &json!({"id": "12", "action": "gettext", "selector": "#next"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&text2);
+    assert_eq!(get_data(&text2)["text"], "Clicked");
+
+    // Invalid selectors return "Could not find frame for selector".
+    assert_success(&execute_command(&json!({"id": "13", "action": "mainframe"}), &mut state).await);
+    for sel in ["#not-a-frame", "#missing"] {
+        let resp = execute_command(
+            &json!({"id": "14", "action": "frame", "selector": sel}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Could not find frame for selector"));
+    }
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_same_site_cross_origin_iframe_selectors_overlay_and_scale() {
+    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p1 = l1.local_addr().unwrap().port();
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p2 = l2.local_addr().unwrap().port();
+
+    let s1 = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = l1.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buffer[..read]);
+                let body = if req.starts_with("GET /scaled ") {
+                    format!(
+                        "<!doctype html><body style='margin:0'>\
+                        <iframe id='scaled' src='http://localhost:{p2}/scaled-child' \
+                        style='position:absolute;left:40px;top:40px;width:400px;height:300px;border:0;transform:scale(0.5);transform-origin:top left'></iframe>\
+                        </body>"
+                    )
+                } else {
+                    format!(
+                        "<!doctype html><body style='margin:0'>\
+                        <h1>Page A</h1><div style='height:400px'></div>\
+                        <div style='position:relative;width:400px;height:200px'>\
+                        <iframe id='frame' src='http://localhost:{p2}/child' width='400' height='200' style='border:0'></iframe>\
+                        <div id='cover' style='display:none;position:absolute;inset:0;background:rgba(0,0,0,0.5);z-index:10'></div>\
+                        </div></body>"
+                    )
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let s2 = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = l2.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buffer[..read]);
+                let body = if req.starts_with("GET /scaled-child ") {
+                    "<!doctype html><body style='margin:0'>\
+                    <button id='wrong' style='position:absolute;left:20px;top:20px;width:120px;height:60px' onclick=\"out.textContent='wrong'\">Wrong</button>\
+                    <button id='target' style='position:absolute;left:200px;top:160px;width:120px;height:60px' onclick=\"out.textContent='target'\">Target</button>\
+                    <p id='out'>none</p></body>"
+                } else {
+                    "<!doctype html><body><p id='state'>frame idle</p>\
+                    <button id='inner' onclick=\"document.getElementById('state').textContent='frame clicked'\">Inner button</button></body>"
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": format!("http://localhost:{p1}/")}),
+            &mut state,
+        )
+        .await,
+    );
+
+    // Frame selector + get text + click in same-site cross-origin iframe.
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "frame", "selector": "#frame"}),
+            &mut state,
+        )
+        .await,
+    );
+    let initial = execute_command(
+        &json!({"id": "4", "action": "gettext", "selector": "#state"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&initial);
+    assert_eq!(get_data(&initial)["text"], "frame idle");
+
+    // Parent overlay must block selector click inside the same-site cross-origin frame.
+    assert_success(
+        &execute_command(
+            &json!({"id": "5", "action": "evaluate", "script": "document.getElementById('cover').style.display='block'"}),
+            &mut state,
+        )
+        .await,
+    );
+    let covered = execute_command(
+        &json!({"id": "6", "action": "click", "selector": "#inner"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        covered["success"], false,
+        "parent overlay should block click inside same-site cross-origin iframe: {covered}"
+    );
+
+    // Remove overlay and click succeeds.
+    assert_success(
+        &execute_command(
+            &json!({"id": "7", "action": "evaluate", "script": "document.getElementById('cover').style.display='none'"}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "8", "action": "click", "selector": "#inner"}),
+            &mut state,
+        )
+        .await,
+    );
+    let after = execute_command(
+        &json!({"id": "9", "action": "gettext", "selector": "#state"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&after);
+    assert_eq!(get_data(&after)["text"], "frame clicked");
+
+    // CSS transform: scale(0.5) on a same-site cross-origin iframe must click #target, not #wrong.
+    assert_success(&execute_command(&json!({"id": "10", "action": "mainframe"}), &mut state).await);
+    assert_success(
+        &execute_command(
+            &json!({"id": "11", "action": "navigate", "url": format!("http://localhost:{p1}/scaled")}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "12", "action": "frame", "selector": "#scaled"}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "13", "action": "click", "selector": "#target"}),
+            &mut state,
+        )
+        .await,
+    );
+    let out = execute_command(
+        &json!({"id": "14", "action": "gettext", "selector": "#out"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&out);
+    assert_eq!(get_data(&out)["text"], "target");
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    s1.abort();
+    s2.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_semantic_find_honors_selected_frame() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    let html = concat!(
+        "data:text/html,<iframe id='f' srcdoc=\"",
+        "<button onclick=&quot;this.textContent='Done'&quot;>Next Page</button>",
+        "<label for='u'>Username</label><input id='u' placeholder='Enter user'>",
+        "<img alt='Logo' title='Brand' data-testid='badge'>",
+        "\"></iframe>"
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": html}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "frame", "selector": "#f"}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "4", "action": "getbytext", "text": "Next Page", "exact": true, "subaction": "click"}),
+            &mut state,
+        )
+        .await,
+    );
+    let btn = execute_command(
+        &json!({"id": "5", "action": "gettext", "selector": "button"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&btn);
+    assert_eq!(get_data(&btn)["text"], "Done");
+
+    assert_success(
+        &execute_command(
+            &json!({"id": "6", "action": "getbylabel", "label": "Username", "subaction": "fill", "value": "alice"}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "7", "action": "getbyplaceholder", "placeholder": "Enter user", "subaction": "fill", "value": "bob"}),
+            &mut state,
+        )
+        .await,
+    );
+    let val = execute_command(
+        &json!({"id": "7b", "action": "inputvalue", "selector": "#u"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&val);
+    assert_eq!(get_data(&val)["value"], "bob");
+
+    for (id, cmd) in [
+        (
+            "8",
+            json!({"action": "getbyalttext", "text": "Logo", "subaction": "text"}),
+        ),
+        (
+            "9",
+            json!({"action": "getbytitle", "text": "Brand", "subaction": "text"}),
+        ),
+        (
+            "10",
+            json!({"action": "getbytestid", "testId": "badge", "subaction": "text"}),
+        ),
+    ] {
+        let mut cmd = cmd;
+        cmd["id"] = json!(id);
+        assert_success(&execute_command(&cmd, &mut state).await);
+    }
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
