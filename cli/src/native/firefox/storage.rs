@@ -210,13 +210,10 @@ fn append_context_urls(contexts: &[Value], urls: &mut Vec<url::Url>) {
     }
 }
 
-async fn cookie_urls(ff: &FirefoxSession) -> Result<Vec<url::Url>, String> {
+async fn cookie_urls(ff: &FirefoxSession, tab: &str) -> Result<Vec<url::Url>, String> {
     let tree = ff
         .bidi
-        .send(
-            "browsingContext.getTree",
-            json!({"root": ff.contexts.active_tab()}),
-        )
+        .send("browsingContext.getTree", json!({"root": tab}))
         .await?;
     let contexts = tree["contexts"]
         .as_array()
@@ -226,8 +223,8 @@ async fn cookie_urls(ff: &FirefoxSession) -> Result<Vec<url::Url>, String> {
     Ok(urls)
 }
 
-async fn get_all_cookies(ff: &FirefoxSession) -> Result<Vec<Cookie>, String> {
-    let params = json!({ "partition": ff.active_partition() });
+async fn get_all_cookies(ff: &FirefoxSession, tab: &str) -> Result<Vec<Cookie>, String> {
+    let params = json!({ "partition": ff.contexts.partition(tab) });
     let result = ff.bidi.send("storage.getCookies", params).await?;
     Ok(result["cookies"]
         .as_array()
@@ -240,6 +237,7 @@ async fn get_all_cookies(ff: &FirefoxSession) -> Result<Vec<Cookie>, String> {
 /// Returns cookies for requested URLs or active page and frames when omitted.
 pub async fn cookies_get(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
+    let tab = ff.storage_tab()?.to_string();
     let urls = match cmd.get("urls") {
         Some(value) => value
             .as_array()
@@ -252,9 +250,9 @@ pub async fn cookies_get(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 url::Url::parse(value).map_err(|error| format!("Invalid URL '{value}': {error}"))
             })
             .collect::<Result<Vec<_>, _>>()?,
-        None => cookie_urls(ff).await?,
+        None => cookie_urls(ff, &tab).await?,
     };
-    let mut cookies = get_all_cookies(ff).await?;
+    let mut cookies = get_all_cookies(ff, &tab).await?;
     cookies.retain(|cookie| urls.iter().any(|url| cookie_applies_to_url(cookie, url)));
     Ok(json!({ "cookies": cookies }))
 }
@@ -262,6 +260,7 @@ pub async fn cookies_get(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 /// Sets cookies like Chrome's `handle_cookies_set` (via `storage.setCookie`).
 pub async fn cookies_set(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
+    let partition = ff.active_partition()?;
     let current_url = ff.url().await.ok();
     let cookie_values = if let Some(arr) = cmd.get("cookies").and_then(Value::as_array) {
         arr.clone()
@@ -279,7 +278,7 @@ pub async fn cookies_set(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         vec![Value::Object(cookie)]
     };
 
-    let mut command = json!({ "partition": ff.active_partition() });
+    let mut command = json!({ "partition": partition });
     for cookie in &cookie_values {
         command["cookie"] = command_cookie_to_bidi(cookie, current_url.as_deref())?;
         ff.bidi.send("storage.setCookie", command.clone()).await?;
@@ -290,7 +289,7 @@ pub async fn cookies_set(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 /// Clears cookies like Chrome's `handle_cookies_clear` (via `storage.deleteCookies`).
 pub async fn cookies_clear(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    let params = json!({ "filter": {}, "partition": ff.active_partition() });
+    let params = json!({ "filter": {}, "partition": ff.active_partition()? });
     ff.bidi.send("storage.deleteCookies", params).await?;
     Ok(json!({ "cleared": true }))
 }
@@ -402,7 +401,8 @@ fn collect_context_origins(
 }
 
 async fn collect_origins(
-    ff: &mut FirefoxSession,
+    ff: &FirefoxSession,
+    tab: &str,
 ) -> Result<(Vec<OriginStorage>, HashSet<String>, HashSet<String>), String> {
     let tree = ff.bidi.send("browsingContext.getTree", json!({})).await?;
     let contexts = tree["contexts"]
@@ -412,7 +412,7 @@ async fn collect_origins(
     let mut active = HashSet::new();
     for info in contexts
         .iter()
-        .filter(|info| ff.contexts.in_active_jar(info))
+        .filter(|info| ff.contexts.in_jar_of(tab, info))
     {
         collect_context_origins(
             std::slice::from_ref(info),
@@ -442,7 +442,7 @@ async fn collect_origins(
         .cloned()
         .collect();
     if !remaining.is_empty() {
-        for mut storage in collect_via_temp_context(ff, &remaining).await? {
+        for mut storage in collect_via_temp_context(ff, tab, &remaining).await? {
             seen.insert(storage.origin.clone());
             temporary.insert(storage.origin.clone());
             storage.session_storage.clear();
@@ -456,48 +456,72 @@ async fn collect_origins(
 }
 
 async fn collect_via_temp_context(
-    ff: &mut FirefoxSession,
+    ff: &FirefoxSession,
+    tab: &str,
     origins: &[String],
 ) -> Result<Vec<OriginStorage>, String> {
-    super::network::ensure_intercept(ff).await?;
     let mut params = json!({"type": "tab", "background": true});
-    if let Some(user_context) = ff.contexts.user_context(ff.contexts.active()) {
+    if let Some(user_context) = ff.contexts.user_context(tab) {
         params["userContext"] = json!(user_context);
     }
     let created = ff.bidi.send("browsingContext.create", params).await?;
     let context = created["context"]
         .as_str()
-        .ok_or("Firefox did not return a context id for the storage tab")?
-        .to_string();
-    ff.net.blank_contexts.write().await.insert(context.clone());
+        .ok_or("Firefox did not return a context id for the storage tab")?;
+    let mut subscription = None;
+    let mut intercept = None;
     let result = async {
+        let mut events = ff
+            .bidi
+            .subscribe_matching(|event| event["method"] == "network.beforeRequestSent");
+        let subscribed = ff.bidi.send("session.subscribe", json!({"events": ["network.beforeRequestSent"], "contexts": [context]})).await?;
+        subscription = Some(subscribed["subscription"].as_str().ok_or("Firefox did not return a network subscription id")?.to_string());
+        let added = ff.bidi.send("network.addIntercept", json!({"phases": ["beforeRequestSent"], "contexts": [context]})).await?;
+        intercept = Some(added["intercept"].as_str().ok_or("Firefox did not return a network intercept id")?.to_string());
         let mut found = Vec::new();
         for origin in origins {
-            let allowed = {
-                let filter = ff.net.domain_filter.read().await;
-                crate::native::network::check_navigation_allowed(filter.as_ref(), origin).is_ok()
-            };
-            if !allowed {
-                continue;
+            let navigation = ff.bidi.send("browsingContext.navigate", json!({"context": context, "url": format!("{origin}/"), "wait": "complete"}));
+            tokio::pin!(navigation);
+            loop {
+                tokio::select! {
+                    result = &mut navigation => { result?; break; }
+                    event = events.recv() => {
+                        if events.has_lost_events() {
+                            return Err("Failed to receive storage request: event queue overflowed".into());
+                        }
+                        let event = event.ok_or("Failed to receive storage request: BiDi connection closed")?;
+                        if event["params"]["context"] == context && event["params"]["isBlocked"] == true {
+                            let request = event["params"]["request"]["request"].as_str().ok_or("Missing storage request id")?;
+                            ff.bidi.send("network.provideResponse", json!({"request": request, "statusCode": 200, "headers": [{"name": "Content-Type", "value": {"type": "string", "value": "text/html"}}], "body": {"type": "base64", "value": "PGh0bWw+PC9odG1sPg=="}})).await?;
+                        }
+                    }
+                }
             }
-            ff.bidi
-                .send(
-                    "browsingContext.navigate",
-                    json!({"context": context, "url": format!("{origin}/"), "wait": "complete"}),
-                )
-                .await?;
-            if let Some(storage) = read_origin_storage(ff, &context, origin).await? {
+            if let Some(storage) = read_origin_storage(ff, context, origin).await? {
                 found.push(storage);
             }
         }
         Ok(found)
+    }.await;
+    if let Some(intercept) = intercept {
+        let _ = ff
+            .bidi
+            .send("network.removeIntercept", json!({"intercept": intercept}))
+            .await;
     }
-    .await;
-    ff.net.blank_contexts.write().await.remove(&context);
     let _ = ff
         .bidi
         .send("browsingContext.close", json!({"context": context}))
         .await;
+    if let Some(subscription) = subscription {
+        let _ = ff
+            .bidi
+            .send(
+                "session.unsubscribe",
+                json!({"subscriptions": [subscription]}),
+            )
+            .await;
+    }
     result
 }
 
@@ -534,12 +558,13 @@ fn merge_previous_origins(
 }
 
 async fn write_state_to(
-    ff: &mut FirefoxSession,
+    ff: &FirefoxSession,
     path: &str,
     previous_path: Option<&str>,
 ) -> Result<String, String> {
-    let cookies = get_all_cookies(ff).await?;
-    let (origins, mut seen, temporary) = collect_origins(ff).await?;
+    let tab = ff.storage_tab()?.to_string();
+    let cookies = get_all_cookies(ff, &tab).await?;
+    let (origins, mut seen, temporary) = collect_origins(ff, &tab).await?;
     let mut state = StorageState { cookies, origins };
     if let Some(previous_path) = previous_path.filter(|path| {
         std::path::Path::new(path).exists() || std::path::Path::new(&format!("{path}.enc")).exists()
@@ -561,6 +586,7 @@ pub async fn validate_restore(
     expression: Option<&str>,
     timeout_ms: u64,
 ) -> Result<(), String> {
+    let _ = ff.storage_tab()?;
     if let Some(pattern) = url_pattern {
         let url = ff.url().await?;
         if !crate::native::actions::route_url_matches(pattern, &url) {
@@ -585,7 +611,7 @@ pub async fn validate_restore(
 
 /// Saves cookies and origin storage in the `state.rs` JSON format, like Chrome's `handle_state_save`.
 pub async fn state_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    super::network::drain(state).await;
+    state.drain_firefox_events();
     let explicit_path = cmd.get("path").and_then(Value::as_str);
     let session_name = state.session_name.clone();
     let session_id = state.session_id.clone();
@@ -610,10 +636,11 @@ pub async fn state_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 
 /// Saves the `--session-name` state file used by restore-on-close/autosave.
 pub async fn save_auto_state(
-    ff: &mut FirefoxSession,
+    ff: &FirefoxSession,
     session_name: &str,
     session_id: &str,
 ) -> Result<String, String> {
+    let _ = ff.storage_tab()?;
     let (candidate_path, final_path) = state::auto_state_paths(session_name, session_id)?;
     let candidate_path = candidate_path.to_string_lossy().to_string();
     let final_path = final_path.to_string_lossy().to_string();
@@ -640,7 +667,7 @@ pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<
     let saved: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {e}"))?;
 
-    let mut command = json!({ "partition": session(state)?.active_partition() });
+    let mut command = json!({ "partition": session(state)?.active_partition()? });
     for cookie in &saved.cookies {
         command["cookie"] = state_cookie_to_bidi(cookie);
         session(state)?
@@ -701,11 +728,6 @@ pub async fn state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .get("path")
         .and_then(Value::as_str)
         .ok_or("Missing 'path' parameter")?;
-    crate::native::actions::ensure_state_replay_supported_by_active_domain_filter(
-        state,
-        "state load",
-    )
-    .await?;
     let skipped = load_state_path(state, path).await?;
     crate::native::actions::mark_explicit_storage_state_loaded(state, path);
     Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
@@ -771,13 +793,13 @@ mod tests {
 
     #[tokio::test]
     async fn collect_origins_drops_a_reply_claiming_another_origin() {
-        let (mut ff, requests) = fake_storage_session(
+        let (ff, requests) = fake_storage_session(
             json!({"contexts": [{"context": "ctx-active", "url": "https://real.example/page"}]}),
             storage_reply("https://bank.example"),
         )
         .await;
 
-        let (origins, seen, _) = collect_origins(&mut ff).await.unwrap();
+        let (origins, seen, _) = collect_origins(&ff, "ctx-active").await.unwrap();
 
         assert!(origins.is_empty());
         assert!(!seen.contains("https://bank.example"));
@@ -794,13 +816,13 @@ mod tests {
 
     #[tokio::test]
     async fn collect_origins_reads_in_a_sandbox_with_the_browser_origin() {
-        let (mut ff, requests) = fake_storage_session(
+        let (ff, requests) = fake_storage_session(
             json!({"contexts": [{"context": "ctx-active", "url": "https://real.example/page"}]}),
             storage_reply("https://real.example"),
         )
         .await;
 
-        let (origins, _, _) = collect_origins(&mut ff).await.unwrap();
+        let (origins, _, _) = collect_origins(&ff, "ctx-active").await.unwrap();
 
         assert_eq!(origins.len(), 1);
         assert_eq!(origins[0].origin, "https://real.example");
@@ -834,7 +856,7 @@ mod tests {
             .record(&json!({"context": "ctx-frame", "parent": "ctx-active"}));
         ff.contexts.activate("ctx-frame");
 
-        let urls = cookie_urls(&ff).await.unwrap();
+        let urls = cookie_urls(&ff, ff.storage_tab().unwrap()).await.unwrap();
 
         assert_eq!(
             urls.iter().map(|url| url.as_str()).collect::<Vec<_>>(),
@@ -868,15 +890,21 @@ mod tests {
                     "browsingContext.create" => {
                         json!({"type":"success","id":id,"result":{"context":"ctx-temp"}})
                     }
-                    "browsingContext.navigate" if !responded => {
+                    "session.subscribe" => {
+                        json!({"type":"success","id":id,"result":{"subscription":"sub-1"}})
+                    }
+                    "network.addIntercept" => {
+                        let event = json!({"type":"event","method":"network.beforeRequestSent","params":{
+                            "context":"ctx-temp","isBlocked":true,"request":{"request":"req-1"}
+                        }});
+                        ws.send(Message::Text(event.to_string())).await.unwrap();
                         for _ in 0..1_500 {
                             let noise = json!({"type":"event","method":"log.entryAdded","params":{"text":"noise"}});
                             ws.send(Message::Text(noise.to_string())).await.unwrap();
                         }
-                        let event = json!({"type":"event","method":"network.beforeRequestSent","params":{
-                            "context":"ctx-temp","isBlocked":true,"request":{"request":"req-1","url":"https://kept.example/"}
-                        }});
-                        ws.send(Message::Text(event.to_string())).await.unwrap();
+                        json!({"type":"success","id":id,"result":{"intercept":"int-1"}})
+                    }
+                    "browsingContext.navigate" if !responded => {
                         navigate = Some(id);
                         continue;
                     }
@@ -904,38 +932,22 @@ mod tests {
             .unwrap()
             .into();
 
-        let _dispatcher = super::super::network::spawn_dispatcher(
-            ff.bidi.clone(),
-            ff.net.clone(),
-            super::super::network::subscribe_dispatcher(&ff.bidi),
-            ff.emulation.clone(),
-            ff.permissions.clone(),
-        );
-
-        let found = collect_via_temp_context(&mut ff, &["https://kept.example".to_string()])
-            .await
-            .unwrap();
+        let found =
+            collect_via_temp_context(&ff, "ctx-active", &["https://kept.example".to_string()])
+                .await
+                .unwrap();
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].local_storage[0].name, "token");
-        assert!(ff.net.blank_contexts.read().await.is_empty());
         let requests = requests.lock().unwrap();
         let provided = requests
             .iter()
             .find(|request| request["method"] == "network.provideResponse")
             .unwrap();
         assert_eq!(provided["params"]["request"], "req-1");
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request["method"] == "network.addIntercept")
-                .count(),
-            1
-        );
         assert!(requests
             .iter()
-            .any(|request| request["method"] == "browsingContext.close"
-                && request["params"]["context"] == "ctx-temp"));
+            .any(|request| request["method"] == "network.removeIntercept"));
     }
 
     #[tokio::test]
@@ -992,7 +1004,10 @@ mod tests {
             }
         });
         let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
-        ff.bidi = std::sync::Arc::new(super::super::bidi::BidiClient::connect(&url).await.unwrap());
+        ff.bidi = super::super::bidi::BidiClient::connect(&url)
+            .await
+            .unwrap()
+            .into();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(
@@ -1307,5 +1322,45 @@ mod tests {
         assert_eq!(session.expires, -1.0);
         assert!(session.session);
         assert!(session.same_site.is_none());
+    }
+
+    #[tokio::test]
+    async fn pinned_gone_tab_never_reads_default_jar_or_overwrites_state_file() {
+        let (mut ff, requests) = fake_storage_session(
+            json!({"contexts": [{"context": "ctx-default", "url": "https://default.example/"}]}),
+            storage_reply("https://default.example"),
+        )
+        .await;
+        ff.contexts.record(&json!({
+            "context": "ctx-isolated",
+            "parent": null,
+            "userContext": "jar-1",
+            "url": "https://isolated.example/dashboard"
+        }));
+        ff.contexts.activate("ctx-isolated");
+        ff.set_pin(true);
+        ff.contexts.remove("ctx-isolated");
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        std::fs::write(
+            &state_path,
+            "{\"cookies\":[{\"name\":\"keep\"}],\"origins\":[]}",
+        )
+        .unwrap();
+        let path_str = state_path.to_str().unwrap();
+
+        let err = write_state_to(&ff, path_str, Some(path_str))
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with(crate::native::browser::TAB_GONE_PREFIX),
+            "{err}"
+        );
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&state_path).unwrap(),
+            "{\"cookies\":[{\"name\":\"keep\"}],\"origins\":[]}"
+        );
     }
 }
