@@ -356,6 +356,7 @@ pub async fn type_text_into_active_context(
                         unmodified_text: text_str,
                         windows_virtual_key_code: Some(key_code),
                         modifiers: None,
+                        location: None,
                     },
                     Some(session_id),
                 )
@@ -372,6 +373,7 @@ pub async fn type_text_into_active_context(
                         unmodified_text: None,
                         windows_virtual_key_code: Some(key_code),
                         modifiers: None,
+                        location: None,
                     },
                     Some(session_id),
                 )
@@ -416,53 +418,174 @@ pub async fn press_key_with_modifiers(
     key: &str,
     modifiers: Option<i32>,
 ) -> Result<(), String> {
-    let (key_name, code, key_code) = named_key_info(key);
+    press_key_with_chord_and_held(client, session_id, key, modifiers.unwrap_or(0), 0).await
+}
 
-    // Suppress text insertion when Control (2) or Meta (4) modifiers are active,
-    // since these are command chords (e.g. Ctrl+A = select-all), not text input.
-    let has_command_modifier = modifiers.is_some_and(|m| m & (2 | 4) != 0);
-    let text = if has_command_modifier {
-        None
-    } else {
-        key_text(&key_name)
-    };
+/// Dispatch keyDown/keyUp for `key` with chord modifiers (emitting keyDown/keyUp
+/// for chord modifiers not already held) combined with `held_modifiers`.
+pub async fn press_key_with_chord_and_held(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    chord_modifiers: i32,
+    held_modifiers: i32,
+) -> Result<(), String> {
+    let chord_only = chord_modifiers & !held_modifiers;
+    let modifier_keys = modifier_key_names(chord_only);
+    let mut pressed_modifiers: Vec<&'static str> = Vec::with_capacity(modifier_keys.len());
+    let mut active_modifiers = held_modifiers;
 
+    for modifier in &modifier_keys {
+        let bit = key_modifier_bit(modifier).expect("modifier names have a CDP bit");
+        let next_modifiers = active_modifiers | bit;
+        if let Err(error) = dispatch_single_key_event(
+            client,
+            session_id,
+            modifier,
+            "keyDown",
+            nonzero_modifiers(next_modifiers),
+        )
+        .await
+        {
+            for pressed in pressed_modifiers.iter().rev() {
+                active_modifiers &=
+                    !key_modifier_bit(pressed).expect("modifier names have a CDP bit");
+                let _ = dispatch_single_key_event(
+                    client,
+                    session_id,
+                    pressed,
+                    "keyUp",
+                    nonzero_modifiers(active_modifiers),
+                )
+                .await;
+            }
+            return Err(error);
+        }
+        pressed_modifiers.push(*modifier);
+        active_modifiers = next_modifiers;
+    }
+
+    let own_bit = key_modifier_bit(key).unwrap_or(0);
+    let down_modifiers = nonzero_modifiers(active_modifiers | own_bit);
+    let up_modifiers = nonzero_modifiers(active_modifiers & !(own_bit & !held_modifiers));
+
+    let key_result = async {
+        dispatch_single_key_event(client, session_id, key, "keyDown", down_modifiers).await?;
+        dispatch_single_key_event(client, session_id, key, "keyUp", up_modifiers).await
+    }
+    .await;
+
+    let mut release_error = None;
+    for modifier in pressed_modifiers.iter().rev() {
+        active_modifiers &= !key_modifier_bit(modifier).expect("modifier names have a CDP bit");
+        if let Err(error) = dispatch_single_key_event(
+            client,
+            session_id,
+            modifier,
+            "keyUp",
+            nonzero_modifiers(active_modifiers),
+        )
+        .await
+        {
+            release_error.get_or_insert(error);
+        }
+    }
+
+    key_result?;
+    release_error.map_or(Ok(()), Err)
+}
+
+/// Press `key` without releasing it and return the updated held modifier mask.
+pub async fn key_down(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    held_modifiers: i32,
+) -> Result<i32, String> {
+    let next_modifiers = held_modifiers | key_modifier_bit(key).unwrap_or(0);
+    dispatch_single_key_event(
+        client,
+        session_id,
+        key,
+        "keyDown",
+        nonzero_modifiers(next_modifiers),
+    )
+    .await?;
+    Ok(next_modifiers)
+}
+
+/// Release `key` and return the updated held modifier mask.
+pub async fn key_up(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    held_modifiers: i32,
+) -> Result<i32, String> {
+    let next_modifiers = held_modifiers & !key_modifier_bit(key).unwrap_or(0);
+    dispatch_single_key_event(
+        client,
+        session_id,
+        key,
+        "keyUp",
+        nonzero_modifiers(next_modifiers),
+    )
+    .await?;
+    Ok(next_modifiers)
+}
+
+async fn dispatch_single_key_event(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    event_type: &str,
+    modifiers: Option<i32>,
+) -> Result<(), String> {
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchKeyEvent",
-            &DispatchKeyEventParams {
-                event_type: "keyDown".to_string(),
-                key: Some(key_name.clone()),
-                code: Some(code.clone()),
-                text: text.clone(),
-                unmodified_text: text.clone(),
-                windows_virtual_key_code: Some(key_code),
-                modifiers,
-            },
+            &single_key_event_params(key, event_type, modifiers),
             Some(session_id),
         )
         .await?;
-
-    client
-        .send_command_typed::<_, Value>(
-            "Input.dispatchKeyEvent",
-            &DispatchKeyEventParams {
-                event_type: "keyUp".to_string(),
-                key: Some(key_name),
-                code: Some(code),
-                text: None,
-                unmodified_text: None,
-                windows_virtual_key_code: Some(key_code),
-                modifiers,
-            },
-            Some(session_id),
-        )
-        .await?;
-
     Ok(())
 }
 
 pub(crate) const SCROLL_BY_JS: &str = "function(dx, dy) { this.scrollBy(dx, dy); }";
+
+fn single_key_event_params(
+    key: &str,
+    event_type: &str,
+    modifiers: Option<i32>,
+) -> DispatchKeyEventParams {
+    let (key_name, code, key_code, text, unmodified_text) = modified_key_info(key, modifiers);
+    let is_down = event_type == "keyDown";
+    let modifiers = if is_down {
+        with_own_modifier_bit(&key_name, modifiers)
+    } else {
+        modifiers
+    };
+    DispatchKeyEventParams {
+        event_type: event_type.to_string(),
+        location: key_location(&code),
+        key: Some(key_name),
+        code: Some(code),
+        text: if is_down { text } else { None },
+        unmodified_text: if is_down { unmodified_text } else { None },
+        windows_virtual_key_code: Some(key_code),
+        modifiers,
+    }
+}
+
+fn nonzero_modifiers(modifiers: i32) -> Option<i32> {
+    (modifiers != 0).then_some(modifiers)
+}
+
+fn modifier_key_names(modifiers: i32) -> Vec<&'static str> {
+    [(2, "Control"), (1, "Alt"), (8, "Shift"), (4, "Meta")]
+        .into_iter()
+        .filter_map(|(bit, key)| (modifiers & bit != 0).then_some(key))
+        .collect()
+}
 
 pub async fn scroll(
     client: &CdpClient,
@@ -1083,6 +1206,114 @@ pub(crate) fn key_text(key_name: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn modified_key_info(
+    key: &str,
+    modifiers: Option<i32>,
+) -> (String, String, i32, Option<String>, Option<String>) {
+    let (unmodified_key, code, key_code) = named_key_info(key);
+    let mask = modifiers.unwrap_or(0);
+    let key_name = if mask & 8 != 0 {
+        shifted_char(&unmodified_key)
+            .map(|ch| ch.to_string())
+            .unwrap_or_else(|| unmodified_key.clone())
+    } else {
+        unmodified_key.clone()
+    };
+    let (text, unmodified_text) = if mask & (1 | 2 | 4) != 0 {
+        (None, None)
+    } else {
+        (key_text(&key_name), key_text(&unmodified_key))
+    };
+    (key_name, code, key_code, text, unmodified_text)
+}
+
+pub(crate) fn parse_key_chord(input: &str) -> (String, Option<i32>) {
+    let parts: Vec<&str> = input.split('+').collect();
+    if parts.len() < 2 {
+        return (input.to_string(), None);
+    }
+
+    let mut modifiers = 0i32;
+    let mut key_parts: Vec<&str> = Vec::new();
+
+    for part in &parts {
+        if let Some(bit) = key_modifier_bit(part) {
+            modifiers |= bit;
+        } else {
+            key_parts.push(part);
+        }
+    }
+
+    if modifiers == 0 {
+        return (input.to_string(), None);
+    }
+
+    let actual_key = if key_parts.is_empty() {
+        input.to_string()
+    } else {
+        key_parts.join("+")
+    };
+
+    (actual_key, Some(modifiers))
+}
+
+pub(crate) fn is_non_printable_control_key(key_name: &str) -> bool {
+    matches!(
+        key_name,
+        "Enter"
+            | "Tab"
+            | "Escape"
+            | "Backspace"
+            | "Delete"
+            | "ArrowUp"
+            | "ArrowDown"
+            | "ArrowLeft"
+            | "ArrowRight"
+            | "Home"
+            | "End"
+            | "PageUp"
+            | "PageDown"
+    )
+}
+
+pub(crate) fn shifted_char(key_name: &str) -> Option<char> {
+    let mut chars = key_name.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    if ch.is_ascii_lowercase() {
+        return Some(ch.to_ascii_uppercase());
+    }
+    const PAIRS: &[(char, char)] = &[
+        ('1', '!'),
+        ('2', '@'),
+        ('3', '#'),
+        ('4', '$'),
+        ('5', '%'),
+        ('6', '^'),
+        ('7', '&'),
+        ('8', '*'),
+        ('9', '('),
+        ('0', ')'),
+        ('`', '~'),
+        ('-', '_'),
+        ('=', '+'),
+        ('[', '{'),
+        (']', '}'),
+        ('\\', '|'),
+        (';', ':'),
+        ('\'', '"'),
+        (',', '<'),
+        ('.', '>'),
+        ('/', '?'),
+    ];
+    PAIRS
+        .iter()
+        .find(|(plain, _)| *plain == ch)
+        .map(|(_, shifted)| *shifted)
+}
+
 pub(crate) fn named_key_info(key: &str) -> (String, String, i32) {
     match key.to_lowercase().as_str() {
         "enter" | "return" => ("Enter".to_string(), "Enter".to_string(), 13),
@@ -1099,8 +1330,28 @@ pub(crate) fn named_key_info(key: &str) -> (String, String, i32) {
         "pageup" => ("PageUp".to_string(), "PageUp".to_string(), 33),
         "pagedown" => ("PageDown".to_string(), "PageDown".to_string(), 34),
         "space" | " " => (" ".to_string(), "Space".to_string(), 32),
-        _ => {
-            if key.len() == 1 {
+        "shift" | "shiftleft" => ("Shift".to_string(), "ShiftLeft".to_string(), 16),
+        "shiftright" => ("Shift".to_string(), "ShiftRight".to_string(), 16),
+        "control" | "ctrl" | "controlleft" => {
+            ("Control".to_string(), "ControlLeft".to_string(), 17)
+        }
+        "controlright" => ("Control".to_string(), "ControlRight".to_string(), 17),
+        "alt" | "altleft" => ("Alt".to_string(), "AltLeft".to_string(), 18),
+        "altright" => ("Alt".to_string(), "AltRight".to_string(), 18),
+        "meta" | "cmd" | "command" | "metaleft" => ("Meta".to_string(), "MetaLeft".to_string(), 91),
+        "metaright" => ("Meta".to_string(), "MetaRight".to_string(), 92),
+        lower => {
+            let code_char = lower
+                .strip_prefix("key")
+                .filter(|rest| rest.len() == 1 && rest.as_bytes()[0].is_ascii_lowercase())
+                .or_else(|| {
+                    lower
+                        .strip_prefix("digit")
+                        .filter(|rest| rest.len() == 1 && rest.as_bytes()[0].is_ascii_digit())
+                });
+            if let Some(rest) = code_char {
+                char_to_key_info(rest.chars().next().unwrap())
+            } else if key.len() == 1 {
                 let ch = key.chars().next().unwrap();
                 char_to_key_info(ch)
             } else {
@@ -1108,6 +1359,31 @@ pub(crate) fn named_key_info(key: &str) -> (String, String, i32) {
             }
         }
     }
+}
+
+fn key_location(code: &str) -> Option<i32> {
+    match code {
+        "ShiftLeft" | "ControlLeft" | "AltLeft" | "MetaLeft" => Some(1),
+        "ShiftRight" | "ControlRight" | "AltRight" | "MetaRight" => Some(2),
+        _ => None,
+    }
+}
+
+pub(crate) fn key_modifier_bit(key: &str) -> Option<i32> {
+    match key.to_ascii_lowercase().as_str() {
+        "alt" | "altleft" | "altright" => Some(1),
+        "control" | "ctrl" | "controlleft" | "controlright" => Some(2),
+        "meta" | "cmd" | "command" | "metaleft" | "metaright" => Some(4),
+        "shift" | "shiftleft" | "shiftright" => Some(8),
+        _ => None,
+    }
+}
+
+fn with_own_modifier_bit(key_name: &str, modifiers: Option<i32>) -> Option<i32> {
+    let Some(bit) = key_modifier_bit(key_name) else {
+        return modifiers;
+    };
+    Some(modifiers.unwrap_or(0) | bit)
 }
 
 #[cfg(test)]
@@ -1274,5 +1550,137 @@ mod tests {
             cdp_error("Could not inspect the element".to_string()),
             CallError::Failed(_)
         ));
+    }
+
+    #[test]
+    fn test_named_key_info_modifiers_and_code_names() {
+        let cases: &[(&str, &str, &str, i32, Option<i32>)] = &[
+            ("Shift", "Shift", "ShiftLeft", 16, Some(1)),
+            ("ShiftRight", "Shift", "ShiftRight", 16, Some(2)),
+            ("Control", "Control", "ControlLeft", 17, Some(1)),
+            ("ctrl", "Control", "ControlLeft", 17, Some(1)),
+            ("ControlRight", "Control", "ControlRight", 17, Some(2)),
+            ("Alt", "Alt", "AltLeft", 18, Some(1)),
+            ("AltRight", "Alt", "AltRight", 18, Some(2)),
+            ("Meta", "Meta", "MetaLeft", 91, Some(1)),
+            ("Cmd", "Meta", "MetaLeft", 91, Some(1)),
+            ("MetaRight", "Meta", "MetaRight", 92, Some(2)),
+            ("KeyW", "w", "KeyW", 87, None),
+            ("keya", "a", "KeyA", 65, None),
+            ("Digit7", "7", "Digit7", 55, None),
+            ("Key", "Key", "Key", 0, None),
+            ("KeyAB", "KeyAB", "KeyAB", 0, None),
+            ("Digit10", "Digit10", "Digit10", 0, None),
+            ("w", "w", "KeyW", 87, None),
+            ("ArrowUp", "ArrowUp", "ArrowUp", 38, None),
+        ];
+        for &(input, key, code, vk, location) in cases {
+            assert_eq!(
+                (named_key_info(input), key_location(code)),
+                ((key.to_string(), code.to_string(), vk), location),
+                "input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_modified_key_info_applies_shift_and_suppresses_command_text() {
+        let check = |key: &str,
+                     modifiers: Option<i32>,
+                     want: (&str, &str, i32, Option<&str>, Option<&str>)| {
+            let (want_key, want_code, want_vk, want_text, want_unmod) = want;
+            assert_eq!(
+                modified_key_info(key, modifiers),
+                (
+                    want_key.to_string(),
+                    want_code.to_string(),
+                    want_vk,
+                    want_text.map(String::from),
+                    want_unmod.map(String::from),
+                ),
+                "press {key} with modifiers {modifiers:?}"
+            );
+        };
+        check("l", None, ("l", "KeyL", 76, Some("l"), Some("l")));
+        check("l", Some(8), ("L", "KeyL", 76, Some("L"), Some("l")));
+        check("1", Some(8), ("!", "Digit1", 49, Some("!"), Some("1")));
+        check("/", Some(8), ("?", "Slash", 191, Some("?"), Some("/")));
+        check("L", Some(8), ("L", "KeyL", 76, Some("L"), Some("L")));
+        check(
+            "Enter",
+            Some(8),
+            ("Enter", "Enter", 13, Some("\r"), Some("\r")),
+        );
+        check("l", Some(1), ("l", "KeyL", 76, None, None));
+        check("l", Some(1 | 8), ("L", "KeyL", 76, None, None));
+        check("a", Some(2), ("a", "KeyA", 65, None, None));
+        check("a", Some(4), ("a", "KeyA", 65, None, None));
+    }
+
+    #[test]
+    fn test_single_key_event_params() {
+        let params = |key, event_type, modifiers| {
+            serde_json::to_value(single_key_event_params(key, event_type, modifiers)).unwrap()
+        };
+        assert_eq!(
+            params("Shift", "keyDown", Some(8)),
+            serde_json::json!({
+                "type": "keyDown", "key": "Shift", "code": "ShiftLeft",
+                "windowsVirtualKeyCode": 16, "modifiers": 8, "location": 1
+            })
+        );
+        assert_eq!(
+            params("Shift", "keyUp", None),
+            serde_json::json!({
+                "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
+                "windowsVirtualKeyCode": 16, "location": 1
+            })
+        );
+        assert_eq!(
+            params("w", "keyDown", None),
+            serde_json::json!({
+                "type": "keyDown", "key": "w", "code": "KeyW", "text": "w",
+                "unmodifiedText": "w", "windowsVirtualKeyCode": 87
+            })
+        );
+        assert_eq!(
+            params("w", "keyDown", Some(8)),
+            serde_json::json!({
+                "type": "keyDown", "key": "W", "code": "KeyW", "text": "W",
+                "unmodifiedText": "w", "windowsVirtualKeyCode": 87, "modifiers": 8
+            })
+        );
+        assert_eq!(
+            params("w", "keyUp", None),
+            serde_json::json!({
+                "type": "keyUp", "key": "w", "code": "KeyW", "windowsVirtualKeyCode": 87
+            })
+        );
+    }
+
+    #[test]
+    fn test_modifier_helpers() {
+        assert_eq!(key_modifier_bit("Alt"), Some(1));
+        assert_eq!(key_modifier_bit("AltRight"), Some(1));
+        assert_eq!(key_modifier_bit("Control"), Some(2));
+        assert_eq!(key_modifier_bit("ControlLeft"), Some(2));
+        assert_eq!(key_modifier_bit("Meta"), Some(4));
+        assert_eq!(key_modifier_bit("MetaRight"), Some(4));
+        assert_eq!(key_modifier_bit("Shift"), Some(8));
+        assert_eq!(key_modifier_bit("ShiftRight"), Some(8));
+        assert_eq!(key_modifier_bit("KeyW"), None);
+        assert_eq!(with_own_modifier_bit("Shift", None), Some(8));
+        assert_eq!(with_own_modifier_bit("Control", Some(8)), Some(10));
+        assert_eq!(with_own_modifier_bit("w", Some(2)), Some(2));
+        assert_eq!(modifier_key_names(2 | 8), vec!["Control", "Shift"]);
+        assert_eq!(
+            modifier_key_names(1 | 2 | 4 | 8),
+            vec!["Control", "Alt", "Shift", "Meta"]
+        );
+        assert_eq!(
+            parse_key_chord("ShiftRight+KeyA"),
+            ("KeyA".to_string(), Some(8))
+        );
+        assert_eq!(parse_key_chord("ControlLeft+l"), ("l".to_string(), Some(2)));
     }
 }
