@@ -211,13 +211,10 @@ fn append_context_urls(contexts: &[Value], urls: &mut Vec<url::Url>) {
     }
 }
 
-async fn cookie_urls(ff: &FirefoxSession) -> Result<Vec<url::Url>, String> {
+async fn cookie_urls(ff: &FirefoxSession, tab: &str) -> Result<Vec<url::Url>, String> {
     let tree = ff
         .bidi
-        .send(
-            "browsingContext.getTree",
-            json!({"root": ff.contexts.active()}),
-        )
+        .send("browsingContext.getTree", json!({"root": tab}))
         .await?;
     let contexts = tree["contexts"]
         .as_array()
@@ -227,8 +224,8 @@ async fn cookie_urls(ff: &FirefoxSession) -> Result<Vec<url::Url>, String> {
     Ok(urls)
 }
 
-async fn get_all_cookies(ff: &FirefoxSession) -> Result<Vec<Cookie>, String> {
-    let params = json!({ "partition": ff.active_partition() });
+async fn get_all_cookies(ff: &FirefoxSession, tab: &str) -> Result<Vec<Cookie>, String> {
+    let params = json!({ "partition": ff.contexts.partition(tab) });
     let result = ff.bidi.send("storage.getCookies", params).await?;
     Ok(result["cookies"]
         .as_array()
@@ -241,6 +238,7 @@ async fn get_all_cookies(ff: &FirefoxSession) -> Result<Vec<Cookie>, String> {
 /// Returns cookies for requested URLs or active page and frames when omitted.
 pub async fn cookies_get(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
+    let tab = ff.storage_tab()?.to_string();
     let urls = match cmd.get("urls") {
         Some(value) => value
             .as_array()
@@ -253,9 +251,9 @@ pub async fn cookies_get(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 url::Url::parse(value).map_err(|error| format!("Invalid URL '{value}': {error}"))
             })
             .collect::<Result<Vec<_>, _>>()?,
-        None => cookie_urls(ff).await?,
+        None => cookie_urls(ff, &tab).await?,
     };
-    let mut cookies = get_all_cookies(ff).await?;
+    let mut cookies = get_all_cookies(ff, &tab).await?;
     cookies.retain(|cookie| urls.iter().any(|url| cookie_applies_to_url(cookie, url)));
     Ok(json!({ "cookies": cookies }))
 }
@@ -263,6 +261,7 @@ pub async fn cookies_get(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 /// Sets cookies like Chrome's `handle_cookies_set` (via `storage.setCookie`).
 pub async fn cookies_set(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
+    let partition = ff.active_partition()?;
     let current_url = ff.url().await.ok();
     let cookie_values = if let Some(arr) = cmd.get("cookies").and_then(Value::as_array) {
         arr.clone()
@@ -280,7 +279,7 @@ pub async fn cookies_set(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         vec![Value::Object(cookie)]
     };
 
-    let mut command = json!({ "partition": ff.active_partition() });
+    let mut command = json!({ "partition": partition });
     for cookie in &cookie_values {
         command["cookie"] = command_cookie_to_bidi(cookie, current_url.as_deref())?;
         ff.bidi.send("storage.setCookie", command.clone()).await?;
@@ -291,7 +290,7 @@ pub async fn cookies_set(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 /// Clears cookies like Chrome's `handle_cookies_clear` (via `storage.deleteCookies`).
 pub async fn cookies_clear(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    let params = json!({ "filter": {}, "partition": ff.active_partition() });
+    let params = json!({ "filter": {}, "partition": ff.active_partition()? });
     ff.bidi.send("storage.deleteCookies", params).await?;
     Ok(json!({ "cleared": true }))
 }
@@ -406,6 +405,7 @@ fn collect_context_origins(
 
 async fn collect_origins(
     ff: &FirefoxSession,
+    tab: &str,
 ) -> Result<(Vec<OriginStorage>, HashSet<String>, HashSet<String>), String> {
     let tree = ff.bidi.send("browsingContext.getTree", json!({})).await?;
     let contexts = tree["contexts"]
@@ -415,7 +415,7 @@ async fn collect_origins(
     let mut active = HashSet::new();
     for info in contexts
         .iter()
-        .filter(|info| ff.contexts.in_active_jar(info))
+        .filter(|info| ff.contexts.in_jar_of(tab, info))
     {
         collect_context_origins(
             std::slice::from_ref(info),
@@ -445,7 +445,7 @@ async fn collect_origins(
         .cloned()
         .collect();
     if !remaining.is_empty() {
-        for mut storage in collect_via_temp_context(ff, &remaining).await? {
+        for mut storage in collect_via_temp_context(ff, tab, &remaining).await? {
             seen.insert(storage.origin.clone());
             temporary.insert(storage.origin.clone());
             storage.session_storage.clear();
@@ -460,10 +460,11 @@ async fn collect_origins(
 
 async fn collect_via_temp_context(
     ff: &FirefoxSession,
+    tab: &str,
     origins: &[String],
 ) -> Result<Vec<OriginStorage>, String> {
     let mut params = json!({"type": "tab", "background": true});
-    if let Some(user_context) = ff.contexts.user_context(ff.contexts.active()) {
+    if let Some(user_context) = ff.contexts.user_context(tab) {
         params["userContext"] = json!(user_context);
     }
     let created = ff.bidi.send("browsingContext.create", params).await?;
@@ -564,8 +565,9 @@ async fn write_state_to(
     path: &str,
     previous_path: Option<&str>,
 ) -> Result<String, String> {
-    let cookies = get_all_cookies(ff).await?;
-    let (origins, mut seen, temporary) = collect_origins(ff).await?;
+    let tab = ff.storage_tab()?.to_string();
+    let cookies = get_all_cookies(ff, &tab).await?;
+    let (origins, mut seen, temporary) = collect_origins(ff, &tab).await?;
     let mut state = StorageState { cookies, origins };
     if let Some(previous_path) = previous_path.filter(|path| {
         std::path::Path::new(path).exists() || std::path::Path::new(&format!("{path}.enc")).exists()
@@ -587,6 +589,7 @@ pub async fn validate_restore(
     expression: Option<&str>,
     timeout_ms: u64,
 ) -> Result<(), String> {
+    let _ = ff.storage_tab()?;
     if let Some(pattern) = url_pattern {
         let url = ff.url().await?;
         if !crate::native::actions::route_url_matches(pattern, &url) {
@@ -640,6 +643,7 @@ pub async fn save_auto_state(
     session_name: &str,
     session_id: &str,
 ) -> Result<String, String> {
+    let _ = ff.storage_tab()?;
     let (candidate_path, final_path) = state::auto_state_paths(session_name, session_id)?;
     let candidate_path = candidate_path.to_string_lossy().to_string();
     let final_path = final_path.to_string_lossy().to_string();
@@ -666,7 +670,7 @@ pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<
     let saved: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {e}"))?;
 
-    let mut command = json!({ "partition": session(state)?.active_partition() });
+    let mut command = json!({ "partition": session(state)?.active_partition()? });
     for cookie in &saved.cookies {
         command["cookie"] = state_cookie_to_bidi(cookie);
         session(state)?
@@ -798,7 +802,7 @@ mod tests {
         )
         .await;
 
-        let (origins, seen, _) = collect_origins(&ff).await.unwrap();
+        let (origins, seen, _) = collect_origins(&ff, "ctx-active").await.unwrap();
 
         assert!(origins.is_empty());
         assert!(!seen.contains("https://bank.example"));
@@ -821,7 +825,7 @@ mod tests {
         )
         .await;
 
-        let (origins, _, _) = collect_origins(&ff).await.unwrap();
+        let (origins, _, _) = collect_origins(&ff, "ctx-active").await.unwrap();
 
         assert_eq!(origins.len(), 1);
         assert_eq!(origins[0].origin, "https://real.example");
@@ -905,9 +909,10 @@ mod tests {
             .unwrap()
             .into();
 
-        let found = collect_via_temp_context(&ff, &["https://kept.example".to_string()])
-            .await
-            .unwrap();
+        let found =
+            collect_via_temp_context(&ff, "ctx-active", &["https://kept.example".to_string()])
+                .await
+                .unwrap();
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].local_storage[0].name, "token");
@@ -1294,5 +1299,45 @@ mod tests {
         assert_eq!(session.expires, -1.0);
         assert!(session.session);
         assert!(session.same_site.is_none());
+    }
+
+    #[tokio::test]
+    async fn pinned_gone_tab_never_reads_default_jar_or_overwrites_state_file() {
+        let (mut ff, requests) = fake_storage_session(
+            json!({"contexts": [{"context": "ctx-default", "url": "https://default.example/"}]}),
+            storage_reply("https://default.example"),
+        )
+        .await;
+        ff.contexts.record(&json!({
+            "context": "ctx-isolated",
+            "parent": null,
+            "userContext": "jar-1",
+            "url": "https://isolated.example/dashboard"
+        }));
+        ff.contexts.activate("ctx-isolated");
+        ff.set_pin(true);
+        ff.contexts.remove("ctx-isolated");
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        std::fs::write(
+            &state_path,
+            "{\"cookies\":[{\"name\":\"keep\"}],\"origins\":[]}",
+        )
+        .unwrap();
+        let path_str = state_path.to_str().unwrap();
+
+        let err = write_state_to(&ff, path_str, Some(path_str))
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with(crate::native::browser::TAB_GONE_PREFIX),
+            "{err}"
+        );
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&state_path).unwrap(),
+            "{\"cookies\":[{\"name\":\"keep\"}],\"origins\":[]}"
+        );
     }
 }
