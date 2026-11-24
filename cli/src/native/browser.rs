@@ -3028,6 +3028,18 @@ impl BrowserManager {
         &self.visited_origins
     }
 
+    pub fn owns_browser(&self) -> bool {
+        self.browser_process.is_some()
+    }
+
+    pub fn is_pin_tab(&self) -> bool {
+        self.pin_tab
+    }
+
+    pub fn tracked_target_ids(&self) -> HashSet<String> {
+        self.pages.iter().map(|p| p.target_id.clone()).collect()
+    }
+
     pub fn record_visited_origins(&mut self, origins: impl IntoIterator<Item = String>) {
         for origin in origins {
             if let Ok(parsed) = url::Url::parse(&origin) {

@@ -7275,6 +7275,125 @@ async fn e2e_save_state_includes_attached_session_origin() {
     s2.abort();
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_save_state_excludes_other_session_pinned_tab_origin() {
+    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p1 = l1.local_addr().unwrap().port();
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p2 = l2.local_addr().unwrap().port();
+
+    let spawn_page = |listener: tokio::net::TcpListener, label: &'static str| {
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let body = format!("<!doctype html><title>{label}</title>{label}");
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        })
+    };
+    let s1 = spawn_page(l1, "host");
+    let s2 = spawn_page(l2, "pinned");
+
+    let sock_dir = tempfile::tempdir().unwrap();
+    let env = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR"]);
+    env.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        sock_dir.path().to_str().unwrap(),
+    );
+    std::fs::write(
+        sock_dir.path().join("pinned-b.pid"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+
+    let mut host = DaemonState::new();
+    host.session_id = "host-a".to_string();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut host,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{p1}/")}),
+            &mut host,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "storage_set", "type": "local", "key": "host_k", "value": "host_v"}),
+            &mut host,
+        )
+        .await,
+    );
+    let cdp_resp = execute_command(&json!({"id": "4", "action": "cdp_url"}), &mut host).await;
+    assert_success(&cdp_resp);
+    let ws_url = get_data(&cdp_resp)["cdpUrl"].as_str().unwrap().to_string();
+
+    // Session B attaches to the same browser with --pin-tab on another origin.
+    let mut pinned = DaemonState::new();
+    pinned.session_id = "pinned-b".to_string();
+    pinned.pin_tab = true;
+    assert_success(
+        &execute_command(
+            &json!({"id": "b1", "action": "launch", "cdpUrl": ws_url}),
+            &mut pinned,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "b2", "action": "tab_new", "url": format!("http://localhost:{p2}/")}),
+            &mut pinned,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "b3", "action": "storage_set", "type": "local", "key": "pinned_k", "value": "pinned_v"}),
+            &mut pinned,
+        )
+        .await,
+    );
+
+    // Host A's state save must include its own origin and exclude B's pinned tab origin.
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let save_path = tmp_dir.path().join("isolated-state.json");
+    assert_success(
+        &execute_command(
+            &json!({"id": "5", "action": "state_save", "path": save_path.to_str().unwrap()}),
+            &mut host,
+        )
+        .await,
+    );
+    let saved_str = std::fs::read_to_string(&save_path).unwrap();
+    assert!(
+        saved_str.contains("host_v"),
+        "host save should include host origin: {saved_str}"
+    );
+    assert!(
+        !saved_str.contains("pinned_v") && !saved_str.contains(&format!("localhost:{p2}")),
+        "host save must not include another session's pinned tab origin: {saved_str}"
+    );
+
+    let _ = execute_command(&json!({"id": "98", "action": "close"}), &mut pinned).await;
+    let _ = execute_command(&json!({"id": "99", "action": "close"}), &mut host).await;
+    s1.abort();
+    s2.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Domain filter
 // ---------------------------------------------------------------------------

@@ -1580,13 +1580,16 @@ impl DaemonState {
                     // never activates a discovered target (that would steal
                     // the active tab and overwrite its binding); a legacy
                     // session follows it.
-                    mgr.register_discovered_page(
-                        &target_info.target_id,
-                        page_sid,
-                        page_url,
-                        target_info.title.clone(),
-                        target_info.target_type.clone(),
-                    );
+                    if tab_binding::pinned_owner(&target_info.target_id, &self.session_id).is_none()
+                    {
+                        mgr.register_discovered_page(
+                            &target_info.target_id,
+                            page_sid,
+                            page_url,
+                            target_info.title.clone(),
+                            target_info.target_type.clone(),
+                        );
+                    }
 
                     mgr.resume_if_waiting_pub(page_sid).await
                 })
@@ -1726,13 +1729,17 @@ impl DaemonState {
                     // discovered tab (that steal would also overwrite its
                     // binding). Explicit commands (`tab new`, `window new`,
                     // `click --new-tab`) activate via their own paths.
-                    mgr.register_discovered_page(
-                        &te.target_info.target_id,
-                        &attach.session_id,
-                        page_url,
-                        te.target_info.title.clone(),
-                        te.target_info.target_type.clone(),
-                    );
+                    if tab_binding::pinned_owner(&te.target_info.target_id, &self.session_id)
+                        .is_none()
+                    {
+                        mgr.register_discovered_page(
+                            &te.target_info.target_id,
+                            &attach.session_id,
+                            page_url,
+                            te.target_info.title.clone(),
+                            te.target_info.target_type.clone(),
+                        );
+                    }
                     mgr.resume_if_waiting_pub(&attach.session_id).await
                 })
                 .await
@@ -5721,12 +5728,18 @@ pub(crate) async fn auto_save_restore_state(
     };
     let active_session_id = mgr.active_session_id()?.to_string();
 
+    let target_scope = state::TargetOriginScope {
+        tracked_target_ids: mgr.tracked_target_ids(),
+        include_unpinned_browser_targets: mgr.owns_browser() && !mgr.is_pin_tab(),
+    };
+
     match state::save_auto_state_transactional(
         &mgr.client,
         &active_session_id,
         &session_name,
         &state.session_id,
         mgr.visited_origins(),
+        &target_scope,
     )
     .await
     {
@@ -8661,6 +8674,11 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
     let session_id = mgr.active_session_id()?.to_string();
     let path = cmd.get("path").and_then(|v| v.as_str());
 
+    let target_scope = state::TargetOriginScope {
+        tracked_target_ids: mgr.tracked_target_ids(),
+        include_unpinned_browser_targets: mgr.owns_browser() && !mgr.is_pin_tab(),
+    };
+
     let saved_path = state::save_state(
         &mgr.client,
         &session_id,
@@ -8668,6 +8686,7 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
         state.session_name.as_deref(),
         &state.session_id,
         mgr.visited_origins(),
+        &target_scope,
     )
     .await?;
 

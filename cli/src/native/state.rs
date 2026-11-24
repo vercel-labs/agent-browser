@@ -214,9 +214,26 @@ async fn create_scratch_target(client: &CdpClient) -> Result<CreateTargetResult,
         .await
 }
 
-/// Origins of open page targets in the browser, excluding scratch storage
-/// targets and internal pages.
-fn origins_from_targets(target_infos: &[TargetInfo]) -> HashSet<String> {
+/// Scope controlling which open page targets from `Target.getTargets` may
+/// contribute origins during `save_state`.
+#[derive(Debug, Clone, Default)]
+pub struct TargetOriginScope {
+    /// Target IDs tracked/owned by this session (`BrowserManager::pages`).
+    pub tracked_target_ids: HashSet<String>,
+    /// Allow unpinned browser targets opened by attached sessions when this
+    /// session launched the browser and is not pinned to a single tab.
+    pub include_unpinned_browser_targets: bool,
+}
+
+/// Origins of open page targets eligible for `own_session_id`'s state save.
+/// Excludes temporary storage targets, internal pages, any tab pinned by
+/// another session, and (when `include_unpinned_browser_targets` is false)
+/// targets not tracked by this session.
+fn origins_from_targets(
+    target_infos: &[TargetInfo],
+    own_session_id: &str,
+    scope: &TargetOriginScope,
+) -> HashSet<String> {
     let storage_targets = STORAGE_TARGETS.lock().unwrap_or_else(|e| e.into_inner());
     let mut origins = HashSet::new();
     for target in target_infos {
@@ -224,6 +241,14 @@ fn origins_from_targets(target_infos: &[TargetInfo]) -> HashSet<String> {
             continue;
         }
         if !super::browser::should_track_target(target) {
+            continue;
+        }
+        if super::tab_binding::pinned_owner(&target.target_id, own_session_id).is_some() {
+            continue;
+        }
+        if !scope.include_unpinned_browser_targets
+            && !scope.tracked_target_ids.contains(&target.target_id)
+        {
             continue;
         }
         if let Ok(parsed) = url::Url::parse(&target.url) {
@@ -435,6 +460,7 @@ pub async fn save_state(
     session_name: Option<&str>,
     session_id_str: &str,
     visited_origins: &HashSet<String>,
+    target_scope: &TargetOriginScope,
 ) -> Result<String, String> {
     let cookies = cookies::get_all_cookies(client, session_id).await?;
 
@@ -469,7 +495,11 @@ pub async fn save_state(
         .send_command_typed::<_, GetTargetsResult>("Target.getTargets", &json!({}), None)
         .await
     {
-        all_origins.extend(origins_from_targets(&targets.target_infos));
+        all_origins.extend(origins_from_targets(
+            &targets.target_infos,
+            session_id_str,
+            target_scope,
+        ));
     }
 
     // 1. Collect localStorage from the current page
@@ -529,6 +559,7 @@ pub async fn save_auto_state_transactional(
     session_name: &str,
     session_id_str: &str,
     visited_origins: &HashSet<String>,
+    target_scope: &TargetOriginScope,
 ) -> Result<String, String> {
     if !is_valid_session_name(session_name) {
         return Err(session_name_error(session_name));
@@ -568,6 +599,7 @@ pub async fn save_auto_state_transactional(
         Some(session_name),
         session_id_str,
         visited_origins,
+        target_scope,
     )
     .await?;
 
@@ -1299,12 +1331,25 @@ mod tests {
             mk("int1", "page", "chrome://settings"),
             mk("blank", "page", "about:blank"),
         ];
-        let origins = origins_from_targets(&targets);
+        let host_scope = TargetOriginScope {
+            tracked_target_ids: HashSet::from(["p1".to_string()]),
+            include_unpinned_browser_targets: true,
+        };
+        let origins = origins_from_targets(&targets, "session-a", &host_scope);
         assert!(origins.contains("http://127.0.0.1:8001"));
         assert!(origins.contains("https://example.test"));
         assert!(!origins.contains("http://127.0.0.1:8002"));
         assert!(!origins.contains("https://sw.test"));
         assert_eq!(origins.len(), 2);
+
+        let attached_scope = TargetOriginScope {
+            tracked_target_ids: HashSet::from(["p1".to_string()]),
+            include_unpinned_browser_targets: false,
+        };
+        let attached_origins = origins_from_targets(&targets, "session-a", &attached_scope);
+        assert!(attached_origins.contains("http://127.0.0.1:8001"));
+        assert!(!attached_origins.contains("https://example.test"));
+        assert_eq!(attached_origins.len(), 1);
     }
 
     #[test]
@@ -1400,6 +1445,7 @@ mod tests {
             Some("preserve-test"),
             "s1",
             &HashSet::new(),
+            &TargetOriginScope::default(),
         )
         .await;
         assert!(save_res.is_err(), "capture error should propagate");
