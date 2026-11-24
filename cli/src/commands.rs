@@ -2653,7 +2653,7 @@ fn parse_command_inner(
                     }
 
                     Ok(
-                        json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }),
+                        json!({ "id": id, "action": "state_rename", "path": old_name, "name": new_name }),
                     )
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
@@ -5093,6 +5093,14 @@ mod tests {
     }
 
     // === Cookies Tests ===
+
+    #[test]
+    fn test_state_rename_sends_daemon_fields() {
+        let cmd = parse_command(&args("state rename old-name new-name"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_rename");
+        assert_eq!(cmd["path"], "old-name");
+        assert_eq!(cmd["name"], "new-name");
+    }
 
     #[test]
     fn test_cookies_get() {
