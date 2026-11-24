@@ -36,13 +36,14 @@ agent-browser -p ladybird close
 
 ## Supported commands
 
-Ladybird uses the WebDriver backend, the same one Safari and iOS use. These commands work: `open`, `get url`, `get title`, `click` and `fill` with CSS selectors, `eval`, `screenshot`, `back`, `forward`, `reload`, `cookies`, and `close`.
+Ladybird uses the WebDriver backend, the same one Safari and iOS use. These commands work: `open`, `get url`, `get title`, `click` and `fill` with CSS selectors, `eval`, `set viewport <w> <h>`, `screenshot`, `back`, `forward`, `reload`, `cookies`, and `close`.
 
 `eval` runs the script as a WebDriver function body, so use `return` to get a value back.
 
 ## Limitations
 
 - Commands that need the Chrome DevTools Protocol are not available, including `snapshot` and `@ref` targeting, `a11y`, network routing and HAR, tracing, profiling, screencast, and init scripts.
+- `set viewport` resizes the window and takes a width and a height only. A scale is refused, because WebDriver has no device scale emulation.
 - `click` supports a plain left click only.
 - `--allowed-domains` is rejected because WebRTC containment cannot be enforced.
 - A headless Ladybird session follows the default idle timeout. A headed session is exempt, like other headed browsers.

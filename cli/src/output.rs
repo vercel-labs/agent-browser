@@ -3365,7 +3365,7 @@ Global Options:
 
 Examples:
   agent-browser set viewport 1920 1080
-  agent-browser set viewport 1920 1080 2    # 2x retina
+  agent-browser set viewport 1920 1080 2    # 2x retina (CDP browsers only)
   agent-browser set device "iPhone 12"
   agent-browser set geo 37.7749 -122.4194
   agent-browser set offline on

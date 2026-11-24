@@ -143,6 +143,16 @@ impl WebDriverClient {
             .to_string())
     }
 
+    pub async fn set_window_rect(&self, width: i32, height: i32) -> Result<(), String> {
+        let sid = self.session_id()?.to_string();
+        self.post(
+            &format!("/session/{}/window/rect", sid),
+            &json!({ "width": width, "height": height }),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn get_cookies(&self) -> Result<Value, String> {
         let sid = self.session_id()?.to_string();
         let response = self.get(&format!("/session/{}/cookie", sid)).await?;
