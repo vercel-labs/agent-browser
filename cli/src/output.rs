@@ -4562,7 +4562,8 @@ Examples:
             r##"
 agent-browser mcp - Start an MCP stdio server
 
-Usage: agent-browser mcp [--tools <profiles>] [--task-grace-ms <ms>] [--config <trusted-path>]
+Usage: agent-browser mcp [--tools <profiles>] [--task-grace-ms <ms>]
+         [--elicit <categories>] [--require-elicitation] [--config <trusted-path>]
        agent-browser mcp call <tool> [<arguments-json> | -]
          [--tools <profiles>] [--config <trusted-path>]
 
@@ -4570,12 +4571,20 @@ Starts a Model Context Protocol server over stdio. MCP clients launch this
 command as a subprocess and communicate with newline-delimited JSON-RPC.
 stdout is reserved for MCP protocol messages; logs and diagnostics use stderr.
 The server supports stateless 2026-07-28 requests (server/discover, Skills over
-MCP, and the Tasks extension) as well as initialize-based sessions (2025-11-25
-down to 2024-11-05, defaulting initialize to 2025-11-25).
+MCP, the Tasks extension, and MRTR Elicitation) as well as initialize-based
+sessions (2025-11-25 down to 2024-11-05, defaulting initialize to 2025-11-25).
 
 Pass --task-grace-ms <ms> (or set AGENT_BROWSER_MCP_TASK_GRACE_MS) to tune how
 long a 2026-07-28 task-eligible tool call waits before returning an async task
 handle (default 250ms).
+
+Pass --elicit <categories> (or set AGENT_BROWSER_MCP_ELICIT) to require user
+confirmation via MCP form-mode elicitation for matching tool categories
+(high-risk, or comma-separated submit, download, upload, eval, auth, state).
+Daemon confirmations (--confirm-actions, --action-policy) automatically use
+elicitation when the client declares support. Clients without elicitation keep
+existing behavior unless --require-elicitation (or
+AGENT_BROWSER_MCP_REQUIRE_ELICITATION=1) is set to fail closed.
 
 mcp call runs one tool without a stdio session and prints its tools/call
 result as JSON, with the agent-browser version in _meta.agentBrowserVersion.

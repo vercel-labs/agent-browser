@@ -50,7 +50,7 @@ If the user gave you a dev server URL, stay on that origin. Dev-only endpoints o
 
 ## Project config trust
 
-Auto-discovered `./agent-browser.json` is repository-controlled and accepts only allowlisted preferences. Passing `--config <path>` explicitly trusts and loads only that file, replacing default user/project discovery. For MCP, tool child processes load the selected file, so include any required safety policy in it.
+Auto-discovered `./agent-browser.json` is repository-controlled and accepts only allowlisted preferences. Passing `--config <path>` explicitly trusts and loads only that file, replacing default user/project discovery. For MCP, tool child processes load the selected file, so include any required safety policy in it. When running `agent-browser mcp`, parked confirmations from `--confirm-actions` or `--action-policy` automatically prompt the user over MCP form-mode elicitation if the client supports it, and `--elicit <categories>` adds MCP-level confirmation gates without requesting secrets in form mode. Pass `--require-elicitation` to fail closed when a client does not support elicitation.
 
 ## Browser version warnings
 

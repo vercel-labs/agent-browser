@@ -8,6 +8,7 @@ mod doctor;
 mod flags;
 mod install;
 mod mcp;
+mod mcp_elicitation;
 mod mcp_skills;
 mod mcp_tasks;
 mod mcp_transport;
