@@ -439,6 +439,9 @@ fn ensure_file_input(selector: &str, describe: &Value) -> Result<(), String> {
 
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
+    if error.starts_with(TAB_GONE_PREFIX) || error.starts_with(PAGE_WEDGED_PREFIX) {
+        return error.to_string();
+    }
     if super::interaction::form_error_code(error).is_some() {
         return error.to_string();
     }
@@ -669,7 +672,7 @@ enum LifecycleWaitError {
 }
 
 /// Error returned when a load-state wait exceeds the caller's timeout budget.
-fn load_state_timeout_error(wait_until: WaitUntil, timeout: Duration) -> String {
+pub(crate) fn load_state_timeout_error(wait_until: WaitUntil, timeout: Duration) -> String {
     format!(
         "Timed out after {}ms waiting for load state '{}'",
         timeout.as_millis(),
@@ -838,7 +841,7 @@ impl WedgeReport {
     }
 }
 
-fn tab_gone_error(target_id: &str, last_url: &str) -> String {
+pub(crate) fn tab_gone_error(target_id: &str, last_url: &str) -> String {
     let url_part = if last_url.is_empty() {
         String::new()
     } else {
@@ -911,7 +914,7 @@ impl BrowserManager {
             }
             _ => {
                 return Err(format!(
-                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, obscura",
+                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, obscura, firefox",
                     engine
                 ));
             }

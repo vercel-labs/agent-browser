@@ -31,6 +31,7 @@ use super::cookies;
 use super::diff;
 use super::downloads::{DownloadLedger, DownloadState};
 use super::element::RefMap;
+use super::firefox;
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
@@ -263,6 +264,7 @@ struct DrainedEvents {
     attached_page_sessions: Vec<(TargetInfo, String)>,
     /// Cross-origin iframe (frame_id, session_id) pairs from Target.attachedToTarget.
     attached_iframe_sessions: Vec<(String, String)>,
+    waiting_for_debugger_sessions: HashSet<String>,
     /// Worker-like targets that can initiate network traffic but do not support
     /// page-domain setup.
     attached_worker_sessions: Vec<(TargetInfo, String)>,
@@ -651,6 +653,7 @@ pub struct DaemonState {
     pub appium: Option<AppiumManager>,
     pub local_driver: Option<DriverProcess>,
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
+    pub firefox: Option<firefox::session::FirefoxSession>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
@@ -895,6 +898,7 @@ impl DaemonState {
             appium: None,
             local_driver: None,
             webdriver_backend: None,
+            firefox: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
@@ -1014,7 +1018,8 @@ impl DaemonState {
             self.active_provider_connection,
             self.browser
                 .as_ref()
-                .is_some_and(BrowserManager::blocks_default_idle_shutdown),
+                .is_some_and(BrowserManager::blocks_default_idle_shutdown)
+                || self.firefox.as_ref().is_some_and(|ff| !ff.headless),
         )
     }
 
@@ -1022,7 +1027,7 @@ impl DaemonState {
     /// configured `default_timeout_ms` (from `AGENT_BROWSER_DEFAULT_TIMEOUT`).
     /// All wait-family handlers should use this instead of reading the
     /// timeout field and providing their own fallback.
-    fn timeout_ms(&self, cmd: &Value) -> u64 {
+    pub(crate) fn timeout_ms(&self, cmd: &Value) -> u64 {
         cmd.get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.default_timeout_ms)
@@ -1234,8 +1239,16 @@ impl DaemonState {
     /// dialogs so they never block the agent. `confirm` and `prompt` dialogs
     /// are left for the agent to handle explicitly.
     fn start_dialog_handler(&mut self) {
+        if self.firefox.is_some() && self.dialog_handler_task.is_some() {
+            return;
+        }
         if let Some(task) = self.dialog_handler_task.take() {
             task.abort();
+        }
+
+        if let Some(ff) = self.firefox.as_ref() {
+            self.dialog_handler_task = Some(ff.spawn_auto_dismiss());
+            return;
         }
 
         if !self.auto_dialog {
@@ -1412,7 +1425,28 @@ impl DaemonState {
         recording::stop_recording_task(&mut self.recording_state).await
     }
 
+    pub(crate) fn drain_firefox_events(&mut self) {
+        if self
+            .firefox
+            .as_mut()
+            .is_some_and(|ff| ff.drain_events(&mut self.pending_dialog))
+        {
+            self.ref_map.invalidate_all_documents();
+            self.active_iframe_sessions.clear();
+            self.active_frame_id = None;
+        }
+    }
+
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
+        self.drain_firefox_events();
+        if let Some(ff) = self.firefox.as_mut() {
+            let reconciled = ff.reconcile_event_loss(&mut self.pending_dialog).await?;
+            let recovered = ff.recover_active_context().await?;
+            ff.release_unused_user_contexts().await;
+            if reconciled || recovered {
+                firefox::daemon::reset_page(self);
+            }
+        }
         let drained = self.drain_cdp_events();
         self.apply_drained_events(drained).await
     }
@@ -1487,7 +1521,7 @@ impl DaemonState {
                             iframe_sid,
                             filter.as_ref(),
                             has_proxy_creds,
-                            false,
+                            drained.waiting_for_debugger_sessions.contains(iframe_sid),
                         )
                         .await?;
                     }
@@ -1537,7 +1571,7 @@ impl DaemonState {
                             page_sid,
                             filter.as_ref(),
                             has_proxy_creds,
-                            false,
+                            drained.waiting_for_debugger_sessions.contains(page_sid),
                         )
                         .await?;
                     }
@@ -1870,6 +1904,7 @@ impl DaemonState {
         let mut destroyed_targets: Vec<String> = Vec::new();
         let mut attached_page_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
+        let mut waiting_for_debugger_sessions = HashSet::new();
         let mut attached_worker_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
@@ -1972,10 +2007,20 @@ impl DaemonState {
                             continue;
                         }
                         "Target.attachedToTarget" => {
-                            if let (Some(sid), Some(target_info_value)) = (
-                                event.params.get("sessionId").and_then(|v| v.as_str()),
-                                event.params.get("targetInfo"),
-                            ) {
+                            let sid = event.params.get("sessionId").and_then(|v| v.as_str());
+                            if event
+                                .params
+                                .get("waitingForDebugger")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                            {
+                                if let Some(sid) = sid {
+                                    waiting_for_debugger_sessions.insert(sid.to_string());
+                                }
+                            }
+                            if let (Some(sid), Some(target_info_value)) =
+                                (sid, event.params.get("targetInfo"))
+                            {
                                 match serde_json::from_value::<TargetInfo>(
                                     target_info_value.clone(),
                                 ) {
@@ -2012,6 +2057,7 @@ impl DaemonState {
                             if let Some(sid) =
                                 event.params.get("sessionId").and_then(|v| v.as_str())
                             {
+                                waiting_for_debugger_sessions.remove(sid);
                                 if let Some(frame_id) =
                                     self.iframe_sessions
                                         .iter()
@@ -2450,6 +2496,7 @@ impl DaemonState {
             destroyed_targets,
             attached_page_sessions,
             attached_iframe_sessions,
+            waiting_for_debugger_sessions,
             attached_worker_sessions,
             attached_other_sessions,
             detached_iframe_sessions,
@@ -2619,6 +2666,7 @@ fn apply_restore_settings(state: &mut DaemonState, rows: &[Key]) {
 /// session, or a WebDriver session (Safari, iOS).
 fn has_active_browser_session(state: &DaemonState) -> bool {
     state.browser.is_some()
+        || state.firefox.is_some()
         || state.active_provider_session.is_some()
         || state.webdriver_backend.is_some()
         || state.appium.is_some()
@@ -2716,6 +2764,14 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 }
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
+    if let Some(task) = state.dialog_handler_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(ff) = state.firefox.take() {
+        state.pending_dialog = None;
+        ff.close().await;
+    }
     let browser = state.browser.take();
     state.launch_identity = None;
     state.webmcp_enabled = false;
@@ -3074,6 +3130,58 @@ fn append_launch_policy_actions(
     }
 }
 
+/// The error a pending dialog raises for `action`, or `None` when the command may run. A dialog
+/// blocks page work, so a command that would touch the active tab fails fast instead of hanging
+/// until the client read timeout. A dialog on a background tab does not block, because that tab's
+/// renderer is not the one the command would use. Tab and session management stay usable either
+/// way: switching or closing tabs is how an agent escapes a tab blocked by a dialog.
+pub(crate) fn dialog_block_error(action: &str, cmd: &Value, state: &DaemonState) -> Option<String> {
+    let dialog = state.pending_dialog.as_ref()?;
+    let active = state
+        .firefox
+        .as_ref()
+        .map(|ff| ff.contexts.active())
+        .or_else(|| {
+            state
+                .browser
+                .as_ref()
+                .and_then(|mgr| mgr.active_session_id().ok())
+        });
+    let on_active_tab = match (&dialog.session_id, active) {
+        (Some(dialog_session), Some(active)) => dialog_session == active,
+        // No session on the event means a top-level page dialog; with no browser, fail safe.
+        _ => true,
+    };
+    if !on_active_tab {
+        return None;
+    }
+    let read_touches_active_tab = action == "read"
+        && cmd.get("url").is_none()
+        && cmd.get("llms").is_none()
+        && !cmd
+            .get("requireMd")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    let safe_during_dialog = (skip_launch_action(action) && !read_touches_active_tab)
+        || matches!(
+            action,
+            "dialog"
+                | "screenshot"
+                | "url"
+                | "title"
+                | "tab_list"
+                | "tab_new"
+                | "tab_switch"
+                | "tab_close"
+        );
+    (!safe_during_dialog).then(|| {
+        format!(
+            "A JavaScript {} dialog is blocking the page: \"{}\". Resolve it with `dialog accept` or `dialog dismiss`, then retry `{}`.",
+            dialog.dialog_type, dialog.message, action
+        )
+    })
+}
+
 /// The command future is large; boxing it keeps it off the caller's stack,
 /// which a debug-build test thread would otherwise overflow.
 /// Fields the CLI adds to every command to carry session configuration. They
@@ -3277,6 +3385,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .as_ref()
         .map(|patch| state.settings.plan(patch))
         .filter(|plan| plan.relaunch);
+    if let Some(plan) = launch_plan.as_ref() {
+        if let Err(e) = validate_firefox_relaunch(&plan.next, &plugins_from_command_or_env(cmd)) {
+            let mut resp = error_response(&id, &e);
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            return resp;
+        }
+    }
 
     let skip_launch = skip_launch_action(action);
     let needs_launch = if !skip_launch && !auth_login_no_navigate {
@@ -3285,6 +3400,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         // actions are gated when recovery relaunches would invoke plugins.
         if launch_plan.is_some() || restore_replaces_browser {
             true
+        } else if state.engine == "firefox" {
+            state.firefox.as_mut().is_none_or(|ff| ff.has_exited())
         } else if let Some(ref mut mgr) = state.browser {
             mgr.has_process_exited() || !mgr.is_connection_alive().await
         } else {
@@ -3407,6 +3524,17 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return resp;
     }
 
+    let engine = launch_plan
+        .as_ref()
+        .map_or(state.settings.engine(), |plan| plan.next.engine());
+    if needs_launch && engine.as_deref() == Some("firefox") {
+        if let Some(error) = firefox::actions::unsupported_error(action) {
+            let mut resp = error_response(&id, &error);
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            return resp;
+        }
+    }
+
     if no_navigate_key_switch {
         let mut resp = error_response(
             &id,
@@ -3450,20 +3578,19 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
             }
             lifecycle_relaunched_browser |= settings_outcome.relaunched_browser;
-            lifecycle_relaunched_browser |=
-                state.browser.is_some() || state.active_provider_session.is_some();
-            if state.browser.is_some() || state.active_provider_session.is_some() {
+            lifecycle_relaunched_browser |= has_active_browser_session(state);
+            if has_active_browser_session(state) {
                 let _ = auto_save_restore_state(state).await;
             }
             let strict_state = launch_patch
                 .as_ref()
                 .is_some_and(|patch| patch.value(Key::StorageState).is_some());
-            let launched = auto_launch_with(
+            let launched = Box::pin(auto_launch_with(
                 state,
                 plugins_from_command_or_env(cmd),
                 &Value::Null,
                 strict_state,
-            )
+            ))
             .await;
             let launched = match launched {
                 Ok(_) => Box::pin(start_flow_capture(state)).await,
@@ -3509,8 +3636,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         mgr.thaw_active_tab(unpinned).await;
     }
 
+    let firefox_routed = state.engine == "firefox"
+        && !matches!(action, "launch" | "confirm")
+        && (!skip_launch || firefox::actions::handles(action));
+
     // WebDriver backend: reject unsupported CDP-only actions
-    if matches!(state.backend_type, BackendType::WebDriver)
+    if !firefox_routed
+        && matches!(state.backend_type, BackendType::WebDriver)
         && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
     {
         let mut resp = error_response(
@@ -3525,57 +3657,16 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return resp;
     }
 
-    // A pending confirm/prompt dialog blocks the renderer's main thread, so
-    // any command that touches the page would hang until the client read
-    // timeout. Fail fast with instructions instead. Actions in skip_launch
-    // never touch the page; dialog/screenshot/url/title are browser-side.
-    // Only a dialog on the ACTIVE tab blocks: one on a background tab leaves
-    // the active tab's renderer responsive.
-    if let Some(ref dialog) = state.pending_dialog {
-        let active_session = state
-            .browser
-            .as_ref()
-            .and_then(|m| m.active_session_id().ok().map(|s| s.to_string()));
-        let on_active_tab = match (&dialog.session_id, &active_session) {
-            (Some(dialog_sid), Some(active_sid)) => dialog_sid == active_sid,
-            // No session on the event = top-level page dialog; no browser = be safe.
-            _ => true,
-        };
-        // Tab and session management must stay usable: switching or closing
-        // tabs is exactly how an agent escapes a tab blocked by a dialog.
-        let read_touches_active_tab = action == "read"
-            && cmd.get("url").is_none()
-            && cmd.get("llms").is_none()
-            && !cmd
-                .get("requireMd")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-        let safe_during_dialog = (skip_launch && !read_touches_active_tab)
-            || matches!(
-                action,
-                "dialog"
-                    | "screenshot"
-                    | "url"
-                    | "title"
-                    | "tab_list"
-                    | "tab_new"
-                    | "tab_switch"
-                    | "tab_close"
-            );
-        if on_active_tab && !safe_during_dialog {
-            let mut resp = error_response(
-                &id,
-                &format!(
-                    "A JavaScript {} dialog is blocking the page: \"{}\". Resolve it with `dialog accept` or `dialog dismiss`, then retry `{}`.",
-                    dialog.dialog_type, dialog.message, action
-                ),
-            );
+    if !firefox_routed {
+        if let Some(error) = dialog_block_error(action, cmd, state) {
+            let mut resp = error_response(&id, &error);
             attach_settings_outcome(&mut resp, &settings_outcome);
             return resp;
         }
     }
 
     let mut result = match action {
+        _ if firefox_routed => Box::pin(firefox::actions::execute(action, cmd, state)).await,
         "launch" => {
             let applied = match launch_patch.as_ref() {
                 Some(patch) => apply_settings_patch(state, patch, true)
@@ -4160,15 +4251,6 @@ fn should_blank_existing_url(url: &str, filter: &DomainFilter) -> bool {
         .unwrap_or(false)
 }
 
-fn check_url_allowed_by_filter(filter: Option<&DomainFilter>, url: &str) -> Result<(), String> {
-    if let Some(filter) = filter {
-        if url != "about:blank" {
-            filter.check_url(url)?;
-        }
-    }
-    Ok(())
-}
-
 fn network_controls_required(filter: Option<&DomainFilter>, handle_auth_requests: bool) -> bool {
     filter.is_some() || handle_auth_requests
 }
@@ -4182,7 +4264,9 @@ fn should_defer_url_until_network_controls(
         return Ok(false);
     };
 
-    check_url_allowed_by_filter(filter, url)?;
+    if let Some(filter) = filter {
+        filter.check_url(url)?;
+    }
     Ok(filter.is_some() || handle_auth_requests)
 }
 
@@ -5062,6 +5146,9 @@ async fn launch_browser_from_settings(
     let enable_features = state.settings.enable_features();
     let init_script_paths = state.settings.init_scripts();
     let contained = state.domain_filter.read().await.is_some();
+    if engine.as_deref() == Some("firefox") {
+        return Box::pin(launch_firefox(state, options, &plugins, strict_state)).await;
+    }
     options.restrict_webrtc = contained;
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
@@ -5500,6 +5587,21 @@ async fn apply_launch_mutator_plugins(
     Ok(())
 }
 
+async fn load_state_path_for_engine(
+    state: &mut DaemonState,
+    path: &str,
+) -> Option<Result<Vec<String>, String>> {
+    if state.firefox.is_some() {
+        return Some(firefox::storage::load_state_path(state, path).await);
+    }
+    if let Some(mgr) = state.browser.as_ref() {
+        if let Ok(session_id) = mgr.active_session_id() {
+            return Some(state::load_state(&mgr.client, session_id, path).await);
+        }
+    }
+    None
+}
+
 async fn try_auto_restore_state(state: &mut DaemonState) {
     state.restore_skipped_origins.clear();
     let session_name = match state.session_name.as_deref() {
@@ -5514,26 +5616,24 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         }
     };
     if let Some(path) = state::find_auto_state_file(&session_name) {
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                match state::load_state(&mgr.client, session_id, &path).await {
-                    Ok(skipped) => {
-                        state.restore_status = "loaded".to_string();
-                        state.restore_status_detail = None;
-                        state.restore_skipped_origins = skipped;
-                        state.restore_loaded_path = Some(path.clone());
-                        state.restore_load_failed = false;
-                        state.restore_validation_pending = state.restore_check_url.is_some()
-                            || state.restore_check_text.is_some()
-                            || state.restore_check_fn.is_some();
-                    }
-                    Err(err) => {
-                        state.restore_status = "load_failed".to_string();
-                        state.restore_status_detail = Some(err);
-                        state.restore_loaded_path = Some(path);
-                        state.restore_load_failed = true;
-                        state.restore_validation_pending = false;
-                    }
+        if let Some(result) = load_state_path_for_engine(state, &path).await {
+            match result {
+                Ok(skipped) => {
+                    state.restore_status = "loaded".to_string();
+                    state.restore_status_detail = None;
+                    state.restore_skipped_origins = skipped;
+                    state.restore_loaded_path = Some(path.clone());
+                    state.restore_load_failed = false;
+                    state.restore_validation_pending = state.restore_check_url.is_some()
+                        || state.restore_check_text.is_some()
+                        || state.restore_check_fn.is_some();
+                }
+                Err(err) => {
+                    state.restore_status = "load_failed".to_string();
+                    state.restore_status_detail = Some(err);
+                    state.restore_loaded_path = Some(path);
+                    state.restore_load_failed = true;
+                    state.restore_validation_pending = false;
                 }
             }
         }
@@ -5548,6 +5648,14 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
 
 async fn validate_restore_if_pending(state: &mut DaemonState) {
     if !state.restore_validation_pending {
+        return;
+    }
+    state.drain_firefox_events();
+    if state
+        .firefox
+        .as_ref()
+        .is_some_and(|ff| ff.contexts.pinned_gone().is_some())
+    {
         return;
     }
     state.restore_validation_pending = false;
@@ -5567,11 +5675,21 @@ async fn validate_restore_if_pending(state: &mut DaemonState) {
 }
 
 async fn validate_restored_state(state: &DaemonState) -> Result<(), String> {
+    let timeout_ms = state.default_timeout_ms.min(2_000);
+    if let Some(ref ff) = state.firefox {
+        return firefox::storage::validate_restore(
+            ff,
+            state.restore_check_url.as_deref(),
+            state.restore_check_text.as_deref(),
+            state.restore_check_fn.as_deref(),
+            timeout_ms,
+        )
+        .await;
+    }
     let Some(ref mgr) = state.browser else {
         return Ok(());
     };
     let session_id = mgr.active_session_id()?.to_string();
-    let timeout_ms = state.default_timeout_ms.min(2_000);
 
     if let Some(ref pattern) = state.restore_check_url {
         let url = mgr.get_url().await.unwrap_or_default();
@@ -5594,7 +5712,7 @@ async fn validate_restored_state(state: &DaemonState) -> Result<(), String> {
     Ok(())
 }
 
-fn mark_explicit_storage_state_loaded(state: &mut DaemonState, path: &str) {
+pub(crate) fn mark_explicit_storage_state_loaded(state: &mut DaemonState, path: &str) {
     if state.session_name.is_none() && state.restore_status == "not_configured" {
         return;
     }
@@ -5658,7 +5776,7 @@ pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interv
         return;
     }
     // No browser means nothing to collect from.
-    if state.browser.is_none() {
+    if state.browser.is_none() && state.firefox.is_none() {
         return;
     }
     state.last_autosave_attempt = Some(std::time::Instant::now());
@@ -5704,6 +5822,24 @@ pub(crate) async fn auto_save_restore_state(
         return Ok(None);
     }
 
+    let session_id = state.session_id.clone();
+    state.drain_firefox_events();
+    if let Some(ff) = state.firefox.as_ref() {
+        return match firefox::storage::save_auto_state(ff, &session_name, &session_id).await {
+            Ok(path) => {
+                state.restore_save_status = "saved".to_string();
+                state.restore_saved_path = Some(path.clone());
+                state.last_autosave_attempt = Some(std::time::Instant::now());
+                Ok(Some(path))
+            }
+            Err(err) => {
+                state.restore_save_status = "error".to_string();
+                state.restore_saved_path = None;
+                Err(err)
+            }
+        };
+    }
+
     let Some(ref mgr) = state.browser else {
         state.restore_save_status = "no_browser".to_string();
         state.restore_saved_path = None;
@@ -5745,10 +5881,8 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
         ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
             .await?;
         let mut skipped = None;
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                skipped = Some(state::load_state(&mgr.client, session_id, path).await?);
-            }
+        if let Some(result) = load_state_path_for_engine(state, path).await {
+            skipped = Some(result?);
         }
         if let Some(skipped) = skipped {
             mark_explicit_storage_state_loaded(state, path);
@@ -5947,6 +6081,84 @@ async fn handle_launch_for_target(
         state.session_setup = setup;
     }
     result
+}
+
+/// Rejects a relaunch into Firefox whose settings it cannot launch with. It runs on the planned
+/// settings before the relaunch closes the running browser, so a rejected option leaves it alone.
+fn validate_firefox_relaunch(
+    next: &Running,
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<(), String> {
+    if next.engine().as_deref() != Some("firefox") {
+        return Ok(());
+    }
+    let mut options = next.launch_options();
+    options.ca_cert = next
+        .get(Key::CaCert)
+        .and_then(Value::as_str)
+        .map(String::from);
+    let allowed_domains = next
+        .security()
+        .allowed_domains
+        .is_some_and(|domains| !domains.is_empty());
+    validate_firefox_launch(next, &options, plugins, allowed_domains)
+}
+
+/// Rejects the settings owned Firefox cannot launch with.
+fn validate_firefox_launch(
+    settings: &Running,
+    options: &LaunchOptions,
+    plugins: &[crate::plugins::PluginConfig],
+    allowed_domains: bool,
+) -> Result<(), String> {
+    let connection = settings.connection();
+    let cdp = match &connection {
+        Connection::Cdp(cdp) => Some(cdp.clone()),
+        _ => None,
+    };
+    let provider = match &connection {
+        Connection::Provider(provider) => Some(provider.clone()),
+        _ => None,
+    };
+    let enable_features = settings.enable_features();
+    let init_scripts = settings.init_scripts();
+    firefox::process::validate_launch(
+        options,
+        firefox::process::LaunchFlags {
+            cdp: cdp.as_deref(),
+            auto_connect: matches!(connection, Connection::AutoConnect),
+            provider: provider.as_deref(),
+            allowed_domains,
+            capture_flow: settings.captures_flow(),
+            enable_features: &enable_features,
+            init_scripts: &init_scripts,
+            plugins,
+        },
+    )
+}
+
+/// Launches owned Firefox with the session's resolved settings.
+async fn launch_firefox(
+    state: &mut DaemonState,
+    options: LaunchOptions,
+    plugins: &[crate::plugins::PluginConfig],
+    strict_state: bool,
+) -> Result<Value, String> {
+    let allowed_domains = state.domain_filter.read().await.is_some();
+    validate_firefox_launch(&state.settings, &options, plugins, allowed_domains)?;
+    let storage_state = options.storage_state.clone();
+    state.ref_map.invalidate_all_documents();
+    state.reset_input_state();
+    let session = firefox::session::FirefoxSession::launch(&options, state.auto_dialog).await?;
+    state.engine = "firefox".to_string();
+    write_engine_file(&state.session_id, &state.engine);
+    state.launch_identity = Some(state.settings.launch_identity());
+    state.firefox = Some(session);
+    set_session_pin(state, state.pin_tab);
+    state.start_dialog_handler();
+    try_auto_restore_state(state).await;
+    load_storage_state_for_launch(state, &storage_state, strict_state).await?;
+    Ok(json!({}))
 }
 
 /// The settings a `launch` command names, as a patch. A client that speaks
@@ -6434,6 +6646,13 @@ async fn apply_settings_patch(
     }
     if was(Key::NoAutoDialog) {
         state.auto_dialog = !next.no_auto_dialog();
+        if let Some(ff) = state.firefox.as_mut() {
+            ff.auto_dialog
+                .store(state.auto_dialog, std::sync::atomic::Ordering::Release);
+            ff.auto_dialog_changed.notify_one();
+        } else {
+            state.start_dialog_handler();
+        }
     }
     if was(Key::ActionPolicy) || was(Key::ConfirmActions) || was(Key::AllowedDomains) {
         // An approval asked for under the old rules no longer stands.
@@ -6464,10 +6683,7 @@ async fn apply_settings_patch(
     }
     if was(Key::PinTab) {
         let pin = next.pin_tab();
-        state.pin_tab = pin;
-        if let Some(ref mut mgr) = state.browser {
-            mgr.set_pin_tab(pin);
-        }
+        set_session_pin(state, pin);
         // Force a re-persist from the snapshot next time.
         state.last_persisted_binding = None;
     }
@@ -6583,6 +6799,10 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .or_else(|| state.settings.engine());
     let patch = launch_envelope_patch(cmd, engine.as_deref())?;
     check_capture_setting(&patch)?;
+    validate_firefox_relaunch(
+        &state.settings.plan(&patch).next,
+        &plugins_from_command_or_env(cmd),
+    )?;
     let had_browser_before_launch = has_active_browser_session(state);
 
     let mut outcome = apply_settings_patch(state, &patch, true).await?;
@@ -6590,7 +6810,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         && match (state.browser.as_mut(), state.webdriver_backend.as_ref()) {
             (Some(mgr), _) => !mgr.has_process_exited() && mgr.is_connection_alive().await,
             (None, Some(webdriver)) => webdriver.is_connection_alive().await,
-            (None, None) => false,
+            (None, None) => state.firefox.as_mut().is_some_and(|ff| !ff.has_exited()),
         };
     if reusable {
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
@@ -6860,7 +7080,10 @@ async fn navigate_active_page(
     Ok(result)
 }
 
-async fn handle_url(state: &DaemonState) -> Result<Value, String> {
+async fn handle_url(state: &mut DaemonState) -> Result<Value, String> {
+    if state.firefox.is_some() {
+        return firefox::page::url(state).await;
+    }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let url = wb.get_url().await?;
@@ -6872,7 +7095,7 @@ async fn handle_url(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "url": url }))
 }
 
-async fn handle_read(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_read(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mut options = crate::read::options_from_command(cmd)?;
     if let Some(allowed_domains) = {
         let df = state.domain_filter.read().await;
@@ -6973,7 +7196,10 @@ async fn handle_title(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "title": title }))
 }
 
-async fn handle_content(state: &DaemonState) -> Result<Value, String> {
+async fn handle_content(state: &mut DaemonState) -> Result<Value, String> {
+    if state.firefox.is_some() {
+        return firefox::page::content(state).await;
+    }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let html = wb.get_content().await?;
@@ -7011,15 +7237,24 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .clone()
         .or_else(|| (result.object_type == "undefined").then(|| "undefined".to_string()));
     let url = mgr.get_url().await.unwrap_or_default();
-    let mut data = json!({ "result": result.value.unwrap_or(Value::Null), "origin": url });
+    Ok(eval_data(
+        result.value.unwrap_or(Value::Null),
+        url,
+        unserializable,
+    ))
+}
+
+/// Builds the `evaluate` reply, carrying the JavaScript token for a value JSON cannot represent.
+pub(crate) fn eval_data(result: Value, origin: String, unserializable: Option<String>) -> Value {
+    let mut data = json!({ "result": result, "origin": origin });
     if let Some(token) = unserializable {
         data["unserializable"] = json!(token);
     }
-    Ok(data)
+    data
 }
 
 /// A user `close`: the session is over, so its stored security settings go.
-async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     close_session(state, true).await
 }
 
@@ -8274,30 +8509,19 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 // Wait helpers
 // ---------------------------------------------------------------------------
 
-async fn wait_for_selector(
-    client: &super::cdp::client::CdpClient,
-    session_id: &str,
-    selector: &str,
-    state: &str,
-    timeout_ms: u64,
-) -> Result<(), String> {
-    let check_fn = match state {
-        "attached" => format!(
-            "!!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
-        "detached" => format!(
-            "!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
+/// The expression Chrome polls for a selector in one of its `wait` states.
+pub(crate) fn selector_state_expression(selector: &str, state: &str) -> String {
+    let sel = serde_json::to_string(selector).unwrap_or_default();
+    match state {
+        "attached" => format!("!!document.querySelector({sel})"),
+        "detached" => format!("!document.querySelector({sel})"),
         "hidden" => format!(
             r#"(() => {{
                 const el = document.querySelector({sel});
                 if (!el) return true;
                 const s = window.getComputedStyle(el);
                 return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
-            }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
+            }})()"#
         ),
         _ => format!(
             r#"(() => {{
@@ -8306,11 +8530,19 @@ async fn wait_for_selector(
                 const r = el.getBoundingClientRect();
                 const s = window.getComputedStyle(el);
                 return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-            }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
+            }})()"#
         ),
-    };
+    }
+}
 
+async fn wait_for_selector(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    selector: &str,
+    state: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let check_fn = selector_state_expression(selector, state);
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
@@ -8613,18 +8845,25 @@ async fn handle_errors(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 }
 
 async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
+    let page_count = if let Some(browser) = state.browser.as_ref() {
+        browser.page_count()
+    } else if let Some(ff) = state.firefox.as_ref() {
+        firefox::tabs::tab_count(ff).await?
+    } else {
+        0
+    };
     Ok(json!({
         "session": state.session_id,
         "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
         "socketDir": get_socket_dir().to_string_lossy(),
         "backgroundPid": std::process::id(),
-        "browserLaunched": state.browser.is_some(),
-        "pageCount": state.browser.as_ref().map(|mgr| mgr.page_count()).unwrap_or(0),
+        "browserLaunched": has_active_browser_session(state),
+        "pageCount": page_count,
         "engine": state.engine,
         "launchHash": state.launch_identity,
         "compatibilityStatus": "current",
         "effectiveLaunch": {
-            "browserLaunched": state.browser.is_some(),
+            "browserLaunched": has_active_browser_session(state),
             "engine": state.engine,
             "launchHash": state.launch_identity,
         },
@@ -9806,7 +10045,9 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     {
         let domain_filter = state.domain_filter.read().await;
         if let Some(url) = recording_url {
-            check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
+            if let Some(filter) = domain_filter.as_ref() {
+                filter.check_url(url)?;
+            }
         }
     }
 
@@ -9871,7 +10112,9 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
     {
         let domain_filter = state.domain_filter.read().await;
         if let Some(ref url) = recording_url {
-            check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
+            if let Some(filter) = domain_filter.as_ref() {
+                filter.check_url(url)?;
+            }
         }
     }
 
@@ -14484,7 +14727,7 @@ fn mocked_response(
     (status, headers, encoded)
 }
 
-fn route_url_matches(pattern: &str, url: &str) -> bool {
+pub(crate) fn route_url_matches(pattern: &str, url: &str) -> bool {
     if pattern == "*" {
         return true;
     }
@@ -15669,7 +15912,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 // Confirmation handlers (stub)
 // ---------------------------------------------------------------------------
 
-async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let pending = state
         .pending_confirmation
         .take()
@@ -15714,7 +15957,7 @@ fn confirmation_replay_command(cmd: &Value) -> Value {
     replay
 }
 
-async fn handle_deny(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_deny(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let pending = state
         .pending_confirmation
         .take()
@@ -16412,7 +16655,7 @@ fn inject_lifecycle(
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status,
             "effectiveLaunch": {
-                "browserLaunched": state.browser.is_some(),
+                "browserLaunched": has_active_browser_session(state),
                 "engine": state.engine,
                 "launchHash": state.launch_identity,
             }
@@ -16458,6 +16701,17 @@ fn error_response(id: &str, error: &str) -> Value {
     resp
 }
 
+/// Applies the session's `--pin-tab` setting to state and whichever backend is running.
+fn set_session_pin(state: &mut DaemonState, pin: bool) {
+    state.pin_tab = pin;
+    if let Some(ref mut mgr) = state.browser {
+        mgr.set_pin_tab(pin);
+    }
+    if let Some(ref mut ff) = state.firefox {
+        ff.set_pin(pin);
+    }
+}
+
 fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
     if resp.get("code").and_then(Value::as_str) != Some("tab_gone") {
         return;
@@ -16466,6 +16720,12 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
         .browser
         .as_ref()
         .and_then(BrowserManager::bound_target_gone_details)
+        .or_else(|| {
+            state
+                .firefox
+                .as_ref()
+                .and_then(|ff| ff.contexts.pinned_gone())
+        })
     else {
         return;
     };
@@ -18217,6 +18477,10 @@ mod tests {
         let drained = state.drain_cdp_events();
         assert_eq!(drained.attached_worker_sessions.len(), 1);
         assert_eq!(drained.attached_worker_sessions[0].1, "new");
+        assert_eq!(
+            drained.waiting_for_debugger_sessions,
+            HashSet::from(["new".to_string()])
+        );
     }
 
     #[test]
@@ -22299,11 +22563,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[tokio::test]
     async fn test_an_empty_filter_denies_read_and_counts_as_contained() {
-        let (_env, state) = isolated_state();
+        let (_env, mut state) = isolated_state();
         *state.domain_filter.write().await = Some(DomainFilter::new(""));
         let err = handle_read(
             &json!({"action":"read","url":"http://127.0.0.1:1/"}),
-            &state,
+            &mut state,
         )
         .await
         .unwrap_err();
@@ -24325,6 +24589,21 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         // Later commands that repeat it or omit it leave the browser alone.
         assert!(plan.next.plan(&flow).is_empty());
         assert!(plan.next.plan(&Patch::default()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn firefox_rejects_flow_capture_before_launch() {
+        let mut state = DaemonState::new();
+        let capture = Patch::from_entries([(Key::Capture, Requested::Set(json!(["flow"])))]);
+        state.settings = state.settings.plan(&capture).next;
+        let error = launch_firefox(&mut state, LaunchOptions::default(), &[], false)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "--capture flow is not supported with --engine firefox"
+        );
+        assert!(state.firefox.is_none());
     }
 
     #[tokio::test]
@@ -27004,5 +27283,398 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
         assert!(elsewhere.domain_filter.read().await.is_none());
         assert!(sibling.domain_filter.read().await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod firefox_routing_tests {
+    use super::*;
+    use crate::native::firefox::session::tests::fake_session;
+    use crate::test_utils::EnvGuard;
+
+    const ENV: &[&str] = &[
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_PROFILE",
+        "AGENT_BROWSER_ARGS",
+        "AGENT_BROWSER_ALLOWED_DOMAINS",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_PIN_TAB",
+    ];
+
+    fn clean_env() -> EnvGuard<'static> {
+        let guard = EnvGuard::new(ENV);
+        for name in ENV {
+            guard.remove(name);
+        }
+        guard.set("AGENT_BROWSER_ENGINE", "firefox");
+        guard
+    }
+
+    async fn firefox_state() -> (DaemonState, Arc<std::sync::Mutex<Vec<String>>>) {
+        let mut state = DaemonState::new();
+        let (ff, tx, calls) = fake_session().await;
+        std::mem::forget(tx);
+        state.firefox = Some(ff);
+        (state, calls)
+    }
+
+    fn navigations(calls: &Arc<std::sync::Mutex<Vec<String>>>) -> usize {
+        let calls = calls.lock().unwrap();
+        calls
+            .iter()
+            .filter(|m| *m == "browsingContext.navigate")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn firefox_session_info_counts_live_contexts_and_rejects_missing_tree() {
+        let _guard = clean_env();
+        let (mut state, _) = firefox_state().await;
+        let (ff, _events, _) = firefox::session::tests::fake_session_with_trees(vec![
+            json!({"contexts": [{"context":"one", "children":[{"context":"frame"}]}, {"context":"two"}]}),
+            json!({"contexts": []}),
+            json!({}),
+        ]).await;
+        state.firefox = Some(ff);
+        assert_eq!(handle_session_info(&state).await.unwrap()["pageCount"], 2);
+        assert_eq!(handle_session_info(&state).await.unwrap()["pageCount"], 0);
+        assert!(handle_session_info(&state)
+            .await
+            .unwrap_err()
+            .contains("browsing contexts"));
+    }
+
+    #[tokio::test]
+    async fn firefox_live_dialog_listener_survives_disabled_start_and_accepts_each_prompt_once() {
+        let _guard = clean_env();
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        state.settings.set(Key::NoAutoDialog, json!(true));
+        state.auto_dialog = false;
+        let (ff, events, calls) = fake_session().await;
+        state.firefox = Some(ff);
+        state.start_dialog_handler();
+        let task_id = state.dialog_handler_task.as_ref().unwrap().id();
+        let accepts = || {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|method| *method == "browsingContext.handleUserPrompt")
+                .count()
+        };
+        let prompt = |kind: &str| {
+            json!({"type":"event", "method":"browsingContext.userPromptOpened",
+            "params":{"context":"ctx-active", "type":kind, "handler":"ignore"}})
+        };
+        events.send(prompt("alert")).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(accepts(), 0);
+        let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(false)))]);
+        let outcome = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        assert!(!outcome.relaunched_browser);
+        assert_eq!(state.dialog_handler_task.as_ref().unwrap().id(), task_id);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while accepts() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        events.send(prompt("confirm")).unwrap();
+        for _ in 0..3 {
+            state
+                .firefox
+                .as_ref()
+                .unwrap()
+                .auto_dialog_changed
+                .notify_one();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(accepts(), 1);
+        let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(true)))]);
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        events.send(prompt("alert")).unwrap();
+        events
+            .send(
+                json!({"type":"event", "method":"browsingContext.userPromptClosed",
+            "params":{"context":"ctx-active"}}),
+            )
+            .unwrap();
+        events.send(prompt("prompt")).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(false)))]);
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(accepts(), 1);
+        assert_eq!(state.dialog_handler_task.as_ref().unwrap().id(), task_id);
+        let client = Arc::downgrade(&state.firefox.as_ref().unwrap().bidi);
+        close_all_browser_backends(&mut state).await.unwrap();
+        assert!(state.dialog_handler_task.is_none());
+        assert!(client.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn implicit_launch_rejects_cdp_settings_before_launching() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        let resp = execute_command(
+            &json!({"id":"1","action":"navigate","url":"https://a.test","settings":{"engine":"firefox","cdp":"ws://127.0.0.1:9222"}}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false);
+        let error = resp["error"].as_str().unwrap();
+        assert!(
+            error.contains("--cdp is not supported with --engine firefox"),
+            "{error}"
+        );
+        assert!(state.firefox.is_some());
+    }
+
+    #[tokio::test]
+    async fn explicit_launch_rejects_unsupported_options() {
+        let _guard = clean_env();
+        let mut state = DaemonState::new();
+        let launch = |extra: Value| {
+            let mut cmd = json!({"action":"launch","engine":"firefox"});
+            cmd.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            cmd
+        };
+        let e = handle_launch(&launch(json!({"provider":"browserbase"})), &mut state)
+            .await
+            .unwrap_err();
+        assert!(e.contains("--provider"), "{e}");
+        let mut state = DaemonState::new();
+        let e = handle_launch(&launch(json!({"profile":"/tmp/p"})), &mut state)
+            .await
+            .unwrap_err();
+        assert!(e.contains("--profile"), "{e}");
+        let e = handle_launch(&launch(json!({"args":["--x"]})), &mut state)
+            .await
+            .unwrap_err();
+        assert!(e.contains("--args"), "{e}");
+        let e = handle_launch(&launch(json!({"allowedDomains":"a.test"})), &mut state)
+            .await
+            .unwrap_err();
+        assert!(e.contains("allowed-domains"), "{e}");
+        assert!(state.firefox.is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_launch_reuses_a_live_session_with_the_same_options() {
+        let guard = clean_env();
+        guard.set("AGENT_BROWSER_EXECUTABLE_PATH", "/nonexistent/firefox");
+        let mut implicit_state = DaemonState::new();
+        let resp = execute_command(&json!({"id":"1","action":"url"}), &mut implicit_state).await;
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+
+        let (mut implicit_state, _calls) = firefox_state().await;
+        let resp =
+            execute_command(&json!({"id":"2","action":"tab_list"}), &mut implicit_state).await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(resp["data"]["lifecycle"]["reused"], true);
+        assert_eq!(resp["data"]["lifecycle"]["launched"], false);
+
+        guard.remove("AGENT_BROWSER_EXECUTABLE_PATH");
+        let (mut state, _calls) = firefox_state().await;
+        state
+            .settings
+            .set(Key::ExecutablePath, json!("/nonexistent/firefox"));
+        state.launch_identity = Some(state.settings.launch_identity());
+        let command =
+            json!({"action":"launch", "engine":"firefox", "executablePath":"/nonexistent/firefox"});
+        let result = handle_launch(&command, &mut state).await.unwrap();
+        assert_eq!(result["reused"], true);
+        let error = handle_launch(&json!({"action":"launch", "storageState":"{}"}), &mut state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+    }
+
+    /// Firefox has no way to enforce the allowlist, so asking for one must leave none installed.
+    #[tokio::test]
+    async fn firefox_allowed_domains_launch_is_refused_without_installing_a_filter() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "engine": "firefox",
+                "allowedDomains": ["example.com"],
+                "executablePath": "/nonexistent/firefox",
+            }),
+            &mut state,
+        )
+        .await;
+        assert!(
+            state.domain_filter.read().await.is_none(),
+            "a refused allowlist must not stay installed"
+        );
+        assert_eq!(
+            resp["error"].as_str().unwrap_or_default(),
+            "--allowed-domains is not supported with --engine firefox"
+        );
+        assert!(state
+            .settings
+            .security()
+            .allowed_domains
+            .is_none_or(|domains| domains.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn chrome_only_action_errors_without_touching_the_browser_and_before_other_gates() {
+        let _guard = clean_env();
+        let (mut state, calls) = firefox_state().await;
+        state.backend_type = BackendType::WebDriver;
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "alert".into(),
+            message: "hi".into(),
+            session_id: Some("ctx-active".into()),
+            ..Default::default()
+        });
+        let resp = execute_command(&json!({"id":"1","action":"trace_start"}), &mut state).await;
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("`trace_start` is Chrome-only"), "{error}");
+        assert!(!error.contains("WebDriver backend"), "{error}");
+        let resp = execute_command(&json!({"id":"2","action":"snapshot"}), &mut state).await;
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("not supported on Firefox"));
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_action_firefox_cannot_run_fails_before_launching_a_browser() {
+        let _guard = clean_env();
+        let mut state = DaemonState::new();
+        state.engine = "firefox".into();
+        state.settings.set(Key::Engine, json!("firefox"));
+        let resp = execute_command(&json!({"id":"1","action":"vitals"}), &mut state).await;
+        assert_eq!(resp["error"], "`vitals` is not supported on Firefox");
+        assert!(state.firefox.is_none(), "no browser was launched");
+    }
+
+    #[tokio::test]
+    async fn dialog_on_a_background_tab_does_not_block_the_active_tab() {
+        let _guard = clean_env();
+        let (mut state, calls) = firefox_state().await;
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "confirm".into(),
+            message: "sure?".into(),
+            session_id: Some("ctx-background".into()),
+            ..Default::default()
+        });
+        let nav = json!({"id":"1","action":"navigate","url":"https://a.test"});
+        let resp = execute_command(&nav, &mut state).await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(navigations(&calls), 1);
+
+        state.pending_dialog.as_mut().unwrap().session_id = Some("ctx-active".into());
+        let resp = execute_command(&nav, &mut state).await;
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("confirm dialog is blocking the page"));
+        assert_eq!(navigations(&calls), 1);
+    }
+
+    #[tokio::test]
+    async fn confirm_runs_the_command_once_and_deny_never() {
+        let guard = clean_env();
+        guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate");
+        let (mut state, calls) = firefox_state().await;
+        state.confirm_actions = ConfirmActions::parse("navigate");
+        let nav = json!({"id":"1","action":"navigate","url":"https://a.test"});
+
+        let resp = execute_command(&nav, &mut state).await;
+        assert_eq!(resp["data"]["confirmation_required"], true);
+        assert_eq!(navigations(&calls), 0);
+        let resp = execute_command(&json!({"id":"2","action":"confirm"}), &mut state).await;
+        assert_eq!(resp["data"]["result"]["success"], true, "{resp}");
+        assert_eq!(navigations(&calls), 1);
+
+        execute_command(&nav, &mut state).await;
+        let resp = execute_command(&json!({"id":"3","action":"deny"}), &mut state).await;
+        assert_eq!(resp["data"]["denied"], true);
+        assert_eq!(navigations(&calls), 1);
+    }
+
+    #[tokio::test]
+    async fn pin_tab_propagates_to_firefox_and_reports_structured_tab_gone() {
+        let _guard = clean_env();
+        let (mut state, calls) = firefox_state().await;
+
+        let resp = execute_command(
+            &json!({"id": "1", "action": "url", "settings": {"pin-tab": true}}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(state.pin_tab);
+        assert!(state.firefox.as_ref().unwrap().contexts.pinned());
+
+        {
+            let ff = state.firefox.as_mut().unwrap();
+            ff.contexts
+                .set_url("ctx-active", "https://u:p@app.test/timeout?secret=1");
+            assert!(!ff.contexts.record(&json!({
+                "context": "ctx-popup",
+                "parent": null,
+                "originalOpener": "ctx-active",
+            })));
+            assert_eq!(ff.contexts.active(), "ctx-active");
+            ff.contexts.remove("ctx-active");
+        }
+
+        let before_calls = calls.lock().unwrap().len();
+        let resp = execute_command(
+            &json!({"id": "2", "action": "evaluate", "script": "document.cookie"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(resp["code"], "tab_gone", "{resp}");
+        assert_eq!(resp["data"]["targetId"], "ctx-active", "{resp}");
+        assert_eq!(
+            resp["data"]["lastUrl"], "https://app.test/timeout",
+            "{resp}"
+        );
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .starts_with(super::super::browser::TAB_GONE_PREFIX));
+        assert_eq!(calls.lock().unwrap().len(), before_calls);
+
+        let resp = execute_command(
+            &json!({"id": "3", "action": "url", "settings": {"pin-tab": false}}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(!state.pin_tab);
+        assert!(!state.firefox.as_ref().unwrap().contexts.pinned());
+        assert_eq!(
+            state.firefox.as_ref().unwrap().contexts.active(),
+            "ctx-popup"
+        );
     }
 }

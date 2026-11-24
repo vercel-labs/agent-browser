@@ -20,6 +20,8 @@ pub mod diff;
 pub mod downloads;
 #[allow(dead_code)]
 pub mod element;
+
+pub mod firefox;
 #[allow(dead_code)]
 pub mod flow;
 #[allow(dead_code)]

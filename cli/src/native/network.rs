@@ -138,7 +138,11 @@ impl DomainFilter {
         false
     }
 
+    /// Fails unless `url`'s host is in the list. `about:blank` has no host, so it always passes.
     pub fn check_url(&self, url: &str) -> Result<(), String> {
+        if url == "about:blank" {
+            return Ok(());
+        }
         if self.allowed_domains.is_empty() {
             return Err(EMPTY_ALLOWED_DOMAINS_ERROR.to_string());
         }
@@ -223,8 +227,6 @@ async fn install_domain_filter_runtime_script(
     allowed_domains: &[String],
     paused_before_document: bool,
 ) -> Result<(), String> {
-    // An auto-attached target is paused before its first document, so it
-    // has no context to patch; the new-document script above covers it.
     if paused_before_document {
         return Ok(());
     }
@@ -732,11 +734,10 @@ mod tests {
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             while let Some(Ok(Message::Text(text))) = ws.next().await {
                 let request: Value = serde_json::from_str(&text).unwrap();
-                seen.lock()
-                    .unwrap()
-                    .push(request["method"].as_str().unwrap_or("").to_string());
+                let method = request["method"].as_str().unwrap_or("").to_string();
+                seen.lock().unwrap().push(method.clone());
                 let mut response = json!({ "id": request["id"] });
-                if request["method"] == "Runtime.evaluate" {
+                if method == "Runtime.evaluate" {
                     response["error"] = json!({ "code": -32000, "message": message });
                 } else {
                     response["result"] = json!({ "identifier": "1" });
@@ -769,14 +770,20 @@ mod tests {
 
     #[tokio::test]
     async fn domain_filter_script_fails_closed_without_a_context_on_live_targets() {
-        let error =
-            install_script_with_runtime_error("Cannot find default execution context", false)
-                .await
-                .unwrap_err();
+        let (result, methods) =
+            install_script_recording_methods("Cannot find default execution context", false).await;
+        let error = result.unwrap_err();
         assert!(
             error.contains("Cannot find default execution context"),
             "{}",
             error
+        );
+        assert_eq!(
+            methods,
+            vec![
+                "Page.addScriptToEvaluateOnNewDocument".to_string(),
+                "Runtime.evaluate".to_string()
+            ]
         );
     }
 
