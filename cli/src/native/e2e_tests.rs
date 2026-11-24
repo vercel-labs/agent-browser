@@ -2016,6 +2016,138 @@ async fn e2e_stale_presentational_iframe_ref_recovers_for_read_and_hover() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_snapshot_labels_iframes_by_name_and_title() {
+    let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port_a = listener_a.local_addr().unwrap().port();
+    let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port_b = listener_b.local_addr().unwrap().port();
+
+    let server_a = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener_a.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = if path == "/outer.html" {
+                    "<iframe name='content-frame' srcdoc='<button>Nested result</button>'></iframe>"
+                        .to_string()
+                } else {
+                    format!(
+                        "<!doctype html><body>\
+                        <iframe id='outer' name='outer-frame' src='/outer.html'></iframe>\
+                        <iframe id='titled' name='ignored-name' title='Accessible frame' srcdoc='<button>Title result</button>'></iframe>\
+                        <iframe id='cross' name='cross-port-frame' src='http://127.0.0.1:{port_b}/cross.html'></iframe>\
+                        <iframe id='anon' src='about:blank?token=secret-frame-token'></iframe>\
+                        </body>"
+                    )
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let server_b = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener_b.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let body = "<!doctype html><body><button>Cross button</button></body>";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "action": "navigate", "url": format!("http://127.0.0.1:{port_a}/") }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_evaluate(
+        &mut state,
+        "wait",
+        "new Promise(resolve => { const ready = () => { const outer = document.getElementById('outer'); const titled = document.getElementById('titled'); const nested = outer?.contentDocument?.querySelector('iframe'); if (nested?.contentDocument?.readyState === 'complete' && titled?.contentDocument?.readyState === 'complete') resolve(true); else requestAnimationFrame(ready); }; ready(); })",
+        json!(true),
+    )
+    .await;
+
+    let snapshot_response = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+    assert_success(&snapshot_response);
+    let data = get_data(&snapshot_response);
+    let snapshot = data["snapshot"].as_str().unwrap();
+
+    assert!(snapshot.contains("Iframe \"outer-frame\""), "{snapshot}");
+    assert!(snapshot.contains("Iframe \"content-frame\""), "{snapshot}");
+    assert!(
+        snapshot.contains("Iframe \"Accessible frame\""),
+        "{snapshot}"
+    );
+    assert!(
+        snapshot.contains("Iframe \"cross-port-frame\""),
+        "{snapshot}"
+    );
+    assert!(!snapshot.contains("ignored-name"), "{snapshot}");
+    assert_eq!(snapshot.matches("Iframe [ref=").count(), 1, "{snapshot}");
+    assert!(!snapshot.contains("secret-frame-token"), "{snapshot}");
+
+    let refs = data["refs"].as_object().unwrap();
+    let title_ref = refs
+        .iter()
+        .find(|(_, node)| node["role"] == "Iframe" && node["name"] == "Accessible frame")
+        .map(|(ref_id, _)| ref_id.clone())
+        .expect("title should remain the iframe's accessible ref name");
+    assert!(refs
+        .values()
+        .any(|node| node["role"] == "Iframe" && node["name"] == ""));
+    assert!(!refs.values().any(|node| {
+        node["role"] == "Iframe"
+            && matches!(
+                node["name"].as_str(),
+                Some("outer-frame" | "content-frame" | "cross-port-frame")
+            )
+    }));
+
+    assert_success(
+        &execute_command(
+            &json!({ "action": "frame", "selector": format!("@{title_ref}") }),
+            &mut state,
+        )
+        .await,
+    );
+    let selected = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+    assert_success(&selected);
+    assert!(get_data(&selected)["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Title result"));
+
+    assert_success(&execute_command(&json!({ "action": "close" }), &mut state).await);
+    server_a.abort();
+    server_b.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_presentational_cross_origin_iframe_refs_support_fill_and_inputvalue() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -10170,6 +10302,233 @@ async fn e2e_screenshot_selector_beyond_viewport() {
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_annotate_iframe_coordinates() {
+    let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port_a = listener_a.local_addr().unwrap().port();
+    let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port_b = listener_b.local_addr().unwrap().port();
+
+    let server_a = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener_a.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = match path {
+                    "/same.html" => {
+                        "<!doctype html><body style='margin:0'>\
+                        <button style='display:block;width:100px;height:30px;margin:10px 0 0 40px;border:0'>SameBtn</button>\
+                        </body>"
+                            .to_string()
+                    }
+                    "/scaled.html" => {
+                        "<!doctype html><body style='margin:0'>\
+                        <button style='display:block;width:50px;height:20px;margin:10px 0 0 15px;border:0'>ScaledBtn</button>\
+                        </body>"
+                            .to_string()
+                    }
+                    "/outer.html" => {
+                        "<!doctype html><body style='margin:0'>\
+                        <iframe id='inner' style='display:block;margin:20px 0 0 30px;width:250px;height:80px;border:2px solid black' src='/inner.html'></iframe>\
+                        </body>"
+                            .to_string()
+                    }
+                    "/inner.html" => {
+                        "<!doctype html><body style='margin:0'>\
+                        <button style='display:block;width:90px;height:24px;margin:8px 0 0 12px;border:0'>NestedBtn</button>\
+                        </body>"
+                            .to_string()
+                    }
+                    _ => format!(
+                        "<!doctype html><body style='margin:0;height:2400px'>\
+                        <button style='position:absolute;left:30px;top:20px;width:80px;height:30px;border:0'>MainBtn</button>\
+                        <iframe id='same' style='position:absolute;left:100px;top:250px;width:300px;height:100px;border:3px solid black' src='/same.html'></iframe>\
+                        <iframe id='cross' style='position:absolute;left:450px;top:250px;width:300px;height:100px;border:4px solid black' src='http://127.0.0.1:{port_b}/cross.html'></iframe>\
+                        <iframe id='scaled' style='position:absolute;left:100px;top:400px;width:200px;height:80px;border:0;transform:translate(50px,30px) scale(2);transform-origin:0 0' src='/scaled.html'></iframe>\
+                        <iframe id='outer' style='position:absolute;left:100px;top:650px;width:320px;height:140px;border:5px solid black' src='/outer.html'></iframe>\
+                        </body>"
+                    ),
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let server_b = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener_b.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let body = "<!doctype html><body style='margin:0'>\
+                    <button style='display:block;width:110px;height:28px;margin:15px 0 0 25px;border:0'>CrossBtn</button>\
+                    </body>";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "viewport", "width": 1280, "height": 900 }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": format!("http://127.0.0.1:{port_a}/") }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_evaluate(
+        &mut state,
+        "wait",
+        "new Promise(resolve => { const ready = () => { const same = document.getElementById('same')?.contentDocument?.querySelector('button'); const scaled = document.getElementById('scaled')?.contentDocument?.querySelector('button'); const nested = document.getElementById('outer')?.contentDocument?.getElementById('inner')?.contentDocument?.querySelector('button'); if (same && scaled && nested) resolve(true); else requestAnimationFrame(ready); }; ready(); })",
+        json!(true),
+    )
+    .await;
+
+    let shot = execute_command(
+        &json!({ "id": "4", "action": "screenshot", "annotate": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&shot);
+    let annotations = get_data(&shot)["annotations"].as_array().unwrap().clone();
+    let box_of = |items: &[Value], name: &str| {
+        items
+            .iter()
+            .find(|a| a["name"] == name)
+            .map(|a| {
+                (
+                    a["box"]["x"].as_i64().unwrap(),
+                    a["box"]["y"].as_i64().unwrap(),
+                    a["box"]["width"].as_i64().unwrap(),
+                    a["box"]["height"].as_i64().unwrap(),
+                )
+            })
+            .unwrap_or_else(|| panic!("missing annotation for {name}: {items:?}"))
+    };
+
+    assert_eq!(box_of(&annotations, "MainBtn"), (30, 20, 80, 30));
+    // same-origin iframe at (100, 250) + border 3 + child (40, 10)
+    assert_eq!(box_of(&annotations, "SameBtn"), (143, 263, 100, 30));
+    // cross-origin (different port) iframe at (450, 250) + border 4 + child (25, 15)
+    assert_eq!(box_of(&annotations, "CrossBtn"), (479, 269, 110, 28));
+    // transformed iframe: origin (100, 400) + translate(50, 30) = (150, 430),
+    // child (15, 10) * scale(2) = (30, 20), size (50, 20) * scale(2) = (100, 40)
+    assert_eq!(box_of(&annotations, "ScaledBtn"), (180, 450, 100, 40));
+
+    // Parent scroll: viewport-relative annotations shift by -120, fullPage stays in document coords.
+    assert_evaluate(
+        &mut state,
+        "scroll",
+        "window.scrollTo(0, 120); window.scrollY",
+        json!(120),
+    )
+    .await;
+    let scrolled_shot = execute_command(
+        &json!({ "id": "5", "action": "screenshot", "annotate": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&scrolled_shot);
+    let scrolled_ann = get_data(&scrolled_shot)["annotations"].as_array().unwrap();
+    assert_eq!(box_of(scrolled_ann, "MainBtn"), (30, 20 - 120, 80, 30));
+    assert_eq!(box_of(scrolled_ann, "SameBtn"), (143, 263 - 120, 100, 30));
+    assert_eq!(box_of(scrolled_ann, "CrossBtn"), (479, 269 - 120, 110, 28));
+    assert_eq!(box_of(scrolled_ann, "ScaledBtn"), (180, 450 - 120, 100, 40));
+
+    let full_shot = execute_command(
+        &json!({ "id": "6", "action": "screenshot", "annotate": true, "fullPage": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&full_shot);
+    let full_ann = get_data(&full_shot)["annotations"].as_array().unwrap();
+    assert_eq!(box_of(full_ann, "SameBtn"), (143, 263, 100, 30));
+    assert_eq!(box_of(full_ann, "CrossBtn"), (479, 269, 110, 28));
+
+    // Reset scroll and verify nested iframe (outer -> inner -> NestedBtn).
+    assert_evaluate(
+        &mut state,
+        "scroll0",
+        "window.scrollTo(0, 0); window.scrollY",
+        json!(0),
+    )
+    .await;
+    let snap = execute_command(&json!({ "id": "7", "action": "snapshot" }), &mut state).await;
+    assert_success(&snap);
+    // The inner iframe is a child of outer (inlined into main snapshot); its ref has frame_id = outer.
+    let inner_ref = get_data(&snap)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["role"] == "Iframe")
+        .and_then(|_| {
+            // Find the nested iframe ref (the last Iframe in the snapshot, inside outer).
+            get_data(&snap)["refs"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(_, node)| node["role"] == "Iframe")
+                .max_by_key(|(ref_id, _)| {
+                    ref_id
+                        .strip_prefix('e')
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .unwrap_or(0)
+                })
+                .map(|(ref_id, _)| format!("@{ref_id}"))
+        })
+        .expect("nested iframe ref");
+    assert_success(
+        &execute_command(
+            &json!({ "id": "8", "action": "frame", "selector": inner_ref }),
+            &mut state,
+        )
+        .await,
+    );
+    let nested_shot = execute_command(
+        &json!({ "id": "9", "action": "screenshot", "annotate": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&nested_shot);
+    let nested_ann = get_data(&nested_shot)["annotations"].as_array().unwrap();
+    // outer (100, 650) + border 5 + inner (30, 20) + border 2 + button (12, 8) = (149, 685)
+    assert_eq!(box_of(nested_ann, "NestedBtn"), (149, 685, 90, 24));
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+    server_a.abort();
+    server_b.abort();
 }
 
 /// Verifies that `screenshot --annotate` completes in bounded time even with

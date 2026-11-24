@@ -115,7 +115,7 @@ pub async fn take_screenshot(
     };
 
     let raw_annotations = if options.annotate {
-        collect_annotations(client, session_id, ref_map).await?
+        collect_annotations(client, session_id, ref_map, iframe_sessions).await?
     } else {
         Vec::new()
     };
@@ -228,93 +228,143 @@ async fn collect_annotations(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<Vec<RawAnnotation>, String> {
     let entries = ref_map.entries_sorted();
     if entries.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Collect entries that have backend_node_ids for batch resolution.
-    let with_backend_ids: Vec<(String, super::element::RefEntry, i64)> = entries
-        .iter()
-        .filter_map(|(ref_id, entry)| {
-            entry
-                .backend_node_id
-                .map(|bid| (ref_id.clone(), entry.clone(), bid))
-        })
-        .collect();
-
-    if with_backend_ids.is_empty() {
-        return Ok(Vec::new());
+    let mut main_entries: Vec<(String, super::element::RefEntry, i64)> = Vec::new();
+    let mut iframe_entries: Vec<(String, super::element::RefEntry, i64, String)> = Vec::new();
+    for (ref_id, entry) in entries {
+        let Some(bid) = entry.backend_node_id else {
+            continue;
+        };
+        if let Some(frame_id) = entry.frame_id.as_deref() {
+            let effective_session = iframe_sessions
+                .get(frame_id)
+                .map(String::as_str)
+                .unwrap_or(session_id)
+                .to_string();
+            iframe_entries.push((ref_id, entry, bid, effective_session));
+        } else {
+            main_entries.push((ref_id, entry, bid));
+        }
     }
 
-    // Batch-resolve all backend_node_ids to object IDs using concurrent CDP calls.
-    let resolve_futures: Vec<_> = with_backend_ids
-        .iter()
-        .map(|(_, _, backend_node_id)| {
-            client.send_command(
-                "DOM.resolveNode",
-                Some(serde_json::json!({
-                    "backendNodeId": backend_node_id,
-                    "objectGroup": "agent-browser-annotate"
-                })),
-                Some(session_id),
-            )
-        })
-        .collect();
+    let mut annotations = Vec::new();
 
-    let resolve_results = futures_util::future::join_all(resolve_futures).await;
+    if !main_entries.is_empty() {
+        let resolve_futures: Vec<_> = main_entries
+            .iter()
+            .map(|(_, _, backend_node_id)| {
+                client.send_command(
+                    "DOM.resolveNode",
+                    Some(serde_json::json!({
+                        "backendNodeId": backend_node_id,
+                        "objectGroup": "agent-browser-annotate"
+                    })),
+                    Some(session_id),
+                )
+            })
+            .collect();
 
-    // Collect resolved object IDs paired with their ref info.
-    let mut resolved: Vec<(String, super::element::RefEntry, String)> = Vec::new();
-    for (i, result) in resolve_results.into_iter().enumerate() {
-        if let Ok(val) = result {
-            if let Some(oid) = val
-                .get("object")
-                .and_then(|o| o.get("objectId"))
-                .and_then(|v| v.as_str())
-            {
-                let (ref_id, entry, _) = &with_backend_ids[i];
-                resolved.push((ref_id.clone(), entry.clone(), oid.to_string()));
+        let resolve_results = futures_util::future::join_all(resolve_futures).await;
+
+        let mut resolved: Vec<(String, super::element::RefEntry, String)> = Vec::new();
+        for (i, result) in resolve_results.into_iter().enumerate() {
+            if let Ok(val) = result {
+                if let Some(oid) = val
+                    .get("object")
+                    .and_then(|o| o.get("objectId"))
+                    .and_then(|v| v.as_str())
+                {
+                    let (ref_id, entry, _) = &main_entries[i];
+                    resolved.push((ref_id.clone(), entry.clone(), oid.to_string()));
+                }
+            }
+        }
+
+        if !resolved.is_empty() {
+            let rect_futures: Vec<_> = resolved
+                .iter()
+                .map(|(_, _, object_id)| get_rect_for_object(client, session_id, object_id))
+                .collect();
+
+            let rect_results = futures_util::future::join_all(rect_futures).await;
+
+            for (i, rect_result) in rect_results.into_iter().enumerate() {
+                let rect = match rect_result {
+                    Ok(Some(r)) if r.width > 0.0 && r.height > 0.0 => r,
+                    _ => continue,
+                };
+                let (ref_id, entry, _) = &resolved[i];
+                annotations.push(make_raw_annotation(ref_id, entry, rect));
             }
         }
     }
 
-    if resolved.is_empty() {
-        return Ok(Vec::new());
-    }
+    if !iframe_entries.is_empty() {
+        let mut session_offsets: HashMap<String, (f64, f64)> = HashMap::new();
+        for (_, _, _, effective_session) in &iframe_entries {
+            if effective_session != session_id && !session_offsets.contains_key(effective_session) {
+                let offset = super::element::session_viewport_offset(
+                    client,
+                    session_id,
+                    effective_session,
+                    iframe_sessions,
+                )
+                .await
+                .unwrap_or((0.0, 0.0));
+                session_offsets.insert(effective_session.clone(), offset);
+            }
+        }
 
-    // Batch-get bounding rects for all resolved elements using concurrent CDP calls.
-    let rect_futures: Vec<_> = resolved
-        .iter()
-        .map(|(_, _, object_id)| get_rect_for_object(client, session_id, object_id))
-        .collect();
+        let box_futures: Vec<_> = iframe_entries
+            .iter()
+            .map(|(_, _, backend_node_id, effective_session)| {
+                get_box_model_rect(client, effective_session, *backend_node_id)
+            })
+            .collect();
 
-    let rect_results = futures_util::future::join_all(rect_futures).await;
+        let box_results = futures_util::future::join_all(box_futures).await;
 
-    let mut annotations = Vec::new();
-    for (i, rect_result) in rect_results.into_iter().enumerate() {
-        let rect = match rect_result {
-            Ok(Some(r)) if r.width > 0.0 && r.height > 0.0 => r,
-            _ => continue,
-        };
-
-        let (ref_id, entry, _) = &resolved[i];
-        let number = ref_id
-            .strip_prefix('e')
-            .and_then(|n| n.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        annotations.push(RawAnnotation {
-            ref_id: ref_id.clone(),
-            number,
-            role: entry.role.clone(),
-            name: (!entry.name.is_empty()).then_some(entry.name.clone()),
-            rect,
-        });
+        for (i, rect_result) in box_results.into_iter().enumerate() {
+            let Ok(Some(mut rect)) = rect_result else {
+                continue;
+            };
+            if rect.width <= 0.0 || rect.height <= 0.0 {
+                continue;
+            }
+            let (ref_id, entry, _, effective_session) = &iframe_entries[i];
+            if let Some(&offset) = session_offsets.get(effective_session) {
+                rect = offset_rect(rect, offset);
+            }
+            annotations.push(make_raw_annotation(ref_id, entry, rect));
+        }
     }
 
     Ok(annotations)
+}
+
+fn make_raw_annotation(
+    ref_id: &str,
+    entry: &super::element::RefEntry,
+    rect: Rect,
+) -> RawAnnotation {
+    let number = ref_id
+        .strip_prefix('e')
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    RawAnnotation {
+        ref_id: ref_id.to_string(),
+        number,
+        role: entry.role.clone(),
+        name: (!entry.name.is_empty()).then_some(entry.name.clone()),
+        rect,
+    }
 }
 
 async fn get_rect_for_selector(
@@ -332,7 +382,25 @@ async fn get_rect_for_selector(
         iframe_sessions,
     )
     .await?;
-    get_rect_for_object(client, &effective_session_id, &object_id).await
+    let mut rect =
+        match get_box_model_rect_for_object(client, &effective_session_id, &object_id).await {
+            Ok(Some(r)) => Some(r),
+            _ => get_rect_for_object(client, &effective_session_id, &object_id).await?,
+        };
+    if effective_session_id != session_id {
+        if let Some(r) = rect.take() {
+            let offset = super::element::session_viewport_offset(
+                client,
+                session_id,
+                &effective_session_id,
+                iframe_sessions,
+            )
+            .await
+            .unwrap_or((0.0, 0.0));
+            rect = Some(offset_rect(r, offset));
+        }
+    }
+    Ok(rect)
 }
 
 async fn get_document_rect_for_selector(
@@ -342,60 +410,68 @@ async fn get_document_rect_for_selector(
     selector: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<Option<Rect>, String> {
-    let (object_id, effective_session_id) = super::element::resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector,
-        iframe_sessions,
-    )
-    .await?;
-    let Some(rect) = get_rect_for_object(client, &effective_session_id, &object_id).await? else {
+    let Some(rect) =
+        get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions).await?
+    else {
         return Ok(None);
     };
-    let offset = get_document_offset_for_object(client, &effective_session_id, &object_id).await?;
-    Ok(Some(offset_rect(rect, offset)))
+    let scroll = get_scroll_offsets(client, session_id).await?;
+    Ok(Some(offset_rect(rect, scroll)))
 }
 
-/// Offset that turns the element's viewport rect into top document
-/// coordinates: the position of every same-process frame it sits in, plus the
-/// top window's scroll.
-async fn get_document_offset_for_object(
+async fn get_box_model_rect(
     client: &CdpClient,
     session_id: &str,
-    object_id: &str,
-) -> Result<(f64, f64), String> {
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    let x = 0;
-                    let y = 0;
-                    let win = this.ownerDocument.defaultView;
-                    while (win && win.frameElement) {
-                        const frame = win.frameElement;
-                        const rect = frame.getBoundingClientRect();
-                        x += rect.x + frame.clientLeft;
-                        y += rect.y + frame.clientTop;
-                        win = win.parent;
-                    }
-                    return { x: x + (win ? win.scrollX : 0), y: y + (win ? win.scrollY : 0) };
-                }"#
-                .to_string(),
-                object_id: Some(object_id.to_string()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
+    backend_node_id: i64,
+) -> Result<Option<Rect>, String> {
+    let value: Value = client
+        .send_command(
+            "DOM.getBoxModel",
+            Some(serde_json::json!({ "backendNodeId": backend_node_id })),
             Some(session_id),
         )
         .await?;
+    Ok(parse_box_model_border(&value))
+}
 
-    let value = result.result.value.unwrap_or(Value::Null);
-    let x = value.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let y = value.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    Ok((x, y))
+async fn get_box_model_rect_for_object(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+) -> Result<Option<Rect>, String> {
+    let value: Value = client
+        .send_command(
+            "DOM.getBoxModel",
+            Some(serde_json::json!({ "objectId": object_id })),
+            Some(session_id),
+        )
+        .await?;
+    Ok(parse_box_model_border(&value))
+}
+
+fn parse_box_model_border(value: &Value) -> Option<Rect> {
+    let quad = value.pointer("/model/border")?.as_array()?;
+    if quad.len() != 8 {
+        return None;
+    }
+    let mut coords = [0.0; 8];
+    for (slot, number) in coords.iter_mut().zip(quad) {
+        *slot = number.as_f64()?;
+    }
+    Some(quad_bounding_rect(&coords))
+}
+
+fn quad_bounding_rect(quad: &[f64; 8]) -> Rect {
+    let min_x = quad[0].min(quad[2]).min(quad[4]).min(quad[6]);
+    let max_x = quad[0].max(quad[2]).max(quad[4]).max(quad[6]);
+    let min_y = quad[1].min(quad[3]).min(quad[5]).min(quad[7]);
+    let max_y = quad[1].max(quad[3]).max(quad[5]).max(quad[7]);
+    Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
 }
 
 fn offset_rect(mut rect: Rect, (scroll_x, scroll_y): (f64, f64)) -> Rect {
@@ -808,5 +884,37 @@ mod tests {
 
         assert_eq!(full_page_clip_size(&metrics), Some((1280.0, 2500.0)));
         assert_eq!(full_page_clip_size(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn parses_box_model_border_quad_including_transformed_corners() {
+        let axis_aligned = serde_json::json!({
+            "model": {
+                "border": [143.0, 263.0, 243.0, 263.0, 243.0, 293.0, 143.0, 293.0]
+            }
+        });
+        let rect = parse_box_model_border(&axis_aligned).unwrap();
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (143.0, 263.0, 100.0, 30.0)
+        );
+
+        // Rotated/skewed quad: bounding box spans min..max across all 4 corners.
+        let transformed = serde_json::json!({
+            "model": {
+                "border": [100.0, 50.0, 150.0, 40.0, 160.0, 90.0, 110.0, 100.0]
+            }
+        });
+        let rect = parse_box_model_border(&transformed).unwrap();
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (100.0, 40.0, 60.0, 60.0)
+        );
+
+        assert!(
+            parse_box_model_border(&serde_json::json!({ "model": { "border": [1.0, 2.0] } }))
+                .is_none()
+        );
+        assert!(parse_box_model_border(&serde_json::json!({})).is_none());
     }
 }
