@@ -146,6 +146,16 @@ fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings:
     if command_is_cdp_url_metadata(cmd) {
         return patch.attach_settings_only();
     }
+    // Closing a session applies no allowlist, so one that cannot be used does
+    // not ride along and fail the close.
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("close")
+        && flags
+            .allowed_domains
+            .as_deref()
+            .is_some_and(|d| native::network::ensure_allowed_domains_not_empty(d).is_err())
+    {
+        patch.remove(session_settings::Key::AllowedDomains);
+    }
     if command_is_browserless(cmd) {
         patch.remove(session_settings::Key::CaCert);
         patch.remove(session_settings::Key::ClearCaCert);
@@ -271,8 +281,23 @@ fn restore_key_from_flags(flags: &Flags) -> Option<&str> {
     flags.restore.as_deref().or(flags.session_name.as_deref())
 }
 
-fn is_valid_restore_save_policy(policy: &str) -> bool {
-    matches!(policy, "auto" | "always" | "never")
+/// The save policy is checked with or without a restore key, so a bad value
+/// from a flag, env or config never passes silently.
+fn validate_restore_settings(flags: &Flags) -> Result<(), (&'static str, String)> {
+    if let Some(policy) = flags.restore_save.as_deref() {
+        if !matches!(policy, "auto" | "always" | "never") {
+            return Err((
+                "invalid_value",
+                format!(
+                    "Invalid --restore-save value '{}'. Use auto, always, or never.",
+                    policy
+                ),
+            ));
+        }
+    }
+    session_settings::Patch::from_flags(flags)
+        .validate()
+        .map_err(|invalid| (invalid.error_type, invalid.message))
 }
 
 fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
@@ -377,28 +402,6 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     }
 
     None
-}
-
-fn attach_restore_config_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
-    if let Some(restore_key) = restore_key_from_flags(flags) {
-        cmd["restoreKey"] = json!(restore_key);
-        cmd["restoreSave"] = json!(flags.restore_save.as_deref().unwrap_or("auto"));
-        cmd["restoreCheckUrl"] = flags
-            .restore_check_url
-            .as_ref()
-            .map(|check| json!(check))
-            .unwrap_or(serde_json::Value::Null);
-        cmd["restoreCheckText"] = flags
-            .restore_check_text
-            .as_ref()
-            .map(|check| json!(check))
-            .unwrap_or(serde_json::Value::Null);
-        cmd["restoreCheckFn"] = flags
-            .restore_check_fn
-            .as_ref()
-            .map(|check| json!(check))
-            .unwrap_or(serde_json::Value::Null);
-    }
 }
 
 fn mark_restarted_background(resp: &mut Response) {
@@ -1493,6 +1496,48 @@ fn run_close_all(flags: &Flags) {
     }
 }
 
+/// An allowlist from a flag, env var or config file that holds no domain is an
+/// error; an absent one means no containment was requested. The message names
+/// where the empty list came from.
+fn validate_allowed_domains_flag(flags: &Flags, args: &[String]) -> Result<(), String> {
+    if matches!(
+        env::var("AGENT_BROWSER_ALLOWED_DOMAINS"),
+        Err(env::VarError::NotUnicode(_))
+    ) {
+        return Err("AGENT_BROWSER_ALLOWED_DOMAINS: the value is not valid UTF-8".to_string());
+    }
+    let Some(domains) = flags.allowed_domains.as_deref() else {
+        return Ok(());
+    };
+    native::network::ensure_allowed_domains_not_empty(domains).map_err(|error| {
+        let source = if flags::before_end_of_options(args)
+            .iter()
+            .any(|a| a == "--allowed-domains")
+        {
+            "--allowed-domains"
+        } else if env::var_os("AGENT_BROWSER_ALLOWED_DOMAINS").is_some() {
+            "AGENT_BROWSER_ALLOWED_DOMAINS"
+        } else {
+            "allowedDomains in the config file"
+        };
+        format!("{source}: {error}")
+    })
+}
+
+/// Chat runs each tool call as a child CLI that sees only the environment, so
+/// the security flags given to `chat` are passed on that way.
+fn forward_security_globals(flags: &Flags) {
+    if let Some(domains) = flags.allowed_domains.as_deref() {
+        env::set_var("AGENT_BROWSER_ALLOWED_DOMAINS", domains.join(","));
+    }
+    if let Some(policy) = flags.action_policy.as_deref() {
+        env::set_var("AGENT_BROWSER_ACTION_POLICY", policy);
+    }
+    if let Some(actions) = flags.confirm_actions.as_deref() {
+        env::set_var("AGENT_BROWSER_CONFIRM_ACTIONS", actions);
+    }
+}
+
 fn main() {
     // Rust ignores SIGPIPE by default, causing println! to panic on broken pipes.
     // Reset to SIG_DFL so the OS terminates the process cleanly instead.
@@ -1539,6 +1584,10 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
+    let runs_browser = flags::command_runs_browser(&args);
+    if !runs_browser {
+        flags::allow_unusable_security_config();
+    }
     let mut flags = parse_flags(&args);
     if flags.restore_uses_session {
         flags.restore = Some(flags.session.clone());
@@ -1675,6 +1724,8 @@ fn main() {
         clean.first().map(|s| s.as_str()),
         Some("plugin") | Some("plugins")
     ) {
+        let mut clean = clean;
+        commands::strip_operand_marker(&mut clean);
         plugins::run_plugin_command(&clean, &flags.plugins, flags.json);
         return;
     }
@@ -1715,6 +1766,22 @@ fn main() {
         return;
     }
 
+    // Commands that start a browser or apply settings refuse an empty allowlist.
+    // Commands that cannot run a browser only warn. The list itself is left as
+    // given, so anything that does reach a browser still refuses it.
+    if let Err(error) = validate_allowed_domains_flag(&flags, &args) {
+        if !runs_browser {
+            eprintln!("{} {}", color::warning_indicator(), error);
+        } else {
+            if flags.json {
+                print_json_error(error);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), error);
+            }
+            exit(1);
+        }
+    }
+
     // Handle chat command
     if clean.first().map(|s| s.as_str()) == Some("chat") {
         let message = if clean.len() > 1 {
@@ -1722,6 +1789,7 @@ fn main() {
         } else {
             None
         };
+        forward_security_globals(&flags);
         chat::run_chat(&flags, message);
         return;
     }
@@ -1797,34 +1865,15 @@ fn main() {
     // broadcasts before observers see the command payload.
     attach_plugins_to_command(&mut cmd, &flags.plugins);
 
-    attach_restore_config_to_command(&mut cmd, &flags);
-
-    // Validate restore/session persistence name before starting daemon
-    if let Some(name) = restore_key_from_flags(&flags) {
-        if !validation::is_valid_session_name(name) {
-            let msg = validation::session_name_error(name);
-            if flags.json {
-                print_json_error_with_type(msg, "invalid_session_name");
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
+    // Validate the settings before a daemon starts: a bad restore key or save
+    // policy must not leave one behind.
+    if let Err((error_type, message)) = validate_restore_settings(&flags) {
+        if flags.json {
+            print_json_error_with_type(message, error_type);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), message);
         }
-    }
-
-    if let Some(ref policy) = flags.restore_save {
-        if !is_valid_restore_save_policy(policy) {
-            let msg = format!(
-                "Invalid --restore-save value '{}'. Use auto, always, or never.",
-                policy
-            );
-            if flags.json {
-                print_json_error_with_type(msg, "invalid_value");
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
-        }
+        exit(1);
     }
 
     // Handle state management commands locally — these are pure file operations
@@ -1930,7 +1979,10 @@ fn main() {
         restore_check_text: flags.restore_check_text.as_deref(),
         restore_check_fn: flags.restore_check_fn.as_deref(),
         download_path: flags.download_path.as_deref(),
-        allowed_domains: flags.allowed_domains.as_deref(),
+        allowed_domains: flags
+            .allowed_domains
+            .as_deref()
+            .filter(|d| native::network::ensure_allowed_domains_not_empty(d).is_ok()),
         action_policy: flags.action_policy.as_deref(),
         confirm_actions: flags.confirm_actions.as_deref(),
         engine: flags.engine.as_deref(),
@@ -2169,7 +2221,6 @@ fn run_batch(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         attach_plugins_to_command(&mut parsed, &flags.plugins);
-        attach_restore_config_to_command(&mut parsed, flags);
         let settings = batch_item_settings(flags, &parsed, relaunch_applied);
         if let Some(wire) = settings.to_wire() {
             parsed["settings"] = wire;
@@ -2261,6 +2312,75 @@ fn batch_result_identity(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_validate_allowed_domains_flag_absent_or_real_is_ok() {
+        let mut flags = parse_flags(&[]);
+        flags.allowed_domains = None;
+        assert!(validate_allowed_domains_flag(&flags, &[]).is_ok());
+        flags.allowed_domains = Some(vec!["example.com".to_string()]);
+        assert!(validate_allowed_domains_flag(&flags, &[]).is_ok());
+    }
+
+    #[test]
+    fn test_parsed_empty_allowed_domains_flag_is_rejected() {
+        for value in ["", ",", " ", " , "] {
+            let args = [
+                "open".to_string(),
+                "--allowed-domains".to_string(),
+                value.to_string(),
+            ];
+            let flags = parse_flags(&args);
+            assert_eq!(flags.allowed_domains, Some(Vec::new()), "{value:?}");
+            assert_eq!(
+                validate_allowed_domains_flag(&flags, &args).unwrap_err(),
+                format!(
+                    "--allowed-domains: {}",
+                    native::network::EMPTY_ALLOWED_DOMAINS_ERROR
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn test_chat_forwards_security_flags_through_the_environment() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ]);
+        for name in [
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ] {
+            guard.remove(name);
+        }
+        let mut flags = parse_flags(&[]);
+        flags.allowed_domains = Some(vec!["a.example".into(), "*.b.example".into()]);
+        flags.action_policy = Some("/p.json".into());
+        flags.confirm_actions = Some("click".into());
+        forward_security_globals(&flags);
+        assert_eq!(
+            env::var("AGENT_BROWSER_ALLOWED_DOMAINS").unwrap(),
+            "a.example,*.b.example"
+        );
+        assert_eq!(env::var("AGENT_BROWSER_ACTION_POLICY").unwrap(), "/p.json");
+        assert_eq!(env::var("AGENT_BROWSER_CONFIRM_ACTIONS").unwrap(), "click");
+    }
+
+    #[test]
+    fn test_empty_allowed_domains_error_names_the_env_var() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", " ");
+        let args = ["open".to_string()];
+        let flags = parse_flags(&args);
+        let error = validate_allowed_domains_flag(&flags, &args).unwrap_err();
+        assert!(
+            error.starts_with("AGENT_BROWSER_ALLOWED_DOMAINS: "),
+            "{error}"
+        );
+    }
+
     #[test]
     fn input_mode_session_setting_preserves_command_override() {
         let args: Vec<String> = ["--input-mode", "smooth", "click", "#button", "--human"]
@@ -3074,60 +3194,162 @@ mod tests {
         assert_eq!(cmd["plugins"], json!([]));
     }
 
-    #[test]
-    fn test_attach_restore_config_to_command_uses_session_for_bare_restore() {
-        let args = vec![
-            "--session".to_string(),
-            "next-loop".to_string(),
-            "--restore".to_string(),
-            "--restore-save".to_string(),
-            "always".to_string(),
-            "--restore-check-url".to_string(),
-            "**/dashboard".to_string(),
-            "--restore-check-text".to_string(),
-            "Dashboard".to_string(),
-            "--restore-check-fn".to_string(),
-            "!!localStorage.getItem('session')".to_string(),
-            "open".to_string(),
-            "http://localhost:3000".to_string(),
-        ];
+    fn restore_flags(extra: &[&str]) -> Flags {
+        let mut args: Vec<String> = ["--session", "next-loop", "--restore"]
+            .iter()
+            .chain(extra)
+            .map(|s| s.to_string())
+            .collect();
+        args.extend(["open".to_string(), "http://localhost:3000".to_string()]);
         let mut flags = parse_flags(&args);
         if flags.restore_uses_session {
             flags.restore = Some(flags.session.clone());
         }
-        let mut cmd = json!({ "action": "launch" });
-
-        attach_restore_config_to_command(&mut cmd, &flags);
-
-        assert_eq!(cmd["restoreKey"], "next-loop");
-        assert_eq!(cmd["restoreSave"], "always");
-        assert_eq!(cmd["restoreCheckUrl"], "**/dashboard");
-        assert_eq!(cmd["restoreCheckText"], "Dashboard");
-        assert_eq!(cmd["restoreCheckFn"], "!!localStorage.getItem('session')");
+        flags
     }
 
     #[test]
-    fn test_attach_restore_config_to_command_sends_defaults_and_clears_checks() {
-        let args = vec![
-            "--session".to_string(),
-            "next-loop".to_string(),
-            "--restore".to_string(),
-            "open".to_string(),
-            "http://localhost:3000".to_string(),
-        ];
-        let mut flags = parse_flags(&args);
-        if flags.restore_uses_session {
-            flags.restore = Some(flags.session.clone());
+    fn test_restore_rides_the_settings_patch_and_uses_session_for_bare_restore() {
+        let flags = restore_flags(&[
+            "--restore-save",
+            "always",
+            "--restore-check-url",
+            "**/dashboard",
+            "--restore-check-text",
+            "Dashboard",
+            "--restore-check-fn",
+            "!!localStorage.getItem('session')",
+        ]);
+        let cmd = json!({ "action": "navigate" });
+        let wire = command_settings(&flags, &cmd).to_wire().unwrap();
+
+        assert_eq!(wire["restore-key"], "next-loop");
+        assert_eq!(wire["restore-save"], "always");
+        assert_eq!(wire["restore-check-url"], "**/dashboard");
+        assert_eq!(wire["restore-check-text"], "Dashboard");
+        assert_eq!(
+            wire["restore-check-fn"],
+            "!!localStorage.getItem('session')"
+        );
+        assert_eq!(
+            batch_item_settings(&flags, &cmd, false).to_wire().unwrap(),
+            wire
+        );
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_drops_the_whole_restore_unit() {
+        let flags = restore_flags(&[
+            "--restore-save",
+            "never",
+            "--restore-check-url",
+            "**/dashboard",
+        ]);
+        let cmd = json!({ "action": "cdp_url" });
+        assert!(command_is_cdp_url_metadata(&cmd));
+        let patch = command_settings(&flags, &cmd);
+        for key in session_settings::RESTORE_UNIT {
+            assert!(patch.get(key).is_none(), "{key:?} must not ride along");
         }
-        let mut cmd = json!({ "action": "navigate" });
+    }
 
-        attach_restore_config_to_command(&mut cmd, &flags);
+    #[test]
+    fn test_restore_settings_send_defaults_and_clear_checks() {
+        let wire = command_settings(&restore_flags(&[]), &json!({ "action": "navigate" }))
+            .to_wire()
+            .unwrap();
 
-        assert_eq!(cmd["restoreKey"], "next-loop");
-        assert_eq!(cmd["restoreSave"], "auto");
-        assert!(cmd["restoreCheckUrl"].is_null());
-        assert!(cmd["restoreCheckText"].is_null());
-        assert!(cmd["restoreCheckFn"].is_null());
+        assert_eq!(wire["restore-key"], "next-loop");
+        assert_eq!(wire["restore-save"], "auto");
+        for check in [
+            "restore-check-url",
+            "restore-check-text",
+            "restore-check-fn",
+        ] {
+            assert!(wire[check].is_null(), "{check} must clear a sticky check");
+        }
+    }
+
+    #[test]
+    fn test_restore_save_rides_the_settings_patch_without_a_restore_key() {
+        let without_key = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let mut flags = parse_flags(&args);
+            flags.restore = None;
+            flags.session_name = None;
+            let cmd = crate::commands::parse_command(&clean_args(&args), &flags).unwrap();
+            command_settings(&flags, &cmd)
+        };
+        let patch = without_key(&["--restore-save", "never", "close"]);
+        assert_eq!(
+            patch.value(session_settings::Key::RestoreKey),
+            None,
+            "{patch:?}"
+        );
+        assert_eq!(
+            patch.value(session_settings::Key::RestoreSave),
+            Some(&json!("never")),
+            "{patch:?}"
+        );
+        for check in [
+            session_settings::Key::RestoreCheckUrl,
+            session_settings::Key::RestoreCheckText,
+            session_settings::Key::RestoreCheckFn,
+        ] {
+            assert!(patch.get(check).is_none(), "{check:?}: {patch:?}");
+        }
+        let patch = without_key(&["close"]);
+        assert!(
+            patch.get(session_settings::Key::RestoreSave).is_none(),
+            "{patch:?}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_restore_save_is_rejected_without_a_restore_key() {
+        let args: Vec<String> = ["--restore-save", "sometimes", "state", "list"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut flags = parse_flags(&args);
+        flags.restore = None;
+        flags.session_name = None;
+        let (error_type, message) = validate_restore_settings(&flags).unwrap_err();
+        assert_eq!(error_type, "invalid_value");
+        assert!(message.contains("Invalid --restore-save value 'sometimes'"));
+
+        // Env and config land in the same field as the flag.
+        let mut from_env = parse_flags(&["state".to_string(), "list".to_string()]);
+        from_env.restore = None;
+        from_env.session_name = None;
+        from_env.restore_save = Some("bogus".to_string());
+        assert_eq!(
+            validate_restore_settings(&from_env).unwrap_err().0,
+            "invalid_value"
+        );
+        from_env.restore_save = Some("never".to_string());
+        assert!(validate_restore_settings(&from_env).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_restore_settings_fail_validation_with_the_json_error_types() {
+        let key = session_settings::Patch::from_flags(&restore_flags(&[]));
+        assert!(key.validate().is_ok());
+
+        let mut flags = restore_flags(&[]);
+        flags.restore = Some("../bad".to_string());
+        let invalid = session_settings::Patch::from_flags(&flags)
+            .validate()
+            .unwrap_err();
+        assert_eq!(invalid.error_type, "invalid_session_name");
+        assert!(invalid.message.contains("Invalid session name"));
+
+        let invalid =
+            session_settings::Patch::from_flags(&restore_flags(&["--restore-save", "sometimes"]))
+                .validate()
+                .unwrap_err();
+        assert_eq!(invalid.error_type, "invalid_value");
+        assert!(invalid.message.contains("sometimes"));
     }
 
     fn launch_mode_flags(auto_connect: bool, cdp: bool, provider: bool, extensions: bool) -> Flags {

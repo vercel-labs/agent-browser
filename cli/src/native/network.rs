@@ -76,6 +76,39 @@ pub async fn set_content(client: &CdpClient, session_id: &str, html: &str) -> Re
 // Domain filter
 // ---------------------------------------------------------------------------
 
+/// Error shared by every entry point that accepts an allowlist.
+pub const EMPTY_ALLOWED_DOMAINS_ERROR: &str =
+    "Allowed domains list is empty. Pass at least one domain pattern, or unset \
+AGENT_BROWSER_ALLOWED_DOMAINS or remove allowedDomains from the config to run without containment.";
+
+/// Checks the allowlist the daemon inherited from its environment. A variable
+/// that is set but lists no domain stops the daemon from starting.
+pub fn check_allowed_domains_env() -> Result<(), String> {
+    match std::env::var("AGENT_BROWSER_ALLOWED_DOMAINS") {
+        Ok(raw) => ensure_allowed_domains_not_empty(&[raw])
+            .map_err(|e| format!("AGENT_BROWSER_ALLOWED_DOMAINS: {e}")),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("AGENT_BROWSER_ALLOWED_DOMAINS: the value is not valid UTF-8".to_string())
+        }
+        Err(std::env::VarError::NotPresent) => Ok(()),
+    }
+}
+
+/// Rejects an allowlist that was supplied but holds no domain. An absent
+/// allowlist is not passed here; it means no containment was requested.
+pub fn ensure_allowed_domains_not_empty<S: AsRef<str>>(domains: &[S]) -> Result<(), String> {
+    // Entries may themselves hold comma-separated lists, as DomainFilter reads them.
+    if domains
+        .iter()
+        .flat_map(|d| d.as_ref().split(','))
+        .any(|d| !d.trim().is_empty())
+    {
+        Ok(())
+    } else {
+        Err(EMPTY_ALLOWED_DOMAINS_ERROR.to_string())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DomainFilter {
     pub allowed_domains: Vec<String>,
@@ -89,10 +122,9 @@ impl DomainFilter {
         }
     }
 
+    /// A filter exists only when containment was requested, so an empty list
+    /// allows nothing.
     pub fn is_allowed(&self, hostname: &str) -> bool {
-        if self.allowed_domains.is_empty() {
-            return true;
-        }
         let hostname = hostname.to_lowercase();
         for pattern in &self.allowed_domains {
             if let Some(suffix) = pattern.strip_prefix("*.") {
@@ -108,7 +140,7 @@ impl DomainFilter {
 
     pub fn check_url(&self, url: &str) -> Result<(), String> {
         if self.allowed_domains.is_empty() {
-            return Ok(());
+            return Err(EMPTY_ALLOWED_DOMAINS_ERROR.to_string());
         }
         let parsed = url::Url::parse(url).map_err(|_| format!("Invalid URL: {}", url))?;
         let hostname = parsed
@@ -164,10 +196,6 @@ pub async fn install_domain_filter_script(
     allowed_domains: &[String],
     paused_before_document: bool,
 ) -> Result<(), String> {
-    if allowed_domains.is_empty() {
-        return Ok(());
-    }
-
     let script = domain_filter_script(allowed_domains);
 
     client
@@ -195,18 +223,11 @@ async fn install_domain_filter_runtime_script(
     allowed_domains: &[String],
     paused_before_document: bool,
 ) -> Result<(), String> {
-    if allowed_domains.is_empty() {
-        return Ok(());
-    }
-
-    // A frame paused before its first document has no context to patch; the
-    // new-document script above covers the document it loads. Chrome 156 and
-    // older reject the evaluation at once, but newer versions hold it until
-    // the target resumes, and the target resumes only after this setup.
+    // An auto-attached target is paused before its first document, so it
+    // has no context to patch; the new-document script above covers it.
     if paused_before_document {
         return Ok(());
     }
-
     let script = domain_filter_script(allowed_domains);
     let evaluation = client
         .send_command(
@@ -686,12 +707,17 @@ impl EventTracker {
 mod tests {
     use super::*;
 
-    /// Installs the domain filter script against a fake browser and returns
-    /// the result with the methods it was sent. `runtime_error` answers
-    /// `Runtime.evaluate`; `None` holds it unanswered, as Chrome 157 and newer
-    /// do for a frame paused before its first document.
-    async fn install_script(
-        runtime_error: Option<&'static str>,
+    async fn install_script_with_runtime_error(
+        message: &'static str,
+        paused_before_document: bool,
+    ) -> Result<(), String> {
+        install_script_recording_methods(message, paused_before_document)
+            .await
+            .0
+    }
+
+    async fn install_script_recording_methods(
+        message: &'static str,
         paused_before_document: bool,
     ) -> (Result<(), String>, Vec<String>) {
         use futures_util::{SinkExt, StreamExt};
@@ -706,13 +732,11 @@ mod tests {
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             while let Some(Ok(Message::Text(text))) = ws.next().await {
                 let request: Value = serde_json::from_str(&text).unwrap();
-                let method = request["method"].as_str().unwrap_or("").to_string();
-                seen.lock().unwrap().push(method.clone());
+                seen.lock()
+                    .unwrap()
+                    .push(request["method"].as_str().unwrap_or("").to_string());
                 let mut response = json!({ "id": request["id"] });
-                if method == "Runtime.evaluate" {
-                    let Some(message) = runtime_error else {
-                        continue;
-                    };
+                if request["method"] == "Runtime.evaluate" {
                     response["error"] = json!({ "code": -32000, "message": message });
                 } else {
                     response["result"] = json!({ "identifier": "1" });
@@ -722,17 +746,13 @@ mod tests {
         });
 
         let client = CdpClient::connect(&url).await.unwrap();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            install_domain_filter_script(
-                &client,
-                "session",
-                &["example.com".to_string()],
-                paused_before_document,
-            ),
+        let result = install_domain_filter_script(
+            &client,
+            "session",
+            &["example.com".to_string()],
+            paused_before_document,
         )
-        .await
-        .unwrap_or_else(|_| Err("timed out".to_string()));
+        .await;
         drop(client);
         server.abort();
         let methods = methods.lock().unwrap().clone();
@@ -740,17 +760,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn domain_filter_script_covers_a_paused_frame_with_the_new_document_script() {
-        let (result, methods) = install_script(None, true).await;
+    async fn domain_filter_script_does_not_evaluate_in_a_paused_target() {
+        let (result, methods) =
+            install_script_recording_methods("Execution context was destroyed.", true).await;
         assert_eq!(result, Ok(()));
-        assert_eq!(methods, vec!["Page.addScriptToEvaluateOnNewDocument"]);
+        assert_eq!(methods, ["Page.addScriptToEvaluateOnNewDocument"]);
     }
 
     #[tokio::test]
     async fn domain_filter_script_fails_closed_without_a_context_on_live_targets() {
-        let (result, _) =
-            install_script(Some("Cannot find default execution context"), false).await;
-        let error = result.unwrap_err();
+        let error =
+            install_script_with_runtime_error("Cannot find default execution context", false)
+                .await
+                .unwrap_err();
         assert!(
             error.contains("Cannot find default execution context"),
             "{}",
@@ -760,8 +782,9 @@ mod tests {
 
     #[tokio::test]
     async fn domain_filter_script_fails_closed_on_other_runtime_errors() {
-        let (result, _) = install_script(Some("Execution context was destroyed."), false).await;
-        let error = result.unwrap_err();
+        let error = install_script_with_runtime_error("Execution context was destroyed.", false)
+            .await
+            .unwrap_err();
         assert!(
             error.contains("Execution context was destroyed"),
             "{}",
@@ -786,9 +809,26 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_filter_empty() {
-        let filter = DomainFilter::new("");
-        assert!(filter.is_allowed("anything.com"));
+    fn test_domain_filter_empty_allows_nothing() {
+        for list in ["", ",", " , "] {
+            let filter = DomainFilter::new(list);
+            assert!(!filter.is_allowed("anything.com"), "{list:?}");
+            assert_eq!(
+                filter.check_url("http://anything.com/").unwrap_err(),
+                EMPTY_ALLOWED_DOMAINS_ERROR
+            );
+        }
+    }
+
+    #[test]
+    fn test_ensure_allowed_domains_not_empty() {
+        let empty: Vec<String> = Vec::new();
+        assert!(ensure_allowed_domains_not_empty(&empty).is_err());
+        assert!(ensure_allowed_domains_not_empty(&["", "  "]).is_err());
+        assert!(ensure_allowed_domains_not_empty(&[","]).is_err());
+        assert!(ensure_allowed_domains_not_empty(&[" , "]).is_err());
+        assert!(ensure_allowed_domains_not_empty(&["a.example,"]).is_ok());
+        assert!(ensure_allowed_domains_not_empty(&["", "example.com"]).is_ok());
     }
 
     #[test]

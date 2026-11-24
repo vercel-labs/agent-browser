@@ -6,6 +6,7 @@
 use serde_json::Value;
 
 use crate::flags::Flags;
+use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::patch::Requested;
 use super::proxy::parse_proxy;
@@ -41,6 +42,17 @@ keys! {
     RestoreKey, RestoreSave, RestoreCheckUrl, RestoreCheckText, RestoreCheckFn,
 }
 
+/// The restore key, save policy and checks act as one unit: they apply,
+/// commit and roll back together, and only once the command that carries them
+/// has passed the policy gates.
+pub const RESTORE_UNIT: [Key; 5] = [
+    Key::RestoreKey,
+    Key::RestoreSave,
+    Key::RestoreCheckUrl,
+    Key::RestoreCheckText,
+    Key::RestoreCheckFn,
+];
+
 /// What changing a setting does to a running session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -68,11 +80,24 @@ pub enum Shape {
     Millis,
     /// Structured value kept as-is (plugin configs).
     Json,
+    /// A string usable as a restore key: alphanumerics, hyphens, underscores.
+    SessionName,
+    /// One of `auto`, `always`, `never`.
+    RestoreSavePolicy,
 }
+
+/// How a validation failure is classed in `--json` output.
+pub const ERROR_INVALID_SESSION_NAME: &str = "invalid_session_name";
+pub const ERROR_INVALID_VALUE: &str = "invalid_value";
 
 impl Shape {
     pub fn accepts(self, value: &Value) -> bool {
-        match self {
+        self.check(value).is_ok()
+    }
+
+    /// Why `value` does not fit, with the `--json` error type to report it as.
+    pub fn check(self, value: &Value) -> Result<(), (&'static str, String)> {
+        let fits = match self {
             Shape::Bool => value.is_boolean(),
             Shape::Str => value.is_string(),
             Shape::StrList => value
@@ -80,6 +105,29 @@ impl Shape {
                 .is_some_and(|items| items.iter().all(Value::is_string)),
             Shape::Millis => value.is_u64(),
             Shape::Json => true,
+            Shape::SessionName => match value.as_str() {
+                Some(name) if is_valid_session_name(name) => true,
+                Some(name) => return Err((ERROR_INVALID_SESSION_NAME, session_name_error(name))),
+                None => false,
+            },
+            Shape::RestoreSavePolicy => match value.as_str() {
+                Some("auto" | "always" | "never") => true,
+                Some(policy) => {
+                    return Err((
+                        ERROR_INVALID_VALUE,
+                        format!(
+                            "Invalid restore save policy '{}'. Use auto, always, or never.",
+                            policy
+                        ),
+                    ))
+                }
+                None => false,
+            },
+        };
+        if fits {
+            Ok(())
+        } else {
+            Err((ERROR_INVALID_VALUE, format!("expected {:?}", self)))
         }
     }
 }
@@ -320,7 +368,11 @@ fn read_restore_key(f: &Flags) -> Option<Requested> {
     restore_key(f).map(|k| Requested::Set(Value::from(k)))
 }
 fn read_restore_save(f: &Flags) -> Option<Requested> {
-    restore_key(f).map(|_| Requested::Set(Value::from(f.restore_save.as_deref().unwrap_or("auto"))))
+    match (restore_key(f), f.restore_save.as_deref()) {
+        (_, Some(policy)) => Some(Requested::Set(Value::from(policy))),
+        (Some(_), None) => Some(Requested::Set(Value::from("auto"))),
+        (None, None) => None,
+    }
 }
 /// Restore checks travel with a restore key; an unset check is an explicit
 /// clear so a later check does not outlive its key.
@@ -716,10 +768,10 @@ pub static SPECS: &[Spec] = &[
         RestoreKey,
         "restore-key",
         "--restore",
-        Live,
+        Launch,
         Memory,
         false,
-        Str,
+        SessionName,
         read_restore_key
     ),
     row!(
@@ -729,7 +781,7 @@ pub static SPECS: &[Spec] = &[
         Live,
         Memory,
         false,
-        Str,
+        RestoreSavePolicy,
         read_restore_save
     ),
     row!(

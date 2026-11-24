@@ -44,6 +44,10 @@ pub async fn run_daemon(session: &str) {
     // Settings are read before stderr goes away and before any file marks this
     // daemon as running: a stored security setting that cannot be used must
     // stop the start with a message the parent can show.
+    if let Err(e) = super::network::check_allowed_domains_env() {
+        eprintln!("{}", e);
+        process::exit(1);
+    }
     let store: Arc<dyn Store> = Arc::new(FsStore::new(&socket_dir, session));
     let settings = match Running::boot(store.as_ref(), session) {
         Ok(settings) => settings,
@@ -113,6 +117,12 @@ pub async fn run_daemon(session: &str) {
     let version_path = SessionFile::Version.path_in(&socket_dir, session);
     let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
 
+    let stream_path = SessionFile::Stream.path_in(&socket_dir, session);
+    let _ = fs::remove_file(&stream_path);
+    let _ = fs::remove_file(SessionFile::Engine.path_in(&socket_dir, session));
+    let _ = fs::remove_file(SessionFile::Provider.path_in(&socket_dir, session));
+    let _ = fs::remove_file(SessionFile::Extensions.path_in(&socket_dir, session));
+
     // The pid and version exist now, so the socket may become reachable.
     #[cfg(unix)]
     if let Err(e) = publish_listener(&socket_path) {
@@ -124,12 +134,6 @@ pub async fn run_daemon(session: &str) {
     {
         let _ = fs::remove_file(SessionFile::Port.path_in(&socket_dir, session));
     }
-
-    let stream_path = SessionFile::Stream.path_in(&socket_dir, session);
-    let _ = fs::remove_file(&stream_path);
-    let _ = fs::remove_file(SessionFile::Engine.path_in(&socket_dir, session));
-    let _ = fs::remove_file(SessionFile::Provider.path_in(&socket_dir, session));
-    let _ = fs::remove_file(SessionFile::Extensions.path_in(&socket_dir, session));
 
     if let Ok(days_str) = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
         if let Ok(days) = days_str.parse::<u64>() {

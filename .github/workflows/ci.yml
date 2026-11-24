@@ -376,7 +376,7 @@ jobs:
       # built above. The launcher resolves it from the global node_modules.
       - name: Install with install scripts blocked
         run: |
-          npm install -g --omit=optional --ignore-scripts packs/*.tgz
+          npm install -g --omit=optional --ignore-scripts ./packs/*.tgz
           agent-browser --version
           agent-browser --version
         shell: bash
@@ -424,7 +424,7 @@ jobs:
         shell: bash
 
       - name: Install with install scripts allowed
-        run: npm install -g --omit=optional packs/*.tgz
+        run: npm install -g --omit=optional ./packs/*.tgz
         shell: bash
 
       - name: Verify postinstall linked the native binary (Unix)
