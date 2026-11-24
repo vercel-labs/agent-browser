@@ -3613,7 +3613,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         if let Err(e) = check_capture_setting(&patch) {
             return error_response(&id, &e);
         }
-        let outcome = match apply_settings_patch(state, &patch, SettingsPass::BeforeGates).await {
+        let outcome = match Box::pin(apply_settings_patch(
+            state,
+            &patch,
+            SettingsPass::BeforeGates,
+        ))
+        .await
+        {
             Ok(outcome) => outcome,
             Err(e) => return error_response(&id, &e),
         };
@@ -3810,7 +3816,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             || !has_active_browser_session(state));
     let (mut prepared, resolved_engine) = if must_prepare {
         match launch_patch.as_ref() {
-            Some(patch) => match prepare_transition(state, patch, cmd).await {
+            Some(patch) => match Box::pin(prepare_transition(state, patch, cmd)).await {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     let message = if action == "launch" {
@@ -3850,7 +3856,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // Past every gate: the restore unit takes effect for any command, whether
     // or not it launches.
-    let restore_applied = match apply_restore_unit(state, &restore_patch).await {
+    let restore_applied = match Box::pin(apply_restore_unit(state, &restore_patch)).await {
         Ok(applied) => applied,
         Err(e) => {
             let mut resp = error_response(&id, &e);
@@ -3864,7 +3870,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if let Some(patch) = settings_patch.as_ref() {
         if !needs_launch && action != "launch" && !(launches && launch_plan.is_some()) {
-            match apply_settings_patch(state, patch, SettingsPass::InPlace).await {
+            match Box::pin(apply_settings_patch(state, patch, SettingsPass::InPlace)).await {
                 Ok(outcome) => settings_outcome.absorb_in_place(outcome),
                 Err(e) => {
                     let mut resp = error_response(&id, &e);
@@ -3879,12 +3885,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         if needs_launch {
             lifecycle_relaunched_browser |= restore_applied.relaunched_browser;
             if let Some(patch) = launch_patch.as_ref() {
-                match apply_settings_patch_with_engine(
+                match Box::pin(apply_settings_patch_with_engine(
                     state,
                     patch,
                     SettingsPass::Launch,
                     resolved_engine,
-                )
+                ))
                 .await
                 {
                     Ok(outcome) => settings_outcome.absorb(outcome),
@@ -3904,7 +3910,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_relaunched_browser |= settings_outcome.relaunched_browser;
             lifecycle_relaunched_browser |= has_active_browser_session(state);
             if has_active_browser_session(state) {
-                let _ = auto_save_restore_state(state).await;
+                let _ = Box::pin(auto_save_restore_state(state)).await;
             }
             let strict_state = launch_patch
                 .as_ref()
@@ -4012,12 +4018,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
         "launch" => {
             let applied = match launch_patch.as_ref() {
-                Some(patch) => apply_settings_patch_with_engine(
+                Some(patch) => Box::pin(apply_settings_patch_with_engine(
                     state,
                     patch,
                     SettingsPass::Launch,
                     resolved_engine,
-                )
+                ))
                 .await
                 .map(|outcome| settings_outcome.absorb(outcome)),
                 None => Ok(()),
@@ -4026,8 +4032,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 restore_applied.relaunched_browser || settings_outcome.relaunched_browser;
             let result = match applied {
                 Ok(()) => {
-                    handle_launch_prepared(cmd, state, LaunchRequest::Planned(prepared.take()))
-                        .await
+                    Box::pin(handle_launch_prepared(
+                        cmd,
+                        state,
+                        LaunchRequest::Planned(prepared.take()),
+                    ))
+                    .await
                 }
                 Err(e) => Err(e),
             };
