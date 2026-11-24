@@ -1301,3 +1301,355 @@ fn legacy_2025_server_initiated_elicitation_and_require_elicitation_flag() {
     let status = strict.close();
     assert!(status.success());
 }
+
+#[cfg(unix)]
+#[test]
+fn batch_elicitation_gates_subcommands_and_binds_immutable_batch() {
+    let home = tempfile::tempdir().unwrap();
+    let (daemon, recorded) = setup_confirm_mock_daemon(&home, "mcp-batch-elicit", 1);
+
+    let mut client = McpStdioClient::spawn_in(
+        home,
+        &[
+            "--tools",
+            "all",
+            "--elicit",
+            "high-risk",
+            "--require-elicitation",
+        ],
+    );
+    let elicit_caps = json!({ "elicitation": { "form": {} } });
+
+    // 1. Without client elicitation support + --require-elicitation, a batch with a gated
+    // subcommand fails closed with -32021 and never reaches the daemon.
+    let gated_batch_args = json!({
+        "commands": [
+            ["stream", "status"],
+            ["eval", "document.cookie"]
+        ],
+        "session": "mcp-batch-elicit"
+    });
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_batch",
+            "arguments": &gated_batch_args,
+            "_meta": modern_meta(json!({}))
+        }
+    }));
+    let (no_cap, _) = client.recv_for_id(&json!(1), Duration::from_secs(5));
+    assert_eq!(no_cap["error"]["code"], -32021);
+    assert!(recorded.lock().unwrap().is_empty());
+
+    // 2. With form-mode elicitation, the server returns InputRequiredResult naming the gated op.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_batch",
+            "arguments": &gated_batch_args,
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    let (ir, _) = client.recv_for_id(&json!(2), Duration::from_secs(5));
+    assert_eq!(ir["result"]["resultType"], "input_required");
+    let token = ir["result"]["requestState"].as_str().unwrap().to_string();
+    let req_key = ir["result"]["inputRequests"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    assert!(ir["result"]["inputRequests"][&req_key]["params"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("eval"));
+
+    // 3. Mutating ANY subcommand in the batch on retry invalidates the signed requestState (-32602).
+    let mutated_batch_args = json!({
+        "commands": [
+            ["stream", "status"],
+            ["eval", "fetch('https://evil.example')"]
+        ],
+        "session": "mcp-batch-elicit"
+    });
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_batch",
+            "arguments": &mutated_batch_args,
+            "requestState": &token,
+            "inputResponses": {
+                &req_key: { "action": "accept", "content": { "approve": true } }
+            },
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    let (mutated_err, _) = client.recv_for_id(&json!(3), Duration::from_secs(5));
+    assert_eq!(mutated_err["error"]["code"], -32602);
+    assert!(recorded.lock().unwrap().is_empty());
+
+    // 4. Declining the original batch refuses without executing any subcommand.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_batch",
+            "arguments": &gated_batch_args,
+            "requestState": &token,
+            "inputResponses": {
+                &req_key: { "action": "decline" }
+            },
+            "_meta": modern_meta(elicit_caps)
+        }
+    }));
+    let (declined, _) = client.recv_for_id(&json!(4), Duration::from_secs(5));
+    assert_eq!(declined["result"]["isError"], true);
+    assert!(recorded.lock().unwrap().is_empty());
+
+    let status = client.close();
+    assert!(status.success());
+    drop(daemon);
+}
+
+#[cfg(unix)]
+#[test]
+fn chained_daemon_confirmations_elicit_every_gate_in_modern_and_legacy() {
+    use std::os::unix::net::UnixListener;
+
+    let home = tempfile::tempdir().unwrap();
+    let sockets = home.path().join("s");
+    std::fs::create_dir_all(&sockets).unwrap();
+
+    for (session, expected_cmds) in [("mcp-chain-mod", 3_usize), ("mcp-chain-leg", 3_usize)] {
+        let bootstrap = Command::new(env!("CARGO_BIN_EXE_agent-browser"))
+            .env("HOME", home.path())
+            .env("AGENT_BROWSER_SOCKET_DIR", &sockets)
+            .env("NO_COLOR", "1")
+            .args(["--session", session, "stream", "status", "--json"])
+            .output()
+            .unwrap();
+        assert!(bootstrap.status.success(), "{bootstrap:?}");
+        if let Ok(pid_str) = std::fs::read_to_string(sockets.join(format!("{session}.pid"))) {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(sockets.join(format!("{session}.pid")));
+        let sock_path = sockets.join(format!("{session}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        thread::spawn(move || {
+            let mut count = 0;
+            while count < expected_cmds {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut line = String::new();
+                if BufReader::new(&stream).read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                count += 1;
+                let req: Value = serde_json::from_str(&line).unwrap_or_default();
+                let req_id = req["id"].clone();
+                let action = req["action"].as_str().unwrap_or("");
+                let cid = req["confirmationId"].as_str().unwrap_or("");
+                let resp = match (action, cid) {
+                    ("evaluate", _) => json!({
+                        "id": req_id,
+                        "success": true,
+                        "data": {
+                            "confirmation_required": true,
+                            "confirmation_id": "c_first",
+                            "action": "eval"
+                        }
+                    }),
+                    ("confirm", "c_first") => json!({
+                        "id": req_id,
+                        "success": true,
+                        "data": {
+                            "confirmed": true,
+                            "confirmation_id": "c_first",
+                            "action": "eval",
+                            "result": {
+                                "success": true,
+                                "data": {
+                                    "confirmation_required": true,
+                                    "confirmation_id": "c_second",
+                                    "action": "plugin:vault:credential.read"
+                                }
+                            }
+                        }
+                    }),
+                    ("confirm", "c_second") => json!({
+                        "id": req_id,
+                        "success": true,
+                        "data": {
+                            "confirmed": true,
+                            "confirmation_id": "c_second",
+                            "action": "plugin:vault:credential.read",
+                            "result": {
+                                "success": true,
+                                "data": { "result": "all-gates-approved" }
+                            }
+                        }
+                    }),
+                    _ => json!({
+                        "id": req_id,
+                        "success": false,
+                        "error": format!("unexpected confirm id: {cid}")
+                    }),
+                };
+                let _ = writeln!(stream, "{}", resp);
+                let _ = stream.flush();
+            }
+        });
+    }
+
+    let mut client = McpStdioClient::spawn_in(home, &[]);
+    let elicit_caps = json!({ "elicitation": { "form": {} } });
+
+    // Modern 2026-07-28 MRTR: gate 1 -> approve -> gate 2 -> approve -> completed!
+    let mod_args = json!({ "script": "1+1", "session": "mcp-chain-mod" });
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": &mod_args,
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    let (ir1, _) = client.recv_for_id(&json!(1), Duration::from_secs(5));
+    assert_eq!(ir1["result"]["resultType"], "input_required");
+    let tok1 = ir1["result"]["requestState"].as_str().unwrap().to_string();
+    let key1 = ir1["result"]["inputRequests"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": &mod_args,
+            "requestState": &tok1,
+            "inputResponses": {
+                &key1: { "action": "accept", "content": { "approve": true } }
+            },
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    let (ir2, _) = client.recv_for_id(&json!(2), Duration::from_secs(5));
+    assert_eq!(
+        ir2["result"]["resultType"], "input_required",
+        "second parked approval must trigger a second InputRequiredResult: {ir2}"
+    );
+    let tok2 = ir2["result"]["requestState"].as_str().unwrap().to_string();
+    let key2 = ir2["result"]["inputRequests"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    assert!(ir2["result"]["inputRequests"][&key2]["params"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("c_second"));
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": &mod_args,
+            "requestState": &tok2,
+            "inputResponses": {
+                &key2: { "action": "accept", "content": { "approve": true } }
+            },
+            "_meta": modern_meta(elicit_caps)
+        }
+    }));
+    let (done_mod, _) = client.recv_for_id(&json!(3), Duration::from_secs(5));
+    assert_eq!(done_mod["result"]["resultType"], "complete");
+    assert_eq!(done_mod["result"]["isError"], false);
+    assert_eq!(
+        done_mod["result"]["structuredContent"]["response"]["data"]["result"]["data"]["result"],
+        "all-gates-approved"
+    );
+
+    // Legacy 2025-11-25: elicits c_first, then elicits c_second, then returns final result!
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": { "elicitation": { "form": {} } },
+            "clientInfo": { "name": "legacy-chain", "version": "1.0.0" }
+        }
+    }));
+    let _ = client.recv(Duration::from_secs(5));
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": { "script": "1+1", "session": "mcp-chain-leg" }
+        }
+    }));
+    let elicit1 = client.recv(Duration::from_secs(5));
+    assert_eq!(elicit1["method"], "elicitation/create");
+    assert!(elicit1["params"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("c_first"));
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": elicit1["id"],
+        "result": { "action": "accept", "content": { "approve": true } }
+    }));
+
+    let elicit2 = client.recv(Duration::from_secs(5));
+    assert_eq!(elicit2["method"], "elicitation/create");
+    assert!(elicit2["params"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("c_second"));
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": elicit2["id"],
+        "result": { "action": "accept", "content": { "approve": true } }
+    }));
+
+    let (done_leg, _) = client.recv_for_id(&json!(11), Duration::from_secs(5));
+    assert_eq!(done_leg["result"]["isError"], false);
+    assert_eq!(
+        done_leg["result"]["structuredContent"]["response"]["data"]["result"]["data"]["result"],
+        "all-gates-approved"
+    );
+
+    let status = client.close();
+    assert!(status.success());
+}

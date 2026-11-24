@@ -25,7 +25,16 @@ use crate::mcp_transport::ProtocolError;
 type HmacSha256 = Hmac<Sha256>;
 
 pub(crate) const ELICITATION_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const MAX_CHAINED_CONFIRMATIONS: usize = 8;
 const REQUEST_STATE_TTL_SECS: u64 = 60;
+
+/// Result of classifying a tool call (including `agent_browser_batch` subcommands)
+/// against enabled `--elicit` categories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreflightMatch {
+    pub(crate) category: ElicitCategory,
+    pub(crate) message: String,
+}
 
 /// Confirmation categories supported by `--elicit` / `AGENT_BROWSER_MCP_ELICIT`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,7 +128,186 @@ const SUBMIT_KEYWORDS: &[&str] = &[
     "signout",
 ];
 
-/// Determine whether a tool call matches an enabled `--elicit` category.
+/// Classify a tool call (including every subcommand inside `agent_browser_batch`)
+/// against enabled `--elicit` categories, returning the first matched category
+/// and a safe confirmation prompt covering the whole call/batch.
+pub(crate) fn classify_preflight_gate(
+    enabled: &BTreeSet<ElicitCategory>,
+    tool_name: &str,
+    arguments: &Value,
+) -> Option<PreflightMatch> {
+    if enabled.is_empty() {
+        return None;
+    }
+    if tool_name == "agent_browser_batch" {
+        return classify_batch_preflight(enabled, arguments);
+    }
+    let category = classify_preflight_category(enabled, tool_name, arguments)?;
+    let message = preflight_prompt_message(category, tool_name, arguments);
+    Some(PreflightMatch { category, message })
+}
+
+fn classify_batch_preflight(
+    enabled: &BTreeSet<ElicitCategory>,
+    arguments: &Value,
+) -> Option<PreflightMatch> {
+    let commands = arguments.get("commands").and_then(Value::as_array)?;
+    let flags = crate::flags::parse_flags(&[]);
+    let mut matches: Vec<(usize, ElicitCategory, String)> = Vec::new();
+
+    for (index, item) in commands.iter().enumerate() {
+        let Some(tokens) = item.as_array() else {
+            continue;
+        };
+        let sub_args: Vec<String> = tokens
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect();
+        if sub_args.is_empty() {
+            continue;
+        }
+        if let Some((cat, summary)) = classify_batch_subcommand(enabled, &sub_args, &flags) {
+            matches.push((index + 1, cat, summary));
+        }
+    }
+
+    if matches.is_empty() {
+        return None;
+    }
+
+    let first_category = matches[0].1;
+    let listed: Vec<String> = matches
+        .iter()
+        .take(5)
+        .map(|(step, cat, summary)| format!("#{} [{}] {}", step, cat.as_str(), summary))
+        .collect();
+    let extra = if matches.len() > 5 {
+        format!(" (+{} more)", matches.len() - 5)
+    } else {
+        String::new()
+    };
+    let message = format!(
+        "Allow agent-browser batch ({} command(s)) containing gated operation(s): {}{}?",
+        commands.len(),
+        listed.join("; "),
+        extra
+    );
+    Some(PreflightMatch {
+        category: first_category,
+        message,
+    })
+}
+
+fn classify_batch_subcommand(
+    enabled: &BTreeSet<ElicitCategory>,
+    sub_args: &[String],
+    flags: &crate::flags::Flags,
+) -> Option<(ElicitCategory, String)> {
+    // 1. Canonical CLI batch parser classification.
+    if let Ok(parsed) = crate::commands::parse_batch_command(sub_args, flags) {
+        let action = parsed.get("action").and_then(Value::as_str).unwrap_or("");
+        let matched = match action {
+            "download" | "waitfordownload" => Some((ElicitCategory::Download, action.to_string())),
+            "upload" => Some((ElicitCategory::Upload, "upload".to_string())),
+            "evaluate" | "evalhandle" | "addscript" | "addinitscript" | "addstyle" | "expose"
+            | "setcontent" => {
+                let preview = parsed
+                    .get("script")
+                    .and_then(Value::as_str)
+                    .map(|s| format!("{} `{}`", action, truncate_preview(s, 48)))
+                    .unwrap_or_else(|| action.to_string());
+                Some((ElicitCategory::Eval, preview))
+            }
+            "auth_login" | "auth_save" | "auth_delete" | "credentials" => {
+                // Never include passwords or secret fields in batch summaries.
+                let name = parsed
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|n| format!(" '{}'", truncate_preview(n, 32)))
+                    .unwrap_or_default();
+                Some((ElicitCategory::Auth, format!("{}{}", action, name)))
+            }
+            "cookies_set" | "storage_set" | "state_load" => {
+                Some((ElicitCategory::State, action.to_string()))
+            }
+            "click" | "dblclick" | "tap" => {
+                let sel = parsed.get("selector").and_then(Value::as_str);
+                if selector_looks_like_submit(sel) {
+                    Some((
+                        ElicitCategory::Submit,
+                        format!("{} '{}'", action, truncate_preview(sel.unwrap_or(""), 48)),
+                    ))
+                } else {
+                    None
+                }
+            }
+            "press" | "key" => {
+                let is_enter = parsed.get("key").and_then(Value::as_str).is_some_and(|k| {
+                    k.eq_ignore_ascii_case("enter") || k.eq_ignore_ascii_case("return")
+                });
+                if is_enter {
+                    Some((ElicitCategory::Submit, "press Enter".to_string()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((cat, summary)) = matched {
+            if enabled.contains(&cat) {
+                return Some((cat, summary));
+            }
+            return None;
+        }
+        return None;
+    }
+
+    // 2. Fallback token classification for any subcommand form the static parser
+    // did not parse (e.g. missing optional flags or aliases) so nothing bypasses.
+    let first = sub_args[0].to_ascii_lowercase();
+    let second = sub_args
+        .get(1)
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let fallback = match (first.as_str(), second.as_str()) {
+        ("download", _) => Some((ElicitCategory::Download, "download".to_string())),
+        ("wait", _) if sub_args.iter().any(|a| a == "--download") => {
+            Some((ElicitCategory::Download, "wait --download".to_string()))
+        }
+        ("upload", _) => Some((ElicitCategory::Upload, "upload".to_string())),
+        ("eval" | "evaluate" | "evalhandle" | "addscript" | "addinitscript" | "setcontent", _) => {
+            Some((ElicitCategory::Eval, first))
+        }
+        ("auth", "login" | "save" | "delete") => {
+            Some((ElicitCategory::Auth, format!("auth {}", second)))
+        }
+        ("set", "credentials") => Some((ElicitCategory::Auth, "set credentials".to_string())),
+        ("cookies", "set") | ("storage", "set") | ("state", "load") => {
+            Some((ElicitCategory::State, format!("{} {}", first, second)))
+        }
+        ("click" | "dblclick" | "tap", _)
+            if sub_args
+                .iter()
+                .skip(1)
+                .any(|a| selector_looks_like_submit(Some(a))) =>
+        {
+            Some((ElicitCategory::Submit, first))
+        }
+        ("press" | "key", _)
+            if sub_args
+                .iter()
+                .skip(1)
+                .any(|a| a.eq_ignore_ascii_case("enter") || a.eq_ignore_ascii_case("return")) =>
+        {
+            Some((ElicitCategory::Submit, "press Enter".to_string()))
+        }
+        _ => None,
+    };
+    fallback.filter(|(cat, _)| enabled.contains(cat))
+}
+
+/// Determine whether a single non-batch tool call matches an enabled `--elicit` category.
 pub(crate) fn classify_preflight_category(
     enabled: &BTreeSet<ElicitCategory>,
     tool_name: &str,
@@ -292,25 +480,36 @@ pub(crate) fn daemon_confirmation_message(
 }
 
 /// Extract `(confirmation_id, action)` if a `CallToolResult` contains a parked
-/// daemon confirmation (`structuredContent.response.data.confirmation_required == true`).
+/// daemon confirmation, either at `structuredContent.response.data` or nested
+/// inside a confirmed replay's `data.result.data` (for chained confirmations).
 pub(crate) fn extract_daemon_confirmation(call_result: &Value) -> Option<(String, String)> {
-    let data = call_result
+    let mut current = call_result
         .get("structuredContent")?
         .get("response")?
         .get("data")?;
-    if data.get("confirmation_required").and_then(Value::as_bool) != Some(true) {
-        return None;
+    for _ in 0..4 {
+        if current
+            .get("confirmation_required")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            let id = current
+                .get("confirmation_id")
+                .and_then(Value::as_str)?
+                .to_string();
+            let action = current
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("action")
+                .to_string();
+            return Some((id, action));
+        }
+        let Some(nested_data) = current.get("result").and_then(|r| r.get("data")) else {
+            break;
+        };
+        current = nested_data;
     }
-    let id = data
-        .get("confirmation_id")
-        .and_then(Value::as_str)?
-        .to_string();
-    let action = data
-        .get("action")
-        .and_then(Value::as_str)
-        .unwrap_or("action")
-        .to_string();
-    Some((id, action))
+    None
 }
 
 /// Construct the flat `elicitation/create` params object (form mode).
@@ -422,9 +621,38 @@ pub(crate) struct SignedStatePayload {
     pub(crate) key: String,
     pub(crate) tool_name: String,
     pub(crate) args_sha256: String,
+    pub(crate) session: String,
+    pub(crate) namespace: Option<String>,
     pub(crate) expires_at_secs: u64,
     pub(crate) nonce: String,
     pub(crate) kind: RequestStateKind,
+}
+
+/// Resolve the effective `(session, namespace)` binding for a tool call so an
+/// approval token cannot be replayed against a different session or namespace.
+pub(crate) fn effective_session_binding(arguments: &Value) -> (String, Option<String>) {
+    let session = arguments
+        .get("session")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            std::env::var("AGENT_BROWSER_SESSION")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "default".to_string());
+    let namespace = arguments
+        .get("namespace")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            std::env::var("AGENT_BROWSER_NAMESPACE")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+    (session, namespace)
 }
 
 /// Per-process HMAC-SHA256 signer and single-use nonce tracker for MRTR `requestState`.
@@ -462,10 +690,13 @@ impl ElicitationState {
         let key = format!("confirm_{}", Uuid::new_v4().simple());
         let nonce = Uuid::new_v4().simple().to_string();
         let expires_at_secs = unix_now_secs().saturating_add(REQUEST_STATE_TTL_SECS);
+        let (session, namespace) = effective_session_binding(arguments);
         let payload = SignedStatePayload {
             key: key.clone(),
             tool_name: tool_name.to_string(),
             args_sha256: digest_json(arguments),
+            session,
+            namespace,
             expires_at_secs,
             nonce: nonce.clone(),
             kind,
@@ -520,9 +751,14 @@ impl ElicitationState {
         if unix_now_secs() > payload.expires_at_secs {
             return Err(ProtocolError::invalid_params("requestState has expired"));
         }
-        if payload.tool_name != tool_name || payload.args_sha256 != digest_json(arguments) {
+        let (current_session, current_namespace) = effective_session_binding(arguments);
+        if payload.tool_name != tool_name
+            || payload.args_sha256 != digest_json(arguments)
+            || payload.session != current_session
+            || payload.namespace != current_namespace
+        {
             return Err(ProtocolError::invalid_params(
-                "requestState does not match the retried tool call",
+                "requestState does not match the retried tool call or session",
             ));
         }
 
@@ -744,5 +980,120 @@ mod tests {
             parse_elicit_decision(&json!({ "action": "cancel" })).unwrap(),
             ElicitDecision::Cancelled
         );
+    }
+
+    #[test]
+    fn batch_preflight_classifies_gated_subcommands_without_leaking_secrets() {
+        let high_risk = ElicitCategory::parse_list("high-risk").unwrap();
+
+        // Safe batch does not trigger elicitation.
+        let safe_batch = json!({
+            "commands": [
+                ["open", "https://example.com"],
+                ["snapshot", "-i"]
+            ]
+        });
+        assert!(classify_preflight_gate(&high_risk, "agent_browser_batch", &safe_batch).is_none());
+
+        // Batch containing eval, download, submit click, and auth save triggers elicitation
+        // and never leaks passwords in the prompt message.
+        let gated_batch = json!({
+            "commands": [
+                ["open", "https://example.com"],
+                ["eval", "document.cookie"],
+                ["download", "#dl", "/tmp/report.pdf"],
+                ["click", "button#checkout-pay"],
+                ["auth", "save", "work", "--url", "https://example.com/login", "--username", "alice", "--password", "SUPER_SECRET_BATCH_PW"]
+            ]
+        });
+        let matched =
+            classify_preflight_gate(&high_risk, "agent_browser_batch", &gated_batch).unwrap();
+        assert_eq!(matched.category, ElicitCategory::Eval);
+        assert!(matched.message.contains("eval"));
+        assert!(matched.message.contains("download"));
+        assert!(matched.message.contains("submit"));
+        assert!(matched.message.contains("auth"));
+        assert!(!matched.message.contains("SUPER_SECRET_BATCH_PW"));
+
+        // State category inside batch is classified when `state` is enabled.
+        let state_only = ElicitCategory::parse_list("state").unwrap();
+        let state_batch = json!({
+            "commands": [
+                ["cookies", "set", "sid", "value"]
+            ]
+        });
+        let state_match =
+            classify_preflight_gate(&state_only, "agent_browser_batch", &state_batch).unwrap();
+        assert_eq!(state_match.category, ElicitCategory::State);
+    }
+
+    #[test]
+    fn extract_daemon_confirmation_finds_nested_chained_confirmations() {
+        let nested = json!({
+            "structuredContent": {
+                "response": {
+                    "success": true,
+                    "data": {
+                        "confirmed": true,
+                        "action": "navigate",
+                        "result": {
+                            "success": true,
+                            "data": {
+                                "confirmation_required": true,
+                                "confirmation_id": "c_second",
+                                "action": "plugin:stealth:launch.mutate"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            extract_daemon_confirmation(&nested),
+            Some((
+                "c_second".to_string(),
+                "plugin:stealth:launch.mutate".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn signed_request_state_binds_session_and_namespace() {
+        let state = ElicitationState::new();
+        let args = json!({ "script": "1+1", "session": "sess-a", "namespace": "ns-1" });
+        let req = state.issue_input_required(
+            "agent_browser_eval",
+            &args,
+            "Allow eval?",
+            RequestStateKind::DaemonConfirm {
+                confirmation_id: "c_1".to_string(),
+                action: "eval".to_string(),
+            },
+        );
+        let token = req["requestState"].as_str().unwrap();
+
+        let wrong_session = json!({ "script": "1+1", "session": "sess-b", "namespace": "ns-1" });
+        assert_eq!(
+            state
+                .verify_and_consume(token, "agent_browser_eval", &wrong_session)
+                .unwrap_err()
+                .code,
+            -32602
+        );
+
+        let wrong_ns = json!({ "script": "1+1", "session": "sess-a", "namespace": "ns-2" });
+        assert_eq!(
+            state
+                .verify_and_consume(token, "agent_browser_eval", &wrong_ns)
+                .unwrap_err()
+                .code,
+            -32602
+        );
+
+        let ok = state
+            .verify_and_consume(token, "agent_browser_eval", &args)
+            .unwrap();
+        assert_eq!(ok.session, "sess-a");
+        assert_eq!(ok.namespace.as_deref(), Some("ns-1"));
     }
 }

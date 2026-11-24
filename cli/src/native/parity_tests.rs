@@ -546,7 +546,7 @@ async fn test_daemon_state_new_defaults() {
     assert!(state.browser.is_none());
     assert!(!state.har_recording);
     assert!(state.har_entries.is_empty());
-    assert!(state.pending_confirmation.is_none());
+    assert!(state.pending_confirmations.is_empty());
     assert!(!state.request_tracking);
     assert!(state.tracked_requests.is_empty());
     assert!(state.active_frame_id.is_none());

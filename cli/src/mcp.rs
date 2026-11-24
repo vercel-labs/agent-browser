@@ -12,11 +12,10 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 
 use crate::mcp_elicitation::{
-    build_confirmation_elicit_params, build_confirmation_input_request,
-    classify_preflight_category, daemon_confirmation_message, extract_daemon_confirmation,
-    missing_elicitation_capability_error, parse_elicit_decision, preflight_prompt_message,
-    refusal_tool_result, ElicitCategory, ElicitDecision, ElicitationState, RequestStateKind,
-    ELICITATION_TIMEOUT,
+    build_confirmation_elicit_params, build_confirmation_input_request, classify_preflight_gate,
+    daemon_confirmation_message, extract_daemon_confirmation, missing_elicitation_capability_error,
+    parse_elicit_decision, refusal_tool_result, ElicitCategory, ElicitDecision, ElicitationState,
+    RequestStateKind, ELICITATION_TIMEOUT, MAX_CHAINED_CONFIRMATIONS,
 };
 use crate::mcp_skills::{
     get_skill, list_resource_templates, list_resources, list_skills, read_resource,
@@ -675,7 +674,31 @@ fn run_mcp_with_io<R: BufRead>(
                         .as_ref()
                         .and_then(|p| p.get("arguments"))
                         .unwrap_or(&Value::Null);
-                    run_daemon_confirm_or_deny(arguments, &confirm_id, approve)
+                    let res = run_daemon_confirm_or_deny(arguments, &confirm_id, approve);
+                    match res {
+                        Ok(val) if approve => {
+                            if let Some((next_cid, next_action)) = extract_daemon_confirmation(&val)
+                            {
+                                let msg = daemon_confirmation_message(
+                                    &next_action,
+                                    &tool_name,
+                                    &next_cid,
+                                );
+                                Ok(worker_elicit.issue_input_required(
+                                    &tool_name,
+                                    arguments,
+                                    &msg,
+                                    RequestStateKind::DaemonConfirm {
+                                        confirmation_id: next_cid,
+                                        action: next_action,
+                                    },
+                                ))
+                            } else {
+                                Ok(val)
+                            }
+                        }
+                        other => other,
+                    }
                 } else {
                     execute_tool_with_elicitation(
                         job.params.as_ref(),
@@ -1061,17 +1084,16 @@ fn dispatch_tools_call(
                 .as_ref()
                 .and_then(|p| p.get("arguments"))
                 .unwrap_or(&Value::Null);
-            if let Some(cat) =
-                classify_preflight_category(&config.elicit_categories, &tool_name, arguments)
+            if let Some(matched) =
+                classify_preflight_gate(&config.elicit_categories, &tool_name, arguments)
             {
                 if ctx.supports_elicitation_form() {
-                    let msg = preflight_prompt_message(cat, &tool_name, arguments);
                     let input_req = elicit.issue_input_required(
                         &tool_name,
                         arguments,
-                        &msg,
+                        &matched.message,
                         RequestStateKind::Preflight {
-                            category: cat.as_str().to_string(),
+                            category: matched.category.as_str().to_string(),
                         },
                     );
                     return state
@@ -1317,16 +1339,19 @@ fn execute_tool_with_elicitation(
 
     // Legacy pre-flight elicitation (modern pre-flight is handled via MRTR before dispatch).
     if !ctx.is_modern() && !skip_preflight {
-        if let Some(cat) =
-            classify_preflight_category(&config.elicit_categories, &tool_name, arguments)
+        if let Some(matched) =
+            classify_preflight_gate(&config.elicit_categories, &tool_name, arguments)
         {
             if ctx.supports_elicitation_form() {
-                let msg = preflight_prompt_message(cat, &tool_name, arguments);
-                match elicit_legacy_confirmation(state, tasks, active_task_id, &msg)? {
+                match elicit_legacy_confirmation(state, tasks, active_task_id, &matched.message)? {
                     ElicitDecision::Approved => {}
                     ElicitDecision::Declined => {
                         return Ok(refusal_tool_result(
-                            &format!("User declined '{}' action ({}).", cat.as_str(), tool_name),
+                            &format!(
+                                "User declined '{}' action ({}).",
+                                matched.category.as_str(),
+                                tool_name
+                            ),
                             "decline",
                         ));
                     }
@@ -1334,7 +1359,7 @@ fn execute_tool_with_elicitation(
                         return Ok(refusal_tool_result(
                             &format!(
                                 "User cancelled confirmation for '{}' action ({}).",
-                                cat.as_str(),
+                                matched.category.as_str(),
                                 tool_name
                             ),
                             "cancel",
@@ -1350,38 +1375,45 @@ fn execute_tool_with_elicitation(
         }
     }
 
-    let result = call_tool(params, config)?;
+    let mut result = call_tool(params, config)?;
 
-    // Bridge parked daemon confirmations (`confirmation_required: true`) to MCP Elicitation.
-    let Some((confirmation_id, action)) = extract_daemon_confirmation(&result) else {
-        return Ok(result);
-    };
+    // Bridge parked daemon confirmations (`confirmation_required: true`), including
+    // chained confirmations where confirming one gate parks a subsequent approval.
+    for _ in 0..MAX_CHAINED_CONFIRMATIONS {
+        let Some((confirmation_id, action)) = extract_daemon_confirmation(&result) else {
+            return Ok(result);
+        };
 
-    if !ctx.supports_elicitation_form() {
-        if config.require_elicitation {
-            let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
-            if ctx.is_modern() {
-                return Err(missing_elicitation_capability_error());
+        if !ctx.supports_elicitation_form() {
+            if config.require_elicitation {
+                let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+                if ctx.is_modern() {
+                    return Err(missing_elicitation_capability_error());
+                }
+                return Ok(refusal_tool_result(
+                    &format!(
+                        "Action '{}' requires user approval via MCP elicitation, which the client does not support.",
+                        action
+                    ),
+                    "unsupported",
+                ));
             }
-            return Ok(refusal_tool_result(
-                &format!(
-                    "Action '{}' requires user approval via MCP elicitation, which the client does not support.",
-                    action
-                ),
-                "unsupported",
-            ));
+            return Ok(result);
         }
-        return Ok(result);
-    }
 
-    let msg = daemon_confirmation_message(&action, &tool_name, &confirmation_id);
+        let msg = daemon_confirmation_message(&action, &tool_name, &confirmation_id);
 
-    if ctx.is_modern() {
-        if let Some(task_id) = active_task_id {
-            let key = format!("confirm_{}", uuid::Uuid::new_v4().simple());
-            let input_req = build_confirmation_input_request(&msg);
-            let reply =
-                match tasks.request_task_input(task_id, key, input_req, msg, ELICITATION_TIMEOUT) {
+        if ctx.is_modern() {
+            if let Some(task_id) = active_task_id {
+                let key = format!("confirm_{}", uuid::Uuid::new_v4().simple());
+                let input_req = build_confirmation_input_request(&msg);
+                let reply = match tasks.request_task_input(
+                    task_id,
+                    key,
+                    input_req,
+                    msg,
+                    ELICITATION_TIMEOUT,
+                ) {
                     Ok(v) => v,
                     Err(_) => {
                         let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
@@ -1391,56 +1423,74 @@ fn execute_tool_with_elicitation(
                         ));
                     }
                 };
-            return match parse_elicit_decision(&reply)? {
-                ElicitDecision::Approved => {
-                    run_daemon_confirm_or_deny(arguments, &confirmation_id, true)
+                match parse_elicit_decision(&reply)? {
+                    ElicitDecision::Approved => {
+                        result = run_daemon_confirm_or_deny(arguments, &confirmation_id, true)?;
+                        continue;
+                    }
+                    ElicitDecision::Declined => {
+                        let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+                        return Ok(refusal_tool_result(
+                            &format!("User declined action '{}'.", action),
+                            "decline",
+                        ));
+                    }
+                    ElicitDecision::Cancelled => {
+                        let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+                        return Ok(refusal_tool_result(
+                            &format!("User cancelled confirmation for action '{}'.", action),
+                            "cancel",
+                        ));
+                    }
                 }
-                ElicitDecision::Declined => {
-                    let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
-                    Ok(refusal_tool_result(
-                        &format!("User declined action '{}'.", action),
-                        "decline",
-                    ))
-                }
-                ElicitDecision::Cancelled => {
-                    let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
-                    Ok(refusal_tool_result(
-                        &format!("User cancelled confirmation for action '{}'.", action),
-                        "cancel",
-                    ))
-                }
-            };
+            }
+
+            return Ok(elicit.issue_input_required(
+                &tool_name,
+                arguments,
+                &msg,
+                RequestStateKind::DaemonConfirm {
+                    confirmation_id,
+                    action,
+                },
+            ));
         }
 
-        return Ok(elicit.issue_input_required(
-            &tool_name,
-            arguments,
-            &msg,
-            RequestStateKind::DaemonConfirm {
-                confirmation_id,
-                action,
-            },
+        // Legacy 2025-11-25 / 2025-06-18 server-initiated elicitation/create.
+        match elicit_legacy_confirmation(state, tasks, active_task_id, &msg)? {
+            ElicitDecision::Approved => {
+                result = run_daemon_confirm_or_deny(arguments, &confirmation_id, true)?;
+                continue;
+            }
+            ElicitDecision::Declined => {
+                let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+                return Ok(refusal_tool_result(
+                    &format!("User declined action '{}'.", action),
+                    "decline",
+                ));
+            }
+            ElicitDecision::Cancelled => {
+                let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+                return Ok(refusal_tool_result(
+                    &format!("User cancelled confirmation for action '{}'.", action),
+                    "cancel",
+                ));
+            }
+        }
+    }
+
+    if let Some((confirmation_id, action)) = extract_daemon_confirmation(&result) {
+        let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+        return Ok(refusal_tool_result(
+            &format!(
+                "Exceeded maximum chained confirmations ({}) while approving '{}'.",
+                MAX_CHAINED_CONFIRMATIONS, action
+            ),
+            "cancel",
         ));
     }
 
-    // Legacy 2025-11-25 / 2025-06-18 server-initiated elicitation/create.
-    match elicit_legacy_confirmation(state, tasks, active_task_id, &msg)? {
-        ElicitDecision::Approved => run_daemon_confirm_or_deny(arguments, &confirmation_id, true),
-        ElicitDecision::Declined => {
-            let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
-            Ok(refusal_tool_result(
-                &format!("User declined action '{}'.", action),
-                "decline",
-            ))
-        }
-        ElicitDecision::Cancelled => {
-            let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
-            Ok(refusal_tool_result(
-                &format!("User cancelled confirmation for action '{}'.", action),
-                "cancel",
-            ))
-        }
-    }
+    Ok(result)
 }
 
 fn elicit_legacy_confirmation(

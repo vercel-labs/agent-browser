@@ -75,6 +75,8 @@ const AUTH_LOGIN_ELEMENT_REF: &str = "e1";
 
 const AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR: &str = "auth login --no-navigate requires an existing active HTTP(S) browser page; open the login page first";
 
+const PENDING_CONFIRMATION_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub struct PendingConfirmation {
     pub action: String,
     pub cmd: Value,
@@ -82,6 +84,7 @@ pub struct PendingConfirmation {
     /// The flow a `flow_run` was checked against, so the confirmed run
     /// executes the same file rather than one read again from disk.
     flow: Option<Box<super::flow::Flow>>,
+    created_at: std::time::Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -699,7 +702,7 @@ pub struct DaemonState {
     pub webmcp_enabled: bool,
     pub screencasting: bool,
     pub policy: Option<ActionPolicy>,
-    pub pending_confirmation: Option<PendingConfirmation>,
+    pub pending_confirmations: HashMap<String, PendingConfirmation>,
     /// A flow handed from a confirmation to the re-executed `flow_run`.
     preloaded_flow: Option<Box<super::flow::Flow>>,
     pub har_recording: bool,
@@ -947,7 +950,7 @@ impl DaemonState {
                 .action_policy_path
                 .as_deref()
                 .map(ActionPolicy::from_path),
-            pending_confirmation: None,
+            pending_confirmations: HashMap::new(),
             preloaded_flow: None,
             har_recording: false,
             har_entries: Vec::new(),
@@ -2861,6 +2864,35 @@ fn attach_flow_stop(resp: &mut Value, state: &mut DaemonState) {
     }
 }
 
+impl DaemonState {
+    pub fn purge_expired_confirmations(&mut self) {
+        self.pending_confirmations
+            .retain(|_, entry| entry.created_at.elapsed() < PENDING_CONFIRMATION_TTL);
+    }
+
+    pub fn park_pending_confirmation(
+        &mut self,
+        action: String,
+        cmd: Value,
+        approved_actions: Vec<String>,
+        flow: Option<Box<super::flow::Flow>>,
+    ) -> String {
+        self.purge_expired_confirmations();
+        let confirmation_id = format!("c_{}", uuid::Uuid::new_v4().simple());
+        self.pending_confirmations.insert(
+            confirmation_id.clone(),
+            PendingConfirmation {
+                action,
+                cmd,
+                approved_actions,
+                flow,
+                created_at: std::time::Instant::now(),
+            },
+        );
+        confirmation_id
+    }
+}
+
 /// Parks a `flow_run` whose writes the policy does not cover, for confirmation.
 #[inline(never)]
 fn park_unconfirmed_flow_write(
@@ -2875,18 +2907,18 @@ fn park_unconfirmed_flow_write(
     }
     let flow = run_flow?;
     let policy_action = unconfirmed_flow_write(cmd, flow, state)?;
-    state.pending_confirmation = Some(PendingConfirmation {
-        action: policy_action.clone(),
-        cmd: cmd.clone(),
-        approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
-        flow: Some(Box::new(flow.clone())),
-    });
+    let confirmation_id = state.park_pending_confirmation(
+        policy_action.clone(),
+        cmd.clone(),
+        state.confirmed_policy_actions.iter().cloned().collect(),
+        Some(Box::new(flow.clone())),
+    );
     Some(json!({
         "id": id,
         "success": true,
         "data": {
             "confirmation_required": true,
-            "confirmation_id": id,
+            "confirmation_id": confirmation_id,
             "action": policy_action,
         },
     }))
@@ -3338,18 +3370,18 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             }
         }
         if let Some(policy_action) = confirmation_required {
-            state.pending_confirmation = Some(PendingConfirmation {
-                action: policy_action.clone(),
-                cmd: cmd.clone(),
-                approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
-                flow: run_flow.clone(),
-            });
+            let confirmation_id = state.park_pending_confirmation(
+                policy_action.clone(),
+                cmd.clone(),
+                state.confirmed_policy_actions.iter().cloned().collect(),
+                run_flow.clone(),
+            );
             let mut resp = json!({
                 "id": id,
                 "success": true,
                 "data": {
                     "confirmation_required": true,
-                    "confirmation_id": id,
+                    "confirmation_id": confirmation_id,
                     "action": policy_action
                 },
             });
@@ -3366,18 +3398,18 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     continue;
                 }
                 if ca.requires_confirmation(policy_action) {
-                    state.pending_confirmation = Some(PendingConfirmation {
-                        action: policy_action.to_string(),
-                        cmd: cmd.clone(),
-                        approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
-                        flow: run_flow.clone(),
-                    });
+                    let confirmation_id = state.park_pending_confirmation(
+                        policy_action.to_string(),
+                        cmd.clone(),
+                        state.confirmed_policy_actions.iter().cloned().collect(),
+                        run_flow.clone(),
+                    );
                     let mut resp = json!({
                         "id": id,
                         "success": true,
                         "data": {
                             "confirmation_required": true,
-                            "confirmation_id": id,
+                            "confirmation_id": confirmation_id,
                             "action": policy_action,
                         },
                     });
@@ -6424,7 +6456,7 @@ async fn apply_settings_patch(
     }
     if was(Key::ActionPolicy) || was(Key::ConfirmActions) || was(Key::AllowedDomains) {
         // An approval asked for under the old rules no longer stands.
-        state.pending_confirmation = None;
+        state.pending_confirmations.clear();
     }
     if was(Key::ActionPolicy) {
         state.policy = next
@@ -15679,11 +15711,17 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 // Confirmation handlers (stub)
 // ---------------------------------------------------------------------------
 
-async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_confirm(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    state.purge_expired_confirmations();
+    let cid = cmd
+        .get("confirmationId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or("Missing confirmationId")?;
     let pending = state
-        .pending_confirmation
-        .take()
-        .ok_or("No pending confirmation")?;
+        .pending_confirmations
+        .remove(cid)
+        .ok_or_else(|| format!("Unknown or expired confirmation ID: {}", cid))?;
 
     let mut approved_actions = pending.approved_actions.clone();
     if !approved_actions.iter().any(|a| a == &pending.action) {
@@ -15699,7 +15737,12 @@ async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     state.preloaded_flow = None;
     state.confirmed_policy_actions = previous_confirmed;
 
-    Ok(json!({ "confirmed": true, "action": pending.action, "result": result }))
+    Ok(json!({
+        "confirmed": true,
+        "confirmation_id": cid,
+        "action": pending.action,
+        "result": result
+    }))
 }
 
 /// The parked command as `confirm` replays it: without its action policy and
@@ -15724,13 +15767,19 @@ fn confirmation_replay_command(cmd: &Value) -> Value {
     replay
 }
 
-async fn handle_deny(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_deny(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    state.purge_expired_confirmations();
+    let cid = cmd
+        .get("confirmationId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or("Missing confirmationId")?;
     let pending = state
-        .pending_confirmation
-        .take()
-        .ok_or("No pending confirmation")?;
+        .pending_confirmations
+        .remove(cid)
+        .ok_or_else(|| format!("Unknown or expired confirmation ID: {}", cid))?;
 
-    Ok(json!({ "denied": true, "action": pending.action }))
+    Ok(json!({ "denied": true, "confirmation_id": cid, "action": pending.action }))
 }
 
 // ---------------------------------------------------------------------------
@@ -20357,7 +20406,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("plugin:stealth:launch.mutate"));
-        assert!(state.pending_confirmation.is_none());
+        assert!(state.pending_confirmations.is_empty());
     }
 
     #[tokio::test]
@@ -20826,7 +20875,11 @@ mod tests {
         )
         .await;
         assert_eq!(parked["data"]["confirmation_required"], true);
-        assert!(state.pending_confirmation.is_some());
+        let parked_cid = parked["data"]["confirmation_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(state.pending_confirmations.contains_key(&parked_cid));
 
         // The operator switches to the stricter policy, riding on any command.
         let switched = execute_command(
@@ -20839,16 +20892,96 @@ mod tests {
         )
         .await;
         assert_eq!(switched["success"], true);
-        assert!(state.pending_confirmation.is_none());
+        assert!(state.pending_confirmations.is_empty());
 
-        let confirmed =
-            execute_command(&json!({ "id": "confirm", "action": "confirm" }), &mut state).await;
+        let confirmed = execute_command(
+            &json!({ "id": "confirm", "action": "confirm", "confirmationId": parked_cid }),
+            &mut state,
+        )
+        .await;
         assert_eq!(confirmed["success"], false);
         assert!(state.policy.is_some());
         assert_eq!(
             state.settings.security().action_policy_path.as_deref(),
             deny_read.to_str()
         );
+    }
+
+    #[tokio::test]
+    async fn test_pending_confirmations_have_unique_ids_and_do_not_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("policy.json");
+        fs::write(&policy_path, r#"{"confirm":["read","close"]}"#).unwrap();
+        let mut state = DaemonState::new();
+        state.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+
+        let first = execute_command(
+            &json!({ "id": "same-req-id", "action": "read", "url": "http://127.0.0.1:9/first" }),
+            &mut state,
+        )
+        .await;
+        let second = execute_command(
+            &json!({ "id": "same-req-id", "action": "close" }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(first["data"]["confirmation_required"], true);
+        assert_eq!(second["data"]["confirmation_required"], true);
+
+        let cid_1 = first["data"]["confirmation_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let cid_2 = second["data"]["confirmation_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(
+            cid_1, cid_2,
+            "each parked command must get a unique confirmation_id"
+        );
+        assert_eq!(state.pending_confirmations.len(), 2);
+
+        // Wrong or missing confirmationId is rejected without touching either parked command.
+        let missing =
+            execute_command(&json!({ "id": "c0", "action": "confirm" }), &mut state).await;
+        assert_eq!(missing["success"], false);
+        let stale = execute_command(
+            &json!({ "id": "c0b", "action": "confirm", "confirmationId": "c_stale" }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(stale["success"], false);
+        assert_eq!(state.pending_confirmations.len(), 2);
+
+        // Denying cid_1 removes only cid_1, leaving cid_2 intact.
+        let denied = execute_command(
+            &json!({ "id": "d1", "action": "deny", "confirmationId": &cid_1 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(denied["success"], true);
+        assert_eq!(denied["data"]["action"], "read");
+        assert!(!state.pending_confirmations.contains_key(&cid_1));
+        assert!(state.pending_confirmations.contains_key(&cid_2));
+
+        // Reusing already-consumed cid_1 is rejected.
+        let reused = execute_command(
+            &json!({ "id": "c1", "action": "confirm", "confirmationId": &cid_1 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(reused["success"], false);
+
+        // Confirming cid_2 executes only the second parked command (`close`), not the first.
+        let confirmed = execute_command(
+            &json!({ "id": "c2", "action": "confirm", "confirmationId": &cid_2 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(confirmed["success"], true);
+        assert_eq!(confirmed["data"]["action"], "close");
+        assert!(state.pending_confirmations.is_empty());
     }
 
     #[test]
@@ -20922,7 +21055,12 @@ mod tests {
         );
 
         // The launch fails (no browser binary) after the settings apply.
-        let _ = execute_command(&json!({ "id": "c", "action": "confirm" }), &mut state).await;
+        let cid = parked["data"]["confirmation_id"].as_str().unwrap();
+        let _ = execute_command(
+            &json!({ "id": "c", "action": "confirm", "confirmationId": cid }),
+            &mut state,
+        )
+        .await;
 
         assert_eq!(
             state.settings.security().allowed_domains,
@@ -20962,8 +21100,13 @@ mod tests {
         assert_eq!(first["data"]["confirmation_required"], true);
         assert_eq!(first["data"]["action"], "navigate");
 
+        let first_cid = first["data"]["confirmation_id"].as_str().unwrap();
         let second = execute_command(
-            &json!({ "id": "policy-plugin-confirm-2", "action": "confirm" }),
+            &json!({
+                "id": "policy-plugin-confirm-2",
+                "action": "confirm",
+                "confirmationId": first_cid
+            }),
             &mut state,
         )
         .await;
@@ -20977,7 +21120,10 @@ mod tests {
             second["data"]["result"]["data"]["action"],
             "plugin:stealth:launch.mutate"
         );
-        let pending = state.pending_confirmation.as_ref().unwrap();
+        let second_cid = second["data"]["result"]["data"]["confirmation_id"]
+            .as_str()
+            .unwrap();
+        let pending = state.pending_confirmations.get(second_cid).unwrap();
         assert_eq!(pending.action, "plugin:stealth:launch.mutate");
         assert!(pending.approved_actions.iter().any(|a| a == "navigate"));
     }
@@ -23517,8 +23663,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let resp = execute_command(&run, &mut state).await;
         assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
         assert_eq!(resp["data"]["action"], "flow_write:s1r1");
-        let confirmed =
-            execute_command(&json!({ "id": "c1", "action": "confirm" }), &mut state).await;
+        let resp_cid = resp["data"]["confirmation_id"].as_str().unwrap();
+        let confirmed = execute_command(
+            &json!({ "id": "c1", "action": "confirm", "confirmationId": resp_cid }),
+            &mut state,
+        )
+        .await;
         assert_eq!(
             confirmed["data"]["result"]["data"]["ok"], true,
             "{confirmed}"
@@ -23887,7 +24037,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nconnection: close\r\n\r\n{\"ok\":true}",
         );
         write_flow_fixture(dir.path(), other);
-        let done = execute_command(&json!({ "id": "c", "action": "confirm" }), &mut state).await;
+        let ask_cid = ask["data"]["confirmation_id"].as_str().unwrap();
+        let done = execute_command(
+            &json!({ "id": "c", "action": "confirm", "confirmationId": ask_cid }),
+            &mut state,
+        )
+        .await;
         assert_eq!(done["data"]["result"]["data"]["ok"], true, "{done}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(other_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -26711,8 +26866,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(parked["data"]["confirmation_required"], true, "{parked}");
         assert!(dir.path().join("s.settings").exists());
 
-        let confirmed =
-            execute_command(&json!({ "id": "2", "action": "confirm" }), &mut state).await;
+        let parked_cid = parked["data"]["confirmation_id"].as_str().unwrap();
+        let confirmed = execute_command(
+            &json!({ "id": "2", "action": "confirm", "confirmationId": parked_cid }),
+            &mut state,
+        )
+        .await;
         assert_eq!(confirmed["success"], true, "{confirmed}");
         assert!(!dir.path().join("s.settings").exists());
     }
