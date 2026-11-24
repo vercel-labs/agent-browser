@@ -7,6 +7,15 @@ use super::*;
 use crate::flags::{split_launch_args, try_parse_flags, Flags};
 use crate::test_utils::EnvGuard;
 
+/// A path that is absolute on every platform; a bare `/x` is not on Windows.
+fn absolute_path(name: &str) -> String {
+    std::env::temp_dir()
+        .join(name)
+        .to_str()
+        .expect("temp dir is valid UTF-8")
+        .to_string()
+}
+
 /// Flags with no environment and an empty config file, so nothing is set.
 fn blank_flags() -> Flags {
     let names: Vec<String> = std::env::vars()
@@ -659,32 +668,29 @@ fn timeout_views() {
 
 #[test]
 fn security_view() {
+    let policy = absolute_path("policy.json");
     let r = seeded(&[
         ("AGENT_BROWSER_ALLOWED_DOMAINS", " a.test , ,*.b.test "),
         ("AGENT_BROWSER_CONFIRM_ACTIONS", "click,fill"),
-        ("AGENT_BROWSER_ACTION_POLICY", "/policy.json"),
+        ("AGENT_BROWSER_ACTION_POLICY", policy.as_str()),
     ]);
     assert_eq!(
         r.security(),
         SecurityView {
             allowed_domains: Some(vec!["a.test".into(), "*.b.test".into()]),
-            action_policy_path: Some("/policy.json".into()),
+            action_policy_path: Some(policy.clone()),
             confirm_actions: Some("click,fill".into()),
         }
     );
 }
 
 #[test]
-fn blank_allowed_domains_do_not_restrict() {
-    let r = seeded(&[("AGENT_BROWSER_ALLOWED_DOMAINS", "  ")]);
-    assert_eq!(r.security().allowed_domains, None);
-    assert!(!r.launch_options().restrict_webrtc);
-}
-
-#[test]
-fn separator_only_allowed_domains_seed_an_empty_list() {
-    let r = seeded(&[("AGENT_BROWSER_ALLOWED_DOMAINS", " , ")]);
-    assert_eq!(r.security().allowed_domains, Some(vec![]));
+fn blank_or_separator_only_allowed_domains_seed_nothing() {
+    for raw in ["", "  ", " , "] {
+        let r = seeded(&[("AGENT_BROWSER_ALLOWED_DOMAINS", raw)]);
+        assert_eq!(r.security().allowed_domains, None, "{raw:?}");
+        assert!(!r.launch_options().restrict_webrtc);
+    }
 }
 
 #[test]
@@ -715,18 +721,20 @@ fn provider_view_ignores_connection_precedence() {
 
 #[test]
 fn legacy_policy_variable_applies_only_when_the_current_one_is_unset() {
-    let legacy = seeded(&[("AGENT_BROWSER_POLICY", "/old.json")]);
+    let old = absolute_path("old.json");
+    let new = absolute_path("new.json");
+    let legacy = seeded(&[("AGENT_BROWSER_POLICY", old.as_str())]);
     assert_eq!(
         legacy.security().action_policy_path.as_deref(),
-        Some("/old.json")
+        Some(old.as_str())
     );
     let both = seeded(&[
-        ("AGENT_BROWSER_POLICY", "/old.json"),
-        ("AGENT_BROWSER_ACTION_POLICY", "/new.json"),
+        ("AGENT_BROWSER_POLICY", old.as_str()),
+        ("AGENT_BROWSER_ACTION_POLICY", new.as_str()),
     ]);
     assert_eq!(
         both.security().action_policy_path.as_deref(),
-        Some("/new.json")
+        Some(new.as_str())
     );
 }
 
@@ -1302,6 +1310,37 @@ fn a_patch_without_launch_settings_keeps_only_live_ones() {
     let live = patch.without_launch_settings();
     assert!(live.get(Key::Profile).is_none());
     assert!(live.get(Key::DefaultTimeout).is_some());
+}
+
+#[test]
+fn a_non_launch_patch_keeps_restore_policy_only_for_the_running_key() {
+    let unit = |key: Option<&str>| {
+        let mut entries = vec![
+            is(Key::RestoreSave, json!("never")),
+            is(Key::RestoreCheckUrl, json!("**/x")),
+        ];
+        if let Some(k) = key {
+            entries.push(is(Key::RestoreKey, json!(k)));
+        }
+        patch_of(&entries)
+    };
+    // A different key: policy and checks must not reach the running key.
+    let live = unit(Some("new")).without_launch_settings_for(Some("old"));
+    for key in RESTORE_UNIT {
+        assert!(live.get(key).is_none(), "{key:?}");
+    }
+    let live = unit(Some("new")).without_launch_settings_for(None);
+    assert!(live.get(Key::RestoreSave).is_none());
+    // The same key, or no key in the patch: they apply to the running session.
+    for patch in [unit(Some("old")), unit(None)] {
+        let live = patch.without_launch_settings_for(Some("old"));
+        assert!(live.get(Key::RestoreSave).is_some());
+        assert!(live.get(Key::RestoreCheckUrl).is_some());
+        assert!(live.get(Key::RestoreKey).is_none());
+    }
+    // A caller that cannot name the running key sends none of the unit.
+    let live = unit(Some("old")).without_launch_settings();
+    assert!(live.get(Key::RestoreSave).is_none());
 }
 
 #[test]

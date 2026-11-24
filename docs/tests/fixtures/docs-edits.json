@@ -68,6 +68,30 @@
       {
         "from": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser dblclick <sel> # Double-click",
         "to": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser click <sel> --button right # Right-click (fires contextmenu) agent-browser click <sel> --modifiers control,shift # Hold keys during the click agent-browser dblclick <sel> # Double-click agent-browser dblclick <sel> --modifiers shift # Double-click with Shift held"
+      },
+      {
+        "from": "agent-browser select <sel> <val>      # Select dropdown by value or visible label",
+        "to": "agent-browser select <sel> <val> [--by value|label]  # Select dropdown by value or visible label"
+      },
+      {
+        "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
+        "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+      },
+      {
+        "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
+        "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to agent-browser webmcp list --json. If a description does not show the arguments, fetch the schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+      },
+      {
+        "from": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)",
+        "to": "agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2); kept across relaunches and new tabs"
+      },
+      {
+        "from": "agent-browser set device <name>       # Emulate device (\"iPhone 14\")",
+        "to": "agent-browser set device <name>       # Emulate a device (\"iPhone 14\"): viewport, user agent and touch input (touch events exist after the next navigation)"
+      },
+      {
+        "from": "not available with Safari or iOS WebDriver sessions",
+        "to": "not available with Safari, iOS, or Ladybird WebDriver sessions"
       }
     ],
     "/configuration": [
@@ -178,6 +202,18 @@
       {
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
+      },
+      {
+        "from": "string[]; also disables WebRTC",
+        "to": "string[]; must list at least one domain (an empty array is rejected); also disables WebRTC"
+      },
+      {
+        "from": "Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). Requires",
+        "to": "Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). An empty value is rejected; unset the variable to run unrestricted. Requires"
+      },
+      {
+        "from": "Comma-separated allowed domain patterns (e.g., example.com,*.example.com). Requires",
+        "to": "Comma-separated allowed domain patterns (e.g., example.com,*.example.com). An empty value is rejected; unset the variable to run unrestricted. Requires"
       }
     ],
     "/plugins": [
@@ -202,6 +238,10 @@
       {
         "from": "All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.",
         "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust."
+      },
+      {
+        "from": "iOS, Safari, and direct-page provider plugins",
+        "to": "iOS, Safari, Ladybird, and direct-page provider plugins"
       }
     ],
     "/init-scripts": [
@@ -372,6 +412,56 @@
       {
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
+      },
+      {
+        "from": "it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json`, then calls `webmcp invoke` with the same `--frame`.",
+        "to": "it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json` when the announced description does not show the arguments, then calls `webmcp invoke` with the same `--frame`."
+      },
+      {
+        "from": "it fetches a tool's input schema with webmcp list <tool> --frame <frame-id> --json, then calls webmcp invoke with the same --frame.",
+        "to": "it fetches a tool's input schema with webmcp list <tool> --frame <frame-id> --json when the announced description does not show the arguments, then calls webmcp invoke with the same --frame."
+      }
+    ],
+    "/webmcp": [
+      {
+        "from": "Automatic summaries are limited to 16 tools and 4 KiB of JSON, with descriptions shortened to 160 bytes plus a truncation marker.",
+        "to": "Catalogs of up to four tools list full descriptions when they fit in 4 KiB of JSON. Larger catalogs are limited to 16 tools and 4 KiB, with descriptions shortened to 160 bytes plus a truncation marker, and the announcement says how many tools are listed."
+      },
+      {
+        "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
+        "to": "The announcement names the top-level page's origin and lists each tool's origin, name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. Each record starts with the browser-reported origin that receives the tool's inputs: `[origin <origin>]` when it matches the page's origin, or `[cross-origin <origin>]` when the tool comes from an embedded frame on another origin. Direct `webmcp invoke` examples cover only tools from the page's own origin. Before invoking a cross-origin tool, confirm that its origin matches the user's task. When every tool is listed and the page's own tools share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+      },
+      {
+        "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
+        "to": "The announcement names the top-level page's origin and lists each tool's origin, name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. Each record starts with the browser-reported origin that receives the tool's inputs: [origin <origin>] when it matches the page's origin, or [cross-origin <origin>] when the tool comes from an embedded frame on another origin. Direct webmcp invoke examples cover only tools from the page's own origin. Before invoking a cross-origin tool, confirm that its origin matches the user's task. When every tool is listed and the page's own tools share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to agent-browser webmcp list --json. If a description does not show the arguments, fetch the schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+      },
+      {
+        "from": "they fetch the selected tool's schema with `webmcp list <tool> --frame <frame-id> --json` and invoke it with the same `--frame`.",
+        "to": "they use an announced tool directly, fetch its schema with `webmcp list <tool> --frame <frame-id> --json` when the description does not show the arguments, and invoke it with the same `--frame`."
+      },
+      {
+        "from": "they fetch the selected tool's schema with webmcp list <tool> --frame <frame-id> --json and invoke it with the same --frame.",
+        "to": "they use an announced tool directly, fetch its schema with webmcp list <tool> --frame <frame-id> --json when the description does not show the arguments, and invoke it with the same --frame."
+      },
+      {
+        "from": "\"toolCount\": 1,\n      \"tools\": [{",
+        "to": "\"toolCount\": 1,\n      \"pageOrigin\": \"https://example.com\",\n      \"tools\": [{"
+      },
+      {
+        "from": "JSON exposes updates as `data.webmcp`; CLI and MCP text use the same summaries. An omitted field",
+        "to": "JSON exposes updates as `data.webmcp`; CLI and MCP text use the same summaries. `pageOrigin` is the browser-reported origin of the top-level page and is omitted until the browser reports it. Each tool's `origin` comes from the frame that registered it. A tool whose origin differs from `pageOrigin`, or any tool when `pageOrigin` is missing or opaque (`null`), is announced as cross-origin. An omitted field"
+      },
+      {
+        "from": "JSON exposes updates as data.webmcp; CLI and MCP text use the same summaries. An omitted field",
+        "to": "JSON exposes updates as data.webmcp; CLI and MCP text use the same summaries. pageOrigin is the browser-reported origin of the top-level page and is omitted until the browser reports it. Each tool's origin comes from the frame that registered it. A tool whose origin differs from pageOrigin, or any tool when pageOrigin is missing or opaque (null), is announced as cross-origin. An omitted field"
+      },
+      {
+        "from": "they use an announced tool directly, fetch its schema",
+        "to": "they use an announced tool from the page's own origin directly, check a cross-origin tool's origin against the request before using it, fetch its schema"
+      },
+      {
+        "from": "Lightpanda, Safari, iOS,",
+        "to": "Lightpanda, Safari, iOS, Ladybird,"
       }
     ],
     "/native-mode": [
@@ -379,12 +469,42 @@
         "from": "See the main [documentation](/) for current architecture and usage.",
         "to": "See the main [documentation](/introduction) for current architecture and usage."
       }
+    ],
+    "/snapshots": [
+      {
+        "from": "<td>Scope to CSS selector</td>",
+        "to": "<td>Scope to CSS selector (every match)</td>"
+      },
+      {
+        "from": "Re-snapshot after interactions to observe changes, and always after navigation:",
+        "to": "Using a ref issued for a document that has since been replaced, in the page or in its iframe (for example by a click that loads a new page), fails with \"Ref @eN is from a document that is no longer loaded\". A snapshot taken while the document is being replaced fails with \"The document changed while the snapshot was being captured\"; run it again. Re-snapshot after interactions to observe changes, and always after navigation:"
+      }
+    ],
+    "/streaming": [
+      {
+        "from": "Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.",
+        "to": "Browser clients are checked by the `Origin` and `Host` headers of the upgrade. The `Origin` must have the same host and port as the `Host` the client connected to, and that host must be `localhost`, `127.0.0.1` or `[::1]` (the server itself listens on 127.0.0.1). A page on another port, a `file://` page (browsers send `Origin: null`) and any other origin get a 403 on the upgrade. A custom viewer works when its page and the WebSocket share one authority, for example behind a reverse proxy that forwards the original `Host`; a proxy that rewrites `Host` to the stream address fails the check. Clients that send no `Origin` header, such as a server-side WebSocket client, are not restricted."
+      },
+      {
+        "from": "Browser clients must load from localhost, 127.0.0.1, ::1 or file://. Any other origin gets a 403 on the upgrade and needs a proxy.",
+        "to": "Browser clients are checked by the Origin and Host headers of the upgrade. The Origin must have the same host and port as the Host the client connected to, and that host must be localhost, 127.0.0.1 or [::1] (the server itself listens on 127.0.0.1). A page on another port, a file:// page (browsers send Origin: null) and any other origin get a 403 on the upgrade. A custom viewer works when its page and the WebSocket share one authority, for example behind a reverse proxy that forwards the original Host; a proxy that rewrites Host to the stream address fails the check. Clients that send no Origin header, such as a server-side WebSocket client, are not restricted."
+      }
+    ],
+    "/diffing": [
+      {
+        "from": "Without `--baseline`, the command automatically compares against the most recent snapshot taken in the current session.",
+        "to": "Without `--baseline`, the command automatically compares against the most recent snapshot taken on this tab."
+      },
+      {
+        "from": "Without --baseline, the command automatically compares against the most recent snapshot taken in the current session.",
+        "to": "Without --baseline, the command automatically compares against the most recent snapshot taken on this tab."
+      }
     ]
   },
   "resources": {
     "/schema.json": {
-      "size": 9813,
-      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
+      "size": 9834,
+      "sha256": "22667a9fa7f532356116f762bedab84c8b1bad997352589a46add84023ef125c"
     }
   }
 }

@@ -4,12 +4,18 @@ import argparse
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+
+
+# Start of a proactive WebMCP update: the tool announcement, the cleared notice
+# or the unavailable notice.
+ANNOUNCEMENT = re.compile(r'(?m)^(This page provides \d+ WebMCP tools?\b|WebMCP tools cleared;|WebMCP state unavailable;)')
 
 
 def main():
@@ -137,7 +143,8 @@ sys.exit(result.returncode)
                 context = json.loads(output).get('data', {}).get('webmcp')
                 if context is not None: proactive.append(json.dumps(context, separators=(',', ':')))
             except (ValueError, AttributeError):
-                if '\nWebMCP ' in output: proactive.append(output.split('\nWebMCP ', 1)[1])
+                announcement = ANNOUNCEMENT.search(output)
+                if announcement: proactive.append(output[announcement.start():])
         transcript = (folder / 'agent.jsonl').read_text()
         result = {
             'trial': trial, 'mode': args.mode, 'exitCode': exit_code,
