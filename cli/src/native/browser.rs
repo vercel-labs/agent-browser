@@ -452,7 +452,7 @@ pub fn to_ai_friendly_error(error: &str) -> String {
     if error.starts_with(TAB_GONE_PREFIX) || error.starts_with(PAGE_WEDGED_PREFIX) {
         return error.to_string();
     }
-    if super::interaction::form_error_code(error).is_some() {
+    if super::forms::form_error_code(error).is_some() {
         return error.to_string();
     }
     let lower = error.to_lowercase();

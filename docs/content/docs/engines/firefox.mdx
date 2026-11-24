@@ -71,6 +71,16 @@ Media emulation on Firefox supports only `prefers-color-scheme` and print media.
 
 `find text` and `find label` search the main document only, like Chrome. The dashboard live view polls screenshots of the active tab and forwards mouse and keyboard input, so it works without screencast.
 
+## Form commands
+
+`fill`, `type`, `check`, `uncheck`, and `select` run the same prechecks and warnings as Chrome. A command that cannot safely act refuses with the same `code` and changes nothing: `not_editable`, `read_only`, `disabled`, `not_checkable`, `malformed_value`, `option_not_found`, `ambiguous`, or `not_multiple`. If the page rewrites or truncates a value after entry, the command still succeeds and returns a warning.
+
+`select` supports native `<select>` elements and custom ARIA comboboxes and listboxes. Pass `--by value` or `--by label` to restrict matching to that attribute.
+
+`check` and `uncheck` target the checkbox control itself rather than its label or wrapper, so links or buttons inside a label are not activated. A covered checkbox is refused and the error names the covering element. A hidden native checkbox is toggled through a DOM click.
+
+`fill` and `type` return `dialogOpened: true` when a page dialog interrupts them.
+
 ## Chrome-only features
 
 These commands return a clear "Chrome-only" error on Firefox. Any other command without a Firefox implementation returns a "not supported on Firefox" error.

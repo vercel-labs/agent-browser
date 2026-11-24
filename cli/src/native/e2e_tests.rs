@@ -22141,13 +22141,7 @@ async fn e2e_firefox_check_rejects_buttons_under_click_policy() {
         for selector in ["#delete", "#center-btn", "#center-link"] {
             let resp = firefox_act(&mut state, "check", selector, json!({})).await;
             assert_eq!(resp["success"], false, "{selector}: {resp}");
-            assert!(
-                resp["error"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains("not a checkbox, radio button, or checkable control"),
-                "{selector}: {resp}"
-            );
+            assert_eq!(resp["code"], "not_checkable", "{selector}: {resp}");
         }
 
         for (selector, blocker) in [
