@@ -689,6 +689,7 @@ mod tests {
         "tab_list",
         "tab_switch",
         "tab_close",
+        "tab_keep",
         // Observability, frames and page inspection.
         "console",
         "errors",
