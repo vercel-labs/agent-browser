@@ -1418,6 +1418,37 @@ fn a_patch_without_launch_settings_keeps_only_live_ones() {
 }
 
 #[test]
+fn a_non_launch_patch_keeps_restore_policy_only_for_the_running_key() {
+    let unit = |key: Option<&str>| {
+        let mut entries = vec![
+            is(Key::RestoreSave, json!("never")),
+            is(Key::RestoreCheckUrl, json!("**/x")),
+        ];
+        if let Some(k) = key {
+            entries.push(is(Key::RestoreKey, json!(k)));
+        }
+        patch_of(&entries)
+    };
+    // A different key: policy and checks must not reach the running key.
+    let live = unit(Some("new")).without_launch_settings_for(Some("old"));
+    for key in RESTORE_UNIT {
+        assert!(live.get(key).is_none(), "{key:?}");
+    }
+    let live = unit(Some("new")).without_launch_settings_for(None);
+    assert!(live.get(Key::RestoreSave).is_none());
+    // The same key, or no key in the patch: they apply to the running session.
+    for patch in [unit(Some("old")), unit(None)] {
+        let live = patch.without_launch_settings_for(Some("old"));
+        assert!(live.get(Key::RestoreSave).is_some());
+        assert!(live.get(Key::RestoreCheckUrl).is_some());
+        assert!(live.get(Key::RestoreKey).is_none());
+    }
+    // A caller that cannot name the running key sends none of the unit.
+    let live = unit(Some("old")).without_launch_settings();
+    assert!(live.get(Key::RestoreSave).is_none());
+}
+
+#[test]
 fn local_only_settings_are_ignored_for_external_sessions() {
     for target in [
         (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),

@@ -80,6 +80,16 @@ export const addedPages = [
     ogAlt: "Modern Web Guidance - agent-browser",
     twitterTitle: "Modern Web Guidance | agent-browser",
   },
+  {
+    path: "/ladybird",
+    markdownTitle: "Ladybird",
+    title: "Ladybird | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Ladybird | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Ladybird - agent-browser",
+    twitterTitle: "Ladybird | agent-browser",
+  },
 ];
 
 /** Every public page: the baseline floor plus pages added since. */
