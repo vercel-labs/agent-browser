@@ -606,6 +606,7 @@ fn spawn_background_tick_if_idle(
             .browser
             .as_mut()
             .map(|mgr| mgr.has_process_exited())
+            .or_else(|| state.firefox.as_mut().map(|ff| ff.has_exited()))
             .unwrap_or(false);
         if process_exited {
             let _ = close_current_browser(&mut state).await;
@@ -613,7 +614,7 @@ fn spawn_background_tick_if_idle(
             // and that relaunch must be reported as one (issue #2505) instead
             // of looking like a fresh launch.
             state.browser_lost = true;
-        } else if state.browser.is_some() {
+        } else if state.browser.is_some() || state.firefox.is_some() {
             if let Err(error) = state.drain_cdp_events_background().await {
                 let _ = writeln!(
                     std::io::stderr(),
@@ -622,6 +623,7 @@ fn spawn_background_tick_if_idle(
                 );
             } else {
                 maybe_autosave_restore_state(&mut state, autosave_interval_ms).await;
+                state.sync_firefox_live().await;
             }
         }
     });
