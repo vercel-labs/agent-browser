@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::{timeout, timeout_at, Instant};
@@ -261,11 +261,12 @@ fn fail(code: &str, message: impl std::fmt::Display) -> String {
 /// address. The first refusal fails the join.
 #[derive(Clone)]
 pub struct JoinGuard {
-    session_id: String,
     sessions: Arc<Mutex<HashSet<String>>>,
+    targets: Arc<Mutex<HashMap<String, (String, bool)>>>,
     guard_scripts: Arc<Mutex<Vec<(String, String)>>>,
     release_token: String,
     binding_events: Arc<AtomicUsize>,
+    retained_locked: Arc<AtomicBool>,
     local: bool,
     deadline: Instant,
     blocked: Arc<Mutex<Option<String>>>,
@@ -275,13 +276,16 @@ pub struct JoinGuard {
 }
 
 impl JoinGuard {
-    fn new(session_id: &str, local: bool, deadline: Instant) -> Self {
+    fn new(session_id: &str, target_id: &str, local: bool, deadline: Instant) -> Self {
+        let mut targets = HashMap::new();
+        targets.insert(session_id.to_string(), (target_id.to_string(), true));
         Self {
-            session_id: session_id.to_string(),
             sessions: Arc::new(Mutex::new(HashSet::from([session_id.to_string()]))),
+            targets: Arc::new(Mutex::new(targets)),
             guard_scripts: Arc::default(),
             release_token: generate_release_token(),
             binding_events: Arc::new(AtomicUsize::new(0)),
+            retained_locked: Arc::new(AtomicBool::new(false)),
             local,
             deadline,
             blocked: Arc::default(),
@@ -331,14 +335,24 @@ impl JoinGuard {
         Ok(())
     }
 
-    async fn remove_session_guards(
+    async fn remove_session_guards_for(
         &self,
         client: &super::cdp::client::CdpClient,
+        sessions: &HashSet<String>,
         release_constructors: bool,
     ) {
         let scripts = {
             let mut guard = self.guard_scripts.lock().unwrap_or_else(|e| e.into_inner());
-            std::mem::take(&mut *guard)
+            let mut to_remove = Vec::new();
+            guard.retain(|(sid, id)| {
+                if sessions.contains(sid) {
+                    to_remove.push((sid.clone(), id.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            to_remove
         };
         for (sid, identifier) in scripts {
             let _ = client
@@ -358,21 +372,19 @@ impl JoinGuard {
         } else {
             None
         };
-        let mut sessions = self.adopted();
-        sessions.push(self.session_id.clone());
         for sid in sessions {
             let _ = client
                 .send_command(
                     "Network.setBlockedURLs",
                     Some(json!({ "urls": [] })),
-                    Some(&sid),
+                    Some(sid),
                 )
                 .await;
             let _ = client
                 .send_command(
                     "Runtime.removeBinding",
                     Some(json!({ "name": POPPY_NET_BINDING })),
-                    Some(&sid),
+                    Some(sid),
                 )
                 .await;
             if let Some(expr) = release_expr.as_deref() {
@@ -380,11 +392,32 @@ impl JoinGuard {
                     .send_command(
                         "Runtime.evaluate",
                         Some(json!({ "expression": expr })),
-                        Some(&sid),
+                        Some(sid),
                     )
                     .await;
             }
         }
+    }
+
+    fn all_sessions(&self) -> HashSet<String> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn target_info(&self, session_id: &str) -> Option<(String, bool)> {
+        self.targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned()
+    }
+
+    fn retain_only(&self, retained: &HashSet<String>) {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions.retain(|s| retained.contains(s));
+        self.retained_locked.store(true, Ordering::SeqCst);
     }
 
     fn redact(&self, message: String) -> String {
@@ -461,25 +494,26 @@ impl JoinGuard {
             .contains(session_id)
     }
 
-    pub(super) fn adopt(&self, session_id: &str) {
+    pub(super) fn adopt(&self, session_id: &str, target_id: String, is_page: bool) {
         self.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(session_id.to_string());
-    }
-
-    fn adopted(&self) -> Vec<String> {
-        self.sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .filter(|s| **s != self.session_id)
-            .cloned()
-            .collect()
+        if !target_id.is_empty() {
+            self.targets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session_id.to_string(), (target_id, is_page));
+        }
     }
 
     /// Whether the tab may request `url`; a refusal is recorded for the join.
     pub(super) async fn admits(&self, url: &str) -> bool {
+        if self.retained_locked.load(Ordering::SeqCst) {
+            return Url::parse(url)
+                .map(|u| !matches!(u.scheme(), "http" | "https"))
+                .unwrap_or(false);
+        }
         match crate::poppy::check_request(url, self.local, self.deadline).await {
             Ok(()) => true,
             Err(e) => {
@@ -680,17 +714,18 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
     // One deadline covers discovery, navigation, the authorizer and the submit.
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let discovery = discover(cmd, state, deadline).await?;
-    let session_id = state
-        .browser
-        .as_ref()
-        .ok_or("Browser not launched")?
-        .active_session_id()?
-        .to_string();
+    let (session_id, target_id) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        (
+            mgr.active_session_id()?.to_string(),
+            mgr.active_target_id()?.to_string(),
+        )
+    };
 
     super::actions::ensure_browser_auto_attach(state)
         .await
         .map_err(|e| fail("join_failed", e))?;
-    let guard = JoinGuard::new(&session_id, discovery.local, deadline);
+    let guard = JoinGuard::new(&session_id, &target_id, discovery.local, deadline);
     let client = state
         .browser
         .as_ref()
@@ -792,23 +827,44 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
     };
     let result = result.map_err(|e| guard.redact(e));
     let join_succeeded = result.is_ok();
-    let adopted = guard.adopted();
-    if !join_succeeded {
-        let _ = timeout(
-            CLEANUP_TIMEOUT,
-            leave_join_page(state, &session_id, &adopted),
-        )
+    if join_succeeded {
+        let cleared = guard.all_sessions();
+        *state.poppy_guard.write().await = None;
+        let _ = timeout(CLEANUP_TIMEOUT, async {
+            guard
+                .remove_session_guards_for(&client, &cleared, true)
+                .await;
+            for sid in &cleared {
+                let _ = super::actions::sync_fetch_interception(state, sid).await;
+            }
+        })
+        .await;
+    } else {
+        let outcome = leave_join_page(state, &guard, &session_id).await;
+        if outcome.retained.is_empty() {
+            *state.poppy_guard.write().await = None;
+        } else {
+            // Keep the guard installed (fail-closed) for any target whose
+            // navigation to about:blank or destruction could not be confirmed.
+            guard.retain_only(&outcome.retained);
+        }
+        if outcome.replaced_main {
+            let _ = timeout(
+                CLEANUP_TIMEOUT,
+                super::actions::adopt_replacement_tab(state, &session_id),
+            )
+            .await;
+        }
+        let _ = timeout(CLEANUP_TIMEOUT, async {
+            guard
+                .remove_session_guards_for(&client, &outcome.cleared, false)
+                .await;
+            for sid in &outcome.cleared {
+                let _ = super::actions::sync_fetch_interception(state, sid).await;
+            }
+        })
         .await;
     }
-    *state.poppy_guard.write().await = None;
-    let _ = timeout(CLEANUP_TIMEOUT, async {
-        guard.remove_session_guards(&client, join_succeeded).await;
-        let _ = super::actions::sync_fetch_interception(state, &session_id).await;
-        for sid in &adopted {
-            let _ = super::actions::sync_fetch_interception(state, sid).await;
-        }
-    })
-    .await;
     recorder.abort();
     result
 }
@@ -930,58 +986,225 @@ async fn run_join(
     Ok(json!({ "experimental": true, "joined": true, "signed_in": signed_in, "url": url }))
 }
 
+struct LeaveOutcome {
+    cleared: HashSet<String>,
+    retained: HashSet<String>,
+    replaced_main: bool,
+}
+
 /// Returns the join tab (and any adopted page sessions) to `about:blank` after
-/// a failed join, waiting for the navigation and unload to settle while the
-/// join guard is still active.
-async fn leave_join_page(state: &mut DaemonState, session_id: &str, adopted: &[String]) {
-    let Some(mgr) = state
+/// a failed join, waiting for each page to confirm replacement while the join
+/// guard is still active. Any target that does not confirm within
+/// `CLEANUP_TIMEOUT` is closed via `Target.closeTarget` (replacing the main tab
+/// with a fresh `about:blank` first), waiting for `Target.targetDestroyed`.
+/// Sessions that still cannot be confirmed are returned in `retained` so the
+/// caller keeps the guard installed for them.
+async fn leave_join_page(
+    state: &mut DaemonState,
+    guard: &JoinGuard,
+    session_id: &str,
+) -> LeaveOutcome {
+    let all_sessions = guard.all_sessions();
+    let Some(client) = state
         .browser
         .as_ref()
         .filter(|m| m.has_page_session(session_id))
+        .map(|m| m.client.clone())
     else {
-        return;
+        return LeaveOutcome {
+            cleared: all_sessions,
+            retained: HashSet::new(),
+            replaced_main: false,
+        };
     };
-    let client = mgr.client.clone();
+
+    // Identify page sessions that must each confirm replacement or destruction.
+    let mut pending_pages: HashSet<String> = HashSet::new();
+    let mut target_to_session: HashMap<String, String> = HashMap::new();
+    for sid in &all_sessions {
+        if let Some((tid, is_page)) = guard.target_info(sid) {
+            if !tid.is_empty() {
+                target_to_session.insert(tid, sid.clone());
+            }
+            if is_page || sid == session_id {
+                pending_pages.insert(sid.clone());
+            }
+        } else if sid == session_id {
+            pending_pages.insert(sid.clone());
+        }
+    }
+
+    let mut confirmed_pages: HashSet<String> = HashSet::new();
+    let mut saw_blank: HashSet<String> = HashSet::new();
     let mut nav_events = client.subscribe_methods_bounded(
-        &["Page.frameNavigated", "Page.loadEventFired"],
+        &[
+            "Page.frameNavigated",
+            "Page.loadEventFired",
+            "Target.targetDestroyed",
+            "Target.detachedFromTarget",
+        ],
         GUARD_EVENT_CAPACITY,
     );
-    for sid in adopted {
-        let _ = client
-            .send_command(
-                "Page.navigate",
-                Some(json!({ "url": "about:blank" })),
-                Some(sid),
-            )
-            .await;
-    }
-    let navigated = client
-        .send_command(
-            "Page.navigate",
-            Some(json!({ "url": "about:blank" })),
-            Some(session_id),
-        )
-        .await;
-    if navigated.is_ok() {
-        let mut saw_blank = false;
-        while let Some(event) = nav_events.recv().await {
-            if event.session_id.as_deref() != Some(session_id) {
-                continue;
-            }
-            match event.method.as_str() {
-                "Page.frameNavigated"
-                    if event.params.pointer("/frame/parentId").is_none()
-                        && event.params.pointer("/frame/url").and_then(Value::as_str)
-                            == Some("about:blank") =>
-                {
-                    saw_blank = true;
+
+    let _ = timeout(CLEANUP_TIMEOUT, async {
+        for sid in &pending_pages {
+            match client
+                .send_command(
+                    "Page.navigate",
+                    Some(json!({ "url": "about:blank" })),
+                    Some(sid),
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(err) if super::cdp::client::is_session_detached_error(&err) => {
+                    confirmed_pages.insert(sid.clone());
                 }
-                "Page.loadEventFired" if saw_blank => break,
+                Err(_) => {}
+            }
+        }
+        while confirmed_pages.len() < pending_pages.len() {
+            let Some(event) = nav_events.recv().await else {
+                break;
+            };
+            match event.method.as_str() {
+                "Page.frameNavigated" => {
+                    if let Some(sid) = event.session_id.as_deref() {
+                        if pending_pages.contains(sid)
+                            && event.params.pointer("/frame/parentId").is_none()
+                            && event.params.pointer("/frame/url").and_then(Value::as_str)
+                                == Some("about:blank")
+                        {
+                            saw_blank.insert(sid.to_string());
+                        }
+                    }
+                }
+                "Page.loadEventFired" => {
+                    if let Some(sid) = event.session_id.as_deref() {
+                        if saw_blank.contains(sid) {
+                            confirmed_pages.insert(sid.to_string());
+                        }
+                    }
+                }
+                "Target.targetDestroyed" => {
+                    if let Some(tid) = event.params.get("targetId").and_then(Value::as_str) {
+                        if let Some(sid) = target_to_session.get(tid) {
+                            if pending_pages.contains(sid) {
+                                confirmed_pages.insert(sid.clone());
+                            }
+                        }
+                    }
+                }
+                "Target.detachedFromTarget" => {
+                    if let Some(sid) = event.params.get("sessionId").and_then(Value::as_str) {
+                        if pending_pages.contains(sid) {
+                            confirmed_pages.insert(sid.to_string());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
+    })
+    .await;
+    drop(nav_events);
+
+    let mut unconfirmed: Vec<String> = pending_pages
+        .difference(&confirmed_pages)
+        .cloned()
+        .collect();
+    let mut replaced_main = false;
+
+    if !unconfirmed.is_empty() {
+        let mut destroy_events = client.subscribe_methods_bounded(
+            &["Target.targetDestroyed", "Target.detachedFromTarget"],
+            GUARD_EVENT_CAPACITY,
+        );
+        let mut closing_targets: HashMap<String, String> = HashMap::new();
+        let mut closing_sessions: HashSet<String> = HashSet::new();
+
+        let _ = timeout(CLEANUP_TIMEOUT, async {
+            for sid in &unconfirmed {
+                if sid == session_id {
+                    if let Some(mgr) = state.browser.as_mut() {
+                        if let Ok((old_target_id, _new_sid)) =
+                            mgr.replace_active_tab_with_blank().await
+                        {
+                            replaced_main = true;
+                            closing_targets.insert(old_target_id, sid.clone());
+                            closing_sessions.insert(sid.clone());
+                        }
+                    }
+                } else if let Some((tid, _)) = guard.target_info(sid) {
+                    if !tid.is_empty() {
+                        let _ = client
+                            .send_command(
+                                "Target.closeTarget",
+                                Some(json!({ "targetId": tid })),
+                                None,
+                            )
+                            .await;
+                        closing_targets.insert(tid, sid.clone());
+                        closing_sessions.insert(sid.clone());
+                    }
+                }
+            }
+            while !closing_sessions.is_empty() {
+                let Some(event) = destroy_events.recv().await else {
+                    break;
+                };
+                match event.method.as_str() {
+                    "Target.targetDestroyed" => {
+                        if let Some(tid) = event.params.get("targetId").and_then(Value::as_str) {
+                            if let Some(sid) = closing_targets.remove(tid) {
+                                closing_sessions.remove(&sid);
+                                confirmed_pages.insert(sid);
+                            }
+                        }
+                    }
+                    "Target.detachedFromTarget" => {
+                        if let Some(sid) = event.params.get("sessionId").and_then(Value::as_str) {
+                            if closing_sessions.remove(sid) {
+                                confirmed_pages.insert(sid.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        drop(destroy_events);
+        unconfirmed = pending_pages
+            .difference(&confirmed_pages)
+            .cloned()
+            .collect();
     }
+
     state.ref_map.invalidate_page(session_id);
+
+    if unconfirmed.is_empty() {
+        LeaveOutcome {
+            cleared: all_sessions,
+            retained: HashSet::new(),
+            replaced_main,
+        }
+    } else {
+        let mut retained: HashSet<String> = unconfirmed.into_iter().collect();
+        // Also retain any non-page child sessions (frames/workers) while a
+        // page session could not be confirmed cleared.
+        for sid in &all_sessions {
+            if !pending_pages.contains(sid) {
+                retained.insert(sid.clone());
+            }
+        }
+        let cleared = all_sessions.difference(&retained).cloned().collect();
+        LeaveOutcome {
+            cleared,
+            retained,
+            replaced_main,
+        }
+    }
 }
 
 fn shell_command(command: &str) -> Command {
@@ -1154,7 +1377,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_stops_at_first_block_and_bounds_binding_flood() {
-        let guard = JoinGuard::new("s1", false, in_ms(5_000));
+        let guard = JoinGuard::new("s1", "t1", false, in_ms(5_000));
         let (tx, mut rx) = tokio::sync::mpsc::channel(GUARD_EVENT_CAPACITY);
         for i in 0..GUARD_EVENT_CAPACITY {
             tx.try_send(super::super::cdp::types::CdpEvent {
@@ -1178,7 +1401,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_blocks_excessive_and_oversized_binding_events() {
-        let guard = JoinGuard::new("s1", false, in_ms(5_000));
+        let guard = JoinGuard::new("s1", "t1", false, in_ms(5_000));
         let (tx, mut rx) = tokio::sync::mpsc::channel(GUARD_EVENT_CAPACITY);
         for _ in 0..=MAX_BINDING_EVENTS {
             tx.try_send(super::super::cdp::types::CdpEvent {
@@ -1201,7 +1424,7 @@ mod tests {
             "{err}"
         );
 
-        let guard = JoinGuard::new("s1", false, in_ms(5_000));
+        let guard = JoinGuard::new("s1", "t1", false, in_ms(5_000));
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         tx.try_send(super::super::cdp::types::CdpEvent {
             method: "Runtime.bindingCalled".to_string(),
@@ -1214,5 +1437,18 @@ mod tests {
         .unwrap();
         let err = guard.checkpoint(&mut rx, None).await.unwrap_err();
         assert!(err.contains("oversized network guard event"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn retained_sessions_stay_guarded_fail_closed() {
+        let guard = JoinGuard::new("s1", "t1", false, in_ms(5_000));
+        guard.adopt("s2", "t2".to_string(), true);
+        let retained = HashSet::from(["s2".to_string()]);
+        guard.retain_only(&retained);
+        assert!(!guard.guards("s1"));
+        assert!(guard.guards("s2"));
+        assert!(!guard.admits("https://93.184.216.34/").await);
+        assert!(!guard.admits("http://127.0.0.1:8080/leak").await);
+        assert!(guard.admits("about:blank").await);
     }
 }

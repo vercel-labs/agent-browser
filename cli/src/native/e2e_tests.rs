@@ -22059,6 +22059,68 @@ async fn e2e_poppy_join_blocks_unload_keepalive_and_beacon_on_failed_join() {
     assert_eq!(target.requests.load(Ordering::SeqCst), 0, "{resp}");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_closes_stalled_failed_page_fail_closed() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    // Stall in beforeunload for 2.8s (> CLEANUP_TIMEOUT = 2s) so
+    // Page.navigate("about:blank") times out, then immediately attempt a fetch
+    // to 127.0.0.1 once the busy loop finishes.
+    let page = format!(
+        r#"{POPPY_FORM}<script>
+        window.addEventListener('beforeunload', () => {{
+            const end = Date.now() + 2800;
+            while (Date.now() < end) {{}}
+            fetch('{0}/after-cleanup-timeout').catch(() => {{}});
+        }});
+        </script>"#,
+        target.origin
+    );
+    let (origin, site) =
+        poppy_site("[::1]:0", PoppyJoinPage::Html(page), "/done".to_string()).await;
+
+    let mut state = DaemonState::new();
+    let launch = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "poppy_join",
+            "url": origin,
+            "authorizer": r#"sleep 0.4; echo '{"error":"user_denied"}'; exit 1"#,
+        }),
+        &mut state,
+    )
+    .await;
+
+    // Wait past the 2.8s stall so an unclosed/unguarded page would fire its fetch.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+
+    // The session must remain usable after replacing the stalled tab.
+    let follow_up = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "location.href" }),
+        &mut state,
+    )
+    .await;
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    site.abort();
+    target.server.abort();
+
+    assert_error_code(&resp, "user_denied");
+    assert_eq!(target.connections.load(Ordering::SeqCst), 0, "{resp}");
+    assert_eq!(target.requests.load(Ordering::SeqCst), 0, "{resp}");
+    assert_success(&follow_up);
+    assert_eq!(get_data(&follow_up)["result"], "about:blank", "{follow_up}");
+}
+
 /// A local page for restore tests: cookies need an http origin.
 async fn restore_fixture_page() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -1176,7 +1176,14 @@ impl DaemonState {
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
                         let joining_guard = match poppy_guard.read().await.as_ref() {
                             Some(guard) if waiting_for_debugger => {
-                                guard.adopt(&sid);
+                                let target_id = target_info
+                                    .as_ref()
+                                    .map(|t| t.target_id.clone())
+                                    .unwrap_or_default();
+                                let is_page = target_info
+                                    .as_ref()
+                                    .is_some_and(|t| t.target_type == "page");
+                                guard.adopt(&sid, target_id, is_page);
                                 Some(guard.clone())
                             }
                             _ => None,
@@ -4726,7 +4733,7 @@ async fn install_active_network_controls(
 /// The wedged tab was replaced by a blank one: drop the old tab's refs and
 /// frame scope, and give the new tab the session setup and network controls
 /// (headers, routes, domain filter) that `tab new` installs.
-async fn adopt_replacement_tab(
+pub(super) async fn adopt_replacement_tab(
     state: &mut DaemonState,
     old_session_id: &str,
 ) -> Result<(), String> {

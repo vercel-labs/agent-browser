@@ -1407,6 +1407,36 @@ impl BrowserManager {
         Some(report)
     }
 
+    /// Replaces the active tab with a fresh `about:blank` tab and closes the
+    /// old target via `Target.closeTarget`, returning `(old_target_id, new_session_id)`.
+    pub async fn replace_active_tab_with_blank(&mut self) -> Result<(String, String), String> {
+        let old_target_id = self.active_target_id()?.to_string();
+        // Create the replacement before closing the old tab so closing the last
+        // tab never shuts down the browser.
+        let (new_target_id, new_session_id) = self.open_blank_target().await?;
+        let _ = self
+            .client
+            .send_command_typed::<_, Value>(
+                "Target.closeTarget",
+                &CloseTargetParams {
+                    target_id: old_target_id.clone(),
+                },
+                None,
+            )
+            .await;
+        let was_bound = self.bound_target_id.as_deref() == Some(old_target_id.as_str());
+        self.tab_keep.remove(&old_target_id);
+        let page = &mut self.pages[self.active_page_index];
+        page.url = "about:blank".to_string();
+        page.title.clear();
+        page.target_id = new_target_id;
+        page.session_id = new_session_id.clone();
+        if was_bound {
+            self.bind_active_target();
+        }
+        Ok((old_target_id, new_session_id))
+    }
+
     /// A command completed. Commands such as `tab list` never reach the
     /// renderer, so only a renderer that answers clears a suspected wedge.
     pub async fn clear_wedge_suspect_if_responsive(&mut self) {
