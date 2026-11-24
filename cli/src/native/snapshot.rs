@@ -367,12 +367,19 @@ pub async fn take_snapshot(
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
     let mut visited = HashSet::new();
-    if let Some(fid) = frame_id {
-        visited.insert(fid.to_string());
-    }
+    let parent_session = match frame_id {
+        Some(fid) => {
+            visited.insert(fid.to_string());
+            super::element::find_frame_host_session(client, session_id, fid, iframe_sessions)
+                .await
+                .unwrap_or_else(|_| session_id.to_string())
+        }
+        None => session_id.to_string(),
+    };
     take_snapshot_inner(
         client,
         session_id,
+        &parent_session,
         options,
         ref_map,
         frame_id,
@@ -387,6 +394,7 @@ pub async fn take_snapshot(
 async fn take_snapshot_inner(
     client: &CdpClient,
     session_id: &str,
+    parent_session_id: &str,
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
     frame_id: Option<&str>,
@@ -421,7 +429,7 @@ async fn take_snapshot_inner(
         };
 
     let (ax_params, effective_session_id) =
-        resolve_ax_session(frame_id, session_id, iframe_sessions);
+        resolve_ax_session(frame_id, parent_session_id, iframe_sessions);
     // Same-origin children share a CDP session but have separate loaders;
     // out-of-process children also have their own effective session identity.
     let frame_tree = client
@@ -689,6 +697,7 @@ async fn take_snapshot_inner(
                 if let Ok(child_text) = Box::pin(take_snapshot_inner(
                     client,
                     session_id,
+                    effective_session_id,
                     options,
                     ref_map,
                     Some(&child_fid),

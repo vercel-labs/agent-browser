@@ -357,31 +357,20 @@ pub(super) async fn create_frame_isolated_world(
         .ok_or_else(|| format!("Could not create isolated world for frame {}", frame_id))
 }
 
-/// Find the CDP session that owns `frame_id`: its dedicated OOPIF session if
-/// present, otherwise the session whose frame tree contains `frame_id`,
-/// falling back to `top_session`.
+/// Find the CDP session that owns `frame_id` within the active tab's frame tree.
+/// Rejects frames belonging to background tabs even if their OOPIF sessions are
+/// retained in `iframe_sessions`.
 pub(super) async fn find_frame_host_session(
     client: &CdpClient,
     top_session: &str,
     frame_id: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> String {
-    if let Some(sid) = iframe_sessions.get(frame_id) {
-        return sid.clone();
-    }
-    for candidate in
-        std::iter::once(top_session).chain(iframe_sessions.values().map(String::as_str))
-    {
-        if let Ok(tree) = client
-            .send_command_no_params("Page.getFrameTree", Some(candidate))
-            .await
-        {
-            if super::snapshot::frame_loader(&tree["frameTree"], Some(frame_id)).is_some() {
-                return candidate.to_string();
-            }
-        }
-    }
-    top_session.to_string()
+) -> Result<String, String> {
+    let active = super::a11y::active_frame_sessions(client, top_session, iframe_sessions).await?;
+    active
+        .get(frame_id)
+        .cloned()
+        .ok_or_else(|| format!("Frame {} not found in active tab", frame_id))
 }
 
 /// Find a selector inside a same-process iframe (same-origin or same-site
@@ -515,17 +504,22 @@ pub(super) async fn ensure_ref_document_current(
     let Some((issued_session, issued_loader)) = entry.document.as_ref() else {
         return Ok(());
     };
-    let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
     let stale = || {
         format!(
             "Ref @{ref_id} {STALE_DOCUMENT_MARKER} (the page navigated or the frame was removed). Take a new snapshot and use a fresh ref."
         )
     };
-    if issued_session != effective_session_id {
+    let effective_session_id = match frame {
+        Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions)
+            .await
+            .map_err(|_| stale())?,
+        None => session_id.to_string(),
+    };
+    if issued_session != &effective_session_id {
         return Err(stale());
     }
     let Ok(tree) = client
-        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id.as_str()))
         .await
     else {
         return Ok(());
@@ -545,13 +539,18 @@ pub(super) async fn current_document(
     frame: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Option<(String, String)> {
-    let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
+    let effective_session_id = match frame {
+        Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions)
+            .await
+            .ok()?,
+        None => session_id.to_string(),
+    };
     let tree = client
-        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id.as_str()))
         .await
         .ok()?;
     let loader = super::snapshot::frame_loader(&tree["frameTree"], frame)?;
-    Some((effective_session_id.to_string(), loader.to_string()))
+    Some((effective_session_id, loader.to_string()))
 }
 
 async fn resolve_ref_center(
@@ -563,8 +562,11 @@ async fn resolve_ref_center(
     iframe_sessions: &HashMap<String, String>,
     require_actionable: bool,
 ) -> Result<(f64, f64, String), String> {
-    let effective_session_id =
-        resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
+    let effective_session_id = match entry.frame_id.as_deref() {
+        Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions).await?,
+        None => session_id.to_string(),
+    };
+    let effective_session_id = effective_session_id.as_str();
 
     // Try cached backend_node_id first (fast path)
     if let Some(backend_node_id) = entry.backend_node_id {
@@ -664,16 +666,16 @@ pub async fn resolve_element_center(
 
     // CSS selector: honor an active `frame <sel>` selection.
     if let Some(frame_id) = active_frame() {
+        let host_session =
+            find_frame_host_session(client, session_id, &frame_id, iframe_sessions).await?;
         // Cross-process iframe: its dedicated session's main frame IS the
         // iframe, so plain document-rooted resolution works there.
-        if let Some(frame_session) = iframe_sessions.get(&frame_id) {
+        if iframe_sessions.get(&frame_id).map(String::as_str) == Some(host_session.as_str()) {
             let (x, y) =
-                resolve_by_selector(client, frame_session, selector_or_ref, require_actionable)
+                resolve_by_selector(client, &host_session, selector_or_ref, require_actionable)
                     .await?;
-            return Ok((x, y, frame_session.clone()));
+            return Ok((x, y, host_session));
         }
-        let host_session =
-            find_frame_host_session(client, session_id, &frame_id, iframe_sessions).await;
         let (x, y) = resolve_center_in_same_process_frame(
             client,
             &host_session,
@@ -841,8 +843,11 @@ async fn resolve_ref_object_id(
     ref_id: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(String, String), String> {
-    let effective_session_id =
-        resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
+    let effective_session_id = match entry.frame_id.as_deref() {
+        Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions).await?,
+        None => session_id.to_string(),
+    };
+    let effective_session_id = effective_session_id.as_str();
 
     // Try cached backend_node_id first (fast path)
     if let Some(backend_node_id) = entry.backend_node_id {
@@ -920,7 +925,9 @@ pub async fn resolve_element_object_id(
 
     // Selector fallback (CSS or XPath): honor an active `frame <sel>` selection.
     if let Some(frame_id) = active_frame() {
-        if let Some(frame_session) = iframe_sessions.get(&frame_id) {
+        let host_session =
+            find_frame_host_session(client, session_id, &frame_id, iframe_sessions).await?;
+        if iframe_sessions.get(&frame_id).map(String::as_str) == Some(host_session.as_str()) {
             let js = build_find_element_js(selector_or_ref);
             let result: EvaluateResult = client
                 .send_command_typed(
@@ -930,17 +937,15 @@ pub async fn resolve_element_object_id(
                         return_by_value: Some(false),
                         await_promise: Some(false),
                     },
-                    Some(frame_session.as_str()),
+                    Some(host_session.as_str()),
                 )
                 .await?;
             let object_id = result
                 .result
                 .object_id
                 .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
-            return Ok((object_id, frame_session.clone()));
+            return Ok((object_id, host_session));
         }
-        let host_session =
-            find_frame_host_session(client, session_id, &frame_id, iframe_sessions).await;
         let object_id =
             resolve_object_in_same_process_frame(client, &host_session, &frame_id, selector_or_ref)
                 .await?;
@@ -1014,9 +1019,7 @@ pub(super) fn resolve_ax_session<'a>(
     }
 }
 
-/// Resolve the effective CDP session for an element's frame.
-/// If the element's frame_id has a dedicated cross-origin iframe session, return it.
-/// Otherwise, return the parent session.
+#[cfg(test)]
 fn resolve_frame_session<'a>(
     frame_id: Option<&str>,
     session_id: &'a str,
@@ -1044,8 +1047,12 @@ async fn find_node_id_by_role_name(
             role, name
         ));
     }
+    let host_session = match frame_id {
+        Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions).await?,
+        None => session_id.to_string(),
+    };
     let (ax_params, effective_session_id) =
-        resolve_ax_session(frame_id, session_id, iframe_sessions);
+        resolve_ax_session(frame_id, &host_session, iframe_sessions);
     let ax_tree: GetFullAXTreeResult = client
         .send_command_typed_raw(
             "Accessibility.getFullAXTree",

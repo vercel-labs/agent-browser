@@ -8051,24 +8051,31 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             .unwrap_or("visible");
         // Honor an active `frame <sel>` selection, like element resolution does.
         match state.active_frame_id.as_deref() {
-            Some(frame_id) => match state.iframe_sessions.get(frame_id) {
-                Some(frame_session) => {
-                    wait_for_selector(&mgr.client, frame_session, selector, state_str, timeout_ms)
+            Some(frame_id) => {
+                let host_session = super::element::find_frame_host_session(
+                    &mgr.client,
+                    &session_id,
+                    frame_id,
+                    &state.iframe_sessions,
+                )
+                .await?;
+                if state.iframe_sessions.get(frame_id).map(String::as_str)
+                    == Some(host_session.as_str())
+                {
+                    wait_for_selector(&mgr.client, &host_session, selector, state_str, timeout_ms)
                         .await?
-                }
-                None => {
+                } else {
                     wait_for_selector_in_frame(
                         &mgr.client,
-                        &session_id,
+                        &host_session,
                         frame_id,
-                        &state.iframe_sessions,
                         selector,
                         state_str,
                         timeout_ms,
                     )
                     .await?
                 }
-            },
+            }
             None => {
                 wait_for_selector(&mgr.client, &session_id, selector, state_str, timeout_ms).await?
             }
@@ -8368,19 +8375,14 @@ async fn wait_for_function(
 /// wait_for_selector inside a same-process iframe selected via `frame <sel>`:
 /// polls through the owner element's contentDocument, which stays correct
 /// even if the frame navigates (the getter re-resolves every poll).
-#[allow(clippy::too_many_arguments)]
 async fn wait_for_selector_in_frame(
     client: &super::cdp::client::CdpClient,
-    session_id: &str,
+    host_session: &str,
     frame_id: &str,
-    iframe_sessions: &HashMap<String, String>,
     selector: &str,
     state: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let host_session =
-        super::element::find_frame_host_session(client, session_id, frame_id, iframe_sessions)
-            .await;
     let sel = serde_json::to_string(selector).unwrap_or_default();
     let check = match state {
         "attached" => format!("!!document.querySelector({sel})"),
@@ -8410,7 +8412,7 @@ async fn wait_for_selector_in_frame(
             Some(id) => id,
             None => {
                 let id =
-                    super::element::create_frame_isolated_world(client, &host_session, frame_id)
+                    super::element::create_frame_isolated_world(client, host_session, frame_id)
                         .await?;
                 ctx_id = Some(id);
                 id
@@ -8425,7 +8427,7 @@ async fn wait_for_selector_in_frame(
                     "returnByValue": true,
                     "awaitPromise": false,
                 })),
-                Some(&host_session),
+                Some(host_session),
             )
             .await;
         let satisfied = match result {
@@ -11776,7 +11778,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                         fid,
                         &state.iframe_sessions,
                     )
-                    .await
+                    .await?
                 }
                 None => session_id.clone(),
             };
@@ -11791,6 +11793,13 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                 .await?;
 
             let frame_id = iframe_frame_id(&describe, "Ref does not point to an iframe element")?;
+            super::element::find_frame_host_session(
+                &mgr.client,
+                &session_id,
+                &frame_id,
+                &state.iframe_sessions,
+            )
+            .await?;
             let label = iframe_attribute(&describe, "name").unwrap_or(&ref_id);
 
             state.active_frame_id = Some(frame_id);
@@ -11800,7 +11809,15 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         // CSS selector path: resolve inside the active frame (or top document
         // when no frame is selected) and read the child frame ID via DOM.describeNode.
         let (object_id, elem_session) = if let Some(cur_fid) = state.active_frame_id.as_deref() {
-            if let Some(frame_session) = state.iframe_sessions.get(cur_fid) {
+            let host_session = super::element::find_frame_host_session(
+                &mgr.client,
+                &session_id,
+                cur_fid,
+                &state.iframe_sessions,
+            )
+            .await?;
+            if state.iframe_sessions.get(cur_fid).map(String::as_str) == Some(host_session.as_str())
+            {
                 let lookup: Value = mgr
                     .client
                     .send_command(
@@ -11812,7 +11829,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                             ),
                             "returnByValue": false,
                         })),
-                        Some(frame_session),
+                        Some(&host_session),
                     )
                     .await?;
                 if let Some(details) = lookup.get("exceptionDetails") {
@@ -11828,15 +11845,8 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                     .and_then(|v| v.as_str())
                     .ok_or("Could not find frame for selector")?
                     .to_string();
-                (oid, frame_session.clone())
+                (oid, host_session)
             } else {
-                let host_session = super::element::find_frame_host_session(
-                    &mgr.client,
-                    &session_id,
-                    cur_fid,
-                    &state.iframe_sessions,
-                )
-                .await;
                 let oid = super::element::resolve_object_in_same_process_frame(
                     &mgr.client,
                     &host_session,
@@ -11896,6 +11906,13 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             .await;
         let describe = describe?;
         let frame_id = iframe_frame_id(&describe, "Could not find frame for selector")?;
+        super::element::find_frame_host_session(
+            &mgr.client,
+            &session_id,
+            &frame_id,
+            &state.iframe_sessions,
+        )
+        .await?;
         let label = ["name", "id", "src"]
             .iter()
             .find_map(|attr| iframe_attribute(&describe, attr).filter(|v| !v.is_empty()))
@@ -11911,10 +11928,14 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         return Ok(json!({ "frame": label }));
     }
 
-    for iframe_sid in state.iframe_sessions.values() {
+    let active_iframe_sids =
+        a11y::active_iframe_session_ids(&mgr.client, &session_id, &state.iframe_sessions)
+            .await
+            .unwrap_or_default();
+    for iframe_sid in active_iframe_sids {
         if let Ok(sub_tree) = mgr
             .client
-            .send_command_no_params("Page.getFrameTree", Some(iframe_sid))
+            .send_command_no_params("Page.getFrameTree", Some(&iframe_sid))
             .await
         {
             if let Some(frame_id) = find_frame(&sub_tree["frameTree"], name, url) {
@@ -12247,14 +12268,29 @@ async fn eval_body_in_active_frame(
     body: &str,
 ) -> Result<Value, String> {
     match frame_id {
-        Some(fid) if !iframe_sessions.contains_key(fid) => {
+        Some(fid) => {
             let host_session = super::element::find_frame_host_session(
                 &mgr.client,
                 top_session,
                 fid,
                 iframe_sessions,
             )
-            .await;
+            .await?;
+            if iframe_sessions.get(fid).map(String::as_str) == Some(host_session.as_str()) {
+                let res: super::cdp::types::EvaluateResult = mgr
+                    .client
+                    .send_command_typed(
+                        "Runtime.evaluate",
+                        &super::cdp::types::EvaluateParams {
+                            expression: format!("({body})(document)"),
+                            return_by_value: Some(true),
+                            await_promise: Some(false),
+                        },
+                        Some(host_session.as_str()),
+                    )
+                    .await?;
+                return Ok(res.result.value.unwrap_or(Value::Null));
+            }
             let ctx_id =
                 super::element::create_frame_isolated_world(&mgr.client, &host_session, fid)
                     .await?;
@@ -12277,11 +12313,7 @@ async fn eval_body_in_active_frame(
                 .cloned()
                 .unwrap_or(Value::Null))
         }
-        _ => {
-            let session = frame_id
-                .and_then(|f| iframe_sessions.get(f))
-                .map(|s| s.as_str())
-                .unwrap_or(top_session);
+        None => {
             let res: super::cdp::types::EvaluateResult = mgr
                 .client
                 .send_command_typed(
@@ -12291,7 +12323,7 @@ async fn eval_body_in_active_frame(
                         return_by_value: Some(true),
                         await_promise: Some(false),
                     },
-                    Some(session),
+                    Some(top_session),
                 )
                 .await?;
             Ok(res.result.value.unwrap_or(Value::Null))

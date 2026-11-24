@@ -2614,6 +2614,230 @@ async fn e2e_wait_selector_in_same_site_and_oopif_frames() {
     s2.abort();
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_frame_lookup_ignores_background_tab_iframes() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buffer[..read]);
+                let body = if req.starts_with("GET /bg-only ") {
+                    "<!doctype html><p id='val'>bg-secret</p>".to_string()
+                } else if req.starts_with("GET /fg-shared ") {
+                    "<!doctype html><p id='val'>fg-visible</p>".to_string()
+                } else if req.starts_with("GET /fg ") {
+                    format!(
+                        "<!doctype html><iframe name='shared_frame' src='http://localhost:{port}/fg-shared' width='300' height='100'></iframe>"
+                    )
+                } else {
+                    format!(
+                        "<!doctype html><iframe name='bg_only_frame' src='http://localhost:{port}/bg-only' width='300' height='100'></iframe>\
+                        <iframe name='shared_frame' src='http://localhost:{port}/bg-only' width='300' height='100'></iframe>"
+                    )
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    // Tab 0 (will become background tab): has OOPIFs bg_only_frame and shared_frame.
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{port}/bg")}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "frame", "selector": "iframe[name=bg_only_frame]"}),
+            &mut state,
+        )
+        .await,
+    );
+    let bg_frame_id = state.active_frame_id.clone().expect("bg frame selected");
+
+    // Tab 1 (active tab): has only shared_frame with fg-visible, no bg_only_frame.
+    assert_success(
+        &execute_command(
+            &json!({"id": "4", "action": "tab_new", "url": format!("http://127.0.0.1:{port}/fg")}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({"id": "5", "action": "snapshot"}), &mut state).await);
+
+    // Lookup by name or URL must not resolve the background tab's OOPIF.
+    let by_name = execute_command(
+        &json!({"id": "6", "action": "frame", "name": "bg_only_frame"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        by_name["success"], false,
+        "background frame by name: {by_name}"
+    );
+
+    let by_url = execute_command(
+        &json!({"id": "7", "action": "frame", "url": "/bg-only"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        by_url["success"], false,
+        "background frame by url: {by_url}"
+    );
+
+    // Same frame name in both tabs resolves only in the active tab.
+    assert_success(
+        &execute_command(
+            &json!({"id": "8", "action": "frame", "name": "shared_frame"}),
+            &mut state,
+        )
+        .await,
+    );
+    let text = execute_command(
+        &json!({"id": "9", "action": "gettext", "selector": "#val"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&text);
+    assert_eq!(get_data(&text)["text"], "fg-visible");
+
+    // Even if active_frame_id still holds a background tab's frame ID, wait and
+    // gettext must reject it rather than reading from the background tab.
+    state.active_frame_id = Some(bg_frame_id);
+    let stale_get = execute_command(
+        &json!({"id": "10", "action": "gettext", "selector": "#val"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        stale_get["success"], false,
+        "background frame gettext: {stale_get}"
+    );
+    let stale_wait = execute_command(
+        &json!({"id": "11", "action": "wait", "selector": "#val", "timeout": 500}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        stale_wait["success"], false,
+        "background frame wait: {stale_wait}"
+    );
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_expands_in_process_child_inside_oopif() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buffer[..read]);
+                let body = if req.starts_with("GET /oopif ") {
+                    format!(
+                        "<!doctype html><iframe id='inner-local' src='http://localhost:{port}/in-process-child' width='300' height='120'></iframe>"
+                    )
+                } else if req.starts_with("GET /in-process-child ") {
+                    "<!doctype html><button id='deep-btn' onclick=\"this.textContent='Deep clicked'\">Deep action</button>".to_string()
+                } else {
+                    format!(
+                        "<!doctype html><iframe id='middle' src='http://localhost:{port}/oopif' width='400' height='220'></iframe>"
+                    )
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{port}/top")}),
+            &mut state,
+        )
+        .await,
+    );
+
+    let snap = execute_command(&json!({"id": "3", "action": "snapshot"}), &mut state).await;
+    assert_success(&snap);
+    let refs = get_data(&snap)["refs"].as_object().unwrap();
+    let btn_ref = refs
+        .iter()
+        .find_map(|(k, v)| {
+            (v["role"] == "button" && v["name"] == "Deep action").then(|| format!("@{k}"))
+        })
+        .unwrap_or_else(|| panic!("expected Deep action button in snapshot: {snap}"));
+
+    assert_success(
+        &execute_command(
+            &json!({"id": "4", "action": "click", "selector": btn_ref}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "5", "action": "frame", "selector": "#middle"}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "6", "action": "frame", "selector": "#inner-local"}),
+            &mut state,
+        )
+        .await,
+    );
+    let text = execute_command(
+        &json!({"id": "7", "action": "gettext", "selector": "#deep-btn"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&text);
+    assert_eq!(get_data(&text)["text"], "Deep clicked");
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    server.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
