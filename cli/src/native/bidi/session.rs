@@ -110,6 +110,8 @@ pub struct FirefoxSession {
     _dispatcher: Option<AbortOnDrop>,
     /// Version Firefox reported when the session opened, used for HAR browser metadata.
     pub browser_version: String,
+    #[cfg(test)]
+    owned_for_test: bool,
 }
 
 /// The tab the user is looking at in a running Firefox: the focused one, else a visible one, else
@@ -485,6 +487,8 @@ impl FirefoxSession {
             visited_origins: HashSet::new(),
             _dispatcher: dispatcher,
             browser_version,
+            #[cfg(test)]
+            owned_for_test: false,
         };
         if let Some(contexts) = tree["contexts"].as_array() {
             session.record_context_origins(contexts);
@@ -544,7 +548,17 @@ impl FirefoxSession {
 
     /// Returns whether this session attached to a Firefox someone else runs.
     pub(crate) fn is_attached(&self) -> bool {
+        #[cfg(test)]
+        if self.owned_for_test {
+            return false;
+        }
         self.process.is_none()
+    }
+
+    /// Marks a fake session as daemon-owned in unit tests without spawning a Firefox process.
+    #[cfg(test)]
+    pub(crate) fn mark_owned(&mut self) {
+        self.owned_for_test = true;
     }
 
     /// Whether the default idle timeout must leave this browser running: the daemon
@@ -713,6 +727,13 @@ impl FirefoxSession {
                 e["method"].as_str(),
                 Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
             ) {
+                if e["method"].as_str() == Some("browsingContext.domContentLoaded") {
+                    if let (Some(context), Some(url)) =
+                        (e["params"]["context"].as_str(), e["params"]["url"].as_str())
+                    {
+                        self.contexts.set_url(context, url);
+                    }
+                }
                 if let Some(url) = e["params"]["url"].as_str() {
                     self.note_visit(url);
                 }
@@ -855,7 +876,10 @@ impl FirefoxSession {
         release: &mut Option<PendingRelease>,
     ) -> Result<bool, String> {
         let lost = self.bidi.take_event_loss();
-        if !lost && !self.events.has_lost_events() && !self.contexts.active().is_empty() {
+        if !lost
+            && !self.events.has_lost_events()
+            && (!self.contexts.active().is_empty() || self.contexts.pinned_gone().is_some())
+        {
             return Ok(false);
         }
         let lost = lost || self.events.has_lost_events();
@@ -1052,6 +1076,11 @@ impl FirefoxSession {
     /// The tab that holds the active context.
     pub fn active_tab(&self) -> &str {
         self.contexts.active_tab()
+    }
+
+    /// Enables or disables strict tab pinning on this Firefox session.
+    pub fn set_pin(&mut self, pin: bool) {
+        self.contexts.set_pin(pin);
     }
 
     /// URL of `context`, read from the browsing context tree.
@@ -1415,6 +1444,7 @@ pub(crate) mod tests {
             inflight: HashMap::new(),
             _dispatcher: None,
             browser_version: "159.0".into(),
+            owned_for_test: false,
         }
     }
 

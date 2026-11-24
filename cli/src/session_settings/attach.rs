@@ -6,7 +6,7 @@
 //! what `reach` calls in place.
 
 use super::running::Connection;
-use super::spec::Key;
+use super::spec::{Key, RESTORE_UNIT};
 
 /// The engine whose attached browser agent-browser drives over WebDriver BiDi.
 pub(super) const FIREFOX: &str = "firefox";
@@ -28,6 +28,9 @@ pub enum Where {
 
 /// Where `key` can take effect.
 pub fn placement(key: Key) -> Where {
+    if RESTORE_UNIT.contains(&key) {
+        return Where::Attach;
+    }
     match key {
         Key::UserAgent => Where::FirefoxOnly,
         Key::DownloadPath => Where::FirefoxOrAttach,
