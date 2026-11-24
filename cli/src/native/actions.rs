@@ -5889,6 +5889,14 @@ async fn validate_restore_if_pending(state: &mut DaemonState) {
     if !state.restore_validation_pending {
         return;
     }
+    state.drain_firefox_events();
+    if state
+        .firefox
+        .as_ref()
+        .is_some_and(|ff| ff.contexts.pinned_gone().is_some())
+    {
+        return;
+    }
     state.restore_validation_pending = false;
 
     match validate_restored_state(state).await {
@@ -8251,26 +8259,29 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let outcome = Box::pin(interaction::fill(
+    let mut control = interaction::CdpControl::resolve(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
-        value,
         &state.iframe_sessions,
-    ))
+    )
     .await?;
-    Ok(form_outcome_data(
-        state,
-        json!({ "filled": selector }),
-        outcome.warning,
-    ))
+    let outcome = Box::pin(forms::fill(&mut control, value)).await?;
+    Ok(form_response(state, json!({ "filled": selector }), outcome))
 }
 
-/// Queues a form action's warning on the out-of-band channel and returns the
-/// response data unchanged.
-fn form_outcome_data(state: &mut DaemonState, data: Value, warning: Option<String>) -> Value {
-    if let Some(warning) = warning {
+/// Response of a text action: a dialog that opened is reported in the data,
+/// and a warning is queued on the out-of-band channel.
+pub(crate) fn form_response(
+    state: &mut DaemonState,
+    mut data: Value,
+    outcome: forms::FormOutcome,
+) -> Value {
+    if outcome.dialog_opened {
+        data["dialogOpened"] = json!(true);
+    }
+    if let Some(warning) = outcome.warning {
         state.push_action_warning(&warning);
     }
     data
@@ -8290,22 +8301,16 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     let delay = cmd.get("delay").and_then(|v| v.as_u64());
 
-    let outcome = Box::pin(interaction::type_text(
+    let mut control = interaction::CdpControl::resolve(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
-        text,
-        clear,
-        delay,
         &state.iframe_sessions,
-    ))
+    )
     .await?;
-    Ok(form_outcome_data(
-        state,
-        json!({ "typed": text }),
-        outcome.warning,
-    ))
+    let outcome = Box::pin(forms::type_text(&mut control, text, clear, delay)).await?;
+    Ok(form_response(state, json!({ "typed": text }), outcome))
 }
 
 async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -8418,9 +8423,25 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "scrolled": true }))
 }
 
+/// The values a `select` names: `values` as a list or one string, or `value`.
+pub(crate) fn select_values(cmd: &Value) -> Vec<String> {
+    match cmd.get("values") {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        Some(Value::String(value)) => vec![value.clone()],
+        _ => cmd
+            .get("value")
+            .and_then(Value::as_str)
+            .map(|value| vec![value.to_string()])
+            .unwrap_or_default(),
+    }
+}
+
 /// The optional `by` field restricts `select` matching to option values or
 /// visible labels.
-fn select_by(cmd: &Value) -> Result<Option<&str>, String> {
+pub(crate) fn select_by(cmd: &Value) -> Result<Option<&str>, String> {
     match cmd.get("by") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(by)) if by == "value" || by == "label" => Ok(Some(by.as_str())),
@@ -8436,31 +8457,28 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let values: Vec<String> = match cmd.get("values") {
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect(),
-        Some(Value::String(s)) => vec![s.clone()],
-        _ => cmd
-            .get("value")
-            .and_then(|v| v.as_str())
-            .map(|s| vec![s.to_string()])
-            .unwrap_or_default(),
-    };
-
+    let values = select_values(cmd);
     let by = select_by(cmd)?;
 
-    let outcome = interaction::select_option(
+    let mut control = interaction::CdpControl::resolve(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
-        &values,
-        by,
         &state.iframe_sessions,
     )
-    .await;
+    .await?;
+    let outcome = forms::select(&mut control, &values, by).await;
+    select_response(state, values, outcome)
+}
+
+/// Response of a select: a refusal carries the options the page offered as
+/// error data.
+pub(crate) fn select_response(
+    state: &mut DaemonState,
+    values: Vec<String>,
+    outcome: Result<(), forms::SelectError>,
+) -> Result<Value, String> {
     if let Err(e) = outcome {
         state.error_data = e.options.map(|options| json!({ "options": options }));
         return Err(e.message);
@@ -8470,12 +8488,18 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
 /// Response of a check or uncheck; an unverified or unchanged toggle queues a
 /// warning.
-fn toggle_response(
+pub(crate) fn toggle_response(
     state: &mut DaemonState,
     key: &str,
     selector: &str,
-    outcome: &interaction::ToggleOutcome,
+    outcome: &forms::ToggleOutcome,
 ) -> Value {
+    if let Some(position) = outcome.position {
+        (state.mouse_state.x, state.mouse_state.y) = position;
+        if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
+            cursor.record(position.0, position.1, state.mouse_state.buttons);
+        }
+    }
     let mut notes = Vec::new();
     if !outcome.verified {
         notes.push(super::element::STATE_NOT_VERIFIED.to_string());
@@ -8483,10 +8507,13 @@ fn toggle_response(
     if let Some(warning) = &outcome.warning {
         notes.push(warning.clone());
     }
-    form_outcome_data(
+    form_response(
         state,
         json!({ key: selector }),
-        (!notes.is_empty()).then(|| notes.join("\n")),
+        forms::FormOutcome {
+            warning: (!notes.is_empty()).then(|| notes.join("\n")),
+            dialog_opened: false,
+        },
     )
 }
 
@@ -8498,7 +8525,7 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let outcome = interaction::check(
+    let mut control = interaction::CdpControl::resolve(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -8506,12 +8533,7 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &state.iframe_sessions,
     )
     .await?;
-    if let Some(position) = outcome.position {
-        (state.mouse_state.x, state.mouse_state.y) = position;
-        if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-            cursor.record(position.0, position.1, state.mouse_state.buttons);
-        }
-    }
+    let outcome = Box::pin(forms::set_checked(&mut control, true)).await?;
     Ok(toggle_response(state, "checked", selector, &outcome))
 }
 
@@ -8523,7 +8545,7 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let outcome = interaction::uncheck(
+    let mut control = interaction::CdpControl::resolve(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -8531,12 +8553,7 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         &state.iframe_sessions,
     )
     .await?;
-    if let Some(position) = outcome.position {
-        (state.mouse_state.x, state.mouse_state.y) = position;
-        if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-            cursor.record(position.0, position.1, state.mouse_state.buttons);
-        }
-    }
+    let outcome = Box::pin(forms::set_checked(&mut control, false)).await?;
     Ok(toggle_response(state, "unchecked", selector, &outcome))
 }
 
@@ -12483,23 +12500,7 @@ async fn execute_subaction(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'value' for fill subaction")?;
-            let outcome = Box::pin(interaction::fill(
-                &mgr.client,
-                &session_id,
-                &state.ref_map,
-                selector,
-                value,
-                &state.iframe_sessions,
-            ))
-            .await?;
-            Ok(form_outcome_data(
-                state,
-                json!({ "filled": selector }),
-                outcome.warning,
-            ))
-        }
-        "check" => {
-            let outcome = interaction::check(
+            let mut control = interaction::CdpControl::resolve(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
@@ -12507,12 +12508,19 @@ async fn execute_subaction(
                 &state.iframe_sessions,
             )
             .await?;
-            if let Some(position) = outcome.position {
-                (state.mouse_state.x, state.mouse_state.y) = position;
-                if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-                    cursor.record(position.0, position.1, state.mouse_state.buttons);
-                }
-            }
+            let outcome = Box::pin(forms::fill(&mut control, value)).await?;
+            Ok(form_response(state, json!({ "filled": selector }), outcome))
+        }
+        "check" => {
+            let mut control = interaction::CdpControl::resolve(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                &state.iframe_sessions,
+            )
+            .await?;
+            let outcome = Box::pin(forms::set_checked(&mut control, true)).await?;
             Ok(toggle_response(state, "checked", selector, &outcome))
         }
         "hover" => {
@@ -13435,9 +13443,9 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
     {
         return Err(format!("No element found: {selector}"));
     }
-    if let Some((code, message)) = interaction::select_failure(&result, &values, by) {
+    if let Some((code, message)) = forms::select_failure(&result, &values, by) {
         return Err(match code {
-            Some(code) => interaction::form_error(code, message),
+            Some(code) => forms::form_error(code, message),
             None => message,
         });
     }
@@ -17224,7 +17232,7 @@ fn error_response(id: &str, error: &str) -> Value {
         resp["code"] = json!("tab_gone");
     } else if error.starts_with(super::browser::PAGE_WEDGED_PREFIX) {
         resp["code"] = json!("page_wedged");
-    } else if let Some(code) = interaction::form_error_code(error) {
+    } else if let Some(code) = forms::form_error_code(error) {
         resp["code"] = json!(code);
     } else if let Some(code) = super::browser::precondition_code(error) {
         resp["code"] = json!(code);
@@ -17668,7 +17676,7 @@ mod tests {
             &mut state,
             "checked",
             "#c",
-            &interaction::ToggleOutcome {
+            &forms::ToggleOutcome {
                 verified: false,
                 ..Default::default()
             },
@@ -17678,10 +17686,13 @@ mod tests {
         let mut resp = success_response("1", data);
         attach_action_warning(&mut resp, &mut state);
         assert_eq!(resp["warning"], super::super::element::STATE_NOT_VERIFIED);
-        let data = form_outcome_data(
+        let data = form_response(
             &mut state,
             json!({ "filled": "#f" }),
-            Some("value_mismatch".to_string()),
+            forms::FormOutcome {
+                warning: Some("value_mismatch".to_string()),
+                dialog_opened: false,
+            },
         );
         assert!(data.get("postActionWarning").is_none());
         let mut resp = success_response("1b", data);
@@ -17695,7 +17706,7 @@ mod tests {
             &mut state,
             "unchecked",
             "#c",
-            &interaction::ToggleOutcome {
+            &forms::ToggleOutcome {
                 verified: true,
                 ..Default::default()
             },
