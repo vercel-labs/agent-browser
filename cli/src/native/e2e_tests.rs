@@ -5936,6 +5936,290 @@ async fn e2e_press_dispatches_single_keystroke() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_keydown_keyup_send_code_and_key_code() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<input id='i'><script>",
+        "window.__k=[];",
+        "for(const t of ['keydown','keypress','keyup'])",
+        "addEventListener(t,e=>__k.push(t+' '+e.key+' '+e.code+' '+e.keyCode+' '",
+        "+e.location+' '+e.shiftKey),true);",
+        "</script>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "focus", "selector": "#i" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let steps = [
+        ("keydown", "w"),
+        ("keyup", "w"),
+        ("keydown", "Shift"),
+        ("keyup", "Shift"),
+        ("keydown", "KeyD"),
+        ("keyup", "KeyD"),
+        ("keydown", "ArrowUp"),
+        ("keyup", "ArrowUp"),
+        ("press", "Shift"),
+    ];
+    for (i, (action, key)) in steps.iter().enumerate() {
+        let resp = execute_command(
+            &json!({ "id": format!("k{i}"), "action": action, "key": key }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+    }
+
+    assert_evaluate(
+        &mut state,
+        "4",
+        "({ events: __k, value: document.getElementById('i').value })",
+        json!({
+            "events": [
+                "keydown w KeyW 87 0 false",
+                "keypress w KeyW 119 0 false",
+                "keyup w KeyW 87 0 false",
+                "keydown Shift ShiftLeft 16 1 true",
+                "keyup Shift ShiftLeft 16 1 false",
+                "keydown d KeyD 68 0 false",
+                "keypress d KeyD 100 0 false",
+                "keyup d KeyD 68 0 false",
+                "keydown ArrowUp ArrowUp 38 0 false",
+                "keyup ArrowUp ArrowUp 38 0 false",
+                "keydown Shift ShiftLeft 16 1 true",
+                "keyup Shift ShiftLeft 16 1 false",
+            ],
+            "value": "wd",
+        }),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_press_applies_shift_alt_and_held_modifiers() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<input id=f><script>window.log=[];",
+        "addEventListener('keydown',e=>log.push(e.key+' shift='+e.shiftKey+' alt='+e.altKey),true)",
+        "</script>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "focus", "selector": "#f" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for (i, mut cmd) in [
+        json!({ "action": "press", "key": "Shift+l" }),
+        json!({ "action": "press", "key": "Shift+1" }),
+        json!({ "action": "press", "key": "Alt+l" }),
+        json!({ "action": "keydown", "key": "Shift" }),
+        json!({ "action": "press", "key": "l" }),
+        json!({ "action": "keyup", "key": "Shift" }),
+        json!({ "action": "press", "key": "l" }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cmd["id"] = json!(format!("key-{i}"));
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_success(&resp);
+    }
+
+    assert_evaluate(
+        &mut state,
+        "4",
+        "({ log, value: document.getElementById('f').value })",
+        json!({
+            "log": [
+                "Shift shift=true alt=false",
+                "L shift=true alt=false",
+                "Shift shift=true alt=false",
+                "! shift=true alt=false",
+                "Alt shift=false alt=true",
+                "l shift=false alt=true",
+                "Shift shift=true alt=false",
+                "L shift=true alt=false",
+                "l shift=false alt=false",
+            ],
+            "value": "L!Ll",
+        }),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_held_modifier_reaches_mouse_events() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "evaluate",
+            "script": r#"(() => {
+                window.__mods = [];
+                for (const type of ['keydown', 'pointermove', 'pointerdown', 'pointerup']) {
+                    document.addEventListener(type, (e) => window.__mods.push(`${type}:${e.altKey}:${e.shiftKey}`));
+                }
+                return true;
+            })()"#
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let steps = [
+        json!({ "action": "keydown", "key": "Alt" }),
+        json!({ "action": "mousemove", "x": 20, "y": 20 }),
+        json!({ "action": "mousedown", "button": "left" }),
+        json!({ "action": "mousemove", "x": 60, "y": 60 }),
+        json!({ "action": "mouseup", "button": "left" }),
+        json!({ "action": "keyup", "key": "Alt" }),
+        json!({ "action": "keydown", "key": "Shift" }),
+        json!({ "action": "mousemove", "x": 80, "y": 80 }),
+        json!({ "action": "keyup", "key": "Shift" }),
+        json!({ "action": "mousemove", "x": 90, "y": 90 }),
+    ];
+    for (i, mut step) in steps.into_iter().enumerate() {
+        step["id"] = json!(format!("s{i}"));
+        assert_success(&execute_command(&step, &mut state).await);
+    }
+
+    assert_evaluate(
+        &mut state,
+        "3",
+        "window.__mods",
+        json!([
+            "keydown:true:false",
+            "pointermove:true:false",
+            "pointerdown:true:false",
+            "pointermove:true:false",
+            "pointerup:true:false",
+            "keydown:false:true",
+            "pointermove:false:true",
+            "pointermove:false:false",
+        ]),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_press_chord_dispatches_modifier_key_events() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<html><body><input id='input'><script>",
+        "window.events=[];const input=document.getElementById('input');",
+        "for(const type of ['keydown','keyup'])input.addEventListener(type,e=>",
+        "events.push({type,key:e.key,code:e.code,keyCode:e.keyCode,ctrlKey:e.ctrlKey,shiftKey:e.shiftKey}));",
+        "input.focus();",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "press", "key": "Control+l" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "press", "key": "Shift+b" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    assert_evaluate(
+        &mut state,
+        "5",
+        "({ events, value: input.value })",
+        json!({
+            "events": [
+                { "type": "keydown", "key": "Control", "code": "ControlLeft", "keyCode": 17, "ctrlKey": true, "shiftKey": false },
+                { "type": "keydown", "key": "l", "code": "KeyL", "keyCode": 76, "ctrlKey": true, "shiftKey": false },
+                { "type": "keyup", "key": "l", "code": "KeyL", "keyCode": 76, "ctrlKey": true, "shiftKey": false },
+                { "type": "keyup", "key": "Control", "code": "ControlLeft", "keyCode": 17, "ctrlKey": false, "shiftKey": false },
+                { "type": "keydown", "key": "Shift", "code": "ShiftLeft", "keyCode": 16, "ctrlKey": false, "shiftKey": true },
+                { "type": "keydown", "key": "B", "code": "KeyB", "keyCode": 66, "ctrlKey": false, "shiftKey": true },
+                { "type": "keyup", "key": "B", "code": "KeyB", "keyCode": 66, "ctrlKey": false, "shiftKey": true },
+                { "type": "keyup", "key": "Shift", "code": "ShiftLeft", "keyCode": 16, "ctrlKey": false, "shiftKey": false },
+            ],
+            "value": "B",
+        }),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Raw mouse regressions
 // ---------------------------------------------------------------------------
@@ -25757,6 +26041,54 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
         &mut state,
     )
     .await;
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_flow_redacts_key_code_alias_passwords() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("ka{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "evaluate", "script": "document.getElementById('pw').value = ''" }),
+        json!({ "action": "click", "selector": "#pw" }),
+        json!({ "action": "press", "key": "KeyH" }),
+        json!({ "action": "keydown", "key": "Digit2" }),
+        json!({ "action": "keyup", "key": "Digit2" }),
+        json!({ "action": "keydown", "key": "Shift" }),
+        json!({ "action": "press", "key": "KeyA" }),
+        json!({ "action": "keyup", "key": "Shift" }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#items" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    assert!(fx.hits("h2A") >= 1, "the page did send the typed password");
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "aliases" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let text = std::fs::read_to_string(dir.path().join("127.0.0.1").join("aliases.json")).unwrap();
+    for forbidden in ["h2A", "KeyH", "Digit2", "KeyA"] {
+        assert!(
+            !text.contains(forbidden),
+            "saved flow should not contain {forbidden}: {text}"
+        );
+    }
+    assert!(text.contains("<redacted>"));
     let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
 }
 
