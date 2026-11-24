@@ -10875,6 +10875,107 @@ async fn e2e_screenshot_annotate_mobile_scaled_viewport_iframe() {
     server.abort();
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_annotate_desktop_visible_scrollbars_iframe() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = if path == "/frame.html" {
+                    "<!doctype html><body style='margin:0;background:#fff'>\
+                    <button style='display:block;margin:50px 0 0 100px;width:100px;height:30px;border:0;background:#eee'>ScrollTopBtn</button>\
+                    </body>"
+                } else {
+                    "<!doctype html>\
+                    <style>\
+                    html{overflow:scroll}\
+                    ::-webkit-scrollbar{width:20px;height:20px;background:#ccc}\
+                    body{margin:0;width:1200px;height:900px;background:#fff}\
+                    </style>\
+                    <body>\
+                    <iframe style='position:absolute;left:300px;top:150px;width:240px;height:120px;border:0' src='/frame.html'></iframe>\
+                    </body>"
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true, "hideScrollbars": false }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "viewport", "width": 600, "height": 400 }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": format!("http://127.0.0.1:{port}/") }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_evaluate(
+        &mut state,
+        "wait",
+        "new Promise(resolve => { const ready = () => { const b = document.querySelector('iframe')?.contentDocument?.querySelector('button'); if (b) resolve(true); else requestAnimationFrame(ready); }; ready(); })",
+        json!(true),
+    )
+    .await;
+
+    let shot_file = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .expect("temp png");
+    let shot_path = shot_file.path().to_string_lossy().to_string();
+    let shot = execute_command(
+        &json!({ "id": "4", "action": "screenshot", "annotate": true, "path": shot_path }),
+        &mut state,
+    )
+    .await;
+    assert_success(&shot);
+
+    let img = image::open(shot_file.path())
+        .expect("decode screenshot")
+        .to_rgba8();
+    // Button sits at (300 + 100, 150 + 50) = (400, 200), size 100x30.
+    // Top-level visible scrollbars must not stretch or shift the composed border.
+    for (px, py) in [(400, 200), (499, 229)] {
+        let p = img.get_pixel(px, py);
+        assert!(
+            p[0] > 180 && p[1] < 100 && p[2] < 100,
+            "expected red border at ({px},{py}), got {p:?}"
+        );
+    }
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+    server.abort();
+}
+
 /// Verifies that `screenshot --annotate` completes in bounded time even with
 /// many interactive elements. Guards against the sequential CDP round-trip
 /// regression that caused hangs over high-latency WSS (Issue #841).

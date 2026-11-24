@@ -939,22 +939,15 @@ async fn get_image_coordinate_space(
         .and_then(Value::as_f64)
         .filter(|v| v.is_finite())
         .unwrap_or(0.0);
-    let css_width = val
-        .get("width")
-        .and_then(Value::as_f64)
-        .filter(|&w| w.is_finite() && w > 0.0)
-        .unwrap_or(0.0);
-    let css_height = val
-        .get("height")
-        .and_then(Value::as_f64)
-        .filter(|&h| h.is_finite() && h > 0.0)
-        .unwrap_or(0.0);
 
+    // Viewport captures include any visible desktop scrollbars, whereas
+    // visualViewport.width/height exclude them, so use dpr * visualViewport.scale
+    // directly instead of dividing captured image dimensions by visualViewport size.
     ImageCoordinateSpace {
         offset_x,
         offset_y,
-        css_width,
-        css_height,
+        css_width: 0.0,
+        css_height: 0.0,
         fallback_scale: dpr * vv_scale,
     }
 }
