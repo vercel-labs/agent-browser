@@ -242,7 +242,7 @@ impl FirefoxSession {
     /// Reads the context tree when no context is active, which happens when the event that
     /// announced the next tab was lost. Returns true when a tab became active.
     pub async fn recover_active_context(&mut self) -> Result<bool, String> {
-        if !self.contexts.active().is_empty() {
+        if !self.contexts.active().is_empty() || self.contexts.pinned_gone().is_some() {
             return Ok(false);
         }
         let tree = self.bidi.send("browsingContext.getTree", json!({})).await?;
@@ -316,6 +316,13 @@ impl FirefoxSession {
                 e["method"].as_str(),
                 Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
             ) {
+                if e["method"].as_str() == Some("browsingContext.domContentLoaded") {
+                    if let (Some(context), Some(url)) =
+                        (e["params"]["context"].as_str(), e["params"]["url"].as_str())
+                    {
+                        self.contexts.set_url(context, url);
+                    }
+                }
                 if let Some(url) = e["params"]["url"].as_str() {
                     self.note_visit(url);
                 }
@@ -574,6 +581,11 @@ impl FirefoxSession {
     /// The tab that holds the active context.
     pub fn active_tab(&self) -> &str {
         self.contexts.active_tab()
+    }
+
+    /// Enables or disables strict tab pinning on this Firefox session.
+    pub fn set_pin(&mut self, pin: bool) {
+        self.contexts.set_pin(pin);
     }
 
     /// URL of `context`, read from the browsing context tree.

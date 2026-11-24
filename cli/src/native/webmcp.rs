@@ -76,7 +76,12 @@ fn full_context_from_tools(ordered: &[&ToolRecord]) -> Option<Value> {
         });
         bytes += entry.to_string().len() + 1;
         // Escapes expand the rendered text well past the JSON size.
-        rendered += crate::output::webmcp_record_len(&tool.name, &tool.frame_id, &tool.description);
+        rendered += crate::output::webmcp_record_len(
+            &tool.origin,
+            &tool.name,
+            &tool.frame_id,
+            &tool.description,
+        );
         catalog.push(entry);
     }
     if bytes > MAX_CONTEXT_BYTES || rendered > MAX_CONTEXT_BYTES {
@@ -121,8 +126,12 @@ pub fn context_from_tools(tools: &[ToolRecord]) -> Value {
         });
         truncated |= tool.description.len() > MAX_CONTEXT_DESCRIPTION_BYTES;
         let entry_bytes = entry.to_string().len() + 1;
-        let record_bytes =
-            crate::output::webmcp_record_len(&tool.name, &tool.frame_id, &description) + 1;
+        let record_bytes = crate::output::webmcp_record_len(
+            &tool.origin,
+            &tool.name,
+            &tool.frame_id,
+            &description,
+        ) + 1;
         if bytes + entry_bytes > MAX_CONTEXT_BYTES || rendered + record_bytes > MAX_CONTEXT_BYTES {
             truncated = true;
             continue;
@@ -302,10 +311,11 @@ pub struct RuntimeState {
     early_order: VecDeque<String>,
     tools: HashMap<String, HashMap<(String, String), ToolRecord>>,
     frame_origins: HashMap<String, HashMap<String, String>>,
+    page_origins: HashMap<String, String>,
     tool_errors: HashMap<String, String>,
     // Subscription survives document navigation, but not CDP session disposal.
     pub observations: HashMap<String, Result<(), String>>,
-    advertised: Option<(String, Vec<ToolRecord>)>,
+    advertised: Option<(String, Option<String>, Vec<ToolRecord>)>,
 }
 
 impl RuntimeState {
@@ -316,15 +326,27 @@ impl RuntimeState {
         if tools.is_empty() {
             return self.advertised.take().map(|_| context_from_tools(&[]));
         }
+        let page_origin = self.page_origins.get(session).cloned();
         if self
             .advertised
             .as_ref()
-            .is_some_and(|(previous, records)| previous == session && records == tools)
+            .is_some_and(|(previous, origin, records)| {
+                previous == session && *origin == page_origin && records == tools
+            })
         {
             return None;
         }
-        self.advertised = Some((session.to_string(), tools.to_vec()));
-        Some(context_from_tools(tools))
+        self.advertised = Some((session.to_string(), page_origin.clone(), tools.to_vec()));
+        let mut context = context_from_tools(tools);
+        if let Some(origin) = page_origin {
+            context["pageOrigin"] = json!(origin);
+        }
+        Some(context)
+    }
+
+    pub fn update_page_origin(&mut self, session_id: &str, origin: &str) {
+        self.page_origins
+            .insert(session_id.to_string(), origin.to_string());
     }
 
     pub fn context_unavailable(&mut self) -> Option<Value> {
@@ -524,13 +546,14 @@ impl RuntimeState {
     }
 
     pub fn clear_page_tools(&mut self, session_id: &str) {
-        if let Some((previous, _)) = self.advertised.as_mut() {
+        if let Some((previous, _, _)) = self.advertised.as_mut() {
             if previous == session_id {
                 previous.clear(); // Reannounce identical tools in a new document.
             }
         }
         self.tools.remove(session_id);
         self.frame_origins.remove(session_id);
+        self.page_origins.remove(session_id);
         self.tool_errors.remove(session_id);
     }
 
@@ -556,6 +579,7 @@ impl RuntimeState {
         self.early_order.clear();
         self.tools.clear();
         self.frame_origins.clear();
+        self.page_origins.clear();
         self.tool_errors.clear();
         self.observations.clear();
         self.advertised = None;
@@ -810,6 +834,27 @@ mod tests {
     }
 
     #[test]
+    fn context_update_reports_the_top_level_page_origin() {
+        let mut state = super::RuntimeState::default();
+        let tools = vec![sample_tool("a", "d", "f")];
+        assert!(state
+            .context_update("s", &tools)
+            .unwrap()
+            .get("pageOrigin")
+            .is_none());
+        state.update_page_origin("s", "https://shop.example");
+        let context = state.context_update("s", &tools).unwrap();
+        assert_eq!(context["pageOrigin"], "https://shop.example");
+        assert!(state.context_update("s", &tools).is_none());
+        state.clear_page_tools("s");
+        assert!(state
+            .context_update("s", &tools)
+            .unwrap()
+            .get("pageOrigin")
+            .is_none());
+    }
+
+    #[test]
     fn small_catalog_lists_full_descriptions() {
         let long = "x".repeat(super::MAX_CONTEXT_DESCRIPTION_BYTES * 3);
         let tools = vec![sample_tool("a", &long, "f"), sample_tool("b", "short", "f")];
@@ -833,6 +878,7 @@ mod tests {
         assert_eq!(context["truncated"], true);
         let tool = &context["tools"][0];
         let rendered = crate::output::webmcp_record_len(
+            tool["origin"].as_str().unwrap(),
             tool["name"].as_str().unwrap(),
             tool["frameId"].as_str().unwrap(),
             tool["description"].as_str().unwrap(),
@@ -858,6 +904,7 @@ mod tests {
             .iter()
             .map(|tool| {
                 crate::output::webmcp_record_len(
+                    tool["origin"].as_str().unwrap(),
                     tool["name"].as_str().unwrap(),
                     tool["frameId"].as_str().unwrap(),
                     tool["description"].as_str().unwrap(),
