@@ -136,11 +136,25 @@ type PrivateSessions = Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<CdpEven
 /// cannot keep up should lose frames, not stall the reader.
 const PRIVATE_SESSION_BUFFER: usize = 16;
 
-/// Lossless taps for events that must each get a reply (paused requests,
-/// auth challenges, targets waiting for the debugger). Unlike the bounded
-/// broadcast, a tap never drops an event when its reader falls behind.
-type MethodTaps =
-    Arc<std::sync::Mutex<Vec<(&'static [&'static str], mpsc::UnboundedSender<CdpEvent>)>>>;
+enum MethodTapSender {
+    Unbounded(mpsc::UnboundedSender<CdpEvent>),
+    Bounded(mpsc::Sender<CdpEvent>),
+}
+
+impl MethodTapSender {
+    fn deliver(&self, event: CdpEvent) -> bool {
+        match self {
+            Self::Unbounded(tx) => tx.send(event).is_ok(),
+            Self::Bounded(tx) => !matches!(
+                tx.try_send(event),
+                Err(mpsc::error::TrySendError::Closed(_))
+            ),
+        }
+    }
+}
+
+/// Lossless or bounded taps for events matching a fixed set of CDP methods.
+type MethodTaps = Arc<std::sync::Mutex<Vec<(&'static [&'static str], MethodTapSender)>>>;
 
 /// Interval between WebSocket ping frames sent to keep the connection alive
 /// through intermediate proxies (reverse proxies, load balancers, service meshes).
@@ -618,8 +632,7 @@ impl CdpClient {
                     if !routed {
                         let mut taps = taps_clone.lock().unwrap_or_else(|e| e.into_inner());
                         taps.retain(|(methods, tx)| {
-                            !methods.contains(&event.method.as_str())
-                                || tx.send(event.clone()).is_ok()
+                            !methods.contains(&event.method.as_str()) || tx.deliver(event.clone())
                         });
                         drop(taps);
                         let _ = event_tx_clone.send(event);
@@ -836,7 +849,22 @@ impl CdpClient {
         self.method_taps
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push((methods, tx));
+            .push((methods, MethodTapSender::Unbounded(tx)));
+        rx
+    }
+
+    /// Deliver events whose method is in `methods` into a bounded queue.
+    /// Once full, newer matching events are dropped instead of growing memory.
+    pub fn subscribe_methods_bounded(
+        &self,
+        methods: &'static [&'static str],
+        capacity: usize,
+    ) -> mpsc::Receiver<CdpEvent> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        self.method_taps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((methods, MethodTapSender::Bounded(tx)));
         rx
     }
 

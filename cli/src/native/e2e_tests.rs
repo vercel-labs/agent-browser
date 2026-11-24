@@ -21857,6 +21857,174 @@ async fn e2e_poppy_join_blocks_websocket_with_allowed_domains() {
     assert_error_code(&resp, "request_blocked");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_restores_constructors_on_landing_page() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+
+    let ws_listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let ws_addr = ws_listener.local_addr().unwrap();
+    let ws_url = format!("ws://{ws_addr}/after");
+    let ws_server = tokio::spawn(async move {
+        if let Ok((stream, _)) = ws_listener.accept().await {
+            let _ = tokio_tungstenite::accept_async(stream).await;
+        }
+    });
+
+    let (origin, site) = poppy_site(
+        "[::1]:0",
+        PoppyJoinPage::Html(POPPY_FORM.to_string()),
+        "/done".to_string(),
+    )
+    .await;
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "poppy_join",
+            "url": origin,
+            "authorizer": "echo '{\"signed_in\":true}'",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["joined"], true);
+
+    // On the landing document (no further navigation), WebSocket, RTCPeerConnection,
+    // and Worker must work again.
+    let eval_script = format!(
+        r#"(async () => {{
+            const wsOpen = await new Promise((resolve, reject) => {{
+                const ws = new WebSocket('{ws_url}');
+                ws.onopen = () => {{ ws.close(); resolve(true); }};
+                ws.onerror = () => reject(new Error('ws error'));
+            }});
+            const pc = new RTCPeerConnection();
+            pc.close();
+            const workerOk = await new Promise((resolve, reject) => {{
+                const blob = new Blob(['postMessage("ok")'], {{ type: 'application/javascript' }});
+                const w = new Worker(URL.createObjectURL(blob));
+                w.onmessage = (e) => {{ w.terminate(); resolve(e.data === 'ok'); }};
+                w.onerror = (e) => reject(new Error(e.message || 'worker error'));
+            }});
+            return {{ wsOpen, workerOk }};
+        }})()"#
+    );
+    let eval_resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": eval_script }),
+        &mut state,
+    )
+    .await;
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    site.abort();
+    ws_server.abort();
+
+    assert_success(&eval_resp);
+    assert_eq!(
+        get_data(&eval_resp)["result"]["wsOpen"],
+        true,
+        "{eval_resp}"
+    );
+    assert_eq!(
+        get_data(&eval_resp)["result"]["workerOk"],
+        true,
+        "{eval_resp}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_binding_flood_does_not_hang_subsequent_commands() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let flood_page = format!(
+        r#"{POPPY_FORM}<script>
+        function flood() {{
+            for (let i = 0; i < 4000; i++) {{
+                if (typeof window.__agentBrowserPoppyNet === 'function') {{
+                    window.__agentBrowserPoppyNet(JSON.stringify({{
+                        api: 'WebSocket',
+                        url: 'wss://flood-' + i + '.invalid/ws'
+                    }}));
+                }}
+            }}
+        }}
+        flood();
+        setInterval(flood, 10);
+        </script>"#
+    );
+    let (origin, site) = poppy_site(
+        "[::1]:0",
+        PoppyJoinPage::Html(flood_page),
+        "/done".to_string(),
+    )
+    .await;
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let started = std::time::Instant::now();
+    let join_resp = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        execute_command(
+            &json!({
+                "id": "2",
+                "action": "poppy_join",
+                "url": origin,
+                "authorizer": "echo '{\"signed_in\":true}'",
+                "timeout": 2000,
+            }),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("poppy_join hung beyond deadline under binding flood");
+    let join_elapsed = started.elapsed();
+
+    let follow_up_started = std::time::Instant::now();
+    let follow_up = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        execute_command(
+            &json!({ "id": "3", "action": "evaluate", "script": "1 + 1" }),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("subsequent command hung after flooded join");
+    let follow_up_elapsed = follow_up_started.elapsed();
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    site.abort();
+
+    assert_error_code(&join_resp, "request_blocked");
+    assert!(
+        join_elapsed < std::time::Duration::from_secs(5),
+        "join took too long under flood: {join_elapsed:?}"
+    );
+    assert_success(&follow_up);
+    assert_eq!(get_data(&follow_up)["result"], 2, "{follow_up}");
+    assert!(
+        follow_up_elapsed < std::time::Duration::from_secs(3),
+        "follow-up command took too long: {follow_up_elapsed:?}"
+    );
+}
+
 /// A local page for restore tests: cookies need an http origin.
 async fn restore_fixture_page() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

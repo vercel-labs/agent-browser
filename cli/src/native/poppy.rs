@@ -7,9 +7,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{timeout, timeout_at, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -29,105 +30,174 @@ const SUBMIT: &str = "(() => { const i = document.querySelector('form input[name
                       if (!i || !i.form) return false; i.form.submit(); return true; })()";
 
 const POPPY_NET_BINDING: &str = "__agentBrowserPoppyNet";
+const GUARD_EVENT_CAPACITY: usize = 256;
+const MAX_BINDING_EVENTS: usize = 64;
+const MAX_BINDING_PAYLOAD_BYTES: usize = 4096;
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
-const POPPY_JOIN_GUARD_SCRIPT: &str = r#"(() => {
-    function _agentBrowserInstallPoppyGuard(_baseOverride) {
+fn generate_release_token() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        bytes.copy_from_slice(&nanos.to_le_bytes());
+    }
+    let mut out = String::with_capacity(32);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{:02x}", b);
+    }
+    out
+}
+
+fn poppy_join_guard_script(release_token: &str) -> String {
+    let token_json = serde_json::to_string(release_token).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"(() => {{
+    const _releaseToken = {token_json};
+    function _agentBrowserInstallPoppyGuard(_baseOverride, _isWorker) {{
         const _global = globalThis;
         if (_global.__agentBrowserPoppyGuardInstalled) return;
         _global.__agentBrowserPoppyGuardInstalled = true;
         const _baseHref = _baseOverride || (_global.location && _global.location.href ? _global.location.href : 'about:blank');
-        function _securityError(message) {
-            if (typeof DOMException === 'function') {
+        const _restorers = [];
+        let _notified = 0;
+        function _remember(name, orig) {{
+            if (_isWorker) return;
+            const desc = Object.getOwnPropertyDescriptor(_global, name);
+            _restorers.push(() => {{
+                if (desc) {{
+                    Object.defineProperty(_global, name, desc);
+                }} else {{
+                    _global[name] = orig;
+                }}
+            }});
+        }}
+        function _securityError(message) {{
+            if (typeof DOMException === 'function') {{
                 return new DOMException(message, 'SecurityError');
-            }
+            }}
             const err = new Error(message);
             err.name = 'SecurityError';
             return err;
-        }
-        function _notify(api, url) {
-            try {
-                if (typeof _global.__agentBrowserPoppyNet === 'function') {
-                    _global.__agentBrowserPoppyNet(JSON.stringify({ api, url }));
-                }
-            } catch (_) {}
-        }
-        function _resolveUrl(raw, asWebSocket) {
-            try {
+        }}
+        function _notify(api, url) {{
+            if (_notified >= {max_events}) return;
+            _notified += 1;
+            try {{
+                if (typeof _global.__agentBrowserPoppyNet === 'function') {{
+                    _global.__agentBrowserPoppyNet(JSON.stringify({{ api, url }}));
+                }}
+            }} catch (_) {{}}
+        }}
+        function _resolveUrl(raw, asWebSocket) {{
+            try {{
                 const u = new URL(raw, _baseHref);
-                if (asWebSocket) {
+                if (asWebSocket) {{
                     if (u.protocol === 'http:') u.protocol = 'ws:';
                     if (u.protocol === 'https:') u.protocol = 'wss:';
-                }
+                }}
                 return u.href;
-            } catch (_) {
+            }} catch (_) {{
                 return String(raw);
-            }
-        }
-        if (typeof _global.WebSocket === 'function') {
+            }}
+        }}
+        if (typeof _global.WebSocket === 'function') {{
             const OrigWS = _global.WebSocket;
-            const BlockedWS = function(url) {
+            _remember('WebSocket', OrigWS);
+            const BlockedWS = function(url) {{
                 _notify('WebSocket', _resolveUrl(url, true));
                 throw _securityError('WebSocket blocked during join');
-            };
+            }};
             BlockedWS.prototype = OrigWS.prototype;
             BlockedWS.CONNECTING = 0;
             BlockedWS.OPEN = 1;
             BlockedWS.CLOSING = 2;
             BlockedWS.CLOSED = 3;
             _global.WebSocket = BlockedWS;
-        }
-        if (typeof _global.WebTransport === 'function') {
+        }}
+        if (typeof _global.WebTransport === 'function') {{
             const OrigWT = _global.WebTransport;
-            const BlockedWT = function(url) {
+            _remember('WebTransport', OrigWT);
+            const BlockedWT = function(url) {{
                 _notify('WebTransport', _resolveUrl(url, false));
                 throw _securityError('WebTransport blocked during join');
-            };
+            }};
             BlockedWT.prototype = OrigWT.prototype;
             _global.WebTransport = BlockedWT;
-        }
-        function _blockCtor(name, api) {
+        }}
+        function _blockCtor(name, api) {{
             if (typeof _global[name] !== 'function') return;
-            const Blocked = function(firstArg) {
+            const orig = _global[name];
+            const desc = Object.getOwnPropertyDescriptor(_global, name);
+            if (desc && desc.configurable === false && desc.writable === false) return;
+            _remember(name, orig);
+            const Blocked = function(firstArg) {{
                 if (api) _notify(api, _resolveUrl(firstArg, false));
                 throw _securityError(name + ' blocked during join');
-            };
-            Object.defineProperty(Blocked, 'prototype', {
+            }};
+            Object.defineProperty(Blocked, 'prototype', {{
                 value: Object.freeze(Object.create(null)),
                 writable: false
-            });
-            try {
-                Object.defineProperty(_global, name, {
+            }});
+            try {{
+                Object.defineProperty(_global, name, {{
                     value: Blocked,
                     writable: false,
                     configurable: true
-                });
-            } catch (_) {
+                }});
+            }} catch (_) {{
                 _global[name] = Blocked;
-            }
-        }
+            }}
+        }}
         _blockCtor('RTCPeerConnection', null);
         _blockCtor('webkitRTCPeerConnection', null);
         _blockCtor('SharedWorker', 'SharedWorker');
         const OrigWorker = _global.Worker;
-        if (typeof OrigWorker === 'function') {
-            _global.Worker = function(scriptURL, options) {
-                if (!_global.Blob || !_global.URL || typeof _global.URL.createObjectURL !== 'function') {
+        if (typeof OrigWorker === 'function') {{
+            _remember('Worker', OrigWorker);
+            _global.Worker = function(scriptURL, options) {{
+                if (!_global.Blob || !_global.URL || typeof _global.URL.createObjectURL !== 'function') {{
                     throw _securityError('Worker blocked during join');
-                }
+                }}
                 const absolute = _resolveUrl(scriptURL, false);
                 const isModule = options && typeof options === 'object' && options.type === 'module';
-                const installSource = '(' + _agentBrowserInstallPoppyGuard.toString() + ')(' + JSON.stringify(absolute) + ');\n';
+                const installSource = '(' + _agentBrowserInstallPoppyGuard.toString() + ')(' + JSON.stringify(absolute) + ', true);\n';
                 const source = installSource + (isModule
                     ? 'await import(' + JSON.stringify(absolute) + ');\n'
                     : 'importScripts(' + JSON.stringify(absolute) + ');\n');
-                const wrapped = _global.URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
+                const wrapped = _global.URL.createObjectURL(new Blob([source], {{ type: 'application/javascript' }}));
                 return new OrigWorker(wrapped, options);
-            };
+            }};
             _global.Worker.prototype = OrigWorker.prototype;
-        }
-    }
-    _agentBrowserInstallPoppyGuard();
-})()"#;
+        }}
+        if (!_isWorker) {{
+            try {{
+                Object.defineProperty(_global, '__agentBrowserPoppyRelease', {{
+                    value: function(token) {{
+                        if (token !== _releaseToken) return false;
+                        while (_restorers.length > 0) {{
+                            try {{ _restorers.pop()(); }} catch (_) {{}}
+                        }}
+                        try {{ delete _global.__agentBrowserPoppyGuardInstalled; }} catch (_) {{ _global.__agentBrowserPoppyGuardInstalled = false; }}
+                        try {{ delete _global.__agentBrowserPoppyRelease; }} catch (_) {{}}
+                        return true;
+                    }},
+                    writable: false,
+                    configurable: true,
+                    enumerable: false
+                }});
+            }} catch (_) {{}}
+        }}
+    }}
+    _agentBrowserInstallPoppyGuard(undefined, false);
+}})()"#,
+        token_json = token_json,
+        max_events = MAX_BINDING_EVENTS,
+    )
+}
 
 type AddressSpaces = HashMap<String, Vec<(i64, bool)>>;
 
@@ -159,6 +229,8 @@ pub struct JoinGuard {
     session_id: String,
     sessions: Arc<Mutex<HashSet<String>>>,
     guard_scripts: Arc<Mutex<Vec<(String, String)>>>,
+    release_token: String,
+    binding_events: Arc<AtomicUsize>,
     local: bool,
     deadline: Instant,
     blocked: Arc<Mutex<Option<String>>>,
@@ -173,6 +245,8 @@ impl JoinGuard {
             session_id: session_id.to_string(),
             sessions: Arc::new(Mutex::new(HashSet::from([session_id.to_string()]))),
             guard_scripts: Arc::default(),
+            release_token: generate_release_token(),
+            binding_events: Arc::new(AtomicUsize::new(0)),
             local,
             deadline,
             blocked: Arc::default(),
@@ -204,10 +278,11 @@ impl JoinGuard {
                     Some(session_id),
                 )
                 .await?;
+            let script = poppy_join_guard_script(&self.release_token);
             let added = client
                 .send_command(
                     "Page.addScriptToEvaluateOnNewDocument",
-                    Some(json!({ "source": POPPY_JOIN_GUARD_SCRIPT })),
+                    Some(json!({ "source": script })),
                     Some(session_id),
                 )
                 .await?;
@@ -221,7 +296,11 @@ impl JoinGuard {
         Ok(())
     }
 
-    async fn remove_session_guards(&self, client: &super::cdp::client::CdpClient) {
+    async fn remove_session_guards(
+        &self,
+        client: &super::cdp::client::CdpClient,
+        release_constructors: bool,
+    ) {
         let scripts = {
             let mut guard = self.guard_scripts.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *guard)
@@ -235,6 +314,15 @@ impl JoinGuard {
                 )
                 .await;
         }
+        let release_expr = if release_constructors {
+            let token_json =
+                serde_json::to_string(&self.release_token).unwrap_or_else(|_| "\"\"".to_string());
+            Some(format!(
+                "typeof globalThis.__agentBrowserPoppyRelease === 'function' && globalThis.__agentBrowserPoppyRelease({token_json})"
+            ))
+        } else {
+            None
+        };
         let mut sessions = self.adopted();
         sessions.push(self.session_id.clone());
         for sid in sessions {
@@ -252,6 +340,15 @@ impl JoinGuard {
                     Some(&sid),
                 )
                 .await;
+            if let Some(expr) = release_expr.as_deref() {
+                let _ = client
+                    .send_command(
+                        "Runtime.evaluate",
+                        Some(json!({ "expression": expr })),
+                        Some(&sid),
+                    )
+                    .await;
+            }
         }
     }
 
@@ -393,10 +490,19 @@ impl JoinGuard {
     /// so the join stops before its next step.
     async fn checkpoint(
         &self,
-        events: &mut tokio::sync::mpsc::UnboundedReceiver<super::cdp::types::CdpEvent>,
+        events: &mut tokio::sync::mpsc::Receiver<super::cdp::types::CdpEvent>,
         filter: Option<&DomainFilter>,
     ) -> Result<(), String> {
-        while let Ok(event) = events.try_recv() {
+        if let Some(message) = self.blocked() {
+            return Err(fail("request_blocked", message));
+        }
+        for _ in 0..GUARD_EVENT_CAPACITY {
+            if self.blocked().is_some() || Instant::now() >= self.deadline {
+                break;
+            }
+            let Ok(event) = events.try_recv() else {
+                break;
+            };
             if !event.session_id.as_deref().is_some_and(|s| self.guards(s)) {
                 continue;
             }
@@ -413,17 +519,33 @@ impl JoinGuard {
                         .unwrap_or_default();
                     if let Err(e) = crate::poppy::check_connected_address(url, remote) {
                         self.block(e.message);
+                        break;
                     }
                 }
                 "Runtime.bindingCalled" => {
                     if event.params.get("name").and_then(Value::as_str) != Some(POPPY_NET_BINDING) {
                         continue;
                     }
+                    let count = self.binding_events.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count > MAX_BINDING_EVENTS {
+                        self.block(
+                            "The join page exceeded the network guard event limit".to_string(),
+                        );
+                        break;
+                    }
                     let Some(payload) = event.params.get("payload").and_then(Value::as_str) else {
-                        continue;
+                        self.block("The join page sent an invalid network guard event".to_string());
+                        break;
                     };
+                    if payload.len() > MAX_BINDING_PAYLOAD_BYTES {
+                        self.block(
+                            "The join page sent an oversized network guard event".to_string(),
+                        );
+                        break;
+                    }
                     let Ok(parsed) = serde_json::from_str::<Value>(payload) else {
-                        continue;
+                        self.block("The join page sent an invalid network guard event".to_string());
+                        break;
                     };
                     let api = parsed
                         .get("api")
@@ -540,19 +662,57 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
         .ok_or("Browser not launched")?
         .client
         .clone();
-    let mut infos = client.subscribe_methods(&["Network.responseReceivedExtraInfo"]);
-    let mut events = client.subscribe_methods(&[
-        "Network.responseReceived",
-        "Runtime.bindingCalled",
-        "Network.webSocketCreated",
-    ]);
+    let mut infos = client.subscribe_methods_bounded(
+        &["Network.responseReceivedExtraInfo", "Runtime.bindingCalled"],
+        GUARD_EVENT_CAPACITY,
+    );
+    let mut events = client.subscribe_methods_bounded(
+        &[
+            "Network.responseReceived",
+            "Runtime.bindingCalled",
+            "Network.webSocketCreated",
+        ],
+        GUARD_EVENT_CAPACITY,
+    );
     let filter = state.domain_filter.read().await.clone();
     let recorder = {
         let guard = guard.clone();
         tokio::spawn(async move {
+            let mut binding_seen = 0usize;
             while let Some(event) = infos.recv().await {
-                if event.session_id.as_deref().is_some_and(|s| guard.guards(s)) {
-                    guard.record_address_space(&event.params);
+                if !event.session_id.as_deref().is_some_and(|s| guard.guards(s)) {
+                    continue;
+                }
+                match event.method.as_str() {
+                    "Network.responseReceivedExtraInfo" => {
+                        guard.record_address_space(&event.params);
+                    }
+                    "Runtime.bindingCalled" => {
+                        if guard.blocked().is_some()
+                            || event.params.get("name").and_then(Value::as_str)
+                                != Some(POPPY_NET_BINDING)
+                        {
+                            continue;
+                        }
+                        binding_seen += 1;
+                        if binding_seen > MAX_BINDING_EVENTS {
+                            guard.block(
+                                "The join page exceeded the network guard event limit".to_string(),
+                            );
+                            continue;
+                        }
+                        if event
+                            .params
+                            .get("payload")
+                            .and_then(Value::as_str)
+                            .is_some_and(|p| p.len() > MAX_BINDING_PAYLOAD_BYTES)
+                        {
+                            guard.block(
+                                "The join page sent an oversized network guard event".to_string(),
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
         })
@@ -590,21 +750,25 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
             })
         }
     };
-    let _ = guard.checkpoint(&mut events, filter.as_ref()).await;
+    drop(events);
     let result = match guard.blocked() {
         Some(message) => Err(fail("request_blocked", message)),
         None => result,
     };
     let result = result.map_err(|e| guard.redact(e));
-    if result.is_err() {
-        leave_join_page(state, &session_id).await;
-    }
+    let join_succeeded = result.is_ok();
     *state.poppy_guard.write().await = None;
-    guard.remove_session_guards(&client).await;
-    let _ = super::actions::sync_fetch_interception(state, &session_id).await;
-    for adopted in guard.adopted() {
-        let _ = super::actions::sync_fetch_interception(state, &adopted).await;
-    }
+    let _ = timeout(CLEANUP_TIMEOUT, async {
+        if !join_succeeded {
+            leave_join_page(state, &session_id).await;
+        }
+        guard.remove_session_guards(&client, join_succeeded).await;
+        let _ = super::actions::sync_fetch_interception(state, &session_id).await;
+        for adopted in guard.adopted() {
+            let _ = super::actions::sync_fetch_interception(state, &adopted).await;
+        }
+    })
+    .await;
     recorder.abort();
     result
 }
@@ -613,7 +777,7 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
 async fn run_join(
     state: &mut DaemonState,
     guard: &JoinGuard,
-    events: &mut tokio::sync::mpsc::UnboundedReceiver<super::cdp::types::CdpEvent>,
+    events: &mut tokio::sync::mpsc::Receiver<super::cdp::types::CdpEvent>,
     filter: Option<&DomainFilter>,
     endpoint: &str,
     authorizer: &str,
@@ -912,5 +1076,69 @@ mod tests {
     fn same_resource_ignores_fragments() {
         assert!(same_resource("http://h/a#x", "http://h/a"));
         assert!(!same_resource("http://h/", "http://h/a"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_stops_at_first_block_and_bounds_binding_flood() {
+        let guard = JoinGuard::new("s1", false, in_ms(5_000));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(GUARD_EVENT_CAPACITY);
+        for i in 0..GUARD_EVENT_CAPACITY {
+            tx.try_send(super::super::cdp::types::CdpEvent {
+                method: "Runtime.bindingCalled".to_string(),
+                params: json!({
+                    "name": POPPY_NET_BINDING,
+                    "payload": json!({
+                        "api": "WebSocket",
+                        "url": format!("ws://127.0.0.1:{}/ws", 8000 + i),
+                    })
+                    .to_string(),
+                }),
+                session_id: Some("s1".to_string()),
+            })
+            .unwrap();
+        }
+        let err = guard.checkpoint(&mut rx, None).await.unwrap_err();
+        assert!(err.starts_with("poppy:request_blocked: "), "{err}");
+        assert_eq!(guard.binding_events.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_blocks_excessive_and_oversized_binding_events() {
+        let guard = JoinGuard::new("s1", false, in_ms(5_000));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(GUARD_EVENT_CAPACITY);
+        for _ in 0..=MAX_BINDING_EVENTS {
+            tx.try_send(super::super::cdp::types::CdpEvent {
+                method: "Runtime.bindingCalled".to_string(),
+                params: json!({
+                    "name": POPPY_NET_BINDING,
+                    "payload": json!({
+                        "api": "WebSocket",
+                        "url": "wss://93.184.216.34/ws",
+                    })
+                    .to_string(),
+                }),
+                session_id: Some("s1".to_string()),
+            })
+            .unwrap();
+        }
+        let err = guard.checkpoint(&mut rx, None).await.unwrap_err();
+        assert!(
+            err.contains("exceeded the network guard event limit"),
+            "{err}"
+        );
+
+        let guard = JoinGuard::new("s1", false, in_ms(5_000));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        tx.try_send(super::super::cdp::types::CdpEvent {
+            method: "Runtime.bindingCalled".to_string(),
+            params: json!({
+                "name": POPPY_NET_BINDING,
+                "payload": "x".repeat(MAX_BINDING_PAYLOAD_BYTES + 1),
+            }),
+            session_id: Some("s1".to_string()),
+        })
+        .unwrap();
+        let err = guard.checkpoint(&mut rx, None).await.unwrap_err();
+        assert!(err.contains("oversized network guard event"), "{err}");
     }
 }
