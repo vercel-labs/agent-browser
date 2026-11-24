@@ -1,0 +1,95 @@
+/* The request right-aligned, the terminal left-aligned and off the foot.
+   Kept outside the upstream kit. */
+.ab-feature-scene .ab-performance {
+  /* The terminal runs off the foot; the stage owns that crop. */
+  & .ss-stage { --ss-control: 44px; overflow: hidden; }
+
+  /* Whole, a gutter from the right edge, as wide as the request needs */
+  & .ab-perf-input {
+    position: absolute;
+    top: 20px;
+    right: 24px;
+    /* The request (190px measured) plus the field's 11px sides: no slack */
+    width: 214px;
+  }
+  /* The raised white control every scene shares (Geist material-small: a
+     hairline ring and its small fall, as the drive inputs), at a message's
+     12px radius so it reads as a chat bubble, not a form field */
+  & .ab-perf-input .ss-field__box {
+    border-radius: 12px;
+    font-size: 14px;
+    background: var(--ss-surface);
+    box-shadow: var(--ss-shadow-control);
+  }
+
+  /* A plain dark panel, the input's shape: a gutter from the left edge, its
+     longest line (264px measured) plus 28px sides, a gutter below the input,
+     off the foot. */
+  & .ab-perf-term {
+    position: absolute;
+    top: 80px;
+    left: 24px;
+    width: 320px;
+    height: 210px;
+    padding: 16px 28px;
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--ss-term-bg, #0a0a0a);
+    box-shadow: var(--ss-shadow-card);
+    font: 11px/20px var(--ss-mono);
+    font-variant-ligatures: none;
+  }
+  /* The scrim: lines run up under it and out of the panel's top edge, so
+     text bleeds to the edge and reads as scrolling off. Inside the border. */
+  & .ab-perf-term::before {
+    content: '';
+    position: absolute;
+    z-index: 1;
+    inset: 0 0 auto;
+    height: 28px;
+    background: linear-gradient(var(--ss-term-bg) 0, transparent 28px);
+    pointer-events: none;
+  }
+
+  /* The text area (VIEW in the scene: room for the newest line,
+     ending a gutter above the stage's foot). Earlier lines stay on and scroll
+     up through the panel's top padding, under the scrim, and out of its top
+     edge, which clips them. */
+  & .ab-perf-view {
+    position: relative;
+  }
+  & .ab-perf-lines {
+    position: relative;
+    /* No will-change: a permanent layer here, scaled to a fractional card
+       size, smeared a dark 1px seam along the card's bottom edge */
+    transition: transform .32s cubic-bezier(.45, 0, .1, 1);
+  }
+
+  /* Two styles on one left edge: commands bright, everything else gray. Blue
+     marks only the finding and the result. Lines just fade in. */
+  & .ab-perf-line {
+    position: absolute;
+    left: 0;
+    height: 20px;
+    white-space: pre;
+    color: var(--ss-term-dim, #8f8f8f);
+    opacity: 0;
+    transition: opacity .14s ease-out;
+  }
+  & .ab-perf-line[data-kind='cmd'] { color: var(--ss-term-text, #ededed); }
+  & .ab-perf-line[data-kind='key'] { color: var(--ss-term-agent, #47a8ff); }
+  & .ab-perf-line[data-on] { opacity: 1; transition-duration: .22s; }
+
+  /* Dark mode: the two-toned black (#0a0a0a on the black stage) needs an
+     edge to read as a panel. One real pixel of Geist's hairline, as the
+     card and the chat input draw it. Light mode keeps its contrast alone. */
+  :where(.dark-theme) & .ab-perf-term {
+    border: var(--ss-hairline, 1px) solid var(--ds-gray-alpha-400);
+  }
+
+  & .ss-stage[data-layout='compact'] .ab-perf-term { width: 312px; padding-inline: 24px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ab-feature-scene .ab-performance :is(.ab-perf-line, .ab-perf-lines) { transition: none; }
+}

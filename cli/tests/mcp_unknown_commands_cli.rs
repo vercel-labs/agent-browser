@@ -1,14 +1,16 @@
+#![cfg(unix)]
+
 use serde_json::{json, Value};
 use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
-fn mcp_batch_rejects_unknown_cookie_subcommands() {
+fn mcp_batch_rejects_invalid_commands() {
     let home = TempDir::new().unwrap();
     let session = "mcp-cookie-parse-test";
     let batch_args = json!({
         "session": session,
-        "commands": [["cookies", "delete", "foo"]]
+        "commands": [["cookies", "delete", "foo"], ["close", "--all"]]
     })
     .to_string();
     let output = Command::new(env!("CARGO_BIN_EXE_agent-browser"))
@@ -29,8 +31,15 @@ fn mcp_batch_rejects_unknown_cookie_subcommands() {
     assert!(
         batch["structuredContent"]["response"][0]["error"]
             .as_str()
-            .unwrap()
+            .unwrap_or_else(|| panic!("{batch}"))
             .contains("Unknown subcommand: delete"),
+        "{batch}"
+    );
+    assert!(
+        batch["structuredContent"]["response"][1]["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{batch}"))
+            .contains("close --all is only supported outside a batch"),
         "{batch}"
     );
 }

@@ -16,6 +16,11 @@ export const hash = (body) => createHash("sha256").update(body).digest("hex");
 export const canonical = (path) => `${origin}${path === "/" ? "" : path}`;
 export const markdownPath = (path) =>
   path === "/" ? "/index.md" : `${path}.md`;
+/** Fixture page `/` carries the introduction; its public canonical is `/introduction`. */
+export const docsCanonical = (path) =>
+  path === "/" ? `${origin}/introduction` : canonical(path);
+export const docsMarkdownPath = (path) =>
+  path === "/" ? "/introduction.md" : markdownPath(path);
 export const apiPath = (path) => `/api/docs-md${path === "/" ? "" : path}`;
 export const tokens = (value) =>
   (value ?? "")
@@ -58,6 +63,44 @@ for (const path of Object.keys(edits.pages))
 
 /** Baseline pages with intentional edits applied: the floor for live routes. */
 export const currentPages = pages.map(applyEdits);
+
+/**
+ * Pages added after the baseline was pinned. They have no baseline fixture, so
+ * they carry only the metadata the shared path checks read, and they belong to
+ * the public route inventory that the route suite audits.
+ */
+export const addedPages = [
+  {
+    path: "/modern-web-guidance",
+    markdownTitle: "Modern Web Guidance",
+    title: "Modern Web Guidance | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Modern Web Guidance | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Modern Web Guidance - agent-browser",
+    twitterTitle: "Modern Web Guidance | agent-browser",
+  },
+  {
+    path: "/ladybird",
+    markdownTitle: "Ladybird",
+    title: "Ladybird | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Ladybird | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Ladybird - agent-browser",
+    twitterTitle: "Ladybird | agent-browser",
+  },
+];
+
+/** Every public page: the baseline floor plus pages added since. */
+export const publicPages = [...currentPages, ...addedPages];
+
+/**
+ * Public pages with a pinned baseline fixture. `navigation` is a fixture field,
+ * so it separates pages whose original content, Markdown and search results are
+ * recorded from pages added since, which only get the path checks.
+ */
+export const fixturePages = publicPages.filter((page) => page.navigation);
 
 /** Baseline resources with intentionally changed bytes replaced. */
 export const currentResources = baseline.resources.map((resource) => ({
@@ -328,6 +371,45 @@ export function assertContainsLines(body, original, label) {
     );
     from = at + line.length;
   }
+}
+
+const HOME_FEATURES = [
+  ["Put your agent in control", "/commands"],
+  ["Read only what matters", "/snapshots"],
+  ["Take screenshots and recordings", "/recording"],
+  ["Run performance tests", "/profiler"],
+  ["Run agents side by side", "/sessions"],
+  ["Mock and inspect the network", "/network"],
+];
+
+export function assertHomeMarkdown(body) {
+  const frontmatter = `---\ntitle: "agent-browser"\ndescription: "Browser automation CLI for AI agents"\ncanonical_url: "${origin}"\n---\n\n`;
+  assert.ok(body.startsWith(frontmatter), "homepage: canonical frontmatter");
+  assert.match(body, /^# agent-browser$/m);
+  for (const [title, path] of HOME_FEATURES)
+    assert.ok(
+      body.includes(`**[${title}](${origin}${path})**`),
+      `homepage: missing feature ${JSON.stringify(title)}`,
+    );
+  assert.ok(
+    body.includes(`[Browser automation built for any agent](${origin}/introduction)`),
+    "homepage: missing browser docs link",
+  );
+  assert.ok(
+    body.includes(
+      `[Desktop automation built for any agent](${origin}/desktop)`,
+    ),
+    "homepage: missing desktop docs link",
+  );
+  assert.ok(
+    body.includes(`Read the [agent-browser documentation](${origin}/introduction)`),
+    "homepage: missing docs pointer",
+  );
+  assert.ok(
+    body.includes(`[llms.txt](${origin}/llms.txt)`),
+    "homepage: missing docs index link",
+  );
+  assert.ok(body.includes("Accept: text/markdown"));
 }
 
 export function assertModernMarkdown(body, page) {

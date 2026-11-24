@@ -96,6 +96,15 @@ pub struct CdpEvent {
     pub session_id: Option<String>,
 }
 
+/// Match direct-page events without allowing an unattached browser to consume them.
+pub fn session_matches(active_session: Option<&str>, event_session: Option<&str>) -> bool {
+    match active_session {
+        Some("") => event_session.is_none_or(str::is_empty),
+        Some(active) => event_session == Some(active),
+        None => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Target domain
 // ---------------------------------------------------------------------------
@@ -490,6 +499,8 @@ pub struct DispatchKeyEventParams {
     pub windows_virtual_key_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modifiers: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
