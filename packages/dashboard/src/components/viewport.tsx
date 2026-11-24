@@ -6,6 +6,13 @@ import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, Rotate
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
+import {
+  createRightClickGuardState,
+  mapCanvasPointToViewport,
+  recordRightMouseEvent,
+  shouldSynthesizeContextMenuRightClick,
+  type DrawnFrame,
+} from "@/lib/viewport-pointer";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -159,13 +166,8 @@ export function Viewport() {
   const sendInput = useSetAtom(sendInputAtom);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const lastRightPressRef = useRef(0);
-  const drawnFrameRef = useRef<{
-    width: number;
-    height: number;
-    offsetTop: number;
-    pageScaleFactor: number;
-  } | null>(null);
+  const rightClickGuardRef = useRef(createRightClickGuardState());
+  const drawnFrameRef = useRef<DrawnFrame | null>(null);
   const decodeSeqRef = useRef(0);
   const drawnSeqRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -205,6 +207,7 @@ export function Viewport() {
     setColorScheme("no-preference");
     setOffline(false);
     drawnFrameRef.current = null;
+    rightClickGuardRef.current = createRightClickGuardState();
   }, [sessionName]);
 
   useEffect(() => {
@@ -269,7 +272,6 @@ export function Viewport() {
           ? {
               width: next.deviceWidth,
               height: next.deviceHeight,
-              offsetTop: next.offsetTop > 0 ? next.offsetTop : 0,
               pageScaleFactor: next.pageScaleFactor > 0 ? next.pageScaleFactor : 1,
             }
           : null;
@@ -359,21 +361,14 @@ export function Viewport() {
     (e: React.MouseEvent): { x: number; y: number } | null => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
-      const rect = canvas.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return null;
-      const drawn = drawnFrameRef.current;
-      const targetWidth = drawn?.width ?? viewportWidth;
-      const targetHeight = drawn?.height ?? viewportHeight;
-      const offsetTop = drawn?.offsetTop ?? 0;
-      const pageScale = drawn?.pageScaleFactor ?? 1;
-      const offsetTopCss = targetHeight > 0 ? (offsetTop / targetHeight) * rect.height : 0;
-      const contentHeight = Math.max(rect.height - offsetTopCss, 1);
-      const scaleX = targetWidth / rect.width;
-      const scaleY = targetHeight / contentHeight;
-      return {
-        x: Math.round(((e.clientX - rect.left) * scaleX) / pageScale),
-        y: Math.round(((e.clientY - rect.top - offsetTopCss) * scaleY) / pageScale),
-      };
+      return mapCanvasPointToViewport(
+        e.clientX,
+        e.clientY,
+        canvas.getBoundingClientRect(),
+        drawnFrameRef.current,
+        viewportWidth,
+        viewportHeight,
+      );
     },
     [viewportWidth, viewportHeight],
   );
@@ -382,9 +377,12 @@ export function Viewport() {
     (e: React.MouseEvent, eventType: string) => {
       const pos = toViewport(e);
       if (!pos) return;
-      if (eventType === "mousePressed" && e.button === 2) {
-        lastRightPressRef.current = Date.now();
-      }
+      recordRightMouseEvent(
+        rightClickGuardRef.current,
+        eventType,
+        e.button,
+        Date.now(),
+      );
       const buttons = e.buttons;
       const button =
         eventType === "mouseMoved"
@@ -413,7 +411,15 @@ export function Viewport() {
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
-      if (Date.now() - lastRightPressRef.current <= 100) return;
+      if (
+        !shouldSynthesizeContextMenuRightClick(
+          rightClickGuardRef.current,
+          e.buttons,
+          Date.now(),
+        )
+      ) {
+        return;
+      }
       const pos = toViewport(e);
       if (!pos) return;
       const modifiers = cdpModifiers(e);
