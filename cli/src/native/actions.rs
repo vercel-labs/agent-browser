@@ -5705,6 +5705,14 @@ async fn validate_restore_if_pending(state: &mut DaemonState) {
     if !state.restore_validation_pending {
         return;
     }
+    state.drain_firefox_events();
+    if state
+        .firefox
+        .as_ref()
+        .is_some_and(|ff| ff.contexts.pinned_gone().is_some())
+    {
+        return;
+    }
     state.restore_validation_pending = false;
 
     match validate_restored_state(state).await {
