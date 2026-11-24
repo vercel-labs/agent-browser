@@ -128,6 +128,16 @@ pub(crate) enum TaskOutcome {
     Error(ProtocolError),
 }
 
+/// Result of waiting through the modern task fast-path grace window.
+pub(crate) enum GraceWaitResult {
+    /// Tool finished before the grace window elapsed; return directly.
+    Finished(Option<TaskOutcome>),
+    /// Grace window elapsed or task needs input; task is now exposed via `CreateTaskResult`.
+    Exposed(Value),
+    /// Original `tools/call` was cancelled via `notifications/cancelled` during the grace window.
+    Cancelled,
+}
+
 struct TaskRecord {
     task_id: String,
     era: ProtocolEra,
@@ -350,17 +360,27 @@ impl TaskManager {
         Ok((task_id, cancel, create_result))
     }
 
+    /// Wake any thread waiting on task state changes (for example, when an
+    /// unexposed task is cancelled via `notifications/cancelled` during its grace window).
+    pub(crate) fn notify_state_change(&self) {
+        let _guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        self.state_changed.notify_all();
+    }
+
     /// Wait up to `grace` for a newly started modern task to finish synchronously.
-    /// Returns `Some(outcome)` if it finished in time (and removes the unexposed task),
-    /// or `None` after marking the task exposed and returning its `CreateTaskResult`.
-    pub(crate) fn wait_or_expose_modern(
-        &self,
-        task_id: &str,
-        grace: Duration,
-    ) -> Result<Option<TaskOutcome>, Value> {
+    /// Removes the unexposed task if it finishes or is cancelled during the grace
+    /// window; otherwise marks it exposed and returns its `CreateTaskResult`.
+    pub(crate) fn wait_or_expose_modern(&self, task_id: &str, grace: Duration) -> GraceWaitResult {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let deadline = Instant::now() + grace;
         loop {
+            if let Some(rec) = store.tasks.get(task_id) {
+                if rec.cancel.load(Ordering::SeqCst) {
+                    store.tasks.remove(task_id);
+                    store.order.retain(|id| id != task_id);
+                    return GraceWaitResult::Cancelled;
+                }
+            }
             let done = store.tasks.get(task_id).is_some_and(|rec| {
                 rec.status.is_terminal() || rec.status == TaskStatus::InputRequired
             });
@@ -371,20 +391,24 @@ impl TaskManager {
                         if let Some(rec_mut) = store.tasks.get_mut(task_id) {
                             rec_mut.exposed = true;
                         }
-                        return Err(create_res);
+                        return GraceWaitResult::Exposed(create_res);
                     }
                 }
                 let rec = store.tasks.remove(task_id);
                 store.order.retain(|id| id != task_id);
-                return Ok(rec.and_then(|r| r.outcome));
+                return GraceWaitResult::Finished(rec.and_then(|r| r.outcome));
             }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                let rec = store
-                    .tasks
-                    .get_mut(task_id)
-                    .expect("task present during grace window");
+                let Some(rec) = store.tasks.get_mut(task_id) else {
+                    return GraceWaitResult::Finished(None);
+                };
+                if rec.cancel.load(Ordering::SeqCst) {
+                    store.tasks.remove(task_id);
+                    store.order.retain(|id| id != task_id);
+                    return GraceWaitResult::Cancelled;
+                }
                 rec.exposed = true;
-                return Err(rec.modern_create_result_json());
+                return GraceWaitResult::Exposed(rec.modern_create_result_json());
             };
             let (next_store, wait_res) = self
                 .state_changed
@@ -393,15 +417,20 @@ impl TaskManager {
             store = next_store;
             if wait_res.timed_out() {
                 let Some(rec) = store.tasks.get_mut(task_id) else {
-                    return Ok(None);
+                    return GraceWaitResult::Finished(None);
                 };
+                if rec.cancel.load(Ordering::SeqCst) {
+                    store.tasks.remove(task_id);
+                    store.order.retain(|id| id != task_id);
+                    return GraceWaitResult::Cancelled;
+                }
                 if rec.status.is_terminal() {
                     let rec = store.tasks.remove(task_id);
                     store.order.retain(|id| id != task_id);
-                    return Ok(rec.and_then(|r| r.outcome));
+                    return GraceWaitResult::Finished(rec.and_then(|r| r.outcome));
                 }
                 rec.exposed = true;
-                return Err(rec.modern_create_result_json());
+                return GraceWaitResult::Exposed(rec.modern_create_result_json());
             }
         }
     }
@@ -1148,5 +1177,32 @@ mod tests {
         assert_eq!(msgs[1]["method"], "notifications/tasks");
         assert_eq!(msgs[1]["params"]["status"], "completed");
         assert_eq!(msgs[1]["params"]["_meta"][META_SUBSCRIPTION_ID], "sub-1");
+    }
+
+    #[test]
+    fn modern_grace_window_returns_cancelled_and_removes_unexposed_task() {
+        let (mgr, _) = test_manager();
+        let (task_id, cancel, _) = mgr
+            .create_task(ProtocolEra::Modern, "agent_browser_wait_ms", None, false)
+            .unwrap();
+
+        let waiter_mgr = Arc::clone(&mgr);
+        let waiter_id = task_id.clone();
+        let waiter = thread::spawn(move || {
+            waiter_mgr.wait_or_expose_modern(&waiter_id, Duration::from_secs(5))
+        });
+
+        thread::sleep(Duration::from_millis(30));
+        cancel.store(true, Ordering::SeqCst);
+        mgr.notify_state_change();
+
+        let res = waiter.join().unwrap();
+        assert!(matches!(res, GraceWaitResult::Cancelled));
+
+        // Task was never exposed and must be cleaned up.
+        let err = mgr
+            .handle_get(Some(&json!({ "taskId": task_id })), &modern_ctx(true))
+            .unwrap_err();
+        assert_eq!(err.code, -32602);
     }
 }

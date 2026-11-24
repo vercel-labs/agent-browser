@@ -863,3 +863,74 @@ fn legacy_2025_tasks_lifecycle_list_result_and_non_task_rejection() {
     assert!(status.success());
     drop(daemon);
 }
+
+#[cfg(unix)]
+#[test]
+fn modern_task_cancelled_during_grace_window_stops_tool_and_suppresses_response() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon = setup_mock_daemon(&home, "mcp-grace-cancel", vec![5000]);
+
+    let mut client = McpStdioClient::spawn_in(home, &["--task-grace-ms", "2000"]);
+    let caps_with_tasks = json!({
+        "extensions": { "io.modelcontextprotocol/tasks": {} }
+    });
+
+    let started = Instant::now();
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_wait_ms",
+            "arguments": { "ms": 5000, "session": "mcp-grace-cancel" },
+            "_meta": modern_meta(caps_with_tasks.clone())
+        }
+    }));
+
+    // Cancel while still inside the 2s grace window (before CreateTaskResult is emitted).
+    thread::sleep(Duration::from_millis(150));
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": { "requestId": 99, "reason": "cancel during grace window" }
+    }));
+
+    // Wait briefly so any stray response for id 99 would surface before ping.
+    thread::sleep(Duration::from_millis(150));
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 100,
+        "method": "ping",
+        "params": { "_meta": modern_meta(caps_with_tasks) }
+    }));
+    let (ping_resp, between) = client.recv_for_id(&json!(100), Duration::from_secs(5));
+    assert_eq!(ping_resp["id"], 100);
+    assert!(
+        between.iter().all(|m| m.get("id") != Some(&json!(99))),
+        "cancelled grace-window request 99 must not emit a response: {:?}",
+        between
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "cancellation during grace window took too long: {:?}",
+        started.elapsed()
+    );
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 101,
+        "method": "shutdown",
+        "params": {}
+    }));
+    let (shutdown_resp, after) = client.recv_for_id(&json!(101), Duration::from_secs(5));
+    assert_eq!(shutdown_resp["id"], 101);
+    assert!(
+        after.iter().all(|m| m.get("id") != Some(&json!(99))),
+        "cancelled request 99 must not emit a late response before shutdown: {:?}",
+        after
+    );
+
+    let status = client.close();
+    assert!(status.success());
+    drop(daemon);
+}

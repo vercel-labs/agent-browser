@@ -16,7 +16,7 @@ use crate::mcp_skills::{
     read_resource_directory, skills_extension_capability, SKILLS_EXTENSION_ID,
 };
 use crate::mcp_tasks::{
-    is_task_eligible_tool, legacy_tasks_capability, TaskManager, TaskOutcome,
+    is_task_eligible_tool, legacy_tasks_capability, GraceWaitResult, TaskManager, TaskOutcome,
     DEFAULT_TASK_GRACE_MS, TASKS_EXTENSION_ID,
 };
 use crate::mcp_transport::{
@@ -944,11 +944,14 @@ fn dispatch_tools_call(
                             .is_err();
                     }
                 };
+            // Register the request ID for notifications/cancelled during the grace
+            // window (before a CreateTaskResult handle has been sent to the client).
+            state.register_in_flight_flag(&id, cancel.clone());
             spawn_task_worker(
                 task_id.clone(),
                 tool_name,
                 params,
-                cancel,
+                cancel.clone(),
                 // Per ext-tasks, notifications/progress MUST NOT be emitted for 2026-07-28 tasks.
                 None,
                 Arc::clone(config),
@@ -960,21 +963,30 @@ fn dispatch_tools_call(
             let wait_tasks = Arc::clone(tasks);
             state.worker_enter();
             thread::spawn(move || {
-                let response = match wait_tasks.wait_or_expose_modern(&task_id, grace) {
-                    Ok(Some(TaskOutcome::Result(res))) => {
-                        result_response(id, wrap_response_result(ProtocolEra::Modern, res))
+                let grace_result = wait_tasks.wait_or_expose_modern(&task_id, grace);
+                wait_state.unregister_in_flight(&id);
+                if !cancel.load(Ordering::SeqCst) {
+                    let response = match grace_result {
+                        GraceWaitResult::Finished(Some(TaskOutcome::Result(res))) => Some(
+                            result_response(id, wrap_response_result(ProtocolEra::Modern, res)),
+                        ),
+                        GraceWaitResult::Finished(Some(TaskOutcome::Error(err))) => {
+                            Some(error_response_from(id, &err))
+                        }
+                        GraceWaitResult::Finished(None) => Some(error_response_from(
+                            id,
+                            &ProtocolError::internal_error("Task ended without a result"),
+                        )),
+                        GraceWaitResult::Exposed(create_task_result) => Some(result_response(
+                            id,
+                            wrap_response_result(ProtocolEra::Modern, create_task_result),
+                        )),
+                        GraceWaitResult::Cancelled => None,
+                    };
+                    if let Some(response) = response {
+                        let _ = wait_state.writer.send_json(&response);
                     }
-                    Ok(Some(TaskOutcome::Error(err))) => error_response_from(id, &err),
-                    Ok(None) => error_response_from(
-                        id,
-                        &ProtocolError::internal_error("Task ended without a result"),
-                    ),
-                    Err(create_task_result) => result_response(
-                        id,
-                        wrap_response_result(ProtocolEra::Modern, create_task_result),
-                    ),
-                };
-                let _ = wait_state.writer.send_json(&response);
+                }
                 wait_state.worker_exit();
             });
             return false;
@@ -1042,7 +1054,9 @@ fn handle_notification(
 ) {
     if method == "notifications/cancelled" {
         if let Some(request_id) = params.and_then(|p| p.get("requestId")) {
-            state.cancel_in_flight(request_id);
+            if state.cancel_in_flight(request_id) {
+                tasks.notify_state_change();
+            }
             tasks.unsubscribe(request_id);
         }
     }

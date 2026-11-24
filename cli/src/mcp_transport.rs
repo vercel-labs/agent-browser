@@ -348,12 +348,16 @@ impl McpServerState {
 
     pub(crate) fn register_in_flight(&self, id: &Value) -> Arc<AtomicBool> {
         let cancel = Arc::new(AtomicBool::new(false));
+        self.register_in_flight_flag(id, cancel.clone());
+        cancel
+    }
+
+    pub(crate) fn register_in_flight_flag(&self, id: &Value, cancel: Arc<AtomicBool>) {
         let key = id_key(id);
         self.in_flight
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key, cancel.clone());
-        cancel
+            .insert(key, cancel);
     }
 
     pub(crate) fn unregister_in_flight(&self, id: &Value) {
