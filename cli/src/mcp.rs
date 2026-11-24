@@ -1304,14 +1304,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SET_VIEWPORT,
             "Set viewport",
-            "Set viewport size. The optional scale must be finite.",
+            "Set viewport size. The optional scale must be finite. Firefox does not support mobile mode.",
             json!({ "width": int_schema(), "height": int_schema(), "scale": number_schema() }),
             &["width", "height"],
         ),
         tool(
             TOOL_SET_DEVICE,
             "Set device",
-            "Emulate a device by name.",
+            "Emulate a device by name. Firefox does not support set device; use set viewport plus the --user-agent launch flag or AGENT_BROWSER_USER_AGENT instead of set device.",
             json!({ "device": { "type": "string" } }),
             &["device"],
         ),
@@ -1346,7 +1346,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SET_MEDIA,
             "Set media",
-            "Set media emulation.",
+            "Set media emulation. Firefox does not support reduced motion.",
             json!({ "colorScheme": { "type": "string", "enum": ["dark", "light", "no-preference"] }, "reducedMotion": { "type": "string", "enum": ["reduce", "no-preference"] } }),
             &[],
         ),
@@ -2206,7 +2206,7 @@ fn shared_property(key: &str) -> Value {
             "type": "array",
             "minItems": 1,
             "items": { "type": "string" },
-            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected."
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active. Omit it to run without domain containment; an empty list is rejected."
         }),
         "capture" => json!({
             "type": "array",

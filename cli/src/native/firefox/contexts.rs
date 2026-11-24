@@ -414,6 +414,12 @@ impl Contexts {
             .filter(|user_context| *user_context != DEFAULT_USER_CONTEXT)
     }
 
+    /// The user context, Firefox's cookie jar, of the tab `context` belongs to.
+    pub fn jar(&self, context: &str) -> &str {
+        self.tab(context)
+            .map_or(DEFAULT_USER_CONTEXT, |tab| tab.user_context.as_str())
+    }
+
     /// The tab whose cookie jar and origin storage commands must use, or `None` while a pinned
     /// tab is gone or no live tab is active.
     pub fn storage_tab(&self) -> Option<&str> {

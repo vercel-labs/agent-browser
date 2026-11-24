@@ -3363,15 +3363,18 @@ Configures various browser settings and emulation options.
 
 Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina;
-                             scale must be finite); kept across relaunches and new tabs
+                             scale must be finite; mobile mode is unsupported in Firefox);
+                             kept across relaunches and new tabs
   device <name>              Emulate device (e.g., "iPhone 12"): viewport, user agent and
-                             touch input; touch events exist after the next navigation
+                             touch input (touch events exist after the next navigation);
+                             unsupported in Firefox (use set viewport plus the --user-agent
+                             launch flag or AGENT_BROWSER_USER_AGENT)
   geo <lat> <lng>            Set geolocation (coordinates must be finite)
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
-        [reduced-motion]     Enable reduced motion
+        [reduced-motion]     Enable reduced motion (unsupported in Firefox)
 
 Global Options:
   --json               Output as JSON
@@ -3911,6 +3914,10 @@ Usage: agent-browser console [--clear]
 
 View browser console output (log, warn, error, info).
 
+The daemon keeps the latest 1,000 messages, and drops the oldest sooner once they hold about
+8 MiB. A message keeps up to 64 KiB of text; longer text ends with ...[truncated N bytes].
+Arguments that hold more than 64 KiB are replaced by a note.
+
 Options:
   --clear              Clear console log buffer
 
@@ -3930,6 +3937,9 @@ agent-browser errors - View page errors
 Usage: agent-browser errors [--clear]
 
 View JavaScript errors and uncaught exceptions.
+
+The daemon keeps the latest 1,000 errors, and drops the oldest sooner once they hold about
+8 MiB. An error keeps up to 64 KiB of text; longer text ends with ...[truncated N bytes].
 
 Options:
   --clear              Clear error buffer
@@ -5097,7 +5107,7 @@ Options:
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
                              Invalid values warn and leave the existing output limit unchanged.
-  --allowed-domains <list>   Restrict network domains; must list at least one; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari/Ladybird (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --allowed-domains <list>   Restrict network domains and non-HTTP document navigation; must list at least one; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari/Ladybird (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --capture <list>           Record the session as it runs; only flow is supported (or AGENT_BROWSER_CAPTURE)
                              On a running session without capture, passing it relaunches with capture on
                              Firefox does not support --capture flow
@@ -5116,10 +5126,12 @@ Options:
                              Explicit Obscura launches validate this invocation's resolved
                              bypass settings, even with an existing daemon; stale daemon
                              environment values are not reused when bypass is cleared.
-                             Firefox rejects --allowed-domains, authenticated proxies, --user-agent,
-                             --color-scheme, and networkidle waits. Firefox takes http://,
-                             socks4://, and socks5:// proxies and rejects https:// proxies
-                             instead of connecting to them without TLS.
+                             Firefox rejects --cdp, --auto-connect, --provider, profiles, extensions,
+                             --args, --allow-file-access, --webgpu, --ca-cert, --enable,
+                             --init-script, and --capture flow. Authenticated proxies work through
+                             --proxy with credentials. Firefox takes http://, socks4://, and
+                             socks5:// proxies and rejects https:// proxies instead of connecting
+                             to them without TLS.
                              Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --relaunch                 Relaunch the session's browser even when no setting changed

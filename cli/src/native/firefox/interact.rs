@@ -1469,7 +1469,7 @@ fn dialog_status(dialog: Option<&PendingDialog>) -> Value {
 mod tests {
     use super::*;
     use crate::native::firefox::session::tests::{
-        fake_session_with, fake_session_with_replies, fake_session_with_script, Calls,
+        fake_session_with, fake_session_with_replies, fake_session_with_script, Calls, FakeReply,
     };
     use crate::native::firefox::target::IN_DOCUMENT_JS;
     use std::sync::{Arc, Mutex};
@@ -2748,9 +2748,9 @@ mod tests {
                 if let Some(tx) = sender.lock().unwrap().as_ref() {
                     tx.send(prompt.clone()).unwrap();
                 }
-                return None;
+                return FakeReply::Silent;
             }
-            Some(json!({}))
+            FakeReply::Result(json!({}))
         })
         .await;
         *events.lock().unwrap() = Some(tx);
@@ -2786,7 +2786,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_touch_batch_that_fails_records_nothing_and_reports_the_error() {
         let (ff, _tx, _calls) = fake_session_with_replies(|request| {
-            (request["method"] != "input.performActions").then(|| json!({}))
+            if request["method"] == "input.performActions" {
+                FakeReply::Silent
+            } else {
+                FakeReply::Result(json!({}))
+            }
         })
         .await;
         let mut state = DaemonState::new();
@@ -3210,26 +3214,31 @@ mod tests {
                         if let Some(tx) = sender.lock().unwrap().as_ref() {
                             tx.send(prompt.clone()).unwrap();
                         }
-                        return None;
+                        return FakeReply::Silent;
                     }
-                    Some(json!({}))
+                    FakeReply::Result(json!({}))
                 }
-                Some("browsingContext.getTree") => Some(frame_tree()),
+                Some("browsingContext.getTree") => FakeReply::Result(frame_tree()),
                 Some("browsingContext.locateNodes") => {
-                    Some(json!({ "nodes": [{ "sharedId": "frame" }] }))
+                    FakeReply::Result(json!({ "nodes": [{ "sharedId": "frame" }] }))
                 }
                 Some("script.callFunction") if function == IN_DOCUMENT_JS => {
-                    Some(connected(params))
+                    FakeReply::Result(connected(params))
                 }
-                Some("script.callFunction") if function == "() => document" => Some(
+                Some("script.callFunction") if function == "() => document" => FakeReply::Result(
                     json!({ "type": "success", "result": { "type": "node", "sharedId": "doc" } }),
                 ),
-                Some("script.callFunction") if params["this"]["sharedId"] == "frame" => Some(
-                    hop_reply(maps((5.0, 7.0), (2.0, 3.0), (85.0, 157.0)), false),
-                ),
-                Some("script.callFunction") if params["this"].is_null() => Some(viewport_reply()),
-                Some("script.callFunction") => Some(located(None)),
-                _ => Some(json!({})),
+                Some("script.callFunction") if params["this"]["sharedId"] == "frame" => {
+                    FakeReply::Result(hop_reply(
+                        maps((5.0, 7.0), (2.0, 3.0), (85.0, 157.0)),
+                        false,
+                    ))
+                }
+                Some("script.callFunction") if params["this"].is_null() => {
+                    FakeReply::Result(viewport_reply())
+                }
+                Some("script.callFunction") => FakeReply::Result(located(None)),
+                _ => FakeReply::Result(json!({})),
             }
         })
         .await;
@@ -3476,16 +3485,18 @@ mod tests {
                 if let Some(tx) = sender.lock().unwrap().as_ref() {
                     tx.send(prompt.clone()).unwrap();
                 }
-                return None;
+                return FakeReply::Silent;
             }
             if request["method"] == "script.callFunction"
                 && request["params"]["functionDeclaration"] == "() => document"
             {
-                return Some(
+                return FakeReply::Result(
                     json!({ "type": "success", "result": { "type": "node", "sharedId": "doc" } }),
                 );
             }
-            Some(json!({ "type": "success", "result": { "type": "boolean", "value": true } }))
+            FakeReply::Result(
+                json!({ "type": "success", "result": { "type": "boolean", "value": true } }),
+            )
         })
         .await;
         *events.lock().unwrap() = Some(tx);
