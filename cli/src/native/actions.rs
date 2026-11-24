@@ -32,11 +32,10 @@ use super::diff;
 use super::downloads::{DownloadLedger, DownloadState};
 use super::element::RefMap;
 use super::firefox;
-use super::forms;
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
-use super::pointer::{ClickPlan, ClickSpec, Modifiers, MouseButton};
+use super::pointer::{ClickPlan, ClickSpec, MouseButton};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
 use super::react;
@@ -226,7 +225,6 @@ pub struct PendingDialog {
     /// Flat CDP session the dialog opened on. A dialog on a background tab
     /// must not block commands targeting the active tab.
     pub session_id: Option<String>,
-    pub owner_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -234,6 +232,7 @@ pub struct MouseState {
     pub x: f64,
     pub y: f64,
     pub buttons: i32,
+    pub modifiers: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -847,7 +846,7 @@ impl DaemonState {
     }
 
     /// Queue a warning for the current command's response.
-    pub(crate) fn push_action_warning(&mut self, warning: &str) {
+    fn push_action_warning(&mut self, warning: &str) {
         self.pending_action_warning = Some(match self.pending_action_warning.take() {
             Some(existing) => format!("{}\n{}", existing, warning),
             None => warning.to_string(),
@@ -1036,7 +1035,6 @@ impl DaemonState {
 
     fn reset_input_state(&mut self) {
         self.mouse_state = MouseState::default();
-        self.pending_pointer_release = None;
     }
 
     /// Create state with an optional stream client slot and server instance
@@ -1428,65 +1426,29 @@ impl DaemonState {
     }
 
     pub(crate) fn drain_firefox_events(&mut self) {
-        let (held, active_changed) = {
-            let (firefox, dialog, hold) = (
-                &mut self.firefox,
-                &mut self.pending_dialog,
-                &mut self.pending_pointer_release,
-            );
-            let held = hold.as_ref().map(|release| release.button);
-            let active_changed = firefox
-                .as_mut()
-                .is_some_and(|ff| ff.drain_events_with(dialog, hold));
-            (held, active_changed)
-        };
-        if active_changed {
+        if self
+            .firefox
+            .as_mut()
+            .is_some_and(|ff| ff.drain_events(&mut self.pending_dialog))
+        {
             self.ref_map.invalidate_all_documents();
             self.active_iframe_sessions.clear();
             self.active_frame_id = None;
-        }
-        if let Some(button) = held.filter(|_| self.pending_pointer_release.is_none()) {
-            self.mouse_state.buttons &= !button.mask();
         }
     }
 
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
         self.drain_firefox_events();
-        let held = self
-            .pending_pointer_release
-            .as_ref()
-            .map(|release| release.button);
         if let Some(ff) = self.firefox.as_mut() {
-            let reconciled = ff
-                .reconcile_event_loss(&mut self.pending_dialog, &mut self.pending_pointer_release)
-                .await?;
+            let reconciled = ff.reconcile_event_loss(&mut self.pending_dialog).await?;
             let recovered = ff.recover_active_context().await?;
             ff.release_unused_user_contexts().await;
             if reconciled || recovered {
                 firefox::daemon::reset_page(self);
             }
         }
-        if let Some(button) = held.filter(|_| self.pending_pointer_release.is_none()) {
-            self.mouse_state.buttons &= !button.mask();
-        }
         let drained = self.drain_cdp_events();
-        let applied = self.apply_drained_events(drained).await;
-        self.reconcile_pending_release().await;
-        applied
-    }
-
-    /// Releases the button a Firefox dialog left held once the browser reports the prompt that
-    /// opened mid-press is gone, and drops a hold whose tab is gone instead.
-    pub(crate) async fn reconcile_pending_release(&mut self) {
-        let (firefox, dialog, hold, buttons) = (
-            &self.firefox,
-            self.pending_dialog.as_ref(),
-            &mut self.pending_pointer_release,
-            &mut self.mouse_state.buttons,
-        );
-        if let Some(ff) = firefox.as_ref() {
-            firefox::interact::release_pending(ff, dialog, hold, buttons).await;
-        }
+        self.apply_drained_events(drained).await
     }
 
     async fn refresh_active_iframe_sessions(&mut self) {
@@ -2494,7 +2456,6 @@ impl DaemonState {
                                         url: dialog_event.url,
                                         default_prompt: dialog_event.default_prompt,
                                         session_id: event.session_id.clone(),
-                                        owner_context: None,
                                     });
                                 }
                             }
@@ -3031,11 +2992,23 @@ async fn record_flow_step(action: &str, cmd: &Value, state: &mut DaemonState) {
             None => None,
         };
         let traits = flow_field_traits(action, cmd, state).await;
-        state
-            .flow
-            .begin(action, cmd, &state.ref_map, from_url, traits.as_ref());
+        state.flow.begin(
+            action,
+            cmd,
+            &state.ref_map,
+            from_url,
+            traits.as_ref(),
+            state.mouse_state.modifiers,
+        );
     } else {
-        state.flow.begin(action, cmd, &state.ref_map, None, None);
+        state.flow.begin(
+            action,
+            cmd,
+            &state.ref_map,
+            None,
+            None,
+            state.mouse_state.modifiers,
+        );
     }
 }
 
@@ -3060,9 +3033,6 @@ fn load_run_flow(
         .map(|flow| Some(Box::new(flow)))
 }
 
-/// Every action a command performs, so policy and confirmation gates check each one. A command
-/// that loads a URL first is also checked as `navigate`, and a `find` command as the standalone
-/// action it runs on the match.
 fn policy_actions_for_command(
     cmd: &Value,
     action: &str,
@@ -3075,25 +3045,8 @@ fn policy_actions_for_command(
     // `a11y <url>` performs a real browser navigation before the audit. Keep
     // navigation deny and confirmation policies effective for the compound
     // command instead of treating it as a read-only audit.
-    if action == "diff_url"
-        || (matches!(action, "a11y" | "vitals")
-            && cmd.get("url").and_then(|v| v.as_str()).is_some())
-    {
+    if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
         actions.push("navigate".to_string());
-    }
-    if FIND_SUBACTION_COMMANDS.contains(&action) {
-        let subaction = cmd
-            .get("subaction")
-            .and_then(|v| v.as_str())
-            .unwrap_or("click");
-        actions.push(
-            if subaction == "text" {
-                "gettext"
-            } else {
-                subaction
-            }
-            .to_string(),
-        );
     }
     if let Some(flow) = flow.filter(|_| action == "flow_run") {
         actions.extend(flow.run_writes().iter().map(|w| w.action()));
@@ -3187,7 +3140,7 @@ pub(crate) fn dialog_block_error(action: &str, cmd: &Value, state: &DaemonState)
     let active = state
         .firefox
         .as_ref()
-        .map(|ff| ff.contexts.active_tab())
+        .map(|ff| ff.contexts.active())
         .or_else(|| {
             state
                 .browser
@@ -3195,9 +3148,7 @@ pub(crate) fn dialog_block_error(action: &str, cmd: &Value, state: &DaemonState)
                 .and_then(|mgr| mgr.active_session_id().ok())
         });
     let on_active_tab = match (&dialog.session_id, active) {
-        (Some(dialog_session), Some(active)) => {
-            dialog.owner_context.as_deref().unwrap_or(dialog_session) == active
-        }
+        (Some(dialog_session), Some(active)) => dialog_session == active,
         // No session on the event means a top-level page dialog; with no browser, fail safe.
         _ => true,
     };
@@ -3247,12 +3198,12 @@ pub(crate) const ENVELOPE_KEYS: &[&str] = &[
 ];
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
-    execute_command_flow(cmd, state).await
+    Box::pin(execute_command_flow(cmd, state)).await
 }
 
 async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
     let outer = state.flow.enter();
-    let mut resp = Box::pin(execute_command_inner(cmd, state)).await;
+    let mut resp = execute_command_inner(cmd, state).await;
     if let Some(seq) = state.flow.exit(outer) {
         let ok = resp.get("success") == Some(&json!(true));
         let url = match state.browser.as_ref() {
@@ -3715,13 +3666,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     let mut result = match action {
-        _ if firefox_routed => {
-            let result = Box::pin(firefox::actions::execute(action, cmd, state)).await;
-            if action == "tab_close" {
-                state.reconcile_pending_release().await;
-            }
-            result
-        }
+        _ if firefox_routed => Box::pin(firefox::actions::execute(action, cmd, state)).await,
         "launch" => {
             let applied = match launch_patch.as_ref() {
                 Some(patch) => apply_settings_patch(state, patch, true)
@@ -5118,14 +5063,14 @@ async fn auto_launch_with_settings(
     if matches!(connection, Connection::Cdp(_) | Connection::AutoConnect)
         || !matches!(&connection, Connection::Provider(provider) if provider_is_browser_use(provider))
     {
-        return Box::pin(auto_launch_inner(state, plugins, cmd, strict_state)).await;
+        return auto_launch_inner(state, plugins, cmd, strict_state).await;
     }
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
     let result = match tokio::time::timeout(
         BROWSER_USE_SETUP_DEADLINE,
-        Box::pin(auto_launch_inner(state, plugins, cmd, strict_state)),
+        auto_launch_inner(state, plugins, cmd, strict_state),
     )
     .await
     {
@@ -6117,16 +6062,15 @@ async fn handle_launch_for_target(
             .and_then(Value::as_str)
             .is_some_and(provider_is_browser_use)
     {
-        return Box::pin(handle_launch_inner(cmd, state)).await;
+        return handle_launch_inner(cmd, state).await;
     }
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
-    let result =
-        match tokio::time::timeout(deadline, Box::pin(handle_launch_inner(cmd, state))).await {
-            Ok(result) => result,
-            Err(_) => Err(browser_use_setup_timeout(state).await),
-        };
+    let result = match tokio::time::timeout(deadline, handle_launch_inner(cmd, state)).await {
+        Ok(result) => result,
+        Err(_) => Err(browser_use_setup_timeout(state).await),
+    };
     if result.is_err() {
         // The stored security settings decide what survives a failed launch, so
         // the live filter follows them.
@@ -7404,9 +7348,11 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
 // Phase 2 handlers
 // ---------------------------------------------------------------------------
 
-/// Reads the snapshot flags (`selector`, `interactive`, `compact`, `maxDepth`, `urls`) from a command.
-pub(crate) fn snapshot_options(cmd: &Value) -> SnapshotOptions {
-    SnapshotOptions {
+async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    let options = SnapshotOptions {
         selector: cmd
             .get("selector")
             .and_then(|v| v.as_str())
@@ -7424,14 +7370,7 @@ pub(crate) fn snapshot_options(cmd: &Value) -> SnapshotOptions {
             .and_then(|v| v.as_u64())
             .map(|d| d as usize),
         urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
-    }
-}
-
-async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-
-    let options = snapshot_options(cmd);
+    };
 
     let previous_refs = state.ref_map.ref_ids();
     let (tree, refs) = snapshot::stage_snapshot(
@@ -7445,25 +7384,13 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     .await?;
     state.ref_map = refs;
     let url = mgr.get_url().await.unwrap_or_default();
-    snapshot_response(cmd, state, session_id, &options, previous_refs, tree, url)
-}
-
-/// Builds the `snapshot` reply (refs, removed refs and the optional delta) from a rendered tree.
-pub(crate) fn snapshot_response(
-    cmd: &Value,
-    state: &mut DaemonState,
-    session_id: String,
-    options: &SnapshotOptions,
-    previous_refs: std::collections::HashSet<String>,
-    tree: String,
-    url: String,
-) -> Result<Value, String> {
     state.remember_snapshot(LastSnapshot {
         session_id: session_id.clone(),
         frame_id: state.active_frame_id.clone(),
-        scope: SnapshotScope::of(options),
+        scope: SnapshotScope::of(&options),
         text: tree.clone(),
     });
+
     let refs: serde_json::Map<String, Value> = state
         .ref_map
         .entries_sorted()
@@ -7925,7 +7852,7 @@ async fn handle_click(
             .await?;
             let call_params = json!({
                 "objectId": object_id,
-                "functionDeclaration": interaction::CLICK_HREF_JS,
+                "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
                 "returnByValue": true
             });
             let call_result = mgr
@@ -7986,8 +7913,11 @@ async fn handle_click(
         ClickPlan::Pointer(spec) => spec,
     };
 
-    let options = PointerMoveOptions::from_cmd(cmd, state);
-    if options.mode != "instant" {
+    let input_mode = cmd
+        .get("inputMode")
+        .and_then(Value::as_str)
+        .unwrap_or(&state.input_mode);
+    if input_mode != "instant" {
         let (x, y, target_session_id) = super::element::resolve_element_center(
             &mgr.client,
             &session_id,
@@ -8004,18 +7934,16 @@ async fn handle_click(
             &state.iframe_sessions,
         )
         .await?;
-        let options = PointerMoveOptions {
-            duration_ms: if options.mode == "smooth" { 200 } else { 0 },
-            steps: None,
-            ..options
-        };
         move_mouse_interpolated(
             &mgr.client,
             &target_session_id,
             &mut state.mouse_state,
             x,
             y,
-            &options,
+            if input_mode == "smooth" { 200 } else { 0 },
+            None,
+            input_mode == "human",
+            cmd.get("seed").and_then(Value::as_u64).unwrap_or(0),
             0,
             offset,
             &state.recording_state.shared_cursor,
@@ -8065,29 +7993,26 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let mut control = interaction::CdpControl::resolve(
+    let outcome = Box::pin(interaction::fill(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
+        value,
         &state.iframe_sessions,
-    )
+    ))
     .await?;
-    let outcome = Box::pin(forms::fill(&mut control, value)).await?;
-    Ok(form_response(state, json!({ "filled": selector }), outcome))
+    Ok(form_outcome_data(
+        state,
+        json!({ "filled": selector }),
+        outcome.warning,
+    ))
 }
 
-/// Response of a text action: a dialog that opened is reported in the data,
-/// and a warning is queued on the out-of-band channel.
-pub(crate) fn form_response(
-    state: &mut DaemonState,
-    mut data: Value,
-    outcome: forms::FormOutcome,
-) -> Value {
-    if outcome.dialog_opened {
-        data["dialogOpened"] = json!(true);
-    }
-    if let Some(warning) = outcome.warning {
+/// Queues a form action's warning on the out-of-band channel and returns the
+/// response data unchanged.
+fn form_outcome_data(state: &mut DaemonState, data: Value, warning: Option<String>) -> Value {
+    if let Some(warning) = warning {
         state.push_action_warning(&warning);
     }
     data
@@ -8107,16 +8032,22 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     let delay = cmd.get("delay").and_then(|v| v.as_u64());
 
-    let mut control = interaction::CdpControl::resolve(
+    let outcome = Box::pin(interaction::type_text(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
+        text,
+        clear,
+        delay,
         &state.iframe_sessions,
-    )
+    ))
     .await?;
-    let outcome = Box::pin(forms::type_text(&mut control, text, clear, delay)).await?;
-    Ok(form_response(state, json!({ "typed": text }), outcome))
+    Ok(form_outcome_data(
+        state,
+        json!({ "typed": text }),
+        outcome.warning,
+    ))
 }
 
 async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -8130,7 +8061,14 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     // Parse modifier+key chords like "Control+a", "Shift+Enter", "Control+Shift+a"
     let (actual_key, modifiers) = parse_key_chord(key);
 
-    interaction::press_key_with_modifiers(&mgr.client, &session_id, &actual_key, modifiers).await?;
+    interaction::press_key_with_chord_and_held(
+        &mgr.client,
+        &session_id,
+        &actual_key,
+        modifiers.unwrap_or(0),
+        state.mouse_state.modifiers,
+    )
+    .await?;
     Ok(json!({ "pressed": key }))
 }
 
@@ -8139,37 +8077,7 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 ///
 /// CDP modifier values: 1 = Alt, 2 = Control, 4 = Meta (Cmd), 8 = Shift.
 fn parse_key_chord(input: &str) -> (String, Option<i32>) {
-    let parts: Vec<&str> = input.split('+').collect();
-    if parts.len() < 2 {
-        return (input.to_string(), None);
-    }
-
-    let mut modifiers = 0i32;
-    let mut key_parts: Vec<&str> = Vec::new();
-
-    for part in &parts {
-        if let Some(bit) = Modifiers::bit(part) {
-            modifiers |= bit;
-        } else {
-            key_parts.push(part);
-        }
-    }
-
-    // If no modifiers were found, the '+' was part of the key name (e.g. "+")
-    // or the input was something unexpected — treat the whole string as the key.
-    if modifiers == 0 {
-        return (input.to_string(), None);
-    }
-
-    // The actual key is whatever remains after stripping modifiers.
-    // If nothing remains (e.g. "Control+"), treat the whole string as-is.
-    let actual_key = if key_parts.is_empty() {
-        input.to_string()
-    } else {
-        key_parts.join("+")
-    };
-
-    (actual_key, Some(modifiers))
+    interaction::parse_key_chord(input)
 }
 
 async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -8229,25 +8137,9 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "scrolled": true }))
 }
 
-/// The values a `select` names: `values` as a list or one string, or `value`.
-pub(crate) fn select_values(cmd: &Value) -> Vec<String> {
-    match cmd.get("values") {
-        Some(Value::Array(values)) => values
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect(),
-        Some(Value::String(value)) => vec![value.clone()],
-        _ => cmd
-            .get("value")
-            .and_then(Value::as_str)
-            .map(|value| vec![value.to_string()])
-            .unwrap_or_default(),
-    }
-}
-
 /// The optional `by` field restricts `select` matching to option values or
 /// visible labels.
-pub(crate) fn select_by(cmd: &Value) -> Result<Option<&str>, String> {
+fn select_by(cmd: &Value) -> Result<Option<&str>, String> {
     match cmd.get("by") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(by)) if by == "value" || by == "label" => Ok(Some(by.as_str())),
@@ -8263,28 +8155,31 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let values = select_values(cmd);
+    let values: Vec<String> = match cmd.get("values") {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        Some(Value::String(s)) => vec![s.clone()],
+        _ => cmd
+            .get("value")
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default(),
+    };
+
     let by = select_by(cmd)?;
 
-    let mut control = interaction::CdpControl::resolve(
+    let outcome = interaction::select_option(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
+        &values,
+        by,
         &state.iframe_sessions,
     )
-    .await?;
-    let outcome = forms::select(&mut control, &values, by).await;
-    select_response(state, values, outcome)
-}
-
-/// Response of a select: a refusal carries the options the page offered as
-/// error data.
-pub(crate) fn select_response(
-    state: &mut DaemonState,
-    values: Vec<String>,
-    outcome: Result<(), forms::SelectError>,
-) -> Result<Value, String> {
+    .await;
     if let Err(e) = outcome {
         state.error_data = e.options.map(|options| json!({ "options": options }));
         return Err(e.message);
@@ -8294,18 +8189,12 @@ pub(crate) fn select_response(
 
 /// Response of a check or uncheck; an unverified or unchanged toggle queues a
 /// warning.
-pub(crate) fn toggle_response(
+fn toggle_response(
     state: &mut DaemonState,
     key: &str,
     selector: &str,
-    outcome: &forms::ToggleOutcome,
+    outcome: &interaction::ToggleOutcome,
 ) -> Value {
-    if let Some(position) = outcome.position {
-        (state.mouse_state.x, state.mouse_state.y) = position;
-        if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-            cursor.record(position.0, position.1, state.mouse_state.buttons);
-        }
-    }
     let mut notes = Vec::new();
     if !outcome.verified {
         notes.push(super::element::STATE_NOT_VERIFIED.to_string());
@@ -8313,13 +8202,10 @@ pub(crate) fn toggle_response(
     if let Some(warning) = &outcome.warning {
         notes.push(warning.clone());
     }
-    form_response(
+    form_outcome_data(
         state,
         json!({ key: selector }),
-        forms::FormOutcome {
-            warning: (!notes.is_empty()).then(|| notes.join("\n")),
-            dialog_opened: false,
-        },
+        (!notes.is_empty()).then(|| notes.join("\n")),
     )
 }
 
@@ -8331,7 +8217,7 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let mut control = interaction::CdpControl::resolve(
+    let outcome = interaction::check(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -8339,7 +8225,12 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &state.iframe_sessions,
     )
     .await?;
-    let outcome = Box::pin(forms::set_checked(&mut control, true)).await?;
+    if let Some(position) = outcome.position {
+        (state.mouse_state.x, state.mouse_state.y) = position;
+        if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
+            cursor.record(position.0, position.1, state.mouse_state.buttons);
+        }
+    }
     Ok(toggle_response(state, "checked", selector, &outcome))
 }
 
@@ -8351,7 +8242,7 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let mut control = interaction::CdpControl::resolve(
+    let outcome = interaction::uncheck(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -8359,7 +8250,12 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         &state.iframe_sessions,
     )
     .await?;
-    let outcome = Box::pin(forms::set_checked(&mut control, false)).await?;
+    if let Some(position) = outcome.position {
+        (state.mouse_state.x, state.mouse_state.y) = position;
+        if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
+            cursor.record(position.0, position.1, state.mouse_state.buttons);
+        }
+    }
     Ok(toggle_response(state, "unchecked", selector, &outcome))
 }
 
@@ -9024,7 +8920,7 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
 /// The options a snapshot was taken with.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct SnapshotScope {
+struct SnapshotScope {
     selector: Option<String>,
     interactive: bool,
     compact: bool,
@@ -9043,7 +8939,7 @@ impl SnapshotScope {
         }
     }
 
-    pub(crate) fn options(&self) -> SnapshotOptions {
+    fn options(&self) -> SnapshotOptions {
         SnapshotOptions {
             selector: self.selector.clone(),
             interactive: self.interactive,
@@ -9119,15 +9015,13 @@ fn implicit_baseline_scope(cmd: &Value, stored: &SnapshotScope) -> Result<Snapsh
     }
 }
 
-/// Resolves the snapshot scope for `diff snapshot`, verifying implicit baseline preconditions.
-pub(crate) fn diff_snapshot_scope(
-    cmd: &Value,
-    state: &DaemonState,
-    session_id: &str,
-) -> Result<SnapshotScope, String> {
+async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
     let baseline = cmd.get("baseline").and_then(|v| v.as_str());
-    match baseline {
-        Some(_) => Ok(SnapshotScope {
+    let scope = match baseline {
+        Some(_) => SnapshotScope {
             selector: cmd
                 .get("selector")
                 .and_then(|v| v.as_str())
@@ -9139,27 +9033,19 @@ pub(crate) fn diff_snapshot_scope(
                 .and_then(|v| v.as_u64())
                 .map(|d| d as usize),
             urls: cmd.get("urls").and_then(Value::as_bool) == Some(true),
-        }),
-        None => match state.last_snapshots.get(session_id) {
+        },
+        None => match state.last_snapshots.get(&session_id) {
             Some(last) => {
                 if last.frame_id != state.active_frame_id {
                     return Err("baseline_mismatch: the last snapshot was taken in a different frame; select that frame or run `snapshot` again, or pass --baseline <file>".to_string());
                 }
-                implicit_baseline_scope(cmd, &last.scope)
+                implicit_baseline_scope(cmd, &last.scope)?
             }
-            None => Err(
-                "no_baseline: no earlier snapshot on this tab; run `snapshot` first or pass --baseline <file>"
-                    .to_string(),
-            ),
+            None => {
+                return Err("no_baseline: no earlier snapshot on this tab; run `snapshot` first or pass --baseline <file>".to_string());
+            }
         },
-    }
-}
-
-async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-
-    let scope = diff_snapshot_scope(cmd, state, &session_id)?;
+    };
     let options = scope.options();
     let (current, current_ref_map) = snapshot::stage_snapshot(
         &mgr.client,
@@ -9171,19 +9057,6 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
     )
     .await?;
 
-    diff_snapshot_response(cmd, state, session_id, scope, current, current_ref_map)
-}
-
-/// Diffs a freshly rendered snapshot against the command's baseline and commits its ref map.
-pub(crate) fn diff_snapshot_response(
-    cmd: &Value,
-    state: &mut DaemonState,
-    session_id: String,
-    scope: SnapshotScope,
-    current: String,
-    current_ref_map: RefMap,
-) -> Result<Value, String> {
-    let baseline = cmd.get("baseline").and_then(|v| v.as_str());
     let baseline_text = match baseline {
         Some(b) => {
             if !std::path::Path::new(b).exists() {
@@ -9503,9 +9376,20 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .get("eventType")
         .and_then(|v| v.as_str())
         .unwrap_or("keyDown");
+    let key = cmd.get("key").and_then(|v| v.as_str());
+    let code = cmd.get("code").and_then(|v| v.as_str());
+    let text = cmd.get("text").and_then(|v| v.as_str());
 
     let mut params = json!({ "type": event_type });
-    raw_key(cmd).apply(&mut params);
+    if let Some(k) = key {
+        params["key"] = Value::String(k.to_string());
+    }
+    if let Some(c) = code {
+        params["code"] = Value::String(c.to_string());
+    }
+    if let Some(t) = text {
+        params["text"] = Value::String(t.to_string());
+    }
 
     mgr.client
         .send_command("Input.dispatchKeyEvent", Some(params), Some(&session_id))
@@ -10752,7 +10636,12 @@ async fn handle_upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         })
         .unwrap_or_default();
 
-    let warning = check_upload_files(&files, upload_browser_is_remote(state))?;
+    let remote = state.active_provider_connection
+        || state
+            .attached_target
+            .as_ref()
+            .is_some_and(AttachedTarget::is_remote);
+    let warning = check_upload_files(&files, remote)?;
     mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
         .await?;
     if let Some(warning) = warning {
@@ -10761,22 +10650,10 @@ async fn handle_upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "uploaded": files.len(), "selector": selector }))
 }
 
-/// Whether the active browser reads upload paths on a host other than the daemon's.
-pub(crate) fn upload_browser_is_remote(state: &DaemonState) -> bool {
-    state.active_provider_connection
-        || state
-            .attached_target
-            .as_ref()
-            .is_some_and(AttachedTarget::is_remote)
-}
-
 /// Rejects upload paths that do not exist on this host. A browser on another
 /// machine reads the paths on its own host, so there a local miss only warns.
 /// Directories pass through for `webkitdirectory` inputs.
-pub(crate) fn check_upload_files(
-    files: &[String],
-    remote_browser: bool,
-) -> Result<Option<String>, String> {
+fn check_upload_files(files: &[String], remote_browser: bool) -> Result<Option<String>, String> {
     let mut unverified = Vec::new();
     for file in files {
         if std::fs::metadata(file).is_ok() {
@@ -12267,19 +12144,23 @@ async fn execute_subaction(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'value' for fill subaction")?;
-            let mut control = interaction::CdpControl::resolve(
+            let outcome = Box::pin(interaction::fill(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
                 selector,
+                value,
                 &state.iframe_sessions,
-            )
+            ))
             .await?;
-            let outcome = Box::pin(forms::fill(&mut control, value)).await?;
-            Ok(form_response(state, json!({ "filled": selector }), outcome))
+            Ok(form_outcome_data(
+                state,
+                json!({ "filled": selector }),
+                outcome.warning,
+            ))
         }
         "check" => {
-            let mut control = interaction::CdpControl::resolve(
+            let outcome = interaction::check(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
@@ -12287,7 +12168,12 @@ async fn execute_subaction(
                 &state.iframe_sessions,
             )
             .await?;
-            let outcome = Box::pin(forms::set_checked(&mut control, true)).await?;
+            if let Some(position) = outcome.position {
+                (state.mouse_state.x, state.mouse_state.y) = position;
+                if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
+                    cursor.record(position.0, position.1, state.mouse_state.buttons);
+                }
+            }
             Ok(toggle_response(state, "checked", selector, &outcome))
         }
         "hover" => {
@@ -12325,7 +12211,7 @@ async fn execute_subaction(
     }
 }
 
-pub(crate) fn build_role_selector(role: &str, name: Option<&str>, exact: bool) -> String {
+fn build_role_selector(role: &str, name: Option<&str>, exact: bool) -> String {
     match name {
         Some(n) => {
             let exact_str = if exact { ", exact: true" } else { "" };
@@ -12339,7 +12225,7 @@ pub(crate) fn build_role_selector(role: &str, name: Option<&str>, exact: bool) -
 /// element's semantics, so Chrome prunes such elements from the AX tree
 /// entirely (divs, lists, imgs) or keeps them only as ignored nodes
 /// (tables). The accessibility tree can never answer a query for them.
-pub(crate) fn is_presentational_role(role: &str) -> bool {
+fn is_presentational_role(role: &str) -> bool {
     role.eq_ignore_ascii_case("none") || role.eq_ignore_ascii_case("presentation")
 }
 
@@ -12354,11 +12240,13 @@ pub(crate) fn is_presentational_role(role: &str) -> bool {
 /// precedence (aria-labelledby, then aria-label, then text content) with
 /// whitespace normalized; non-exact is a case-insensitive substring check,
 /// exact is a case-sensitive whole-name comparison.
-pub(crate) fn build_presentational_role_locator_js(
+async fn handle_presentational_getbyrole(
+    cmd: &Value,
+    state: &mut DaemonState,
     role: &str,
     name: Option<&str>,
     exact: bool,
-) -> String {
+) -> Result<Value, String> {
     let name_check = match name {
         Some(n) => {
             let name_json = serde_json::to_string(n).unwrap_or_default();
@@ -12379,7 +12267,7 @@ pub(crate) fn build_presentational_role_locator_js(
     // later presentational token wrongly win.
     // A function of `root` (the document to search), so it can run against the
     // top document or a selected frame's document, not just the global one.
-    format!(
+    let locate_body = format!(
         r#"(root) => {{
             const VALID_ROLES = new Set(['alert','alertdialog','application','article','banner','blockquote','button','caption','cell','checkbox','code','columnheader','combobox','complementary','contentinfo','definition','deletion','dialog','directory','document','emphasis','feed','figure','form','generic','grid','gridcell','group','heading','img','insertion','link','list','listbox','listitem','log','main','mark','marquee','math','meter','menu','menubar','menuitem','menuitemcheckbox','menuitemradio','navigation','none','note','option','paragraph','presentation','progressbar','radio','radiogroup','region','row','rowgroup','rowheader','scrollbar','search','searchbox','separator','slider','spinbutton','status','strong','subscript','superscript','switch','tab','table','tablist','tabpanel','term','textbox','time','timer','toolbar','tooltip','tree','treegrid','treeitem']);
             const norm = s => (s || '').replace(/\s+/g, ' ').trim();
@@ -12411,23 +12299,11 @@ pub(crate) fn build_presentational_role_locator_js(
                 // answer a query for none/presentation.
                 if (isPresentational && (isFocusable(el) || el.getAttributeNames().some(a => GLOBAL_ARIA.has(a)))) continue;
                 {name_check}
-                return el;
+                el.setAttribute('data-agent-browser-located', 'true');
+                return true;
             }}
-            return null;
+            return false;
         }}"#
-    )
-}
-
-async fn handle_presentational_getbyrole(
-    cmd: &Value,
-    state: &mut DaemonState,
-    role: &str,
-    name: Option<&str>,
-    exact: bool,
-) -> Result<Value, String> {
-    let locator = build_presentational_role_locator_js(role, name, exact);
-    let locate_body = format!(
-        "(root) => {{ const el = ({locator})(root); if (!el) return false; el.setAttribute('data-agent-browser-located', 'true'); return true; }}"
     );
 
     let located = {
@@ -12601,7 +12477,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 /// `img` and `document`); queries pass through the same table so both spellings
 /// match. `directory` is not mapped here (Chrome collapses it into `list`); it is
 /// matched on the DOM attribute instead, see handle_getbyrole.
-pub(crate) fn normalize_ax_role(role: &str) -> String {
+fn normalize_ax_role(role: &str) -> String {
     let lower = role.to_ascii_lowercase();
     match lower.as_str() {
         "image" => "img".to_string(),
@@ -12613,7 +12489,7 @@ pub(crate) fn normalize_ax_role(role: &str) -> String {
 /// Collapse internal whitespace runs to single spaces and trim, mirroring
 /// Playwright's accessible-name normalization: `"Save   changes"` and
 /// `"Save changes"` are the same accessible name.
-pub(crate) fn normalize_ws(s: &str) -> String {
+fn normalize_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -12624,7 +12500,7 @@ pub(crate) fn normalize_ws(s: &str) -> String {
 /// exact matching is a case-sensitive whole-name comparison. Continues past AX
 /// nodes without a backendDOMNodeId (virtual nodes) so a later actionable match
 /// still wins.
-pub(crate) fn find_ax_node_by_role(
+fn find_ax_node_by_role(
     nodes: &[super::cdp::types::AXNode],
     role: &str,
     name: Option<&str>,
@@ -13041,8 +12917,12 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     )
     .await?;
 
-    let options = PointerMoveOptions::from_cmd(cmd, state);
-    let human = options.human();
+    let mode = cmd
+        .get("inputMode")
+        .and_then(Value::as_str)
+        .unwrap_or(&state.input_mode);
+    let human = mode == "human";
+    let seed = cmd.get("seed").and_then(Value::as_u64).unwrap_or(0);
 
     // Approach the source before pressing so hover and pointer path handlers fire.
     let source_offset = super::element::session_viewport_offset(
@@ -13065,11 +12945,10 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &mut state.mouse_state,
         sx,
         sy,
-        &PointerMoveOptions {
-            duration_ms: 0,
-            steps: (!human).then_some(1),
-            ..options.clone()
-        },
+        0,
+        if human { None } else { Some(1) },
+        human,
+        seed,
         0,
         source_offset,
         &state.recording_state.shared_cursor,
@@ -13097,12 +12976,10 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &mut state.mouse_state,
         tx,
         ty,
-        &PointerMoveOptions {
-            duration_ms: if human { 250 } else { 100 },
-            steps: (!human).then_some(10),
-            seed: options.seed.wrapping_add(1),
-            ..options
-        },
+        if human { 250 } else { 100 },
+        if human { None } else { Some(10) },
+        human,
+        seed.wrapping_add(1),
         1,
         target_offset,
         &state.recording_state.shared_cursor,
@@ -13210,9 +13087,9 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
     {
         return Err(format!("No element found: {selector}"));
     }
-    if let Some((code, message)) = forms::select_failure(&result, &values, by) {
+    if let Some((code, message)) = interaction::select_failure(&result, &values, by) {
         return Err(match code {
-            Some(code) => forms::form_error(code, message),
+            Some(code) => interaction::form_error(code, message),
             None => message,
         });
     }
@@ -16239,109 +16116,6 @@ async fn handle_device_list() -> Result<Value, String> {
 // Input event handlers
 // ---------------------------------------------------------------------------
 
-fn mouse_button_mask(button: &str) -> i32 {
-    match button {
-        "left" => 1,
-        "right" => 2,
-        "middle" => 4,
-        "back" => 8,
-        "forward" => 16,
-        _ => 0,
-    }
-}
-
-fn primary_button_from_mask(buttons: i32) -> &'static str {
-    if buttons & 1 != 0 {
-        "left"
-    } else if buttons & 2 != 0 {
-        "right"
-    } else if buttons & 4 != 0 {
-        "middle"
-    } else if buttons & 8 != 0 {
-        "back"
-    } else if buttons & 16 != 0 {
-        "forward"
-    } else {
-        "none"
-    }
-}
-
-/// The key fields a raw keyboard command may carry: logical key, physical code
-/// and text.
-pub(crate) struct RawKey<'a> {
-    pub key: Option<&'a str>,
-    pub code: Option<&'a str>,
-    pub text: Option<&'a str>,
-}
-
-impl RawKey<'_> {
-    /// Writes the fields the command carried into a CDP key event.
-    pub(crate) fn apply(&self, params: &mut Value) {
-        for (name, value) in [("key", self.key), ("code", self.code), ("text", self.text)] {
-            if let Some(value) = value {
-                params[name] = Value::String(value.to_string());
-            }
-        }
-    }
-}
-
-pub(crate) fn raw_key(cmd: &Value) -> RawKey<'_> {
-    RawKey {
-        key: cmd.get("key").and_then(Value::as_str),
-        code: cmd.get("code").and_then(Value::as_str),
-        text: cmd.get("text").and_then(Value::as_str),
-    }
-}
-
-/// The fields a raw mouse command may carry.
-pub(crate) struct RawMouse<'a> {
-    pub event_type: &'a str,
-    pub x: Option<f64>,
-    pub y: Option<f64>,
-    pub button: Option<&'a str>,
-    pub buttons: Option<i32>,
-    pub click_count: Option<i32>,
-    pub delta_x: Option<f64>,
-    pub delta_y: Option<f64>,
-    pub modifiers: Option<i32>,
-}
-
-pub(crate) fn raw_mouse(cmd: &Value) -> RawMouse<'_> {
-    let as_i32 = |value: Option<&Value>| value.and_then(Value::as_i64).map(|value| value as i32);
-    RawMouse {
-        event_type: cmd
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("mouseMoved"),
-        x: cmd.get("x").and_then(Value::as_f64),
-        y: cmd.get("y").and_then(Value::as_f64),
-        button: cmd.get("button").and_then(Value::as_str),
-        buttons: as_i32(cmd.get("buttons")),
-        click_count: as_i32(cmd.get("clickCount")),
-        delta_x: cmd.get("deltaX").and_then(Value::as_f64),
-        delta_y: cmd.get("deltaY").and_then(Value::as_f64),
-        modifiers: as_i32(cmd.get("modifiers")),
-    }
-}
-
-/// Returns the buttons held after a raw mouse event: an explicit mask wins over
-/// the event's own press or release of `button`.
-pub(crate) fn next_mouse_buttons(
-    held: i32,
-    event_type: &str,
-    button: Option<&str>,
-    buttons: Option<i32>,
-) -> i32 {
-    if let Some(buttons) = buttons {
-        return buttons;
-    }
-    match event_type {
-        "mousePressed" => held | mouse_button_mask(button.unwrap_or("left")),
-        "mouseReleased" => held & !mouse_button_mask(button.unwrap_or("left")),
-        _ => held,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_mouse_event_params(
     mouse_state: &mut MouseState,
@@ -16382,34 +16156,42 @@ fn build_mouse_event_params(
         y,
         button: Some(
             button
-                .unwrap_or(primary_button_from_mask(next_buttons))
+                .unwrap_or(MouseButton::primary(next_buttons).map_or("none", MouseButton::name))
                 .to_string(),
         ),
         buttons: Some(next_buttons),
         click_count,
         delta_x,
         delta_y,
-        modifiers,
+        modifiers: modifiers.or((mouse_state.modifiers != 0).then_some(mouse_state.modifiers)),
     }
 }
 
 async fn handle_input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    let raw = raw_mouse(cmd);
-    let event_type = raw.event_type;
+    let event_type = cmd
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mouseMoved");
     let mut mouse_state = state.mouse_state;
     let params = build_mouse_event_params(
         &mut mouse_state,
         event_type,
-        raw.x,
-        raw.y,
-        raw.button,
-        raw.buttons,
-        raw.click_count,
-        raw.delta_x,
-        raw.delta_y,
-        raw.modifiers,
+        cmd.get("x").and_then(|v| v.as_f64()),
+        cmd.get("y").and_then(|v| v.as_f64()),
+        cmd.get("button").and_then(|v| v.as_str()),
+        cmd.get("buttons")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
+        cmd.get("clickCount")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
+        cmd.get("deltaX").and_then(|v| v.as_f64()),
+        cmd.get("deltaY").and_then(|v| v.as_f64()),
+        cmd.get("modifiers")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
     );
 
     mgr.client
@@ -16431,7 +16213,11 @@ async fn handle_input_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value
         .unwrap_or("keyDown");
 
     let mut params = json!({ "type": event_type });
-    raw_key(cmd).apply(&mut params);
+    for key in &["key", "code", "text"] {
+        if let Some(v) = cmd.get(*key) {
+            params[*key] = v.clone();
+        }
+    }
 
     mgr.client
         .send_command("Input.dispatchKeyEvent", Some(params), Some(&session_id))
@@ -16460,7 +16246,7 @@ async fn handle_input_touch(cmd: &Value, state: &DaemonState) -> Result<Value, S
     Ok(json!({ "dispatched": event_type }))
 }
 
-async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let key = cmd
@@ -16468,17 +16254,13 @@ async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
-    mgr.client
-        .send_command(
-            "Input.dispatchKeyEvent",
-            Some(json!({ "type": "keyDown", "key": key })),
-            Some(&session_id),
-        )
-        .await?;
+    let next_modifiers =
+        interaction::key_down(&mgr.client, &session_id, key, state.mouse_state.modifiers).await?;
+    state.mouse_state.modifiers = next_modifiers;
     Ok(json!({ "keydown": key }))
 }
 
-async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_keyup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let key = cmd
@@ -16486,13 +16268,9 @@ async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String>
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
-    mgr.client
-        .send_command(
-            "Input.dispatchKeyEvent",
-            Some(json!({ "type": "keyUp", "key": key })),
-            Some(&session_id),
-        )
-        .await?;
+    let next_modifiers =
+        interaction::key_up(&mgr.client, &session_id, key, state.mouse_state.modifiers).await?;
+    state.mouse_state.modifiers = next_modifiers;
     Ok(json!({ "keyup": key }))
 }
 
@@ -16514,89 +16292,11 @@ async fn handle_inserttext(cmd: &Value, state: &DaemonState) -> Result<Value, St
     Ok(json!({ "inserted": true }))
 }
 
-/// Pointer motion settings shared by the Chrome and Firefox engines.
-#[derive(Clone)]
-pub(crate) struct PointerMoveOptions {
-    pub mode: String,
-    pub seed: u64,
-    pub duration_ms: u64,
-    pub steps: Option<usize>,
-}
-
-impl PointerMoveOptions {
-    /// Reads the motion settings from a command, falling back to the session input mode.
-    pub(crate) fn from_cmd(cmd: &Value, state: &DaemonState) -> Self {
-        let mode = cmd
-            .get("inputMode")
-            .and_then(Value::as_str)
-            .unwrap_or(&state.input_mode);
-        let duration_ms = cmd.get("duration").and_then(Value::as_u64).unwrap_or(0);
-        let mut steps = cmd
-            .get("steps")
-            .and_then(Value::as_u64)
-            .map(|steps| steps as usize);
-        if mode == "instant" && duration_ms == 0 && steps.is_none() {
-            steps = Some(1);
-        }
-        Self {
-            mode: mode.to_string(),
-            seed: cmd.get("seed").and_then(Value::as_u64).unwrap_or(0),
-            duration_ms,
-            steps,
-        }
-    }
-
-    /// Whether the pointer samples a human-like path.
-    pub(crate) fn human(&self) -> bool {
-        self.mode == "human"
-    }
-}
-
-/// Plans the points a pointer visits on its way from `from` to `to` as
-/// `(x, y, delay_ms)`, ending exactly on `to`. Human mode adds a seeded
-/// perpendicular bend and samples the path frequently enough for
-/// animation-heavy pages.
-pub(crate) fn plan_pointer_move(
-    from: (f64, f64),
-    to: (f64, f64),
-    options: &PointerMoveOptions,
-) -> Vec<(f64, f64, u64)> {
-    let dx = to.0 - from.0;
-    let dy = to.1 - from.1;
-    let distance = dx.hypot(dy);
-    let human = options.human();
-    let duration_ms = interpolated_mouse_duration(distance, options.duration_ms, human);
-    let steps = interpolated_mouse_steps(distance, duration_ms, options.steps, human);
-    let bend = interpolated_mouse_bend(distance, human, options.seed);
-    let (perpendicular_x, perpendicular_y) = if distance > 0.0 {
-        (-dy / distance, dx / distance)
-    } else {
-        (0.0, 0.0)
-    };
-
-    (1..=steps)
-        .map(|step| {
-            let (x, y) = interpolated_mouse_point(
-                from.0,
-                from.1,
-                to.0,
-                to.1,
-                perpendicular_x,
-                perpendicular_y,
-                bend,
-                step,
-                steps,
-            );
-            let delay_ms =
-                duration_ms / steps as u64 + u64::from(step as u64 <= duration_ms % steps as u64);
-            (x, y, delay_ms)
-        })
-        .collect()
-}
-
-/// Move the session cursor along a planned path. Steps are scheduled against
-/// one clock so Chrome's response time counts toward the requested duration
-/// instead of being added to every step's delay.
+/// Move the session cursor along a deterministic eased curve. Human mode adds
+/// a seeded perpendicular bend and samples the path frequently enough for
+/// animation-heavy pages while preserving exact, reproducible endpoints.
+/// Schedule steps against one clock so Chrome's response time counts toward
+/// the requested duration instead of being added to every step's delay.
 #[allow(clippy::too_many_arguments)]
 async fn move_mouse_interpolated(
     client: &CdpClient,
@@ -16604,20 +16304,53 @@ async fn move_mouse_interpolated(
     mouse_state: &mut MouseState,
     target_x: f64,
     target_y: f64,
-    options: &PointerMoveOptions,
+    duration_ms: u64,
+    requested_steps: Option<usize>,
+    human: bool,
+    seed: u64,
     buttons: i32,
     viewport_offset: (f64, f64),
     recording_cursor: &recording::SharedRecordingCursor,
 ) -> Result<(), String> {
     // Cursor state stays in page coordinates even when dispatching to an OOPIF.
-    let start = (
-        mouse_state.x - viewport_offset.0,
-        mouse_state.y - viewport_offset.1,
-    );
-    let started = tokio::time::Instant::now();
-    let mut elapsed_ms = 0;
+    let start_x = mouse_state.x - viewport_offset.0;
+    let start_y = mouse_state.y - viewport_offset.1;
+    let dx = target_x - start_x;
+    let dy = target_y - start_y;
+    let distance = dx.hypot(dy);
+    let duration_ms = if duration_ms == 0 && human {
+        (80.0 + distance * 0.35).clamp(100.0, 700.0) as u64
+    } else {
+        duration_ms
+    };
+    let steps = interpolated_mouse_steps(distance, duration_ms, requested_steps, human);
+    let bend = if human && distance > 0.0 {
+        let mixed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let unit = ((mixed >> 11) as f64) / ((1_u64 << 53) as f64);
+        (unit * 2.0 - 1.0) * (distance * 0.08).min(36.0)
+    } else {
+        0.0
+    };
+    let (perp_x, perp_y) = if distance > 0.0 {
+        (-dy / distance, dx / distance)
+    } else {
+        (0.0, 0.0)
+    };
+    let schedule = if duration_ms == 0 {
+        None
+    } else {
+        Some((
+            tokio::time::Instant::now(),
+            tokio::time::Duration::from_millis(duration_ms),
+        ))
+    };
 
-    for (x, y, delay_ms) in plan_pointer_move(start, (target_x, target_y), options) {
+    for i in 1..=steps {
+        let (x, y) = interpolated_mouse_point(
+            start_x, start_y, target_x, target_y, perp_x, perp_y, bend, i, steps,
+        );
         let params = build_mouse_event_params(
             mouse_state,
             "mouseMoved",
@@ -16638,36 +16371,14 @@ async fn move_mouse_interpolated(
         if let Ok(mut cursor) = recording_cursor.lock() {
             cursor.record(mouse_state.x, mouse_state.y, buttons);
         }
-        elapsed_ms += delay_ms;
-        if elapsed_ms > 0 {
-            tokio::time::sleep_until(started + tokio::time::Duration::from_millis(elapsed_ms))
-                .await;
+        if let Some((started, duration)) = schedule {
+            tokio::time::sleep_until(started + duration.mul_f64(i as f64 / steps as f64)).await;
         }
     }
     Ok(())
 }
 
-pub(super) fn interpolated_mouse_duration(distance: f64, duration_ms: u64, human: bool) -> u64 {
-    if duration_ms == 0 && human {
-        (80.0 + distance * 0.35).clamp(100.0, 700.0) as u64
-    } else {
-        duration_ms
-    }
-}
-
-pub(super) fn interpolated_mouse_bend(distance: f64, human: bool, seed: u64) -> f64 {
-    if human && distance > 0.0 {
-        let mixed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let unit = ((mixed >> 11) as f64) / ((1_u64 << 53) as f64);
-        (unit * 2.0 - 1.0) * (distance * 0.08).min(36.0)
-    } else {
-        0.0
-    }
-}
-
-pub(super) fn interpolated_mouse_steps(
+fn interpolated_mouse_steps(
     distance: f64,
     duration_ms: u64,
     requested_steps: Option<usize>,
@@ -16686,7 +16397,7 @@ pub(super) fn interpolated_mouse_steps(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn interpolated_mouse_point(
+fn interpolated_mouse_point(
     start_x: f64,
     start_y: f64,
     target_x: f64,
@@ -16714,7 +16425,17 @@ async fn handle_mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let session_id = mgr.active_session_id()?.to_string();
     let x = cmd.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let y = cmd.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let options = PointerMoveOptions::from_cmd(cmd, state);
+    let duration = cmd.get("duration").and_then(Value::as_u64).unwrap_or(0);
+    let mut steps = cmd.get("steps").and_then(Value::as_u64).map(|v| v as usize);
+    let mode = cmd
+        .get("inputMode")
+        .and_then(Value::as_str)
+        .unwrap_or(&state.input_mode);
+    let human = mode == "human";
+    if mode == "instant" && duration == 0 && steps.is_none() {
+        steps = Some(1);
+    }
+    let seed = cmd.get("seed").and_then(Value::as_u64).unwrap_or(0);
     let buttons = state.mouse_state.buttons;
     move_mouse_interpolated(
         &mgr.client,
@@ -16722,7 +16443,10 @@ async fn handle_mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &mut state.mouse_state,
         x,
         y,
-        &options,
+        duration,
+        steps,
+        human,
+        seed,
         buttons,
         (0.0, 0.0),
         &state.recording_state.shared_cursor,
@@ -16965,7 +16689,7 @@ fn error_response(id: &str, error: &str) -> Value {
         resp["code"] = json!("tab_gone");
     } else if error.starts_with(super::browser::PAGE_WEDGED_PREFIX) {
         resp["code"] = json!("page_wedged");
-    } else if let Some(code) = forms::form_error_code(error) {
+    } else if let Some(code) = interaction::form_error_code(error) {
         resp["code"] = json!(code);
     } else if let Some(code) = super::browser::precondition_code(error) {
         resp["code"] = json!(code);
@@ -17355,7 +17079,7 @@ mod tests {
             &mut state,
             "checked",
             "#c",
-            &forms::ToggleOutcome {
+            &interaction::ToggleOutcome {
                 verified: false,
                 ..Default::default()
             },
@@ -17365,13 +17089,10 @@ mod tests {
         let mut resp = success_response("1", data);
         attach_action_warning(&mut resp, &mut state);
         assert_eq!(resp["warning"], super::super::element::STATE_NOT_VERIFIED);
-        let data = form_response(
+        let data = form_outcome_data(
             &mut state,
             json!({ "filled": "#f" }),
-            forms::FormOutcome {
-                warning: Some("value_mismatch".to_string()),
-                dialog_opened: false,
-            },
+            Some("value_mismatch".to_string()),
         );
         assert!(data.get("postActionWarning").is_none());
         let mut resp = success_response("1b", data);
@@ -17385,7 +17106,7 @@ mod tests {
             &mut state,
             "unchecked",
             "#c",
-            &forms::ToggleOutcome {
+            &interaction::ToggleOutcome {
                 verified: true,
                 ..Default::default()
             },
@@ -17826,6 +17547,7 @@ mod tests {
             x: 50.0,
             y: 60.0,
             buttons: 1,
+            modifiers: 0,
         };
         let mgr = state.browser.as_ref().unwrap();
         mgr.client
@@ -19843,7 +19565,6 @@ mod tests {
             url: "https://example.com".to_string(),
             default_prompt: None,
             session_id: None,
-            owner_context: None,
         });
         assert!(!autosave_due(&state, 30_000));
     }
@@ -20719,35 +20440,6 @@ mod tests {
                 &Running::from_env()
             ),
             vec!["a11y".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_policy_actions_include_nested_actions() {
-        let actions = |cmd: Value| {
-            let action = cmd["action"].as_str().unwrap().to_string();
-            policy_actions_for_command(&cmd, &action, false, None, None, &Running::from_env())
-        };
-        assert_eq!(
-            actions(json!({ "action": "getbyrole" })),
-            ["getbyrole", "click"]
-        );
-        assert_eq!(
-            actions(json!({ "action": "nth", "subaction": "fill" })),
-            ["nth", "fill"]
-        );
-        assert_eq!(
-            actions(json!({ "action": "getbytext", "subaction": "text" })),
-            ["getbytext", "gettext"]
-        );
-        assert_eq!(
-            actions(json!({ "action": "vitals", "url": "https://example.com" })),
-            ["vitals", "navigate"]
-        );
-        assert_eq!(actions(json!({ "action": "vitals" })), ["vitals"]);
-        assert_eq!(
-            actions(json!({ "action": "diff_url" })),
-            ["diff_url", "navigate"]
         );
     }
 
@@ -22215,12 +21907,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             &mut mouse,
             400.0,
             200.0,
-            &PointerMoveOptions {
-                mode: "human".into(),
-                seed: 42,
-                duration_ms: 1000,
-                steps: Some(4),
-            },
+            1000,
+            Some(4),
+            true,
+            42,
             1,
             (0.0, 0.0),
             &history,
@@ -22652,24 +22342,89 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         state.mouse_state.x = 12.0;
         state.mouse_state.y = 34.0;
         state.mouse_state.buttons = 1;
-        state.pending_pointer_release = Some(crate::native::interaction::PendingRelease {
-            session_id: "session".into(),
-            owner_tab: None,
-            blocked: true,
-            owner_position: (12.0, 34.0),
-            x: 12.0,
-            y: 34.0,
-            button: crate::native::pointer::MouseButton::Left,
-            click_count: 1,
-            modifiers: crate::native::pointer::Modifiers::default(),
-        });
+        state.mouse_state.modifiers = 8;
 
         state.reset_input_state();
 
         assert_eq!(state.mouse_state.x, 0.0);
         assert_eq!(state.mouse_state.y, 0.0);
         assert_eq!(state.mouse_state.buttons, 0);
-        assert!(state.pending_pointer_release.is_none());
+        assert_eq!(state.mouse_state.modifiers, 0);
+    }
+
+    #[test]
+    fn test_mouse_event_params_carry_held_modifiers() {
+        let mut mouse_state = MouseState {
+            modifiers: 1 | 8,
+            ..MouseState::default()
+        };
+        let held = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseMoved",
+            Some(1.0),
+            Some(1.0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(held.modifiers, Some(9));
+
+        let explicit = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseMoved",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(2),
+        );
+        assert_eq!(explicit.modifiers, Some(2));
+
+        mouse_state.modifiers = 0;
+        let none = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseMoved",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(none.modifiers, None);
+    }
+
+    #[test]
+    fn a_relaunch_releases_shift_for_keys_recorded_into_a_secret_field() {
+        let secret = crate::native::flow::FieldTraits::from_value(&json!({ "type": "password" }));
+        let press = |state: &mut DaemonState, key: &str| {
+            let held = state.mouse_state.modifiers;
+            state.flow.begin(
+                "press",
+                &json!({ "action": "press", "key": key }),
+                &RefMap::new(),
+                None,
+                Some(&secret),
+                held,
+            );
+        };
+        let mut state = DaemonState::new();
+        state.flow.begin_capture(None);
+        state.mouse_state.modifiers = 8;
+        press(&mut state, "a");
+        assert_eq!(state.flow.key_buffer(), "A");
+        state.reset_input_state();
+        assert_eq!(state.mouse_state.modifiers, 0);
+        press(&mut state, "b");
+        assert_eq!(state.flow.key_buffer(), "Ab");
     }
 
     #[test]
@@ -24220,6 +23975,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             &RefMap::new(),
             None,
             None,
+            0,
         );
         let resp =
             execute_command(&json!({ "id": "s", "action": "session_info" }), &mut state).await;
@@ -24862,6 +24618,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 &RefMap::new(),
                 None,
                 None,
+                0,
             )
             .unwrap();
         state.flow.tag(
@@ -27796,7 +27553,7 @@ mod firefox_routing_tests {
         let error = resp["error"].as_str().unwrap();
         assert!(error.contains("`trace_start` is Chrome-only"), "{error}");
         assert!(!error.contains("WebDriver backend"), "{error}");
-        let resp = execute_command(&json!({"id":"2","action":"vitals"}), &mut state).await;
+        let resp = execute_command(&json!({"id":"2","action":"snapshot"}), &mut state).await;
         assert!(resp["error"]
             .as_str()
             .unwrap()
@@ -27819,13 +27576,10 @@ mod firefox_routing_tests {
     async fn dialog_on_a_background_tab_does_not_block_the_active_tab() {
         let _guard = clean_env();
         let (mut state, calls) = firefox_state().await;
-        let ff = state.firefox.as_mut().unwrap();
-        ff.contexts.record(&json!({"context": "ctx-background"}));
         state.pending_dialog = Some(PendingDialog {
             dialog_type: "confirm".into(),
             message: "sure?".into(),
             session_id: Some("ctx-background".into()),
-            owner_context: Some("ctx-background".into()),
             ..Default::default()
         });
         let nav = json!({"id":"1","action":"navigate","url":"https://a.test"});
@@ -27833,9 +27587,7 @@ mod firefox_routing_tests {
         assert_eq!(resp["success"], true, "{resp}");
         assert_eq!(navigations(&calls), 1);
 
-        let dialog = state.pending_dialog.as_mut().unwrap();
-        dialog.session_id = Some("ctx-active".into());
-        dialog.owner_context = Some("ctx-active".into());
+        state.pending_dialog.as_mut().unwrap().session_id = Some("ctx-active".into());
         let resp = execute_command(&nav, &mut state).await;
         assert_eq!(resp["success"], false);
         assert!(resp["error"]
