@@ -592,3 +592,274 @@ fn skills_over_mcp_discover_list_get_read_and_directory_read() {
     let status = client.close();
     assert!(status.success());
 }
+
+#[cfg(unix)]
+fn setup_mock_daemon(home: &TempDir, session: &str, delays_ms: Vec<u64>) -> thread::JoinHandle<()> {
+    use std::os::unix::net::UnixListener;
+
+    let sockets = home.path().join("s");
+    std::fs::create_dir_all(&sockets).unwrap();
+    let bootstrap = Command::new(env!("CARGO_BIN_EXE_agent-browser"))
+        .env("HOME", home.path())
+        .env("AGENT_BROWSER_SOCKET_DIR", &sockets)
+        .env("NO_COLOR", "1")
+        .args(["--session", session, "stream", "status", "--json"])
+        .output()
+        .unwrap();
+    assert!(bootstrap.status.success(), "{bootstrap:?}");
+
+    if let Ok(pid_str) = std::fs::read_to_string(sockets.join(format!("{session}.pid"))) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(sockets.join(format!("{session}.pid")));
+    let sock_path = sockets.join(format!("{session}.sock"));
+    let _ = std::fs::remove_file(&sock_path);
+    let listener = UnixListener::bind(&sock_path).unwrap();
+
+    thread::spawn(move || {
+        let mut idx = 0;
+        while idx < delays_ms.len() {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut line = String::new();
+            if BufReader::new(&stream).read_line(&mut line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let delay = delays_ms[idx];
+            idx += 1;
+            let req: Value = serde_json::from_str(&line).unwrap_or_default();
+            let req_id = req["id"].clone();
+            if delay > 0 {
+                thread::sleep(Duration::from_millis(delay));
+            }
+            let resp = json!({
+                "id": req_id,
+                "success": true,
+                "data": { "waited": true }
+            });
+            let _ = writeln!(stream, "{}", resp);
+            let _ = stream.flush();
+        }
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn modern_tasks_create_poll_subscribe_and_cancel_over_stdio() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon = setup_mock_daemon(&home, "mcp-tasks-mod", vec![600, 5000]);
+
+    let mut client = McpStdioClient::spawn_in(home, &["--task-grace-ms", "100"]);
+    let caps_with_tasks = json!({
+        "extensions": { "io.modelcontextprotocol/tasks": {} }
+    });
+
+    // server/discover advertises io.modelcontextprotocol/tasks.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": { "_meta": modern_meta(caps_with_tasks.clone()) }
+    }));
+    let disc = client.recv(Duration::from_secs(5));
+    assert!(
+        disc["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/tasks"].is_object()
+    );
+
+    // Slow wait exceeds 100ms grace window and returns CreateTaskResult (`resultType: "task"`).
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_wait_ms",
+            "arguments": { "ms": 600, "session": "mcp-tasks-mod" },
+            "_meta": modern_meta(caps_with_tasks.clone())
+        }
+    }));
+    let (created, _) = client.recv_for_id(&json!(2), Duration::from_secs(5));
+    assert_eq!(created["result"]["resultType"], "task");
+    assert_eq!(created["result"]["status"], "working");
+    let task_id = created["result"]["taskId"].as_str().unwrap().to_string();
+
+    // Subscribe to notifications/tasks for this task.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "sub-1",
+        "method": "subscriptions/listen",
+        "params": {
+            "notifications": { "taskIds": [&task_id] },
+            "_meta": modern_meta(caps_with_tasks.clone())
+        }
+    }));
+    let ack = client.recv(Duration::from_secs(5));
+    assert_eq!(ack["method"], "notifications/subscriptions/acknowledged");
+
+    // Wait for notifications/tasks completed push, then verify tasks/get also returns completed.
+    let notif = client.recv(Duration::from_secs(5));
+    assert_eq!(notif["method"], "notifications/tasks");
+    assert_eq!(notif["params"]["taskId"], task_id);
+    assert_eq!(notif["params"]["status"], "completed");
+    assert_eq!(notif["params"]["result"]["isError"], false);
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tasks/get",
+        "params": {
+            "taskId": &task_id,
+            "_meta": modern_meta(caps_with_tasks.clone())
+        }
+    }));
+    let (polled, _) = client.recv_for_id(&json!(3), Duration::from_secs(5));
+    assert_eq!(polled["result"]["resultType"], "complete");
+    assert_eq!(polled["result"]["status"], "completed");
+
+    // Calling tasks/get without declaring io.modelcontextprotocol/tasks returns -32021.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tasks/get",
+        "params": {
+            "taskId": &task_id,
+            "_meta": modern_meta(json!({}))
+        }
+    }));
+    let (missing_cap, _) = client.recv_for_id(&json!(4), Duration::from_secs(5));
+    assert_eq!(missing_cap["error"]["code"], -32021);
+
+    // Second long wait: cancel it via tasks/cancel and confirm cancelled state promptly.
+    let cancel_start = Instant::now();
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_wait_ms",
+            "arguments": { "ms": 5000, "session": "mcp-tasks-mod" },
+            "_meta": modern_meta(caps_with_tasks.clone())
+        }
+    }));
+    let (created2, _) = client.recv_for_id(&json!(5), Duration::from_secs(5));
+    let task_id2 = created2["result"]["taskId"].as_str().unwrap().to_string();
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "tasks/cancel",
+        "params": {
+            "taskId": &task_id2,
+            "_meta": modern_meta(caps_with_tasks.clone())
+        }
+    }));
+    let (cancel_ack, _) = client.recv_for_id(&json!(6), Duration::from_secs(5));
+    assert_eq!(cancel_ack["result"]["resultType"], "complete");
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tasks/get",
+        "params": {
+            "taskId": &task_id2,
+            "_meta": modern_meta(caps_with_tasks)
+        }
+    }));
+    let (cancelled, _) = client.recv_for_id(&json!(7), Duration::from_secs(5));
+    assert_eq!(cancelled["result"]["status"], "cancelled");
+    assert!(cancel_start.elapsed() < Duration::from_secs(2));
+
+    let status = client.close();
+    assert!(status.success());
+    drop(daemon);
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_2025_tasks_lifecycle_list_result_and_non_task_rejection() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon = setup_mock_daemon(&home, "mcp-tasks-leg", vec![400]);
+
+    let mut client = McpStdioClient::spawn_in(home, &[]);
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "legacy-tasks", "version": "1.0.0" }
+        }
+    }));
+    let init = client.recv(Duration::from_secs(5));
+    assert!(init["result"]["capabilities"]["tasks"]["requests"]["tools"]["call"].is_object());
+
+    // Non-task tool rejects params.task with -32601.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_tools_profiles",
+            "arguments": {},
+            "task": { "ttl": 60000 }
+        }
+    }));
+    let (rejected, _) = client.recv_for_id(&json!(2), Duration::from_secs(5));
+    assert_eq!(rejected["error"]["code"], -32601);
+
+    // Task-eligible tool returns CreateTaskResult immediately.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_wait_ms",
+            "arguments": { "ms": 400, "session": "mcp-tasks-leg" },
+            "task": { "ttl": 60000 }
+        }
+    }));
+    let (created, _) = client.recv_for_id(&json!(3), Duration::from_secs(5));
+    let task_id = created["result"]["task"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(created["result"]["task"]["status"], "working");
+
+    // tasks/list includes the created task.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tasks/list",
+        "params": {}
+    }));
+    let (listed, _) = client.recv_for_id(&json!(4), Duration::from_secs(5));
+    assert!(listed["result"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["taskId"] == task_id));
+
+    // tasks/result blocks until completion and includes related-task metadata.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tasks/result",
+        "params": { "taskId": &task_id }
+    }));
+    let (final_res, _) = client.recv_for_id(&json!(5), Duration::from_secs(5));
+    assert_eq!(final_res["result"]["isError"], false);
+    assert_eq!(
+        final_res["result"]["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
+        task_id
+    );
+
+    let status = client.close();
+    assert!(status.success());
+    drop(daemon);
+}

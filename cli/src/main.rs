@@ -9,6 +9,7 @@ mod flags;
 mod install;
 mod mcp;
 mod mcp_skills;
+mod mcp_tasks;
 mod mcp_transport;
 mod native;
 mod output;

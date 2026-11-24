@@ -7,6 +7,9 @@
         "readOnlyHint": false
       },
       "description": "Run an axe-core accessibility audit and report WCAG violations, optionally navigating to a URL first.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "json": {
@@ -88,6 +91,9 @@
         "readOnlyHint": false
       },
       "description": "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting. Credential-provider errors omit response error text and unsupported protocol values.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "name": {
@@ -224,6 +230,9 @@
         "readOnlyHint": false
       },
       "description": "Run multiple commands sequentially. Unknown commands and subcommands return errors. Only commands that treat -- as the end of options accept it before a dash-leading literal argument inside a command array; other commands may receive -- as data. Set global flags on the batch invocation or MCP server, not inside command arrays. Closing with --all must run outside a batch. A batch containing only get cdp-url commands never launches a browser.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "bail": {
@@ -266,6 +275,9 @@
         "readOnlyHint": false
       },
       "description": "Run a single-shot natural-language browser instruction.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "message": {
@@ -531,6 +543,9 @@
         "readOnlyHint": false
       },
       "description": "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "pinTab": {
@@ -1018,6 +1033,9 @@
         "readOnlyHint": false
       },
       "description": "Compare two URLs. fullPage applies to the screenshot diff and requires screenshot.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "compact": {
@@ -1067,6 +1085,9 @@
         "readOnlyHint": false
       },
       "description": "Diagnose the installation.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "debug": {
@@ -1109,6 +1130,9 @@
         "readOnlyHint": false
       },
       "description": "Click an element and save the download. Only works with a browser agent-browser launched; rejected over --cdp, --auto-connect, or a provider.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "path": {
@@ -1356,6 +1380,9 @@
         "readOnlyHint": false
       },
       "description": "Experimental. Run a saved task by sending its requests directly, falling back to the page, then to a replay of the recorded commands. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed; continue with the UI then.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "allowWrite": {
@@ -1919,6 +1946,9 @@
         "readOnlyHint": false
       },
       "description": "Install browser binaries. On macOS versions below 13, the command stops before downloading Chrome for Testing and prints instructions to update macOS or install Chrome manually. If `sw_vers -productVersion` is unavailable, exits with an error, returns no version, or returns a malformed version, the command reports a detection error and stops before making a network request.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "session": {
@@ -2309,6 +2339,9 @@
         "readOnlyHint": false
       },
       "description": "Stop HAR capture and save it. Fails with no_har_recording when no recording is active, for example after a daemon restart. A relative path resolves against the working directory of the caller.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "path": {
@@ -2461,6 +2494,9 @@
         "readOnlyHint": false
       },
       "description": "Launch the browser and optionally navigate to a URL. On macOS, installed browsers are searched in /Applications, then ~/Applications. Set the proxy in the server environment or config; percent-encoded proxy URL credentials are decoded before authentication. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. A plugin provider that returns directPage: true connects to a page socket, so console messages, network requests, HAR recording, tracing, and profiling apply to that page. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "allowedDomains": {
@@ -2544,6 +2580,9 @@
         "readOnlyHint": false
       },
       "description": "Save the current page as PDF.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "path": {
@@ -2571,6 +2610,9 @@
         "readOnlyHint": false
       },
       "description": "Add a plugin from npm or GitHub to agent-browser config.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "capabilities": {
@@ -2642,6 +2684,9 @@
         "readOnlyHint": false
       },
       "description": "Run a command.run or custom plugin request.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "name": {
@@ -2759,6 +2804,9 @@
         "readOnlyHint": false
       },
       "description": "Stop profiler capture.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "path": {
@@ -2961,6 +3009,9 @@
         "readOnlyHint": true
       },
       "description": "Fetch a URL as agent-readable text, preferring text/markdown. Omit url to read the active tab.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "allowedDomains": {
@@ -3035,6 +3086,9 @@
         "readOnlyHint": false
       },
       "description": "Restart video recording. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "contactSheet": {
@@ -3138,6 +3192,9 @@
         "readOnlyHint": false
       },
       "description": "Stop video recording.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "session": {
@@ -3159,6 +3216,9 @@
         "readOnlyHint": false
       },
       "description": "Reload the page.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "session": {
@@ -4326,6 +4386,9 @@
         "readOnlyHint": false
       },
       "description": "Open a new tab after applying session setup before its first navigation. Rejected labels preserve the current tab's refs and selected frame.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "allowedDomains": {
@@ -4501,6 +4564,9 @@
         "readOnlyHint": false
       },
       "description": "Stop Chrome trace capture.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "path": {
@@ -4596,6 +4662,9 @@
         "readOnlyHint": false
       },
       "description": "Upgrade agent-browser.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "session": {
@@ -4681,6 +4750,9 @@
         "readOnlyHint": true
       },
       "description": "Wait for a browser download. A path is rejected over --cdp, --auto-connect, or a provider.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "path": {
@@ -4717,6 +4789,9 @@
         "readOnlyHint": true
       },
       "description": "Wait for a JavaScript expression to become truthy.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "expression": {
@@ -4753,6 +4828,9 @@
         "readOnlyHint": true
       },
       "description": "Wait for a page load state. Uses the full wait timeout and returns an error when it expires.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "session": {
@@ -4796,6 +4874,9 @@
         "readOnlyHint": true
       },
       "description": "Wait for an element with a CSS selector or @ref to reach a state. Bare integer selectors are rejected; use CSS selector syntax for numeric IDs or agent_browser_wait_ms for a delay.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "selector": {
@@ -4845,6 +4926,9 @@
         "readOnlyHint": true
       },
       "description": "Wait for text to appear.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "session": {
@@ -4883,6 +4967,9 @@
         "readOnlyHint": true
       },
       "description": "Wait for the current URL to match a pattern.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "session": {
@@ -4920,6 +5007,9 @@
         "readOnlyHint": true
       },
       "description": "Wait for a fixed time.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "ms": {
@@ -4981,6 +5071,9 @@
         "readOnlyHint": false
       },
       "description": "Invoke an experimental page-provided WebMCP tool. Inputs go to the tool's origin; before invoking a tool announced as cross-origin, confirm that its origin matches the user's task.",
+      "execution": {
+        "taskSupport": "optional"
+      },
       "inputSchema": {
         "properties": {
           "detach": {

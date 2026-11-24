@@ -15,6 +15,10 @@ use crate::mcp_skills::{
     get_skill, list_resource_templates, list_resources, list_skills, read_resource,
     read_resource_directory, skills_extension_capability, SKILLS_EXTENSION_ID,
 };
+use crate::mcp_tasks::{
+    is_task_eligible_tool, legacy_tasks_capability, TaskManager, TaskOutcome,
+    DEFAULT_TASK_GRACE_MS, TASKS_EXTENSION_ID,
+};
 use crate::mcp_transport::{
     current_tool_control, error_response_from, result_response, server_info_value,
     wrap_response_result, McpServerState, ProtocolEra, ProtocolError, RequestContext, StdioWriter,
@@ -212,6 +216,7 @@ struct CliRun {
 struct McpConfig {
     profiles: Vec<ToolProfile>,
     enabled_tools: Option<BTreeSet<&'static str>>,
+    task_grace_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,10 +293,15 @@ impl ToolProfile {
 
 impl McpConfig {
     fn from_profiles(profiles: Vec<ToolProfile>) -> Self {
+        let task_grace_ms = env::var("AGENT_BROWSER_MCP_TASK_GRACE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_TASK_GRACE_MS);
         if profiles.contains(&ToolProfile::All) {
             return Self {
                 profiles: vec![ToolProfile::All],
                 enabled_tools: None,
+                task_grace_ms,
             };
         }
 
@@ -303,6 +313,7 @@ impl McpConfig {
         Self {
             profiles,
             enabled_tools: Some(enabled_tools),
+            task_grace_ms,
         }
     }
 
@@ -599,6 +610,7 @@ fn run_mcp_with_io<R: BufRead>(
     config: McpConfig,
 ) -> Result<(), String> {
     let config = Arc::new(config);
+    let tasks = Arc::new(TaskManager::new(writer.clone()));
     let state = Arc::new(McpServerState::new(writer));
     let (tool_tx, tool_rx) = std::sync::mpsc::channel::<SyncToolJob>();
 
@@ -663,12 +675,15 @@ fn run_mcp_with_io<R: BufRead>(
             continue;
         }
 
-        if dispatch_line(&line, &config, &state, &tool_tx) || state.is_shutdown() {
+        if dispatch_line(&line, &config, &state, &tasks, &tool_tx) || state.is_shutdown() {
             break;
         }
     }
 
     drop(tool_tx);
+    if state.is_shutdown() {
+        tasks.cancel_all();
+    }
     state.wait_for_workers(Duration::from_secs(DEFAULT_TIMEOUT_MS / 1000 + 5));
     let _ = worker_handle.join();
 
@@ -681,6 +696,7 @@ fn dispatch_line(
     line: &str,
     config: &Arc<McpConfig>,
     state: &Arc<McpServerState>,
+    tasks: &Arc<TaskManager>,
     tool_tx: &std::sync::mpsc::Sender<SyncToolJob>,
 ) -> bool {
     let message: Value = match serde_json::from_str(line) {
@@ -724,7 +740,7 @@ fn dispatch_line(
 
     // Notifications have no `id` and never receive responses.
     let Some(id) = id else {
-        handle_notification(method, params.as_ref(), state);
+        handle_notification(method, params.as_ref(), state, tasks);
         return false;
     };
 
@@ -738,27 +754,63 @@ fn dispatch_line(
         }
     };
 
-    if method == "tools/call" {
-        let cancel = state.register_in_flight(&id);
-        state.worker_enter();
-        if tool_tx
-            .send(SyncToolJob {
-                id: id.clone(),
-                params,
-                ctx,
-                cancel,
-            })
-            .is_err()
-        {
-            state.unregister_in_flight(&id);
-            state.worker_exit();
-            return true;
+    if method == "subscriptions/listen" {
+        if let Err(err) = tasks.handle_subscribe(&id, params.as_ref(), &ctx) {
+            return tasks.send_subscribe_error(id, &err);
         }
         return false;
     }
 
+    if method == "tasks/result" {
+        if ctx.is_modern() {
+            return state
+                .writer
+                .send_json(&error_response_from(
+                    id,
+                    &ProtocolError::method_not_found("tasks/result"),
+                ))
+                .is_err();
+        }
+        let task_id = match params
+            .as_ref()
+            .and_then(|p| p.get("taskId"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            Some(tid) => tid.to_string(),
+            None => {
+                return state
+                    .writer
+                    .send_json(&error_response_from(
+                        id,
+                        &ProtocolError::invalid_params(
+                            "tasks/result requires non-empty string params.taskId",
+                        ),
+                    ))
+                    .is_err();
+            }
+        };
+        let state_clone = Arc::clone(state);
+        let tasks_clone = Arc::clone(tasks);
+        state.worker_enter();
+        thread::spawn(move || {
+            let response = match tasks_clone.wait_for_legacy_result(&task_id) {
+                Ok(result) => result_response(id, result),
+                Err(err) => error_response_from(id, &err),
+            };
+            let _ = state_clone.writer.send_json(&response);
+            state_clone.worker_exit();
+        });
+        return false;
+    }
+
+    if method == "tools/call" {
+        return dispatch_tools_call(id, params, config, state, tasks, &ctx, tool_tx);
+    }
+
     if method == "shutdown" {
         // Let any already-queued tool calls finish before answering shutdown.
+        tasks.cancel_all();
         state.wait_for_workers(Duration::from_secs(DEFAULT_TIMEOUT_MS / 1000 + 5));
         let response = result_response(id, wrap_response_result(ctx.era, json!({})));
         let _ = state.writer.send_json(&response);
@@ -772,6 +824,7 @@ fn dispatch_line(
         params.as_ref(),
         config,
         state,
+        tasks,
         &ctx,
         &mut exit_after_response,
     );
@@ -787,10 +840,210 @@ fn dispatch_line(
     write_failed
 }
 
-fn handle_notification(method: &str, params: Option<&Value>, state: &McpServerState) {
+fn dispatch_tools_call(
+    id: Value,
+    params: Option<Value>,
+    config: &Arc<McpConfig>,
+    state: &Arc<McpServerState>,
+    tasks: &Arc<TaskManager>,
+    ctx: &RequestContext,
+    tool_tx: &std::sync::mpsc::Sender<SyncToolJob>,
+) -> bool {
+    let legacy_task_param = if !ctx.is_modern() {
+        params.as_ref().and_then(|p| p.get("task"))
+    } else {
+        None
+    };
+
+    // Legacy 2025-11-25 requestor-driven task augmentation (`params.task`).
+    if let Some(task_param) = legacy_task_param {
+        if !task_param.is_object() {
+            return state
+                .writer
+                .send_json(&error_response_from(
+                    id,
+                    &ProtocolError::invalid_params("tools/call params.task must be an object"),
+                ))
+                .is_err();
+        }
+        let tool_name = match validate_tool_call_request(params.as_ref(), config) {
+            Ok(name) => name,
+            Err(err) => {
+                return state
+                    .writer
+                    .send_json(&error_response_from(id, &err))
+                    .is_err();
+            }
+        };
+        if !is_task_eligible_tool(&tool_name) {
+            return state
+                .writer
+                .send_json(&error_response_from(
+                    id,
+                    &ProtocolError::method_not_found(&format!(
+                        "Task execution not supported for tool: {}",
+                        tool_name
+                    )),
+                ))
+                .is_err();
+        }
+        let requested_ttl = task_param.get("ttl").and_then(Value::as_u64);
+        let (task_id, cancel, create_result) =
+            match tasks.create_task(ProtocolEra::Legacy, &tool_name, requested_ttl, true) {
+                Ok(created) => created,
+                Err(err) => {
+                    return state
+                        .writer
+                        .send_json(&error_response_from(id, &err))
+                        .is_err();
+                }
+            };
+        if state
+            .writer
+            .send_json(&result_response(id, create_result))
+            .is_err()
+        {
+            return true;
+        }
+        spawn_task_worker(
+            task_id,
+            tool_name,
+            params,
+            cancel,
+            ctx.progress_token.clone(),
+            Arc::clone(config),
+            Arc::clone(state),
+            Arc::clone(tasks),
+        );
+        return false;
+    }
+
+    // Modern 2026-07-28 server-directed task execution (`io.modelcontextprotocol/tasks`).
+    if ctx.is_modern() && ctx.has_extension(TASKS_EXTENSION_ID) {
+        let maybe_name = params
+            .as_ref()
+            .and_then(|p| p.get("name"))
+            .and_then(Value::as_str);
+        if maybe_name.is_some_and(is_task_eligible_tool) {
+            let tool_name = match validate_tool_call_request(params.as_ref(), config) {
+                Ok(name) => name,
+                Err(err) => {
+                    return state
+                        .writer
+                        .send_json(&error_response_from(id, &err))
+                        .is_err();
+                }
+            };
+            let (task_id, cancel, _) =
+                match tasks.create_task(ProtocolEra::Modern, &tool_name, None, false) {
+                    Ok(created) => created,
+                    Err(err) => {
+                        return state
+                            .writer
+                            .send_json(&error_response_from(id, &err))
+                            .is_err();
+                    }
+                };
+            spawn_task_worker(
+                task_id.clone(),
+                tool_name,
+                params,
+                cancel,
+                // Per ext-tasks, notifications/progress MUST NOT be emitted for 2026-07-28 tasks.
+                None,
+                Arc::clone(config),
+                Arc::clone(state),
+                Arc::clone(tasks),
+            );
+            let grace = Duration::from_millis(config.task_grace_ms);
+            let wait_state = Arc::clone(state);
+            let wait_tasks = Arc::clone(tasks);
+            state.worker_enter();
+            thread::spawn(move || {
+                let response = match wait_tasks.wait_or_expose_modern(&task_id, grace) {
+                    Ok(Some(TaskOutcome::Result(res))) => {
+                        result_response(id, wrap_response_result(ProtocolEra::Modern, res))
+                    }
+                    Ok(Some(TaskOutcome::Error(err))) => error_response_from(id, &err),
+                    Ok(None) => error_response_from(
+                        id,
+                        &ProtocolError::internal_error("Task ended without a result"),
+                    ),
+                    Err(create_task_result) => result_response(
+                        id,
+                        wrap_response_result(ProtocolEra::Modern, create_task_result),
+                    ),
+                };
+                let _ = wait_state.writer.send_json(&response);
+                wait_state.worker_exit();
+            });
+            return false;
+        }
+    }
+
+    // Standard synchronous FIFO tool execution (clients without tasks or non-task tools).
+    let cancel = state.register_in_flight(&id);
+    state.worker_enter();
+    if tool_tx
+        .send(SyncToolJob {
+            id: id.clone(),
+            params,
+            ctx: ctx.clone(),
+            cancel,
+        })
+        .is_err()
+    {
+        state.unregister_in_flight(&id);
+        state.worker_exit();
+        return true;
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_task_worker(
+    task_id: String,
+    tool_name: String,
+    params: Option<Value>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    progress_token: Option<Value>,
+    config: Arc<McpConfig>,
+    state: Arc<McpServerState>,
+    tasks: Arc<TaskManager>,
+) {
+    state.worker_enter();
+    thread::spawn(move || {
+        let control = ToolRunControl {
+            cancel: cancel.clone(),
+            progress_token: progress_token.clone(),
+            writer: progress_token.as_ref().map(|_| state.writer.clone()),
+            tool_name,
+        };
+        let outcome = {
+            let _guard = ToolControlGuard::enter(control);
+            call_tool(params.as_ref(), &config)
+        };
+        if !cancel.load(Ordering::SeqCst) {
+            let task_outcome = match outcome {
+                Ok(res) => TaskOutcome::Result(res),
+                Err(err) => TaskOutcome::Error(err),
+            };
+            tasks.complete_task(&task_id, task_outcome);
+        }
+        state.worker_exit();
+    });
+}
+
+fn handle_notification(
+    method: &str,
+    params: Option<&Value>,
+    state: &McpServerState,
+    tasks: &TaskManager,
+) {
     if method == "notifications/cancelled" {
         if let Some(request_id) = params.and_then(|p| p.get("requestId")) {
             state.cancel_in_flight(request_id);
+            tasks.unsubscribe(request_id);
         }
     }
 }
@@ -800,6 +1053,7 @@ fn handle_inline_request(
     params: Option<&Value>,
     config: &McpConfig,
     state: &McpServerState,
+    tasks: &TaskManager,
     ctx: &RequestContext,
     exit_after_response: &mut bool,
 ) -> Result<Value, ProtocolError> {
@@ -825,6 +1079,10 @@ fn handle_inline_request(
         "resources/templates/list" => Ok(list_resource_templates(ctx.era)),
         "resources/read" => read_resource(params, ctx.era),
         "resources/directory/read" => read_resource_directory(params),
+        "tasks/get" => tasks.handle_get(params, ctx),
+        "tasks/update" => tasks.handle_update(params, ctx),
+        "tasks/cancel" => tasks.handle_cancel(params, ctx),
+        "tasks/list" => tasks.handle_list(params, ctx),
         "shutdown" => {
             *exit_after_response = true;
             Ok(json!({}))
@@ -835,6 +1093,7 @@ fn handle_inline_request(
 
 fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
     let mut tools_arg: Option<String> = None;
+    let mut task_grace_ms: Option<u64> = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -848,39 +1107,60 @@ fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
         } else if let Some(value) = arg.strip_prefix("--tools=") {
             tools_arg = Some(value.to_string());
             i += 1;
+        } else if arg == "--task-grace-ms" {
+            let Some(value) = args.get(i + 1) else {
+                return Err("Missing value for --task-grace-ms".to_string());
+            };
+            let parsed = value
+                .parse::<u64>()
+                .map_err(|_| format!("Invalid value for --task-grace-ms: {}", value))?;
+            task_grace_ms = Some(parsed);
+            i += 2;
+        } else if let Some(value) = arg.strip_prefix("--task-grace-ms=") {
+            let parsed = value
+                .parse::<u64>()
+                .map_err(|_| format!("Invalid value for --task-grace-ms: {}", value))?;
+            task_grace_ms = Some(parsed);
+            i += 1;
         } else {
             return Err(format!(
-                "Unknown mcp option: {}\nUsage: agent-browser mcp [--tools <profiles>] [--config <trusted-path>]",
+                "Unknown mcp option: {}\nUsage: agent-browser mcp [--tools <profiles>] [--task-grace-ms <ms>] [--config <trusted-path>]",
                 arg
             ));
         }
     }
 
-    let Some(tools_arg) = tools_arg else {
-        return Ok(McpConfig::default());
+    let mut config = if let Some(tools_arg) = tools_arg {
+        let mut profiles = Vec::new();
+        for raw_name in tools_arg.split(',') {
+            let name = raw_name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let Some(profile) = ToolProfile::parse(name) else {
+                return Err(format!(
+                    "Unknown MCP tools profile: {}\nValid profiles: {}",
+                    name,
+                    tool_profile_names().join(", ")
+                ));
+            };
+            profiles.push(profile);
+        }
+
+        if profiles.is_empty() {
+            return Err("Missing value for --tools".to_string());
+        }
+
+        McpConfig::from_profiles(profiles)
+    } else {
+        McpConfig::default()
     };
 
-    let mut profiles = Vec::new();
-    for raw_name in tools_arg.split(',') {
-        let name = raw_name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let Some(profile) = ToolProfile::parse(name) else {
-            return Err(format!(
-                "Unknown MCP tools profile: {}\nValid profiles: {}",
-                name,
-                tool_profile_names().join(", ")
-            ));
-        };
-        profiles.push(profile);
+    if let Some(ms) = task_grace_ms {
+        config.task_grace_ms = ms;
     }
 
-    if profiles.is_empty() {
-        return Err("Missing value for --tools".to_string());
-    }
-
-    Ok(McpConfig::from_profiles(profiles))
+    Ok(config)
 }
 
 fn list_tools_for_era(
@@ -946,7 +1226,8 @@ fn discover_result(config: &McpConfig) -> Value {
             "tools": {},
             "resources": {},
             "extensions": {
-                SKILLS_EXTENSION_ID: skills_extension_capability()
+                SKILLS_EXTENSION_ID: skills_extension_capability(),
+                TASKS_EXTENSION_ID: {}
             }
         },
         "instructions": server_instructions(config),
@@ -974,6 +1255,7 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
         "resources": {}
     });
     if protocol_version == "2025-11-25" {
+        capabilities["tasks"] = legacy_tasks_capability();
         capabilities["extensions"] = json!({
             SKILLS_EXTENSION_ID: skills_extension_capability()
         });
@@ -2467,13 +2749,17 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         schema.insert("required".to_string(), json!(required));
     }
 
-    json!({
+    let mut def = json!({
         "name": name,
         "title": title,
         "description": description,
         "inputSchema": Value::Object(schema),
         "annotations": tool_annotations(name),
-    })
+    });
+    if is_task_eligible_tool(name) {
+        def["execution"] = json!({ "taskSupport": "optional" });
+    }
+    def
 }
 
 fn tool_annotations(name: &str) -> Value {
@@ -2701,7 +2987,10 @@ fn wait_tool(
     tool(name, title, description, properties, required)
 }
 
-fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, ProtocolError> {
+fn validate_tool_call_request(
+    params: Option<&Value>,
+    config: &McpConfig,
+) -> Result<String, ProtocolError> {
     let params =
         params.ok_or_else(|| ProtocolError::invalid_params("tools/call requires params"))?;
     let name = params
@@ -2727,8 +3016,15 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
 
     reject_unknown_arguments(name, &tool_def, arguments)?;
     reject_invalid_enum_values(&tool_def, arguments)?;
+    Ok(name.to_string())
+}
 
-    match name {
+fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, ProtocolError> {
+    let name = validate_tool_call_request(params, config)?;
+    let params = params.expect("validated above");
+    let arguments = params.get("arguments").unwrap_or(&Value::Null);
+
+    match name.as_str() {
         TOOL_TOOLS_PROFILES => call_tools_profiles(config),
         TOOL_OPEN => call_open(arguments),
         TOOL_READ => call_read(arguments),
