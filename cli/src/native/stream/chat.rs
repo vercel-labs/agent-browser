@@ -16,17 +16,6 @@ pub(crate) fn is_chat_enabled() -> bool {
     std::env::var("AI_GATEWAY_API_KEY").is_ok()
 }
 
-pub(super) fn chat_status_json() -> String {
-    let enabled = is_chat_enabled();
-    let mut obj = json!({ "enabled": enabled });
-    if enabled {
-        if let Ok(model) = std::env::var("AI_GATEWAY_MODEL") {
-            obj["model"] = Value::String(model);
-        }
-    }
-    obj.to_string()
-}
-
 pub(super) async fn handle_models_request(stream: &mut tokio::net::TcpStream) {
     let gateway_url = std::env::var("AI_GATEWAY_URL")
         .unwrap_or_else(|_| DEFAULT_AI_GATEWAY_URL.to_string())

@@ -829,10 +829,16 @@ struct DashboardConfig {
     allowed_origins: Vec<String>,
     #[serde(default)]
     access_token: Option<String>,
+    #[serde(default)]
+    browsers: native::stream::DashboardBrowsers,
 }
 
 impl DashboardConfig {
-    fn new(port: u16, allowed_origins: Vec<String>) -> Result<Self, String> {
+    fn new(
+        port: u16,
+        allowed_origins: Vec<String>,
+        browsers: native::stream::DashboardBrowsers,
+    ) -> Result<Self, String> {
         let access_token = if allowed_origins.is_empty() {
             None
         } else {
@@ -842,6 +848,7 @@ impl DashboardConfig {
             port,
             allowed_origins,
             access_token,
+            browsers,
         })
     }
 
@@ -862,7 +869,9 @@ impl DashboardConfig {
     }
 
     fn has_same_settings_as(&self, requested: &Self) -> bool {
-        self.port == requested.port && self.allowed_origins == requested.allowed_origins
+        self.port == requested.port
+            && self.allowed_origins == requested.allowed_origins
+            && self.browsers == requested.browsers
     }
 
     fn access_urls(&self) -> Vec<String> {
@@ -881,8 +890,27 @@ enum DashboardCommand {
     Start {
         port: u16,
         allowed_origins: Option<String>,
+        engines: Option<String>,
+        providers: Option<String>,
     },
     Stop,
+}
+
+fn dashboard_option_value(
+    args: &[String],
+    index: usize,
+    already_set: bool,
+) -> Result<String, String> {
+    let option = &args[index];
+    if already_set {
+        return Err(format!(
+            "Dashboard option '{option}' was provided more than once."
+        ));
+    }
+    args.get(index + 1)
+        .filter(|value| !value.starts_with('-'))
+        .cloned()
+        .ok_or_else(|| format!("Dashboard option '{option}' requires a value."))
 }
 
 /// Parse dashboard-specific arguments independently of the general command
@@ -910,6 +938,8 @@ fn parse_dashboard_command(args: &[String]) -> Result<DashboardCommand, String> 
     let mut port = 4848;
     let mut saw_port = false;
     let mut allowed_origins = None;
+    let mut engines = None;
+    let mut providers = None;
 
     while let Some(argument) = args.get(index) {
         match argument.as_str() {
@@ -930,19 +960,19 @@ fn parse_dashboard_command(args: &[String]) -> Result<DashboardCommand, String> 
                 index += 2;
             }
             "--allowed-origins" => {
-                if allowed_origins.is_some() {
-                    return Err(
-                        "Dashboard option '--allowed-origins' was provided more than once."
-                            .to_string(),
-                    );
-                }
-                let value = args
-                    .get(index + 1)
-                    .filter(|value| !value.starts_with('-'))
-                    .ok_or_else(|| {
-                        "Dashboard option '--allowed-origins' requires a value.".to_string()
-                    })?;
-                allowed_origins = Some(value.clone());
+                allowed_origins = Some(dashboard_option_value(
+                    args,
+                    index,
+                    allowed_origins.is_some(),
+                )?);
+                index += 2;
+            }
+            "--engines" => {
+                engines = Some(dashboard_option_value(args, index, engines.is_some())?);
+                index += 2;
+            }
+            "--providers" => {
+                providers = Some(dashboard_option_value(args, index, providers.is_some())?);
                 index += 2;
             }
             value if value.starts_with('-') => {
@@ -957,6 +987,8 @@ fn parse_dashboard_command(args: &[String]) -> Result<DashboardCommand, String> 
     Ok(DashboardCommand::Start {
         port,
         allowed_origins,
+        engines,
+        providers,
     })
 }
 
@@ -1020,9 +1052,11 @@ fn dashboard_config_issue(
     }
 
     Some(format!(
-        "Dashboard is already running with port {} and {}. Run 'agent-browser dashboard stop' before starting it with different settings.",
+        "Dashboard is already running with port {}, {}, engines {} and providers {}. Run 'agent-browser dashboard stop' before starting it with different settings.",
         running.port,
-        running.allowed_origins_description()
+        running.allowed_origins_description(),
+        running.browsers.engines.join(","),
+        running.browsers.providers_value()
     ))
 }
 
@@ -1031,7 +1065,12 @@ fn dashboard_config_issue(
 /// cannot grant access to an attacker-controlled origin. Persist the effective
 /// settings beside the PID so repeated starts cannot silently claim that a live
 /// process adopted different settings.
-fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool) {
+fn run_dashboard_start(
+    port: u16,
+    allowed_origins: Vec<String>,
+    browsers: native::stream::DashboardBrowsers,
+    json_mode: bool,
+) {
     let pid_path = get_dashboard_pid_path();
 
     // Check if already running
@@ -1043,6 +1082,7 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
                     port,
                     allowed_origins,
                     access_token: None,
+                    browsers,
                 };
                 if let Some(error) =
                     dashboard_config_issue(running_config.as_ref(), &requested_config)
@@ -1078,7 +1118,7 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
         let _ = fs::remove_file(get_dashboard_config_path());
     }
 
-    let requested_config = match DashboardConfig::new(port, allowed_origins) {
+    let requested_config = match DashboardConfig::new(port, allowed_origins, browsers) {
         Ok(config) => config,
         Err(error) => {
             if json_mode {
@@ -1112,10 +1152,19 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
     };
 
     let mut cmd = std::process::Command::new(&exe_path);
-    cmd.env("AGENT_BROWSER_DASHBOARD", "1").env(
-        "AGENT_BROWSER_DASHBOARD_PORT",
-        requested_config.port.to_string(),
-    );
+    cmd.env("AGENT_BROWSER_DASHBOARD", "1")
+        .env(
+            "AGENT_BROWSER_DASHBOARD_PORT",
+            requested_config.port.to_string(),
+        )
+        .env(
+            "AGENT_BROWSER_DASHBOARD_ENGINES",
+            requested_config.browsers.engines.join(","),
+        )
+        .env(
+            "AGENT_BROWSER_DASHBOARD_PROVIDERS",
+            requested_config.browsers.providers_value(),
+        );
     if requested_config.allowed_origins.is_empty() {
         cmd.env_remove("AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS");
         cmd.env_remove("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN");
@@ -1683,24 +1732,37 @@ fn main() {
             DashboardCommand::Start {
                 port,
                 allowed_origins,
+                engines,
+                providers,
             } => {
                 let env_allowed_origins = env::var("AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS").ok();
                 let configured_origins = allowed_origins
                     .as_deref()
                     .or(env_allowed_origins.as_deref());
-                let allowed_origins =
-                    match native::stream::normalize_dashboard_allowed_origins(configured_origins) {
-                        Ok(origins) => origins,
-                        Err(error) => {
-                            if flags.json {
-                                print_json_error(error);
-                            } else {
-                                eprintln!("{} {}", color::error_indicator(), error);
-                            }
-                            exit(1);
+                let engines = engines.or_else(|| env::var("AGENT_BROWSER_DASHBOARD_ENGINES").ok());
+                let providers =
+                    providers.or_else(|| env::var("AGENT_BROWSER_DASHBOARD_PROVIDERS").ok());
+                let settings =
+                    native::stream::normalize_dashboard_allowed_origins(configured_origins)
+                        .and_then(|origins| {
+                            let browsers = native::stream::DashboardBrowsers::parse(
+                                engines.as_deref(),
+                                providers.as_deref(),
+                            )?;
+                            Ok((origins, browsers))
+                        });
+                let (allowed_origins, browsers) = match settings {
+                    Ok(settings) => settings,
+                    Err(error) => {
+                        if flags.json {
+                            print_json_error(error);
+                        } else {
+                            eprintln!("{} {}", color::error_indicator(), error);
                         }
-                    };
-                run_dashboard_start(port, allowed_origins, flags.json);
+                        exit(1);
+                    }
+                };
+                run_dashboard_start(port, allowed_origins, browsers, flags.json);
                 return;
             }
         }
@@ -2424,6 +2486,7 @@ mod tests {
                 "https://second.example.com, https://dashboard.example.com",
             ))
             .unwrap(),
+            native::stream::DashboardBrowsers::default(),
         )
         .unwrap();
         let equivalent = DashboardConfig::new(
@@ -2432,6 +2495,7 @@ mod tests {
                 "https://dashboard.example.com,https://second.example.com",
             ))
             .unwrap(),
+            native::stream::DashboardBrowsers::parse(Some("lightpanda,chrome"), None).unwrap(),
         )
         .unwrap();
         let changed = DashboardConfig::new(
@@ -2440,11 +2504,19 @@ mod tests {
                 "https://dashboard.example.com",
             ))
             .unwrap(),
+            native::stream::DashboardBrowsers::default(),
+        )
+        .unwrap();
+        let changed_browsers = DashboardConfig::new(
+            4848,
+            requested.allowed_origins.clone(),
+            native::stream::DashboardBrowsers::parse(Some("chrome"), Some("none")).unwrap(),
         )
         .unwrap();
 
         assert_eq!(dashboard_config_issue(Some(&equivalent), &requested), None);
         assert!(dashboard_config_issue(Some(&changed), &requested).is_some());
+        assert!(dashboard_config_issue(Some(&changed_browsers), &requested).is_some());
         assert!(dashboard_config_issue(None, &requested).is_some());
     }
 
@@ -2456,6 +2528,10 @@ mod tests {
             "8080".to_string(),
             "--allowed-origins".to_string(),
             "https://dashboard.example.com".to_string(),
+            "--engines".to_string(),
+            "chrome".to_string(),
+            "--providers".to_string(),
+            "none".to_string(),
         ];
 
         assert_eq!(
@@ -2463,6 +2539,8 @@ mod tests {
             Ok(DashboardCommand::Start {
                 port: 8080,
                 allowed_origins: Some("https://dashboard.example.com".to_string()),
+                engines: Some("chrome".to_string()),
+                providers: Some("none".to_string()),
             })
         );
     }
@@ -2476,6 +2554,8 @@ mod tests {
             vec!["start", "--port", "0"],
             vec!["start", "--port"],
             vec!["start", "--allowed-origins"],
+            vec!["start", "--engines"],
+            vec!["start", "--providers", "none", "--providers", "kernel"],
             vec!["stop", "--port", "4848"],
         ] {
             let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();

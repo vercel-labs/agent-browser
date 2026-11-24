@@ -492,10 +492,13 @@ agent-browser webmcp cancel <invocation-id>
 agent-browser dashboard start
 agent-browser dashboard start --port 8080
 agent-browser dashboard start --allowed-origins https://dashboard.example.com
+agent-browser dashboard start --engines chrome --providers none  # Limit New Session options
 agent-browser dashboard stop
 ```
 
-The dashboard runs on port 4848 by default, independent of browser sessions. It can also be opened through a proxied or forwarded URL such as `https://dashboard.agent-browser.localhost`; stay on the dashboard origin, because session tabs, status, and stream traffic are proxied internally and session ports do not need to be exposed. Loopback origins are allowed by default over IPv4 and IPv6 without an access token. Set `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS` to a comma-separated list of exact HTTPS reverse-proxied origins. Every origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. The URL's token is carried in the initial fragment, then stored in a Secure, host-bound, same-site cookie for dashboard API and stream requests. Configure the reverse proxy to redact cookies from logs. The dashboard rejects requests with missing or cross-origin browser provenance. Open `http://localhost:<port>` directly for local access. Repeated starts reuse the running dashboard only when the port and allowed origins match; stop it before changing either setting.
+The dashboard runs on port 4848 by default, independent of browser sessions. It can also be opened through a proxied or forwarded URL such as `https://dashboard.agent-browser.localhost`; stay on the dashboard origin, because session tabs, status, and stream traffic are proxied internally and session ports do not need to be exposed. Loopback origins are allowed by default over IPv4 and IPv6 without an access token. Set `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS` to a comma-separated list of exact HTTPS reverse-proxied origins. Every origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. The URL's token is carried in the initial fragment, then stored in a Secure, host-bound, same-site cookie for dashboard API and stream requests. Configure the reverse proxy to redact cookies from logs. The dashboard rejects requests with missing or cross-origin browser provenance. Open `http://localhost:<port>` directly for local access. Repeated starts reuse the running dashboard only when the port, allowed origins, engines, and providers match; stop it before changing any of them.
+
+`--engines` (`chrome`, `lightpanda`) and `--providers` (`agentcore`, `browserbase`, `browserless`, `browseruse`, `kernel`, or `none`) limit what the New Session dialog offers; both default to every option, also settable with `AGENT_BROWSER_DASHBOARD_ENGINES` and `AGENT_BROWSER_DASHBOARD_PROVIDERS`. Unknown names fail startup. With one option left, the dialog hides the picker. This trims the UI only; the dashboard API still runs any command. The Chat tab appears only when `AI_GATEWAY_API_KEY` is set; otherwise the dashboard opens on Activity.
 
 ## Browser installation
 
@@ -709,6 +712,8 @@ BROWSER_USE_PROXY_COUNTRY="de"               # Managed proxy country; none/direc
 BROWSER_USE_ENABLE_RECORDING="true"          # Record the Browser Use Cloud session
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
 AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS="https://dashboard.example.com" # Trusted HTTPS reverse-proxied dashboard origins
+AGENT_BROWSER_DASHBOARD_ENGINES="chrome"     # Engines the dashboard's New Session dialog offers
+AGENT_BROWSER_DASHBOARD_PROVIDERS="none"     # Providers the dashboard's New Session dialog offers
 AGENT_BROWSER_CONFIG="./agent-browser.json"  # Custom config file
 AGENT_BROWSER_CDP="9222"                     # Connect daemon to CDP port or WebSocket URL
 AGENT_BROWSER_ALLOWED_DOMAINS="example.com"  # Restrict network domains; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins

@@ -4,7 +4,8 @@ import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { useAtomValue } from "jotai/react";
 import { useChat } from "@ai-sdk/react";
 import { Streamdown } from "streamdown";
-import { CHAT_STORAGE_PREFIX, chatModelAtom, availableModelsAtom, getChat, setChatModel, stripImagesForStorage } from "@/store/chat";
+import { CHAT_STORAGE_PREFIX, availableModelsAtom, getChat, setChatModel, stripImagesForStorage } from "@/store/chat";
+import { dashboardConfigAtom } from "@/store/dashboard-config";
 import { activeSessionNameAtom } from "@/store/sessions";
 import { ModelSelector } from "@/components/model-selector";
 import { shikiTheme } from "@/lib/shiki-theme";
@@ -305,7 +306,7 @@ export function ChatPanel() {
   const [errorDismissed, setErrorDismissed] = useState(false);
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const defaultModel = useAtomValue(chatModelAtom);
+  const defaultModel = useAtomValue(dashboardConfigAtom)?.chat.model;
   const [selectedModel, setSelectedModel] = useState<string>(defaultModel || DEFAULT_MODEL);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -314,10 +315,6 @@ export function ChatPanel() {
   const storageKey = `${CHAT_STORAGE_PREFIX}${chatId}`;
   setChatModel(selectedModel);
   const messageTimestamps = useRef<Record<string, number>>({});
-
-  useEffect(() => {
-    if (defaultModel) setSelectedModel(defaultModel);
-  }, [defaultModel]);
 
   const { messages, sendMessage, stop, status, setMessages, error } = useChat({ chat: getChat(chatId) });
 
