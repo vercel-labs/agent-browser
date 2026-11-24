@@ -7889,7 +7889,7 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         }
     }
 
-    interaction::scroll(
+    let movement = interaction::scroll(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7899,7 +7899,14 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         &state.iframe_sessions,
     )
     .await?;
-    Ok(json!({ "scrolled": true }))
+    let x = movement.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+    let y = movement.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+    Ok(json!({
+        "scrolled": x != 0.0 || y != 0.0,
+        "x": x,
+        "y": y,
+        "in": movement.get("in").and_then(Value::as_str).unwrap_or("page"),
+    }))
 }
 
 /// The optional `by` field restricts `select` matching to option values or
