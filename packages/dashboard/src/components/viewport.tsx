@@ -40,6 +40,7 @@ import {
   streamEngineAtom,
   activeUrlAtom,
   sendInputAtom,
+  type StreamFrame,
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
@@ -158,6 +159,15 @@ export function Viewport() {
   const sendInput = useSetAtom(sendInputAtom);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const lastRightPressRef = useRef(0);
+  const drawnFrameRef = useRef<{
+    width: number;
+    height: number;
+    offsetTop: number;
+    pageScaleFactor: number;
+  } | null>(null);
+  const decodeSeqRef = useRef(0);
+  const drawnSeqRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const addressRef = useRef<HTMLInputElement>(null);
@@ -194,6 +204,7 @@ export function Viewport() {
     setActiveDevice(null);
     setColorScheme("no-preference");
     setOffline(false);
+    drawnFrameRef.current = null;
   }, [sessionName]);
 
   useEffect(() => {
@@ -233,20 +244,35 @@ export function Viewport() {
     }
   }, [addressValue, navigating, runCmd, url]);
 
-  const drawFrame = useCallback((base64: string) => {
+  const drawFrame = useCallback((next: StreamFrame) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const bin = atob(base64);
+    const seq = ++decodeSeqRef.current;
+    const bin = atob(next.data);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
     createImageBitmap(new Blob([bytes], { type: "image/jpeg" })).then((bmp) => {
+      if (seq < drawnSeqRef.current) {
+        bmp.close();
+        return;
+      }
+      drawnSeqRef.current = seq;
       canvas.width = bmp.width;
       canvas.height = bmp.height;
       const ctx = canvas.getContext("2d");
       if (ctx) ctx.drawImage(bmp, 0, 0);
       bmp.close();
+      drawnFrameRef.current =
+        next.deviceWidth > 0 && next.deviceHeight > 0
+          ? {
+              width: next.deviceWidth,
+              height: next.deviceHeight,
+              offsetTop: next.offsetTop > 0 ? next.offsetTop : 0,
+              pageScaleFactor: next.pageScaleFactor > 0 ? next.pageScaleFactor : 1,
+            }
+          : null;
     });
   }, []);
 
@@ -334,11 +360,19 @@ export function Viewport() {
       const canvas = canvasRef.current;
       if (!canvas) return null;
       const rect = canvas.getBoundingClientRect();
-      const scaleX = viewportWidth / rect.width;
-      const scaleY = viewportHeight / rect.height;
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const drawn = drawnFrameRef.current;
+      const targetWidth = drawn?.width ?? viewportWidth;
+      const targetHeight = drawn?.height ?? viewportHeight;
+      const offsetTop = drawn?.offsetTop ?? 0;
+      const pageScale = drawn?.pageScaleFactor ?? 1;
+      const offsetTopCss = targetHeight > 0 ? (offsetTop / targetHeight) * rect.height : 0;
+      const contentHeight = Math.max(rect.height - offsetTopCss, 1);
+      const scaleX = targetWidth / rect.width;
+      const scaleY = targetHeight / contentHeight;
       return {
-        x: Math.round((e.clientX - rect.left) * scaleX),
-        y: Math.round((e.clientY - rect.top) * scaleY),
+        x: Math.round(((e.clientX - rect.left) * scaleX) / pageScale),
+        y: Math.round(((e.clientY - rect.top - offsetTopCss) * scaleY) / pageScale),
       };
     },
     [viewportWidth, viewportHeight],
@@ -348,14 +382,60 @@ export function Viewport() {
     (e: React.MouseEvent, eventType: string) => {
       const pos = toViewport(e);
       if (!pos) return;
+      if (eventType === "mousePressed" && e.button === 2) {
+        lastRightPressRef.current = Date.now();
+      }
+      const buttons = e.buttons;
+      const button =
+        eventType === "mouseMoved"
+          ? buttons & 1
+            ? "left"
+            : buttons & 2
+              ? "right"
+              : buttons & 4
+                ? "middle"
+                : "none"
+          : cdpButton(e.button);
       sendInput({
         type: "input_mouse",
         eventType,
         x: pos.x,
         y: pos.y,
-        button: cdpButton(e.button),
+        button,
+        buttons,
         clickCount: eventType === "mousePressed" ? 1 : 0,
         modifiers: cdpModifiers(e),
+      });
+    },
+    [toViewport, sendInput],
+  );
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      if (Date.now() - lastRightPressRef.current <= 100) return;
+      const pos = toViewport(e);
+      if (!pos) return;
+      const modifiers = cdpModifiers(e);
+      sendInput({
+        type: "input_mouse",
+        eventType: "mousePressed",
+        x: pos.x,
+        y: pos.y,
+        button: "right",
+        buttons: 2,
+        clickCount: 1,
+        modifiers,
+      });
+      sendInput({
+        type: "input_mouse",
+        eventType: "mouseReleased",
+        x: pos.x,
+        y: pos.y,
+        button: "right",
+        buttons: 0,
+        clickCount: 0,
+        modifiers,
       });
     },
     [toViewport, sendInput],
@@ -544,7 +624,7 @@ export function Viewport() {
             }}
             onMouseUp={(e) => handleMouseEvent(e, "mouseReleased")}
             onWheel={handleWheel}
-            onContextMenu={(e) => e.preventDefault()}
+            onContextMenu={handleContextMenu}
           />
         ) : (
           <div className="text-center text-sm text-muted-foreground">

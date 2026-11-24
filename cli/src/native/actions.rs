@@ -1457,9 +1457,22 @@ impl DaemonState {
         }
 
         // Remove destroyed targets
+        let mut removed_tracked_page = false;
         for target_id in &drained.destroyed_targets {
             if let Some(ref mut mgr) = self.browser {
-                mgr.remove_page_by_target_id(target_id);
+                removed_tracked_page |= mgr.remove_page_by_target_id(target_id);
+            }
+        }
+
+        if removed_tracked_page {
+            if let Some(ref server) = self.stream_server {
+                if let Some(ref mgr) = self.browser {
+                    let session_id = mgr.active_session_id().ok().map(|s| s.to_string());
+                    server
+                        .bind_cdp_session_and_broadcast_tabs(session_id, &mgr.tab_list())
+                        .await;
+                    server.notify_client_changed();
+                }
             }
         }
 
