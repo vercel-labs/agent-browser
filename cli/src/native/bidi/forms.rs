@@ -21,6 +21,7 @@ use crate::native::actions::{
 use crate::native::browser::ensure_file_input_shape;
 use crate::native::forms::{self, CallError, FormControl};
 use crate::native::interaction::{CLEAR_VALUE_JS, SELECT_ALL_JS};
+use crate::native::pointer::MouseButton;
 
 const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
     let el = useActive ? ((this && this.ownerDocument) || document).activeElement : this;
@@ -355,7 +356,11 @@ impl FormControl for FirefoxControl<'_> {
             &target,
             self.name,
             PointerAction::Check,
-            pointer_click(&Origin::Element(target.shared_id.clone()), "left", 1),
+            pointer_click(
+                &Origin::Element(target.shared_id.clone()),
+                MouseButton::Left,
+                1,
+            ),
             json!({}),
         )
         .await
