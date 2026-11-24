@@ -3,6 +3,27 @@ title: "Changelog"
 navTitle: "Changelog"
 ---
 
+## v0.45.0
+
+<p className="text-[#888] text-sm">November 24, 2026</p>
+
+### New Features
+
+- Added a **Firefox engine** driven over WebDriver BiDi: pass `--engine firefox` (or set `AGENT_BROWSER_ENGINE=firefox`) with Firefox 150 or newer to drive a local Firefox install with snapshots and `@eN` refs across open and closed shadow roots and iframes, `find` locators, shared form preconditions and error codes (`fill`, `type`, `check`, `uncheck`, `select --by`), right-click, middle-click, and modifier keys (`--button`, `--modifiers`), network routes and HAR capture, `--allowed-domains`, downloads, viewport, media, geolocation, header, and offline emulation, isolated windows, `--pin-tab`, screenshots, PDF export, and dashboard live view (#2205, #2206, #2207, #2208, #2595, #2633)
+- Added **Firefox attach mode**: connect to an existing Firefox instance over WebDriver BiDi with `--cdp` or `connect` (including `ws://.../session?devtools=<port>` endpoints), apply live settings in place, and detach on `close` without closing the running browser (#2227)
+
+### Bug Fixes
+
+- Fixed **keyboard `keydown`, `keyup`, and `press` modifier handling**: `keydown` and `keyup` now send `code`, `keyCode`, `location`, and printable text and carry held modifiers across subsequent keyboard, mouse, and flow-recorder commands. `press` applies US-layout Shift mapping, suppresses printable text for Alt, Control, and Meta chords, and dispatches modifier key events for chords not already held (#2734)
+- Fixed **saved flow host rules, write consent, deadlines, and result shaping**: saved host rules now match hostnames regardless of case or a trailing DNS root dot, non-`POST` requests carrying GraphQL queries require write declarations and consent, HTTP preflight cookie and route lookups and in-page fetches stop at the run deadline, empty result lists no longer fail `--fields` or `--where`, and `--limit` shapes only retained rows (#2735)
+- Fixed **saved flow replay** finishing before late-reported first-party Chrome requests settle (#2711)
+
+### Documentation
+
+- Added the **Firefox engine guide** (`/engines/firefox`) and updated CLI help, MCP tool schemas, command references, and core skills for Firefox support and form command behavior (#2208, #2227, #2595, #2633)
+
+---
+
 ## v0.44.0
 
 <p className="text-[#888] text-sm">November 23, 2026</p>
