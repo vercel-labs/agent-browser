@@ -29,11 +29,12 @@ use super::cdp::types::{
 };
 use super::cookies;
 use super::diff;
-use super::downloads::{DownloadLedger, DownloadState};
+use super::downloads::{DownloadLedger, DownloadRecord, DownloadState};
 use super::element::RefMap;
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
+use super::pending_wait::WaitPoll;
 use super::pointer::{ClickPlan, ClickSpec, MouseButton};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
@@ -775,6 +776,21 @@ pub struct DaemonState {
     pub stream_server: Option<Arc<StreamServer>>,
     /// Daemon-owned activity clock shared by commands and stream servers.
     pub idle_activity: Arc<IdleActivity>,
+    /// Set by the daemon before a command it received: a wait-family command
+    /// may then poll without the state lock. Commands run from inside another
+    /// command (batch, confirm, flow replay) wait inline.
+    pub defer_wait: bool,
+    /// Changes whenever the session's browser is replaced or closed, so a
+    /// wait that polled without the state lock can tell on resume whether it
+    /// still talks to the browser it started on.
+    browser_generation: u64,
+    /// Waits polling without the state lock, shared with the daemon, which
+    /// cancels them on `close` and shutdown. Replacing the browser cancels
+    /// them too.
+    pub waits: Arc<super::pending_wait::PendingWaits>,
+    /// The wait the last command left for the daemon to poll unlocked. In a
+    /// mutex only so the state stays `Sync`; always reached through `&mut`.
+    deferred: std::sync::Mutex<Option<DeferredCommand>>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_identity: Option<u64>,
     /// CDP endpoint and headers from the last explicit CDP launch, reused when
@@ -983,6 +999,10 @@ impl DaemonState {
             stream_client: None,
             stream_server: None,
             idle_activity: Arc::new(IdleActivity::new()),
+            defer_wait: false,
+            browser_generation: 0,
+            waits: Arc::new(super::pending_wait::PendingWaits::new()),
+            deferred: std::sync::Mutex::new(None),
             launch_identity: None,
             cdp_headers: None,
             attached_target: None,
@@ -1051,8 +1071,27 @@ impl DaemonState {
         s
     }
 
-    fn subscribe_to_browser_events(&mut self) {
+    fn deferred_mut(&mut self) -> &mut Option<DeferredCommand> {
+        self.deferred.get_mut().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Take the wait the last command left for the daemon to poll without
+    /// the state lock. See [`DaemonState::defer_wait`].
+    pub fn take_deferred(&mut self) -> Option<DeferredCommand> {
+        self.deferred_mut().take()
+    }
+
+    /// The browser was replaced or closed: what the old one reported no
+    /// longer applies, and waits polling it end now rather than at their
+    /// timeout.
+    fn browser_replaced(&mut self) {
+        self.browser_generation += 1;
         self.downloads.clear();
+        self.waits.cancel_all(super::pending_wait::BROWSER_CHANGED);
+    }
+
+    fn subscribe_to_browser_events(&mut self) {
+        self.browser_replaced();
         if let Some(ref browser) = self.browser {
             self.event_rx = Some(browser.client.subscribe());
         }
@@ -2717,6 +2756,8 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
     let browser = state.browser.take();
+    // Downloads and pending waits belong to the browser being closed.
+    state.browser_replaced();
     state.launch_identity = None;
     state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
@@ -3094,9 +3135,26 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 }
 
 async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
+    let may_defer = std::mem::take(&mut state.defer_wait);
     let outer = state.flow.enter();
-    let mut resp = execute_command_inner(cmd, state).await;
-    if let Some(seq) = state.flow.exit(outer) {
+    let resp = execute_command_inner(cmd, state, may_defer).await;
+    let seq = state.flow.exit(outer);
+    if let Some(deferred) = state.deferred_mut().as_mut() {
+        // Commands that run while the wait polls hand the recorder back and
+        // forth; the wait keeps its own step to end when it resumes.
+        deferred.resume.flow_seq = seq;
+        return resp;
+    }
+    finish_flow(cmd, seq, resp, state).await
+}
+
+async fn finish_flow(
+    cmd: &Value,
+    seq: Option<u64>,
+    mut resp: Value,
+    state: &mut DaemonState,
+) -> Value {
+    if let Some(seq) = seq {
         let ok = resp.get("success") == Some(&json!(true));
         let url = match state.browser.as_ref() {
             Some(mgr) => mgr.get_url().await.ok(),
@@ -3121,6 +3179,118 @@ async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
         warn_if_browser_outdated(state, &mut resp).await;
     }
     resp
+}
+
+/// A wait-family command whose setup ran under the state lock and whose poll
+/// the daemon drives with the lock released.
+pub struct DeferredCommand {
+    pub poll: WaitPoll,
+    pub resume: ResumeCommand,
+}
+
+/// What a deferred wait needs to finish under the lock once its poll settles.
+pub struct ResumeCommand {
+    finish: WaitFinish,
+    post: PostCommand,
+    flow_seq: Option<u64>,
+    /// The browser the wait started on. See [`DaemonState::browser_generation`].
+    browser_generation: u64,
+}
+
+/// What resuming a deferred wait produced.
+pub enum Resumed {
+    /// The command's response.
+    Done(Value),
+    /// The wait has more to wait for, such as a `wait --download` whose
+    /// download another wait claimed first. Poll it again without the lock.
+    Again(Box<DeferredCommand>),
+}
+
+/// Finish a command whose wait the daemon polled without the state lock,
+/// through the same response pipeline as a command that never deferred.
+pub async fn resume_command(
+    cmd: &Value,
+    mut resume: ResumeCommand,
+    polled: Result<(), String>,
+    state: &mut DaemonState,
+) -> Resumed {
+    Box::pin(async move {
+        // Another command may have replaced the browser while the wait
+        // polled. The finish step must not act on the new browser with what
+        // the old one reported, such as a download's file path.
+        // A poll the daemon cancelled (`close`, shutdown) keeps that reason.
+        let browser_changed = state.browser_generation != resume.browser_generation;
+        let result = match polled {
+            Err(e) if super::pending_wait::is_cancelled(&e) => Err(e),
+            _ if browser_changed => Err(super::pending_wait::cancelled_error(
+                super::pending_wait::BROWSER_CHANGED,
+            )),
+            Ok(()) => match claim_or_repoll_download(&mut resume.finish, state).await {
+                Ok(Some(poll)) => {
+                    return Resumed::Again(Box::new(DeferredCommand { poll, resume }))
+                }
+                Ok(None) => finish_wait(cmd, resume.finish, state).await,
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
+        let resp = finish_command(resume.post, result, state).await;
+        Resumed::Done(finish_flow(cmd, resume.flow_seq, resp, state).await)
+    })
+    .await
+}
+
+#[cfg(test)]
+pub(crate) fn resumed_response(resumed: Resumed) -> Value {
+    match resumed {
+        Resumed::Done(response) => response,
+        Resumed::Again(_) => panic!("the wait asked to poll again"),
+    }
+}
+
+/// For a deferred `wait --download` whose poll saw a download finish, claim
+/// it from the ledger. When another wait claimed it first, return a poll for
+/// the next finished download so the wait keeps waiting without the lock.
+async fn claim_or_repoll_download(
+    finish: &mut WaitFinish,
+    state: &mut DaemonState,
+) -> Result<Option<WaitPoll>, String> {
+    let WaitFinish::Download {
+        claimed: claimed @ None,
+        deadline,
+    } = finish
+    else {
+        return Ok(None);
+    };
+    let rx = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .client
+        .subscribe();
+    state.drain_cdp_events_background().await?;
+    match state.downloads.claim_finished() {
+        Some(record) => {
+            *claimed = Some(record);
+            Ok(None)
+        }
+        None if tokio::time::Instant::now() >= *deadline => {
+            Err("Timeout waiting for download".to_string())
+        }
+        None => Ok(Some(Box::pin(next_finished_download_event(rx, *deadline)))),
+    }
+}
+
+/// The per-command bookkeeping the response pipeline needs after dispatch.
+struct PostCommand {
+    id: String,
+    action: String,
+    cmd_start: std::time::Instant,
+    skip_launch: bool,
+    settings_outcome: SettingsOutcome,
+    lifecycle_reused: bool,
+    lifecycle_launched: bool,
+    lifecycle_relaunched_browser: bool,
 }
 
 /// Adds a warning to the response when the connected browser is outdated with known CVEs. Checks each browser product once and never fails.
@@ -3158,7 +3328,7 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
     }
 }
 
-async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
+async fn execute_command_inner(cmd: &Value, state: &mut DaemonState, may_defer: bool) -> Value {
     state.error_data = None;
     state.pending_action_warning = None;
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
@@ -3575,16 +3745,74 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
-    let mut result = match action {
+    let wait = match action {
+        "wait" | "waitforurl" | "waitforloadstate" | "waitforfunction" | "waitfordownload" => {
+            Some(plan_wait(action, cmd, state).await)
+        }
+        _ => None,
+    };
+    let mut post = PostCommand {
+        id,
+        action: action.to_string(),
+        cmd_start,
+        skip_launch,
+        settings_outcome,
+        lifecycle_reused,
+        lifecycle_launched,
+        lifecycle_relaunched_browser,
+    };
+    let result = match wait {
+        Some(Ok(plan)) if may_defer => {
+            // The daemon polls with the state lock released, then resumes
+            // the command through finish_command.
+            *state.deferred_mut() = Some(DeferredCommand {
+                poll: plan.poll,
+                resume: ResumeCommand {
+                    finish: plan.finish,
+                    post,
+                    flow_seq: None,
+                    browser_generation: state.browser_generation,
+                },
+            });
+            return Value::Null;
+        }
+        Some(Ok(plan)) => run_wait_plan(cmd, plan, state).await,
+        Some(Err(e)) => Err(e),
+        None => {
+            dispatch_command(
+                action,
+                cmd,
+                state,
+                launch_patch.as_ref(),
+                run_flow.take(),
+                &restore_applied,
+                &mut post,
+            )
+            .await
+        }
+    };
+    finish_command(post, result, state).await
+}
+
+async fn dispatch_command(
+    action: &str,
+    cmd: &Value,
+    state: &mut DaemonState,
+    launch_patch: Option<&Patch>,
+    run_flow: Option<Box<super::flow::Flow>>,
+    restore_applied: &RestoreUnitApplied,
+    post: &mut PostCommand,
+) -> Result<Value, String> {
+    match action {
         "launch" => {
-            let applied = match launch_patch.as_ref() {
+            let applied = match launch_patch {
                 Some(patch) => apply_settings_patch(state, patch, true)
                     .await
-                    .map(|outcome| settings_outcome.absorb(outcome)),
+                    .map(|outcome| post.settings_outcome.absorb(outcome)),
                 None => Ok(()),
             };
-            lifecycle_relaunched_browser |=
-                restore_applied.relaunched_browser || settings_outcome.relaunched_browser;
+            post.lifecycle_relaunched_browser |=
+                restore_applied.relaunched_browser || post.settings_outcome.relaunched_browser;
             let result = match applied {
                 Ok(()) => handle_launch(cmd, state).await,
                 Err(e) => Err(e),
@@ -3596,8 +3824,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
                 Err(e) => Err(Box::pin(rollback_launch(
                     state,
-                    &restore_applied,
-                    &mut settings_outcome,
+                    restore_applied,
+                    &mut post.settings_outcome,
                     &e,
                 ))
                 .await),
@@ -3624,7 +3852,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "select" => handle_select(cmd, state).await,
         "check" => handle_check(cmd, state).await,
         "uncheck" => handle_uncheck(cmd, state).await,
-        "wait" => handle_wait(cmd, state).await,
         "gettext" => handle_gettext(cmd, state).await,
         "getattribute" => handle_getattribute(cmd, state).await,
         "isvisible" => handle_isvisible(cmd, state).await,
@@ -3721,9 +3948,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "webmcp_invoke" => handle_webmcp_invoke(cmd, state).await,
         "webmcp_result" => handle_webmcp_result(cmd, state).await,
         "webmcp_cancel" => handle_webmcp_cancel(cmd, state).await,
-        "waitforurl" => handle_waitforurl(cmd, state).await,
-        "waitforloadstate" => handle_waitforloadstate(cmd, state).await,
-        "waitforfunction" => handle_waitforfunction(cmd, state).await,
         "frame" => handle_frame(cmd, state).await,
         "mainframe" => handle_mainframe(state).await,
         "getbyrole" => handle_getbyrole(cmd, state).await,
@@ -3741,13 +3965,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "pause" => handle_pause(state).await,
         "multiselect" => handle_multiselect(cmd, state).await,
         "responsebody" => handle_responsebody(cmd, state).await,
-        "waitfordownload" => handle_waitfordownload(cmd, state).await,
         "window_new" => handle_window_new(cmd, state).await,
         "diff_screenshot" => handle_diff_screenshot(cmd, state).await,
         "video_start" => handle_video_start(cmd, state).await,
         "video_stop" => handle_video_stop(state).await,
         "flow_steps" | "flow_save" | "flow_run" | "flow_list" => {
-            handle_flow_command(action, cmd, state, run_flow.take()).await
+            handle_flow_command(action, cmd, state, run_flow).await
         }
         "har_start" => handle_har_start(cmd, state).await,
         "har_stop" => handle_har_stop(cmd, state).await,
@@ -3776,7 +3999,27 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "mousedown" => handle_mousedown(cmd, state).await,
         "mouseup" => handle_mouseup(cmd, state).await,
         _ => Err(format!("Not yet implemented: {}", action)),
-    };
+    }
+}
+
+/// The response pipeline every command runs after its handler: wedge
+/// handling, tab binding, lifecycle and warnings, stream broadcast.
+async fn finish_command(
+    post: PostCommand,
+    mut result: Result<Value, String>,
+    state: &mut DaemonState,
+) -> Value {
+    let PostCommand {
+        id,
+        action,
+        cmd_start,
+        skip_launch,
+        settings_outcome,
+        lifecycle_reused,
+        lifecycle_launched,
+        lifecycle_relaunched_browser,
+    } = post;
+    let action = action.as_str();
 
     if result.is_ok() && should_validate_restore_after_action(action) {
         validate_restore_if_pending(state).await;
@@ -8024,67 +8267,207 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     Ok(toggle_response(state, "unchecked", selector, &outcome))
 }
 
-async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+struct WaitPlan {
+    poll: WaitPoll,
+    finish: WaitFinish,
+}
+
+enum WaitFinish {
+    Data(Value),
+    /// `waitforurl` reports the URL it matched, read from the tab it polled so
+    /// another tab becoming active does not change the answer.
+    Url {
+        session_id: String,
+    },
+    /// `waitforfunction` reports the expression's value.
+    Function {
+        expression: String,
+        session_id: String,
+    },
+    /// `waitfordownload` claims the finished download from the ledger.
+    Download {
+        claimed: Option<DownloadRecord>,
+        deadline: tokio::time::Instant,
+    },
+}
+
+impl WaitPlan {
+    fn new(
+        poll: impl std::future::Future<Output = Result<(), String>> + Send + 'static,
+        finish: WaitFinish,
+    ) -> Self {
+        Self {
+            poll: Box::pin(poll),
+            finish,
+        }
+    }
+}
+
+async fn plan_wait(action: &str, cmd: &Value, state: &mut DaemonState) -> Result<WaitPlan, String> {
+    match action {
+        "waitforurl" => plan_waitforurl(cmd, state),
+        "waitforloadstate" => plan_waitforloadstate(cmd, state),
+        "waitforfunction" => plan_waitforfunction(cmd, state),
+        "waitfordownload" => plan_waitfordownload(cmd, state).await,
+        _ => plan_wait_command(cmd, state),
+    }
+}
+
+/// Poll and finish a wait while holding the state lock, for commands run
+/// from inside another command.
+async fn run_wait_plan(
+    cmd: &Value,
+    plan: WaitPlan,
+    state: &mut DaemonState,
+) -> Result<Value, String> {
+    plan.poll.await?;
+    finish_wait(cmd, plan.finish, state).await
+}
+
+async fn finish_wait(
+    cmd: &Value,
+    finish: WaitFinish,
+    state: &mut DaemonState,
+) -> Result<Value, String> {
+    match finish {
+        WaitFinish::Data(data) => Ok(data),
+        WaitFinish::Url { session_id } => {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            let result: super::cdp::types::EvaluateResult = mgr
+                .client
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &super::cdp::types::EvaluateParams {
+                        expression: "location.href".to_string(),
+                        return_by_value: Some(true),
+                        await_promise: Some(true),
+                    },
+                    Some(&session_id),
+                )
+                .await?;
+            let url = result
+                .result
+                .value
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Ok(json!({ "url": url }))
+        }
+        WaitFinish::Function {
+            expression,
+            session_id,
+        } => {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            let result: super::cdp::types::EvaluateResult = mgr
+                .client
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &super::cdp::types::EvaluateParams {
+                        expression: format!("({})", expression),
+                        return_by_value: Some(true),
+                        await_promise: Some(true),
+                    },
+                    Some(&session_id),
+                )
+                .await?;
+            Ok(json!({ "result": result.result.value.unwrap_or(Value::Null) }))
+        }
+        WaitFinish::Download { claimed, deadline } => {
+            finish_waitfordownload(cmd, claimed, deadline, state).await
+        }
+    }
+}
+
+fn plan_wait_command(cmd: &Value, state: &DaemonState) -> Result<WaitPlan, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let client = mgr.client.clone();
     let session_id = mgr.active_session_id()?.to_string();
     let timeout_ms = state.timeout_ms(cmd);
 
     if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
-        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
-        return Ok(json!({ "waited": "text", "text": text }));
+        let data = json!({ "waited": "text", "text": text });
+        let text = text.to_string();
+        let poll = async move { wait_for_text(&client, &session_id, &text, timeout_ms).await };
+        return Ok(WaitPlan::new(poll, WaitFinish::Data(data)));
     }
 
     if let Some(selector) = cmd.get("selector").and_then(|v| v.as_str()) {
+        let data = json!({ "waited": "selector", "selector": selector });
+        let selector = selector.to_string();
         let state_str = cmd
             .get("state")
             .and_then(|v| v.as_str())
-            .unwrap_or("visible");
+            .unwrap_or("visible")
+            .to_string();
         // Honor an active `frame <sel>` selection, like element resolution does.
-        match state.active_frame_id.as_deref() {
-            Some(frame_id) => match state.iframe_sessions.get(frame_id) {
-                Some(frame_session) => {
-                    wait_for_selector(&mgr.client, frame_session, selector, state_str, timeout_ms)
-                        .await?
+        let frame = state.active_frame_id.as_ref().map(|frame_id| {
+            (
+                frame_id.clone(),
+                state.iframe_sessions.get(frame_id).cloned(),
+            )
+        });
+        let poll = async move {
+            match frame {
+                Some((_, Some(frame_session))) => {
+                    wait_for_selector(&client, &frame_session, &selector, &state_str, timeout_ms)
+                        .await
                 }
-                None => {
+                Some((frame_id, None)) => {
                     wait_for_selector_in_frame(
-                        &mgr.client,
+                        &client,
                         &session_id,
-                        frame_id,
-                        selector,
-                        state_str,
+                        &frame_id,
+                        &selector,
+                        &state_str,
                         timeout_ms,
                     )
-                    .await?
+                    .await
                 }
-            },
-            None => {
-                wait_for_selector(&mgr.client, &session_id, selector, state_str, timeout_ms).await?
+                None => {
+                    wait_for_selector(&client, &session_id, &selector, &state_str, timeout_ms).await
+                }
             }
-        }
-        return Ok(json!({ "waited": "selector", "selector": selector }));
+        };
+        return Ok(WaitPlan::new(poll, WaitFinish::Data(data)));
     }
 
     if let Some(url_pattern) = cmd.get("url").and_then(|v| v.as_str()) {
-        wait_for_url(mgr, url_pattern, timeout_ms).await?;
-        return Ok(json!({ "waited": "url", "url": url_pattern }));
+        let data = json!({ "waited": "url", "url": url_pattern });
+        let url_pattern = url_pattern.to_string();
+        let poll =
+            async move { wait_for_url(&client, &session_id, &url_pattern, timeout_ms).await };
+        return Ok(WaitPlan::new(poll, WaitFinish::Data(data)));
     }
 
     if let Some(fn_str) = cmd.get("function").and_then(|v| v.as_str()) {
-        wait_for_function(&mgr.client, &session_id, fn_str, timeout_ms).await?;
-        return Ok(json!({ "waited": "function" }));
+        let fn_str = fn_str.to_string();
+        let poll =
+            async move { wait_for_function(&client, &session_id, &fn_str, timeout_ms).await };
+        return Ok(WaitPlan::new(
+            poll,
+            WaitFinish::Data(json!({ "waited": "function" })),
+        ));
     }
 
     if let Some(load_state) = cmd.get("loadState").and_then(|v| v.as_str()) {
+        let data = json!({ "waited": "load", "state": load_state });
         let wait_until = WaitUntil::from_str(load_state);
-        mgr.wait_for_lifecycle_external(wait_until, &session_id, timeout_ms)
-            .await?;
-        return Ok(json!({ "waited": "load", "state": load_state }));
+        let poll = async move {
+            BrowserManager::wait_for_load_state(&client, wait_until, &session_id, timeout_ms).await
+        };
+        return Ok(WaitPlan::new(poll, WaitFinish::Data(data)));
     }
 
     // Just a timeout wait
-    tokio::time::sleep(tokio::time::Duration::from_millis(timeout_ms)).await;
-    Ok(json!({ "waited": "timeout", "ms": timeout_ms }))
+    let poll = async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(timeout_ms)).await;
+        Ok(())
+    };
+    Ok(WaitPlan::new(
+        poll,
+        WaitFinish::Data(json!({ "waited": "timeout", "ms": timeout_ms })),
+    ))
 }
 
 async fn handle_gettext(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -8314,12 +8697,33 @@ async fn wait_for_selector(
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
-async fn wait_for_url(mgr: &BrowserManager, pattern: &str, timeout_ms: u64) -> Result<(), String> {
+async fn wait_for_url(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    pattern: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
     loop {
-        let url = mgr.get_url().await?;
-        if route_url_matches(pattern, &url) {
+        let result: super::cdp::types::EvaluateResult = client
+            .send_command_typed(
+                "Runtime.evaluate",
+                &super::cdp::types::EvaluateParams {
+                    expression: "location.href".to_string(),
+                    return_by_value: Some(true),
+                    await_promise: Some(true),
+                },
+                Some(session_id),
+            )
+            .await?;
+        let url = result
+            .result
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if route_url_matches(pattern, url) {
             return Ok(());
         }
 
@@ -11591,58 +11995,60 @@ async fn handle_screencast_stop(state: &mut DaemonState) -> Result<Value, String
 // Wait variant handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_waitforurl(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+fn plan_waitforurl(cmd: &Value, state: &DaemonState) -> Result<WaitPlan, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let url_pattern = cmd
         .get("url")
         .and_then(|v| v.as_str())
-        .ok_or("Missing 'url' parameter")?;
+        .ok_or("Missing 'url' parameter")?
+        .to_string();
     let timeout_ms = state.timeout_ms(cmd);
+    let client = mgr.client.clone();
+    let session_id = mgr.active_session_id()?.to_string();
 
-    wait_for_url(mgr, url_pattern, timeout_ms).await?;
-    let url = mgr.get_url().await.unwrap_or_default();
-    Ok(json!({ "url": url }))
+    let finish = WaitFinish::Url {
+        session_id: session_id.clone(),
+    };
+    let poll = async move { wait_for_url(&client, &session_id, &url_pattern, timeout_ms).await };
+    Ok(WaitPlan::new(poll, finish))
 }
 
 /// Wait for a page lifecycle state and return an error when its timeout expires.
-async fn handle_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+fn plan_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<WaitPlan, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let load_state = cmd.get("state").and_then(|v| v.as_str()).unwrap_or("load");
     let timeout_ms = state.timeout_ms(cmd);
+    let client = mgr.client.clone();
 
     let wait_until = WaitUntil::from_str(load_state);
-    mgr.wait_for_lifecycle_external(wait_until, &session_id, timeout_ms)
-        .await?;
-
-    Ok(json!({ "state": load_state }))
+    let poll = async move {
+        BrowserManager::wait_for_load_state(&client, wait_until, &session_id, timeout_ms).await
+    };
+    Ok(WaitPlan::new(
+        poll,
+        WaitFinish::Data(json!({ "state": load_state })),
+    ))
 }
 
-async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+fn plan_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<WaitPlan, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let expression = cmd
         .get("expression")
         .and_then(|v| v.as_str())
-        .ok_or("Missing 'expression' parameter")?;
+        .ok_or("Missing 'expression' parameter")?
+        .to_string();
     let timeout_ms = state.timeout_ms(cmd);
+    let client = mgr.client.clone();
 
-    wait_for_function(&mgr.client, &session_id, expression, timeout_ms).await?;
-
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: format!("({})", expression),
-                return_by_value: Some(true),
-                await_promise: Some(true),
-            },
-            Some(&session_id),
-        )
-        .await?;
-
-    Ok(json!({ "result": result.result.value.unwrap_or(Value::Null) }))
+    let finish = WaitFinish::Function {
+        expression: expression.clone(),
+        session_id: session_id.clone(),
+    };
+    let poll =
+        async move { wait_for_function(&client, &session_id, &expression, timeout_ms).await };
+    Ok(WaitPlan::new(poll, finish))
 }
 
 // ---------------------------------------------------------------------------
@@ -12937,9 +13343,9 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
     }
 }
 
-async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn plan_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<WaitPlan, String> {
     let timeout_ms = state.timeout_ms(cmd);
-    let mut rx = state
+    let rx = state
         .browser
         .as_ref()
         .ok_or("Browser not launched")?
@@ -12951,19 +13357,77 @@ async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<
     state.drain_cdp_events_background().await?;
 
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
-    let record = loop {
-        if let Some(record) = state.downloads.claim_finished() {
-            break record;
+    let claimed = state.downloads.claim_finished();
+    let finished = claimed.is_some();
+    let poll = async move {
+        if finished {
+            return Ok(());
         }
+        next_finished_download_event(rx, deadline).await
+    };
+    Ok(WaitPlan::new(
+        poll,
+        WaitFinish::Download { claimed, deadline },
+    ))
+}
+
+/// Resolves when a download finishes or the event stream lags, either of
+/// which is worth rechecking the ledger for.
+async fn next_finished_download_event(
+    mut rx: broadcast::Receiver<CdpEvent>,
+    deadline: tokio::time::Instant,
+) -> Result<(), String> {
+    loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
-                state.downloads.observe(&event.method, &event.params);
+                let finished = event.method.ends_with(".downloadProgress")
+                    && matches!(
+                        event.params.get("state").and_then(|v| v.as_str()),
+                        Some("completed" | "canceled")
+                    );
+                if finished {
+                    return Ok(());
+                }
             }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => return Ok(()),
             Ok(Err(_)) => return Err("Event stream closed".to_string()),
             Err(_) => return Err("Timeout waiting for download".to_string()),
         }
+    }
+}
+
+/// Claim a finished download from the ledger, which the state's own event
+/// drain feeds. Another `wait --download` may claim it first, so keep
+/// waiting for the next one until the deadline.
+async fn claim_finished_download(
+    state: &mut DaemonState,
+    deadline: tokio::time::Instant,
+) -> Result<DownloadRecord, String> {
+    loop {
+        let rx = state
+            .browser
+            .as_ref()
+            .ok_or("Browser not launched")?
+            .client
+            .subscribe();
+        state.drain_cdp_events_background().await?;
+        if let Some(record) = state.downloads.claim_finished() {
+            return Ok(record);
+        }
+        next_finished_download_event(rx, deadline).await?;
+    }
+}
+
+async fn finish_waitfordownload(
+    cmd: &Value,
+    claimed: Option<DownloadRecord>,
+    deadline: tokio::time::Instant,
+    state: &mut DaemonState,
+) -> Result<Value, String> {
+    let record = match claimed {
+        Some(record) => record,
+        None => claim_finished_download(state, deadline).await?,
     };
 
     if record.state == DownloadState::Canceled {
@@ -16961,17 +17425,123 @@ mod tests {
         let mut state = super::DaemonState::new();
         start_finished_download(&mut state, &dir.path().join("downloads")).await;
 
-        let result = super::handle_waitfordownload(
-            &serde_json::json!({ "action": "waitfordownload", "timeout": 2000 }),
-            &mut state,
-        )
-        .await;
+        let cmd = serde_json::json!({ "action": "waitfordownload", "timeout": 2000 });
+        let plan = super::plan_waitfordownload(&cmd, &mut state).await.unwrap();
+        let result = super::run_wait_plan(&cmd, plan, &mut state).await;
         assert!(result.is_ok(), "{result:?}");
         super::execute_command(
             &serde_json::json!({ "id": "9", "action": "close" }),
             &mut state,
         )
         .await;
+    }
+
+    /// A deferred wait polls without the state lock, so another command can
+    /// replace the browser meanwhile. Resuming must not move a download the
+    /// old browser reported, and the new browser starts with no downloads.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_is_cancelled_when_the_browser_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        let saved = start_finished_download(&mut state, &dir.path().join("downloads")).await;
+        let dest = dir.path().join("out").join("report.bin");
+
+        let wait = serde_json::json!({ "id": "4", "action": "waitfordownload",
+            "path": dest.to_string_lossy(), "timeout": 5000 });
+        state.defer_wait = true;
+        let resp = super::execute_command(&wait, &mut state).await;
+        assert_eq!(resp, Value::Null);
+        let deferred = state.take_deferred().expect("the wait deferred its poll");
+
+        // A launch with other options replaces the browser while the wait polls.
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "launch", "headless": true,
+                "downloadPath": dir.path().join("other").to_string_lossy() }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+
+        let polled = crate::native::pending_wait::Cancel::new()
+            .run(deferred.poll)
+            .await;
+        assert!(polled.is_ok(), "{polled:?}");
+        let resp = super::resumed_response(
+            super::resume_command(&wait, deferred.resume, polled, &mut state).await,
+        );
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(
+            resp["error"],
+            "Wait cancelled: the browser changed while it waited"
+        );
+        assert!(saved.exists(), "the old browser's download stays put");
+        assert!(!dest.exists(), "nothing is moved for a replaced browser");
+
+        // The replaced browser's downloads were dropped, claimed or not.
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "6", "action": "waitfordownload", "timeout": 500 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
+    /// `waitforurl` reports the URL of the tab it polled. Another tab becoming
+    /// active between the poll and the finish must not change the answer.
+    #[tokio::test]
+    async fn waitforurl_reports_the_url_of_the_tab_it_polled() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_by_server = seen.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let session = command["sessionId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let result = if command["method"] == "Runtime.evaluate" {
+                    seen_by_server.lock().unwrap().push(session);
+                    json!({ "result": { "type": "string", "value": "https://polled.example/" } })
+                } else {
+                    json!({})
+                };
+                let reply = json!({ "id": command["id"], "result": result });
+                if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let client = crate::native::cdp::client::CdpClient::connect(&ws_url)
+            .await
+            .unwrap();
+        let mut state = DaemonState::new();
+        state.browser = Some(super::BrowserManager::for_test(client, ws_url));
+
+        let result = super::finish_wait(
+            &json!({ "action": "waitforurl" }),
+            super::WaitFinish::Url {
+                session_id: "TAB-POLLED".to_string(),
+            },
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["url"], "https://polled.example/");
+        assert_eq!(seen.lock().unwrap().as_slice(), ["TAB-POLLED"]);
     }
 
     #[tokio::test]
