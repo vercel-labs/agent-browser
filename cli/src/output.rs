@@ -5382,8 +5382,14 @@ fn format_state_show_text(data: &serde_json::Value) -> Option<String> {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let enc_str = if encrypted { " (encrypted)" } else { "" };
-    if let Some(s) = summary.as_str() {
-        return Some(format!("State file summary{}:\n  {}\n", enc_str, s));
+    if let (Some(cookies), Some(origins)) = (
+        data.get("cookieCount").and_then(|v| v.as_i64()),
+        data.get("originCount").and_then(|v| v.as_i64()),
+    ) {
+        return Some(format!(
+            "State file summary{}:\n  Cookies: {}\n  Origins with localStorage: {}\n",
+            enc_str, cookies, origins
+        ));
     }
     if summary.is_object() {
         let cookies = summary.get("cookies").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -5392,6 +5398,9 @@ fn format_state_show_text(data: &serde_json::Value) -> Option<String> {
             "State file summary{}:\n  Cookies: {}\n  Origins with localStorage: {}\n",
             enc_str, cookies, origins
         ));
+    }
+    if let Some(s) = summary.as_str() {
+        return Some(format!("State file summary{}:\n  {}\n", enc_str, s));
     }
     None
 }
@@ -6597,7 +6606,9 @@ hydration: -  phases: 0  hydratedComponents: 0"
             "filename": "demo-default.json",
             "path": "/tmp/demo-default.json",
             "encrypted": false,
-            "summary": { "cookies": 3, "origins": 2 }
+            "summary": "3 cookies, 2 origins",
+            "cookieCount": 3,
+            "originCount": 2
         });
         assert_eq!(
             super::format_state_show_text(&payload).as_deref(),
@@ -6608,7 +6619,9 @@ hydration: -  phases: 0  hydratedComponents: 0"
             "filename": "sec.json",
             "path": "/tmp/sec.json",
             "encrypted": true,
-            "summary": { "cookies": 1, "origins": 0 }
+            "summary": "1 cookies, 0 origins",
+            "cookieCount": 1,
+            "originCount": 0
         });
         assert_eq!(
             super::format_state_show_text(&encrypted).as_deref(),

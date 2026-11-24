@@ -634,10 +634,9 @@ pub fn state_show(path: &str) -> Result<Value, String> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
         "encrypted": encrypted,
-        "summary": {
-            "cookies": state.cookies.len(),
-            "origins": state.origins.len(),
-        },
+        "summary": format!("{} cookies, {} origins", state.cookies.len(), state.origins.len()),
+        "cookieCount": state.cookies.len(),
+        "originCount": state.origins.len(),
         "state": state,
     }))
 }
@@ -1105,8 +1104,9 @@ mod tests {
         fs::write(&path, serde_json::to_string(&fixture).unwrap()).unwrap();
 
         let shown = state_show(path.to_str().unwrap()).expect("state_show");
-        assert_eq!(shown["summary"]["cookies"], 2);
-        assert_eq!(shown["summary"]["origins"], 1);
+        assert_eq!(shown["summary"], "2 cookies, 1 origins");
+        assert_eq!(shown["cookieCount"], 2);
+        assert_eq!(shown["originCount"], 1);
         assert_eq!(shown["filename"], "demo-default.json");
     }
 }
