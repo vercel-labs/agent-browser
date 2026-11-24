@@ -166,6 +166,18 @@ test('Windows launcher runs the binary from the platform package', async (t) => 
   assert.deepEqual(result.stdout.trim().split('\n'), ['win32-package-ran', ...args]);
 });
 
+test('materializing the binary brings the macOS PiP helper along', async (t) => {
+  const packageRoot = await createPackage(t);
+  const binary = await writePlatformPackage(packageRoot, '@agent-browser/cli-darwin-arm64', 'agent-browser', 'cli');
+  await writeFakeBinary(join(dirname(binary), 'agent-browser-pip-darwin'), 'pip');
+  const { materializeBinary } = await import(join(packageRoot, 'scripts', 'link-native.js'));
+
+  const destination = materializeBinary(packageRoot, binary, { binaryName: 'agent-browser-darwin-arm64' });
+
+  assert.equal(destination, join(packageRoot, 'bin', 'agent-browser-darwin-arm64'));
+  assert.match(await readFile(join(packageRoot, 'bin', 'agent-browser-pip-darwin'), 'utf8'), /pip/);
+});
+
 test('launcher reports a missing platform package', async (t) => {
   const result = await runLauncher(t, { platform: 'darwin', arch: 'arm64', args: ['--version'] });
 

@@ -94,7 +94,7 @@ Run `agent-browser --help` for the full list, or `agent-browser <command> --help
 | Debug and performance | `console`, `errors`, `highlight`, `inspect`, `trace`, `profiler`, `vitals`, `react`, `a11y` | [Debugging](https://agent-browser.dev/debugging), [Profiler](https://agent-browser.dev/profiler), [React](https://agent-browser.dev/react) |
 | Sessions and auth | `session`, `state`, `auth`, `profiles`, `confirm`, `deny` | [Sessions](https://agent-browser.dev/sessions), [Security](https://agent-browser.dev/security) |
 | Agents and integrations | `skills`, `mcp`, `webmcp`, `flow`, `chat`, `batch`, `plugin` | [Skills](https://agent-browser.dev/skills), [WebMCP](https://agent-browser.dev/webmcp), [Plugins](https://agent-browser.dev/plugins) |
-| Observe | `stream`, `dashboard` | [Streaming](https://agent-browser.dev/streaming), [Dashboard](https://agent-browser.dev/dashboard) |
+| Observe | `stream`, `dashboard`, `pip` | [Streaming](https://agent-browser.dev/streaming), [Dashboard](https://agent-browser.dev/dashboard) |
 | Setup | `install`, `upgrade`, `doctor`, `connect`, `close` | [Installation](https://agent-browser.dev/installation) |
 
 Flags, environment variables, and `agent-browser.json` are documented in [Configuration](https://agent-browser.dev/configuration).
@@ -109,7 +109,7 @@ Building from source requires Node.js 24 or later, pnpm 11 or later, and Rust:
 
 ```bash
 pnpm install
-pnpm build:source               # builds the dashboard and the native CLI
+pnpm build:source               # builds the dashboard, the native CLI, and the macOS PiP helper
 pnpm link --global
 agent-browser install
 ```
