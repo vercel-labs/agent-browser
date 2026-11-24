@@ -376,9 +376,10 @@ agent-browser snapshot -i
 agent-browser fill @e4 "4111111111111111"
 agent-browser click @e5
 
-# Or switch frame context for scoped snapshots
+# Or switch frame context for scoped snapshots and eval
 agent-browser frame @e3               # Switch using element ref
 agent-browser snapshot -i             # Snapshot scoped to that iframe
+agent-browser eval "document.title"   # Runs inside that iframe
 agent-browser frame main              # Return to main frame
 ```
 
@@ -386,6 +387,8 @@ The `frame` command accepts:
 - **Element refs** — `frame @e3` resolves the ref to an iframe element
 - **CSS selectors** — `frame "#payment-iframe"` finds the iframe by selector
 - **Frame name/URL** — matches against the browser's frame tree
+
+While a frame is selected, `eval` runs in that frame's context and reports the frame's own URL as `origin`. `console` and `errors` include messages and uncaught exceptions from cross-origin iframes on the active tab.
 
 ## Dialogs
 

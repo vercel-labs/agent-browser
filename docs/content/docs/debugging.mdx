@@ -29,7 +29,7 @@ agent-browser errors --clear
   </tbody>
 </table>
 
-Use `console --json` when object previews or raw CDP arguments matter for an automated diagnostic script. Use the default text output when an agent only needs to understand what the page logged.
+Use `console --json` when object previews or raw CDP arguments matter for an automated diagnostic script. Use the default text output when an agent only needs to understand what the page logged. Both `console` and `errors` include logs and uncaught exceptions from cross-origin iframes on the active tab while keeping background tabs isolated.
 
 ## JavaScript dialogs
 

@@ -623,8 +623,9 @@ pub async fn frame_host_info(
 
 /// Return the dedicated target sessions that belong to the active page's
 /// frame tree. The daemon keeps iframe sessions from background tabs so an
-/// audit can recover them after a tab switch, while network capture uses this
-/// active subset to avoid mixing traffic from different tabs.
+/// audit can recover them after a tab switch, while network tracking and
+/// console/exception capture use this active subset to avoid mixing events
+/// from different tabs.
 pub async fn active_iframe_session_ids(
     client: &CdpClient,
     top_session_id: &str,

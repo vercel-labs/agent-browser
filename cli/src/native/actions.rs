@@ -747,8 +747,8 @@ pub struct DaemonState {
     /// `Runtime.executionContextCreated`.
     pub frame_contexts: HashMap<(String, String), i64>,
     /// Dedicated iframe sessions reachable from the currently active page.
-    /// Network tracking uses this subset so background-tab iframe traffic is
-    /// not mixed into the active tab's request list or HAR capture.
+    /// Network tracking and console/exception capture use this subset so
+    /// background-tab iframe events are not mixed into the active tab.
     pub active_iframe_sessions: HashSet<String>,
     /// Origin-scoped extra HTTP headers set via `--headers` on navigate.
     /// Key is the origin (scheme + host + port), value is the headers map.

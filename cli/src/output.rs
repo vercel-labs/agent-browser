@@ -3618,6 +3618,7 @@ agent-browser frame - Switch frame context
 Usage: agent-browser frame <selector|main>
 
 Switch to an iframe or back to the main frame.
+While a frame is selected, `snapshot`, element commands, and `eval` run in that frame.
 
 Arguments:
   <selector>           CSS selector for iframe
