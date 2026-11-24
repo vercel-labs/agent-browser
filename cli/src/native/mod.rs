@@ -24,6 +24,7 @@ pub mod element;
 pub mod firefox;
 #[allow(dead_code)]
 pub mod flow;
+pub mod forms;
 #[allow(dead_code)]
 pub mod inspect_server;
 #[allow(dead_code)]

@@ -110,7 +110,7 @@ pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, St
             Load::History { delta } => traverse_history(ff, &context, delta).await,
         }
     };
-    let landed = tokio::time::timeout(budget, ff.race_prompt(operation))
+    let landed = tokio::time::timeout(budget, ff.race_prompt(&context, operation))
         .await
         .map_err(|_| load_state_timeout_error(waited, budget))??;
     let (url, prompt) = match landed {
@@ -407,7 +407,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .refs
-            .insert(("ctx-active".into(), "node".into()), 7);
+            .insert(("ctx-active".into(), "node".into(), "doc".into()), 7);
         state.active_frame_id = Some("frame".into());
 
         let landing = load(
@@ -440,10 +440,11 @@ mod tests {
     /// gives up, and the failure must name the load timeout rather than the client's own.
     #[tokio::test(start_paused = true)]
     async fn a_load_past_the_client_default_reports_the_load_timeout() {
-        let (ff, _events, _calls) = crate::native::firefox::session::tests::fake_session_ignoring(
-            "browsingContext.navigate",
-        )
-        .await;
+        let (ff, _events, _calls) =
+            crate::native::firefox::session::tests::fake_session_with_replies(|v| {
+                (v["method"] != "browsingContext.navigate").then(|| json!({}))
+            })
+            .await;
         let mut state = DaemonState::new();
         state.firefox = Some(ff);
         state.default_timeout_ms = 60_000;

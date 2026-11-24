@@ -16,6 +16,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const BUFFERED_EVENT_CAPACITY: usize = 65_536;
 const BUFFERED_EVENT_BYTES: [usize; 2] = [64 << 20, 8 << 20];
 
+/// The sandbox every script that must not see page patches runs in.
 pub(crate) const SANDBOX: &str = "agent-browser";
 
 #[derive(Debug)]
@@ -324,6 +325,18 @@ impl BidiClient {
         }
     }
 
+    /// Runs `script.callFunction` in a browsing context and returns the decoded result.
+    pub async fn call_function(
+        &self,
+        context: &str,
+        js: &str,
+        this: Option<Value>,
+        args: Vec<Value>,
+    ) -> Result<Value, String> {
+        self.call_function_target(json!({"context": context}), js, this, args)
+            .await
+    }
+
     /// Runs a function in a named sandbox, isolated from the page's JavaScript globals.
     pub(crate) async fn call_function_in_sandbox(
         &self,
@@ -341,6 +354,36 @@ impl BidiClient {
         .await
     }
 
+    /// Runs a function in a named sandbox with `this` set to a remote object reference.
+    pub(crate) async fn call_function_on_in_sandbox(
+        &self,
+        context: &str,
+        sandbox: &str,
+        js: &str,
+        this: Value,
+    ) -> Result<Value, String> {
+        self.call_function_target(
+            json!({"context": context, "sandbox": sandbox}),
+            js,
+            Some(this),
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Runs a function in `context` with `this` set to a remote object
+    /// reference, telling a script that threw apart from a failed command.
+    pub(crate) async fn run_function(
+        &self,
+        context: &str,
+        js: &str,
+        this: Value,
+        args: Vec<Value>,
+    ) -> Result<Script, BidiError> {
+        self.script_call(json!({"context": context}), js, Some(this), args)
+            .await
+    }
+
     async fn call_function_target(
         &self,
         target: Value,
@@ -348,30 +391,68 @@ impl BidiClient {
         this: Option<Value>,
         args: Vec<Value>,
     ) -> Result<Value, String> {
+        match self
+            .script_call(target, js, this, args)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Script::Returned(value) => Ok(value),
+            Script::Threw(text) => Err(text),
+        }
+    }
+
+    async fn script_call(
+        &self,
+        target: Value,
+        js: &str,
+        this: Option<Value>,
+        args: Vec<Value>,
+    ) -> Result<Script, BidiError> {
         let mut params = json!({
             "functionDeclaration": js,
             "target": target,
-            "arguments": args
-                .into_iter()
-                .map(|a| match a {
-                    Value::String(s) => json!({"type": "string", "value": s}),
-                    other => other,
-                })
-                .collect::<Vec<_>>(),
+            "arguments": args.iter().map(to_local).collect::<Vec<_>>(),
             "awaitPromise": true,
-            "resultOwnership": "root",
+            "resultOwnership": "none",
         });
         if let Some(t) = this {
             params["this"] = t;
         }
-        let r = self.send("script.callFunction", params).await?;
+        let r = self.send_raw("script.callFunction", params).await?;
         if r["type"] == "exception" {
-            return Err(r["exceptionDetails"]["text"]
-                .as_str()
-                .unwrap_or("script exception")
-                .to_string());
+            return Ok(Script::Threw(
+                r["exceptionDetails"]["text"]
+                    .as_str()
+                    .unwrap_or("script exception")
+                    .to_string(),
+            ));
         }
-        Ok(remote_to_json(&r["result"]))
+        Ok(Script::Returned(remote_to_json(&r["result"])))
+    }
+}
+
+/// What a function the browser ran ended with.
+pub(crate) enum Script {
+    Returned(Value),
+    /// The script threw; the text is the page's.
+    Threw(String),
+}
+
+/// Wraps plain JSON as a BiDi LocalValue; values that already carry `type` or `sharedId` pass through.
+pub fn to_local(v: &Value) -> Value {
+    match v {
+        Value::Object(o) if o.contains_key("type") || o.contains_key("sharedId") => v.clone(),
+        Value::String(_) => json!({"type": "string", "value": v}),
+        Value::Number(_) => json!({"type": "number", "value": v}),
+        Value::Bool(_) => json!({"type": "boolean", "value": v}),
+        Value::Null => json!({"type": "null"}),
+        Value::Array(a) => {
+            json!({"type": "array", "value": a.iter().map(to_local).collect::<Vec<_>>()})
+        }
+        Value::Object(o) => json!({
+            "type": "object",
+            "value": o.iter().map(|(k, x)| json!([k, to_local(x)])).collect::<Vec<_>>(),
+        }),
     }
 }
 
@@ -523,6 +604,17 @@ mod tests {
         drop(command);
         assert!(client.pending.lock().unwrap().is_empty());
         server.abort();
+    }
+
+    #[test]
+    fn plain_json_becomes_local_values() {
+        assert_eq!(to_local(&json!(3)), json!({"type": "number", "value": 3}));
+        assert_eq!(
+            to_local(&json!(["a"])),
+            json!({"type": "array", "value": [{"type": "string", "value": "a"}]})
+        );
+        let node = json!({"sharedId": "n"});
+        assert_eq!(to_local(&node), node);
     }
 
     #[test]

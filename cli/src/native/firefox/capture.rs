@@ -3,9 +3,17 @@
 use base64::Engine;
 use serde_json::{json, Value};
 
+use super::bidi::remote_to_json;
 use super::daemon::session;
+use super::frame_transform;
+use super::query;
+use super::target::{resolve_target, Target};
 use crate::native::actions::DaemonState;
-use crate::native::screenshot::{save_screenshot, ScreenshotOptions};
+use crate::native::screenshot::{
+    annotation_overlay_js, annotation_removal_js, filter_annotations, parse_rect,
+    project_annotations, save_screenshot, RawAnnotation, Rect, ScreenshotOptions,
+};
+use crate::native::snapshot::SnapshotOptions;
 
 const NOT_YET: &str = "not yet supported on Firefox";
 
@@ -19,7 +27,10 @@ fn screenshot_format(cmd: &Value) -> String {
 
 fn screenshot_options(cmd: &Value) -> ScreenshotOptions {
     ScreenshotOptions {
-        selector: None,
+        selector: cmd
+            .get("selector")
+            .and_then(Value::as_str)
+            .map(String::from),
         path: cmd.get("path").and_then(Value::as_str).map(String::from),
         full_page: cmd
             .get("fullPage")
@@ -27,7 +38,10 @@ fn screenshot_options(cmd: &Value) -> ScreenshotOptions {
             .unwrap_or(false),
         format: screenshot_format(cmd),
         quality: cmd.get("quality").and_then(Value::as_i64).map(|q| q as i32),
-        annotate: false,
+        annotate: cmd
+            .get("annotate")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         output_dir: cmd
             .get("screenshotDir")
             .and_then(Value::as_str)
@@ -36,18 +50,6 @@ fn screenshot_options(cmd: &Value) -> ScreenshotOptions {
 }
 
 fn reject_unsupported_screenshot_options(cmd: &Value) -> Result<(), String> {
-    if let Some(selector) = cmd.get("selector").and_then(Value::as_str) {
-        return Err(format!(
-            "Element screenshots are {NOT_YET} (selector `{selector}`)"
-        ));
-    }
-    if cmd
-        .get("annotate")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err(format!("Annotated screenshots are {NOT_YET}"));
-    }
     if cmd
         .get("ifChanged")
         .and_then(Value::as_bool)
@@ -83,6 +85,11 @@ fn screenshot_params(cmd: &Value, context: &str) -> Result<Value, String> {
         params["format"]["quality"] = json!(quality as f64 / 100.0);
     }
     Ok(params)
+}
+
+/// The BiDi `element` clip for `shared_id`.
+fn element_clip(shared_id: &str) -> Value {
+    json!({"type": "element", "element": {"sharedId": shared_id}})
 }
 
 /// The BiDi parameters for a PDF of `context`, following Chrome's `handle_pdf` options.
@@ -124,27 +131,209 @@ fn pdf_save_path(cmd: &Value) -> String {
     }
 }
 
-/// Viewport or full-page screenshot (`browsingContext.captureScreenshot`, `origin: document` for
-/// full page). Must return what Chrome's `handle_screenshot` returns for the same flags.
-pub async fn screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let options = screenshot_options(cmd);
-    let ff = session(state)?;
-    let params = screenshot_params(cmd, ff.contexts.active())?;
-    let result = ff
+async fn evaluate(
+    ff: &super::session::FirefoxSession,
+    context: &str,
+    expression: &str,
+) -> Result<Value, String> {
+    let r = ff
         .bidi
-        .send("browsingContext.captureScreenshot", params)
+        .send(
+            "script.evaluate",
+            json!({
+                "expression": expression,
+                "target": {"context": context},
+                "awaitPromise": true,
+                "resultOwnership": "none",
+            }),
+        )
         .await?;
-    let data = result
-        .get("data")
-        .and_then(Value::as_str)
-        .ok_or("No screenshot data returned")?;
-    Ok(json!({ "path": save_screenshot(data, &options)? }))
+    if r["type"] == "exception" {
+        return Err(format!(
+            "Evaluation error: {}",
+            r["exceptionDetails"]["text"]
+                .as_str()
+                .unwrap_or("script exception")
+        ));
+    }
+    Ok(r["result"].clone())
+}
+
+async fn target_rect(state: &DaemonState, target: &Target) -> Option<Rect> {
+    let ff = state.firefox.as_ref()?;
+    let value = query::element_rect(&ff.bidi, target).await.ok().flatten()?;
+    parse_rect(&value)
+}
+
+/// Boxes for every resolved ref, read through each node's handle and expressed in `capture` viewport
+/// coordinates. A frame whose geometry the browser cannot confirm fails the screenshot, rather than
+/// moving a box to a place it is not.
+async fn collect_annotations(
+    state: &DaemonState,
+    capture: &str,
+) -> Result<(Vec<RawAnnotation>, Vec<RawAnnotation>), String> {
+    let Some(ff) = state.firefox.as_ref() else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let tree = frame_transform::tree(ff).await?;
+    let mut annotations = Vec::new();
+    let mut overlay_annotations = Vec::new();
+    for (ref_id, entry) in state.ref_map.entries_sorted() {
+        let Some(id) = entry.backend_node_id else {
+            continue;
+        };
+        let Some(((context, shared_id, _), _)) = ff.refs.iter().find(|(_, value)| **value == id)
+        else {
+            continue;
+        };
+        let target = Target {
+            context: context.clone(),
+            shared_id: shared_id.clone(),
+        };
+        let Some(rect) = target_rect(state, &target).await else {
+            continue;
+        };
+        let rect = if context != capture {
+            let Some(hops) = frame_transform::chain(&tree, context, capture) else {
+                continue;
+            };
+            let (x, y, width, height) =
+                frame_transform::lift_rect(ff, &hops, (rect.x, rect.y, rect.width, rect.height))
+                    .await?;
+            Rect {
+                x,
+                y,
+                width,
+                height,
+            }
+        } else {
+            rect
+        };
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            continue;
+        }
+        let number = ref_id
+            .strip_prefix('e')
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0);
+        let annotation = RawAnnotation {
+            ref_id,
+            number,
+            role: entry.role,
+            name: (!entry.name.is_empty()).then_some(entry.name),
+            rect,
+        };
+        if context == capture {
+            overlay_annotations.push(annotation.clone());
+        }
+        annotations.push(annotation);
+    }
+    Ok((annotations, overlay_annotations))
+}
+
+/// Viewport, full-page or element screenshot, with annotations drawn before capture.
+/// Must return what Chrome's `handle_screenshot` returns for the same flags.
+pub async fn screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    screenshot_params(cmd, "validate")?;
+    let options = screenshot_options(cmd);
+    let annotate = options.annotate;
+    let full_page = options.full_page;
+
+    if annotate {
+        state.ref_map.begin_snapshot();
+        let ff = state.firefox.as_mut().ok_or("Browser not launched")?;
+        let snapshot_options = SnapshotOptions {
+            interactive: true,
+            ..SnapshotOptions::default()
+        };
+        Box::pin(super::snapshot::take_snapshot(
+            ff,
+            &snapshot_options,
+            &mut state.ref_map,
+        ))
+        .await?;
+    }
+
+    let target = match options.selector.as_deref() {
+        Some(selector) => Some(resolve_target(state, selector).await?),
+        None => None,
+    };
+    let clip_rect = match (&target, annotate) {
+        (Some(target), true) => target_rect(state, target).await,
+        _ => None,
+    };
+    let capture_context = match (&target, full_page) {
+        (Some(target), false) => target.context.clone(),
+        _ => session(state)?.contexts.active_tab().to_string(),
+    };
+    let (annotations, overlay_annotations) = if annotate {
+        let (annotations, overlay_annotations) =
+            collect_annotations(state, &capture_context).await?;
+        (
+            filter_annotations(annotations, clip_rect.as_ref()),
+            filter_annotations(overlay_annotations, clip_rect.as_ref()),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let data = {
+        let ff = session(state)?;
+        let context = capture_context.clone();
+        let overlay = if annotate && !overlay_annotations.is_empty() {
+            evaluate(ff, &context, &annotation_overlay_js(&overlay_annotations)).await?;
+            true
+        } else {
+            false
+        };
+        let mut params = screenshot_params(cmd, &context)?;
+        if !full_page {
+            if let Some(target) = &target {
+                params["origin"] = json!("document");
+                params["clip"] = element_clip(&target.shared_id);
+            }
+        }
+        let result = ff
+            .bidi
+            .send("browsingContext.captureScreenshot", params)
+            .await;
+        if overlay {
+            let _ = evaluate(ff, &context, &annotation_removal_js()).await;
+        }
+        let result = result?;
+        let data = result
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or("No screenshot data returned")?
+            .to_string();
+        data
+    };
+
+    let mut response = json!({ "path": save_screenshot(&data, &options)? });
+    if !annotations.is_empty() {
+        let scroll = if full_page {
+            let ff = session(state)?;
+            let expression = "({x: window.scrollX || 0, y: window.scrollY || 0})";
+            let value = evaluate(ff, &capture_context, expression).await?;
+            let value = remote_to_json(&value);
+            Some((
+                value.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+                value.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+            ))
+        } else {
+            None
+        };
+        let projected = project_annotations(&annotations, clip_rect.as_ref(), scroll);
+        response["annotations"] = serde_json::to_value(&projected)
+            .map_err(|e| format!("Failed to serialize annotations: {}", e))?;
+    }
+    Ok(response)
 }
 
 /// PDF of the active tab (`browsingContext.print`). Must return what Chrome's `handle_pdf` returns.
 pub async fn pdf(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    let params = pdf_params(cmd, ff.contexts.active());
+    let params = pdf_params(cmd, ff.contexts.active_tab());
     let result = ff.bidi.send("browsingContext.print", params).await?;
     let data = result
         .get("data")
@@ -164,20 +353,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn viewport_png_maps_to_bidi_screenshot() {
-        let params = screenshot_params(&json!({}), "ctx-1").unwrap();
-        assert_eq!(
-            params,
-            json!({
-                "context": "ctx-1",
-                "origin": "viewport",
-                "format": {"type": "image/png"},
-            })
-        );
-    }
-
-    #[test]
-    fn full_page_jpeg_carries_quality_as_a_fraction() {
+    fn screenshot_params_map_options_to_bidi() {
         let params = screenshot_params(
             &json!({"fullPage": true, "format": "jpeg", "quality": 55}),
             "c",
@@ -190,10 +366,7 @@ mod tests {
         );
         let default = screenshot_params(&json!({"format": "jpeg"}), "c").unwrap();
         assert_eq!(default["format"]["quality"], 0.8);
-    }
 
-    #[test]
-    fn type_aliases_format_and_png_ignores_quality() {
         let params = screenshot_params(&json!({"type": "jpeg", "quality": 30}), "c").unwrap();
         assert_eq!(
             params["format"],
@@ -203,25 +376,23 @@ mod tests {
         assert_eq!(png["format"], json!({"type": "image/png"}));
         let e = screenshot_params(&json!({"format": "webp"}), "c").unwrap_err();
         assert!(e.contains("Unsupported screenshot format"), "{e}");
-    }
 
-    #[test]
-    fn element_annotated_and_conditional_screenshots_are_rejected() {
-        let element = screenshot_params(&json!({"selector": "#main"}), "c").unwrap_err();
-        assert!(
-            element.contains("Element screenshots are not yet supported on Firefox"),
-            "{element}"
-        );
-        let annotated = screenshot_params(&json!({"annotate": true}), "c").unwrap_err();
-        assert!(
-            annotated.contains("Annotated screenshots are not yet supported on Firefox"),
-            "{annotated}"
-        );
         let conditional = screenshot_params(&json!({"ifChanged": true}), "c").unwrap_err();
         assert!(
             conditional.contains("not yet supported on Firefox"),
             "{conditional}"
         );
+    }
+
+    #[test]
+    fn element_and_annotated_screenshots_build_params() {
+        let element = screenshot_params(&json!({"selector": "#main"}), "c").unwrap();
+        assert_eq!(element["origin"], "viewport");
+        let annotated = screenshot_params(&json!({"annotate": true}), "c").unwrap();
+        assert_eq!(annotated["origin"], "viewport");
+        let options = screenshot_options(&json!({"selector": "#main", "annotate": true}));
+        assert_eq!(options.selector.as_deref(), Some("#main"));
+        assert!(options.annotate);
     }
 
     #[test]
