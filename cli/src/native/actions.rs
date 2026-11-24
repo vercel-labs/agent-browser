@@ -3511,6 +3511,17 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return resp;
     }
 
+    let engine = launch_plan
+        .as_ref()
+        .map_or(state.settings.engine(), |plan| plan.next.engine());
+    if needs_launch && engine.as_deref() == Some("firefox") {
+        if let Some(error) = firefox::actions::unsupported_error(action) {
+            let mut resp = error_response(&id, &error);
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            return resp;
+        }
+    }
+
     if no_navigate_key_switch {
         let mut resp = error_response(
             &id,
@@ -3554,9 +3565,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
             }
             lifecycle_relaunched_browser |= settings_outcome.relaunched_browser;
-            lifecycle_relaunched_browser |=
-                state.browser.is_some() || state.active_provider_session.is_some();
-            if state.browser.is_some() || state.active_provider_session.is_some() {
+            lifecycle_relaunched_browser |= has_active_browser_session(state);
+            if has_active_browser_session(state) {
                 let _ = auto_save_restore_state(state).await;
             }
             let strict_state = launch_patch
@@ -5789,6 +5799,24 @@ pub(crate) async fn auto_save_restore_state(
         state.restore_save_status = "skipped_identity_unresolved".to_string();
         state.restore_saved_path = None;
         return Ok(None);
+    }
+
+    let session_id = state.session_id.clone();
+    state.drain_firefox_events();
+    if let Some(ff) = state.firefox.as_ref() {
+        return match firefox::storage::save_auto_state(ff, &session_name, &session_id).await {
+            Ok(path) => {
+                state.restore_save_status = "saved".to_string();
+                state.restore_saved_path = Some(path.clone());
+                state.last_autosave_attempt = Some(std::time::Instant::now());
+                Ok(Some(path))
+            }
+            Err(err) => {
+                state.restore_save_status = "error".to_string();
+                state.restore_saved_path = None;
+                Err(err)
+            }
+        };
     }
 
     let Some(ref mgr) = state.browser else {
