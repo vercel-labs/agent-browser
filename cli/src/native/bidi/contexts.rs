@@ -428,12 +428,21 @@ impl Contexts {
             .map_or(DEFAULT_USER_CONTEXT, |tab| tab.user_context.as_str())
     }
 
-    /// Whether a `getTree` entry uses the same cookie jar as the active tab.
-    pub fn in_active_jar(&self, info: &Value) -> bool {
-        let jar = self
-            .tab(&self.active)
-            .map_or(DEFAULT_USER_CONTEXT, |tab| tab.user_context.as_str());
-        info["userContext"].as_str().unwrap_or(DEFAULT_USER_CONTEXT) == jar
+    /// The tab whose cookie jar and origin storage commands must use, or `None` while a pinned
+    /// tab is gone or no live tab is active.
+    pub fn storage_tab(&self) -> Option<&str> {
+        match &self.pin {
+            PinState::Gone { .. } => None,
+            PinState::Off | PinState::Unbound | PinState::Bound(_) => self.tab_of(&self.active),
+        }
+    }
+
+    /// Whether a `getTree` entry uses the same cookie jar as `tab`.
+    pub fn in_jar_of(&self, tab: &str, info: &Value) -> bool {
+        let Some(tab) = self.tab(tab) else {
+            return false;
+        };
+        info["userContext"].as_str().unwrap_or(DEFAULT_USER_CONTEXT) == tab.user_context.as_str()
     }
 
     /// The BiDi storage partition of the tab `context` belongs to. The default user context is

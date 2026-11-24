@@ -353,6 +353,19 @@ impl StreamServer {
             .map(|live| live.context.clone())
     }
 
+    /// True when the dashboard already points at `context` on `bidi`.
+    pub async fn firefox_live_serves(
+        &self,
+        bidi: &Arc<crate::native::bidi::client::BidiClient>,
+        context: &str,
+    ) -> bool {
+        self.firefox_live
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|live| Arc::ptr_eq(&live.bidi, bidi) && live.context == context)
+    }
+
     /// True while at least one dashboard client is connected.
     pub async fn has_clients(&self) -> bool {
         *self.client_count.lock().await > 0

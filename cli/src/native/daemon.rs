@@ -619,6 +619,7 @@ fn spawn_background_tick_if_idle(
                 );
             } else {
                 maybe_autosave_restore_state(&mut state, autosave_interval_ms).await;
+                state.sync_firefox_live().await;
             }
         }
     });
