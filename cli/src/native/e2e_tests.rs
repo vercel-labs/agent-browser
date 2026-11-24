@@ -21826,6 +21826,33 @@ async fn start_iframe_eval_console_servers() -> (u16, u16, Vec<tokio::task::Join
     (p1, p2, vec![h1, h2])
 }
 
+async fn wait_for_oopif_frame(state: &mut DaemonState, url_substr: &str) -> (String, String) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let _ = state.drain_cdp_events_background().await;
+        if let Some(browser) = state.browser.as_ref() {
+            if let Ok(active_sid) = browser.active_session_id().map(ToString::to_string) {
+                for (fid, sid) in &state.iframe_sessions {
+                    if let Ok(Some(host)) = super::a11y::frame_host_info(
+                        &browser.client,
+                        &active_sid,
+                        &state.iframe_sessions,
+                        fid,
+                    )
+                    .await
+                    {
+                        if host.url.contains(url_substr) {
+                            return (fid.clone(), sid.clone());
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for OOPIF matching '{url_substr}'");
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_eval_in_same_origin_csp_cross_origin_and_oopif_frames() {
@@ -21846,7 +21873,7 @@ async fn e2e_eval_in_same_origin_csp_cross_origin_and_oopif_frames() {
     )
     .await;
     assert_success(&resp);
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let (oopif_fid, _) = wait_for_oopif_frame(&mut state, "/oopif.html").await;
 
     // Main frame eval reports top-level origin.
     let resp = execute_command(
@@ -21880,6 +21907,19 @@ async fn e2e_eval_in_same_origin_csp_cross_origin_and_oopif_frames() {
         json!(format!("http://127.0.0.1:{p1}/same.html"))
     );
 
+    // In-frame pushState updates post-eval `origin`.
+    let resp = execute_command(
+        &json!({ "id": "5b", "action": "evaluate", "script": "history.pushState({}, '', '/after-push.html'); location.pathname" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!("/after-push.html"));
+    assert_eq!(
+        get_data(&resp)["origin"],
+        json!(format!("http://127.0.0.1:{p1}/after-push.html"))
+    );
+
     // Cross-origin iframe on another port (same-site cross-origin, same-process):
     // `contentWindow.eval` fails here, while `contextId` evaluation succeeds.
     let resp = execute_command(&json!({ "id": "6", "action": "mainframe" }), &mut state).await;
@@ -21906,30 +21946,6 @@ async fn e2e_eval_in_same_origin_csp_cross_origin_and_oopif_frames() {
     );
 
     // Cross-origin OOPIF on localhost (dedicated CDP session).
-    let active_sid = state
-        .browser
-        .as_ref()
-        .unwrap()
-        .active_session_id()
-        .unwrap()
-        .to_string();
-    let mut oopif_frame = None;
-    for fid in state.iframe_sessions.keys() {
-        if let Ok(Some(host)) = super::a11y::frame_host_info(
-            &state.browser.as_ref().unwrap().client,
-            &active_sid,
-            &state.iframe_sessions,
-            fid,
-        )
-        .await
-        {
-            if host.url.contains("/oopif.html") {
-                oopif_frame = Some(fid.clone());
-            }
-        }
-    }
-    let oopif_fid = oopif_frame.expect("oopif iframe should be attached");
-
     state.active_frame_id = Some(oopif_fid);
     let resp = execute_command(
         &json!({ "id": "9", "action": "evaluate", "script": "({ text: document.querySelector('#p')?.textContent, tag: window.__frameTag })" }),
@@ -21984,7 +22000,7 @@ async fn e2e_eval_popup_clears_active_frame_and_rejects_foreign_frame() {
     )
     .await;
     assert_success(&resp);
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let (oopif_fid, _) = wait_for_oopif_frame(&mut state, "/oopif.html").await;
 
     let tab1_sid = state
         .browser
@@ -21993,22 +22009,6 @@ async fn e2e_eval_popup_clears_active_frame_and_rejects_foreign_frame() {
         .active_session_id()
         .unwrap()
         .to_string();
-    let mut oopif_fid = None;
-    for fid in state.iframe_sessions.keys() {
-        if let Ok(Some(host)) = super::a11y::frame_host_info(
-            &state.browser.as_ref().unwrap().client,
-            &tab1_sid,
-            &state.iframe_sessions,
-            fid,
-        )
-        .await
-        {
-            if host.url.contains("/oopif.html") {
-                oopif_fid = Some(fid.clone());
-            }
-        }
-    }
-    let oopif_fid = oopif_fid.expect("oopif iframe should be attached");
 
     state.active_frame_id = Some(oopif_fid.clone());
     let mgr = state.browser.as_ref().unwrap();
@@ -22018,7 +22018,19 @@ async fn e2e_eval_popup_clears_active_frame_and_rejects_foreign_frame() {
             &tab1_sid,
         )
         .await;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let _ = state.drain_cdp_events_background().await;
+        if state
+            .browser
+            .as_ref()
+            .and_then(|b| b.active_session_id().ok())
+            != Some(tab1_sid.as_str())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     let resp = execute_command(
         &json!({ "id": "3", "action": "evaluate", "script": "window.__frameTag" }),
@@ -22081,7 +22093,8 @@ async fn e2e_console_captures_cross_origin_oopif_logs_and_errors() {
     )
     .await;
     assert_success(&resp);
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let (_, oopif_sid) = wait_for_oopif_frame(&mut state, "/oopif.html").await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     let resp = execute_command(&json!({ "id": "3", "action": "console" }), &mut state).await;
     assert_success(&resp);
@@ -22101,6 +22114,55 @@ async fn e2e_console_captures_cross_origin_oopif_logs_and_errors() {
             .iter()
             .any(|e| e["text"].as_str().unwrap_or("").contains("OOPIF-BOOM")),
         "expected cross-origin OOPIF uncaught error, got: {errors:?}"
+    );
+
+    // Open a second active tab, clear logs/errors, then emit from tab 1's background OOPIF:
+    // neither log nor error may leak into tab 2.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "tab_new", "url": "about:blank" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let _ = execute_command(
+        &json!({ "id": "6", "action": "console", "clear": true }),
+        &mut state,
+    )
+    .await;
+    let _ = execute_command(
+        &json!({ "id": "7", "action": "errors", "clear": true }),
+        &mut state,
+    )
+    .await;
+    let _ = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .evaluate_remote_object_in(
+            "console.log('[BG-OOPIF-LOG]'); setTimeout(() => { throw new Error('BG-OOPIF-BOOM'); }, 5);",
+            &oopif_sid,
+        )
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let resp = execute_command(&json!({ "id": "8", "action": "console" }), &mut state).await;
+    assert_success(&resp);
+    let bg_messages = get_data(&resp)["messages"].as_array().unwrap();
+    assert!(
+        !bg_messages
+            .iter()
+            .any(|m| m["text"].as_str().unwrap_or("").contains("[BG-OOPIF-LOG]")),
+        "background OOPIF log leaked into active tab: {bg_messages:?}"
+    );
+
+    let resp = execute_command(&json!({ "id": "9", "action": "errors" }), &mut state).await;
+    assert_success(&resp);
+    let bg_errors = get_data(&resp)["errors"].as_array().unwrap();
+    assert!(
+        !bg_errors
+            .iter()
+            .any(|e| e["text"].as_str().unwrap_or("").contains("BG-OOPIF-BOOM")),
+        "background OOPIF error leaked into active tab: {bg_errors:?}"
     );
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;

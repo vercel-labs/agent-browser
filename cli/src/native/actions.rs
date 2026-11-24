@@ -274,6 +274,10 @@ struct DrainedEvents {
     /// while HAR recording; bodies are fetched for these in
     /// `apply_drained_events` before Chrome evicts them (e.g. on navigation).
     har_finished_requests: Vec<(String, Option<String>)>,
+    /// Console/exception events emitted by an iframe session that was just
+    /// attached in this same drain (for example when `fetch_handler_task`
+    /// enabled Runtime before `active_iframe_sessions` was refreshed).
+    early_iframe_console_events: Vec<(String, String, Value)>,
 }
 
 fn is_active_iframe_network_event(
@@ -1471,6 +1475,49 @@ impl DaemonState {
         }
     }
 
+    fn record_runtime_console_or_exception(&mut self, method: &str, params: &Value) {
+        match method {
+            "Runtime.consoleAPICalled" => {
+                let level = params.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                let raw_args: Vec<Value> = params
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let text = network::format_console_args(&raw_args);
+                if let Some(ref server) = self.stream_server {
+                    server.broadcast_console(level, &text, &raw_args);
+                }
+                self.event_tracker.add_console(level, &text, raw_args);
+            }
+            "Runtime.exceptionThrown" => {
+                if let Ok(ex_event) = serde_json::from_value::<ExceptionThrownEvent>(params.clone())
+                {
+                    let details = &ex_event.exception_details;
+                    let text = details
+                        .exception
+                        .as_ref()
+                        .and_then(|e| e.description.as_deref())
+                        .unwrap_or(&details.text);
+                    self.event_tracker.add_error(
+                        text,
+                        None,
+                        details.line_number,
+                        details.column_number,
+                    );
+                    if let Some(ref server) = self.stream_server {
+                        server.broadcast_page_error(
+                            text,
+                            details.line_number,
+                            details.column_number,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     async fn refresh_active_iframe_sessions(&mut self) {
         let Some(ref browser) = self.browser else {
             self.active_iframe_sessions.clear();
@@ -1899,6 +1946,11 @@ impl DaemonState {
 
         if active_frame_scope_changed {
             self.refresh_active_iframe_sessions().await;
+            for (sid, method, params) in &drained.early_iframe_console_events {
+                if self.active_iframe_sessions.contains(sid) {
+                    self.record_runtime_console_or_exception(method, params);
+                }
+            }
             if self.recording_state.active && self.recording_state.cursor {
                 let capture = self
                     .recording_state
@@ -1945,6 +1997,7 @@ impl DaemonState {
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
         let mut har_finished_requests: Vec<(String, Option<String>)> = Vec::new();
+        let mut early_iframe_console_events: Vec<(String, String, Value)> = Vec::new();
 
         loop {
             match rx.try_recv() {
@@ -2024,8 +2077,10 @@ impl DaemonState {
                                 if let Some(session) = self.browser.as_ref().and_then(|browser| {
                                     browser.session_id_for_target(&te.target_id)
                                 }) {
-                                    self.webmcp.observations.remove(session);
-                                    self.touch_sessions.remove(session);
+                                    let session = session.to_string();
+                                    self.webmcp.observations.remove(&session);
+                                    self.touch_sessions.remove(&session);
+                                    self.frame_contexts.retain(|(s, _), _| s != &session);
                                 }
                                 new_targets
                                     .retain(|entry| entry.target_info.target_id != te.target_id);
@@ -2158,6 +2213,17 @@ impl DaemonState {
                                 self.frame_contexts.insert((sid.to_string(), frame_id), id);
                             }
                         }
+                        "Runtime.executionContextDestroyed" => {
+                            let sid = event.session_id.as_deref().unwrap_or_default();
+                            if let Some(destroyed_id) = event
+                                .params
+                                .get("executionContextId")
+                                .and_then(Value::as_i64)
+                            {
+                                self.frame_contexts
+                                    .retain(|(s, _), id| !(s == sid && *id == destroyed_id));
+                            }
+                        }
                         "Runtime.executionContextsCleared" => {
                             let sid = event.session_id.as_deref().unwrap_or_default();
                             self.frame_contexts.retain(|(s, _), _| s != sid);
@@ -2179,6 +2245,23 @@ impl DaemonState {
                         && !iframe_console_event
                         && !webmcp_event
                     {
+                        if matches!(
+                            event.method.as_str(),
+                            "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+                        ) {
+                            if let Some(sid) = event.session_id.as_deref() {
+                                if attached_iframe_sessions
+                                    .iter()
+                                    .any(|(_, attached_sid)| attached_sid == sid)
+                                {
+                                    early_iframe_console_events.push((
+                                        sid.to_string(),
+                                        event.method.clone(),
+                                        event.params.clone(),
+                                    ));
+                                }
+                            }
+                        }
                         continue;
                     }
 
@@ -2533,6 +2616,7 @@ impl DaemonState {
                 Err(broadcast::error::TryRecvError::Empty) => break,
                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
                     eprintln!("[agent-browser] Warning: CDP event buffer overflowed, {} events dropped. Network requests may be missing from HAR output.", n);
+                    self.frame_contexts.clear();
                     continue;
                 }
                 Err(broadcast::error::TryRecvError::Closed) => {
@@ -2562,6 +2646,7 @@ impl DaemonState {
             attached_other_sessions,
             detached_iframe_sessions,
             har_finished_requests,
+            early_iframe_console_events,
         }
     }
 }
@@ -4728,6 +4813,7 @@ async fn adopt_replacement_tab(
 ) -> Result<(), String> {
     state.webmcp.clear_page_scope(old_session_id);
     state.webmcp.observations.remove(old_session_id);
+    state.frame_contexts.retain(|(s, _), _| s != old_session_id);
     state.ref_map.begin_snapshot();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
@@ -13321,11 +13407,16 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         (tab_id, attach.session_id)
     };
 
+    state.active_frame_id = None;
+    state.active_iframe_sessions.clear();
+    state.webmcp.clear_invocations();
+
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     apply_session_setup(state, &session_id).await?;
     install_network_controls_or_resume_prepared_session(state, has_proxy_creds, &session_id)
         .await?;
     state.drain_cdp_events_background().await?;
+    state.refresh_active_iframe_sessions().await;
 
     if let Some(viewport) = cmd.get("viewport") {
         let width = viewport
@@ -27188,5 +27279,127 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
         assert!(state.active_frame_id.is_none());
         assert!(state.frame_contexts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_drain_cdp_events_prunes_frame_contexts_clears_active_frame_and_buffers_early_oopif_console(
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ws = tokio_tungstenite::accept_async(stream).await;
+                std::future::pending::<()>().await;
+            }
+        });
+        let ws_url = format!("ws://{addr}/devtools/browser/test");
+        let client = crate::native::cdp::client::CdpClient::connect(&ws_url)
+            .await
+            .unwrap();
+        let mut mgr = crate::native::browser::BrowserManager::for_test(client, ws_url);
+        mgr.add_page(crate::native::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "t1".to_string(),
+            session_id: "s1".to_string(),
+            url: "https://example.com/".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let mut state = DaemonState::new();
+        state.browser = Some(mgr);
+        let (tx, rx) = broadcast::channel::<crate::native::cdp::types::CdpEvent>(64);
+        state.event_rx = Some(rx);
+        state.active_frame_id = Some("child-1".to_string());
+
+        let send = |session_id: Option<&str>, method: &str, params: Value| {
+            let _ = tx.send(crate::native::cdp::types::CdpEvent {
+                method: method.to_string(),
+                params,
+                session_id: session_id.map(ToString::to_string),
+            });
+        };
+
+        // Context created -> tracked, then executionContextDestroyed prunes it.
+        send(
+            Some("s1"),
+            "Runtime.executionContextCreated",
+            json!({ "context": { "id": 10, "auxData": { "frameId": "f1", "isDefault": true } } }),
+        );
+        send(
+            Some("s1"),
+            "Runtime.executionContextCreated",
+            json!({ "context": { "id": 11, "auxData": { "frameId": "f2", "isDefault": true } } }),
+        );
+        let _ = state.drain_cdp_events();
+        assert_eq!(
+            state.frame_contexts.get(&("s1".into(), "f1".into())),
+            Some(&10)
+        );
+        assert_eq!(
+            state.frame_contexts.get(&("s1".into(), "f2".into())),
+            Some(&11)
+        );
+
+        send(
+            Some("s1"),
+            "Runtime.executionContextDestroyed",
+            json!({ "executionContextId": 10 }),
+        );
+        let _ = state.drain_cdp_events();
+        assert!(!state
+            .frame_contexts
+            .contains_key(&("s1".into(), "f1".into())));
+        assert_eq!(
+            state.frame_contexts.get(&("s1".into(), "f2".into())),
+            Some(&11)
+        );
+
+        // Page.frameDetached removes that frame's context.
+        send(Some("s1"), "Page.frameDetached", json!({ "frameId": "f2" }));
+        let _ = state.drain_cdp_events();
+        assert!(state.frame_contexts.is_empty());
+
+        // Runtime.executionContextsCleared wipes all contexts for that session.
+        send(
+            Some("s1"),
+            "Runtime.executionContextCreated",
+            json!({ "context": { "id": 12, "auxData": { "frameId": "f3", "isDefault": true } } }),
+        );
+        send(Some("s1"), "Runtime.executionContextsCleared", json!({}));
+        let _ = state.drain_cdp_events();
+        assert!(state.frame_contexts.is_empty());
+
+        // Top-level Page.frameNavigated on active session clears active_frame_id.
+        send(
+            Some("s1"),
+            "Page.frameNavigated",
+            json!({ "frame": { "id": "top", "url": "https://example.com/" } }),
+        );
+        let _ = state.drain_cdp_events();
+        assert!(state.active_frame_id.is_none());
+
+        // Early console/exception events arriving right behind Target.attachedToTarget for an iframe are buffered.
+        send(
+            None,
+            "Target.attachedToTarget",
+            json!({
+                "sessionId": "oopif-s1",
+                "targetInfo": { "targetId": "oopif-f1", "type": "iframe", "title": "", "url": "https://other.test/", "attached": true }
+            }),
+        );
+        send(
+            Some("oopif-s1"),
+            "Runtime.consoleAPICalled",
+            json!({ "type": "log", "args": [{ "type": "string", "value": "early-log" }] }),
+        );
+        let drained = state.drain_cdp_events();
+        assert_eq!(drained.early_iframe_console_events.len(), 1);
+        assert_eq!(drained.early_iframe_console_events[0].0, "oopif-s1");
+        assert_eq!(
+            drained.early_iframe_console_events[0].1,
+            "Runtime.consoleAPICalled"
+        );
+        srv.abort();
     }
 }
