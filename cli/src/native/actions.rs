@@ -1174,12 +1174,12 @@ impl DaemonState {
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
-                        let joining = match poppy_guard.read().await.as_ref() {
+                        let joining_guard = match poppy_guard.read().await.as_ref() {
                             Some(guard) if waiting_for_debugger => {
                                 guard.adopt(&sid);
-                                true
+                                Some(guard.clone())
                             }
-                            _ => false,
+                            _ => None,
                         };
                         setup_auto_attached_session(
                             &client,
@@ -1188,7 +1188,7 @@ impl DaemonState {
                             waiting_for_debugger,
                             df.as_ref(),
                             has_proxy_creds,
-                            joining,
+                            joining_guard.as_ref(),
                         )
                         .await;
                     }
@@ -4479,10 +4479,10 @@ async fn setup_auto_attached_session(
     waiting_for_debugger: bool,
     domain_filter: Option<&DomainFilter>,
     has_proxy_creds: bool,
-    joining: bool,
+    poppy_guard: Option<&super::poppy::JoinGuard>,
 ) -> AutoAttachedSetup {
     let target_needs_controls = target_info.is_some_and(target_supports_network_controls);
-    let controls_active = domain_filter.is_some() || has_proxy_creds || joining;
+    let controls_active = domain_filter.is_some() || has_proxy_creds || poppy_guard.is_some();
     let controls_result = match target_info {
         Some(target) if controls_active && target_needs_controls => {
             bounded_auto_attached_setup("session", sid, async {
@@ -4506,17 +4506,21 @@ async fn setup_auto_attached_session(
                     )
                     .await?;
                 }
-                if joining
-                    && (!target_is_worker_like(target)
-                        || target_supports_worker_fetch_controls(target))
-                {
-                    client
-                        .send_command(
-                            "Fetch.enable",
-                            Some(super::poppy::fetch_enable_params(has_proxy_creds)),
-                            Some(sid),
-                        )
+                if let Some(guard) = poppy_guard {
+                    guard
+                        .install_session_guard(client, sid, target_is_worker_like(target))
                         .await?;
+                    if !target_is_worker_like(target)
+                        || target_supports_worker_fetch_controls(target)
+                    {
+                        client
+                            .send_command(
+                                "Fetch.enable",
+                                Some(super::poppy::fetch_enable_params(has_proxy_creds)),
+                                Some(sid),
+                            )
+                            .await?;
+                    }
                 }
                 Ok(())
             })
@@ -19348,7 +19352,7 @@ mod tests {
                         true,
                         None,
                         true,
-                        false,
+                        None,
                     ),
                 )
                 .await
@@ -19437,7 +19441,7 @@ mod tests {
                     false,
                     Some(&filter),
                     false,
-                    false,
+                    None,
                 ),
             )
             .await

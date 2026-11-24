@@ -394,35 +394,63 @@ fn request_blocked(message: String) -> JoinError {
     }
 }
 
-/// Holds a request the browser makes during the join to the rules the
-/// endpoint passed in discovery, before it is sent: HTTPS (or WSS) to public
-/// addresses unless the join started locally, and never a link-local or cloud
-/// metadata address. Schemes that make no network request are not checked.
+/// Holds an HTTP request the browser makes during the join to the rules the
+/// endpoint passed in discovery, before it is sent: HTTPS to public addresses
+/// unless the join started locally, and never a link-local or cloud metadata
+/// address. Schemes that make no HTTP request are not checked here.
 pub async fn check_request(
+    raw: &str,
+    local: bool,
+    deadline: tokio::time::Instant,
+) -> Result<(), JoinError> {
+    let url = Url::parse(raw).map_err(|e| {
+        request_blocked(format!(
+            "The join would request a URL that is not valid: {}",
+            e
+        ))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Ok(());
+    }
+    let shown = redacted(&url);
+    check_endpoint(&url, local, deadline)
+        .await
+        .map_err(|e| request_blocked(format!("The join would request {}: {}", shown, e.message)))
+}
+
+/// Holds a WebSocket URL the browser attempts during the join to the same
+/// address rules as an HTTP request: WSS to public addresses unless the join
+/// started locally, and never a link-local or cloud metadata address.
+pub async fn check_websocket_request(
     raw: &str,
     local: bool,
     deadline: tokio::time::Instant,
 ) -> Result<(), JoinError> {
     let mut url = Url::parse(raw).map_err(|e| {
         request_blocked(format!(
-            "The join would request a URL that is not valid: {}",
+            "The join would open a WebSocket to a URL that is not valid: {}",
             e
         ))
     })?;
     let shown = redacted(&url);
     let http_scheme = match url.scheme() {
-        "http" | "https" => None,
-        "ws" => Some("http"),
-        "wss" => Some("https"),
-        _ => return Ok(()),
+        "ws" | "http" => "http",
+        "wss" | "https" => "https",
+        _ => {
+            return Err(request_blocked(format!(
+                "The join would open a WebSocket to {}",
+                shown
+            )))
+        }
     };
-    if let Some(scheme) = http_scheme {
-        url.set_scheme(scheme)
-            .map_err(|_| request_blocked(format!("The join would request {}", shown)))?;
-    }
-    check_endpoint(&url, local, deadline)
-        .await
-        .map_err(|e| request_blocked(format!("The join would request {}: {}", shown, e.message)))
+    url.set_scheme(http_scheme)
+        .map_err(|_| request_blocked(format!("The join would open a WebSocket to {}", shown)))?;
+    check_endpoint(&url, local, deadline).await.map_err(|e| {
+        request_blocked(format!(
+            "The join would open a WebSocket to {}: {}",
+            shown, e.message
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -760,7 +788,6 @@ mod tests {
             ("https://10.0.0.1/", false),
             ("https://169.254.169.254/latest/meta-data", false),
             ("https://169.254.169.254/latest/meta-data", true),
-            ("ws://127.0.0.1:9222/devtools", false),
             ("http://192.168.1.10/", true),
             ("not a url", false),
         ] {
@@ -770,14 +797,51 @@ mod tests {
         }
         for (url, local) in [
             ("https://93.184.216.34/join", false),
-            ("wss://93.184.216.34/socket", false),
             ("http://127.0.0.1:8080/after", true),
-            ("ws://127.0.0.1:8080/socket", true),
             ("https://10.0.0.1/", true),
             ("data:text/html,hi", false),
             ("blob:https://example.com/1", false),
         ] {
             assert_eq!(check_request(url, local, deadline).await, Ok(()), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_join_websocket_is_held_to_the_endpoint_rules() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        for (url, local) in [
+            ("ws://127.0.0.1:9222/devtools", false),
+            ("wss://127.0.0.1:8080/ws", false),
+            ("wss://[::1]/ws", false),
+            ("wss://10.0.0.1/internal", false),
+            ("ws://169.254.169.254/latest/meta-data", false),
+            ("ws://169.254.169.254/latest/meta-data", true),
+            ("wss://[fe80::1]/ws", false),
+            ("wss://[fe80::1]/ws", true),
+            ("wss://[fd00:ec2::254]/ws", false),
+            ("wss://100.100.100.200/ws", true),
+            ("ws://93.184.216.34/ws", false),
+            ("not a url", false),
+        ] {
+            let err = check_websocket_request(url, local, deadline)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "request_blocked", "{url}");
+            assert!(
+                err.message.contains("The join would open a WebSocket"),
+                "{url}"
+            );
+        }
+        for (url, local) in [
+            ("wss://93.184.216.34/socket", false),
+            ("ws://127.0.0.1:8080/socket", true),
+            ("wss://10.0.0.1/socket", true),
+        ] {
+            assert_eq!(
+                check_websocket_request(url, local, deadline).await,
+                Ok(()),
+                "{url}"
+            );
         }
     }
 
@@ -790,13 +854,21 @@ mod tests {
                 false,
             ),
             ("https://169.254.169.254/bc_secret?c=bc_secret", true),
-            ("ws://user:bc_secret@127.0.0.1:9222/bc_secret", false),
             ("bc_secret not a url", false),
         ] {
             let err = check_request(url, local, deadline).await.unwrap_err();
             assert_eq!(err.code, "request_blocked", "{url}");
             assert!(!err.message.contains("bc_secret"), "{url}: {err:?}");
         }
+        let err = check_websocket_request(
+            "ws://user:bc_secret@127.0.0.1:9222/bc_secret?c=bc_secret#bc_secret",
+            false,
+            deadline,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "request_blocked");
+        assert!(!err.message.contains("bc_secret"), "{err:?}");
         let err = check_connected_address(
             "https://example.com/bc_secret?c=bc_secret",
             "169.254.169.254",

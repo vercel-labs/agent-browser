@@ -21515,12 +21515,20 @@ async fn run_poppy_join(origin: &str) -> Value {
 }
 
 async fn run_poppy_join_with(origin: &str, authorizer: &str) -> Value {
+    run_poppy_join_with_options(origin, authorizer, None).await
+}
+
+async fn run_poppy_join_with_options(
+    origin: &str,
+    authorizer: &str,
+    allowed_domains: Option<&[&str]>,
+) -> Value {
     let mut state = DaemonState::new();
-    let resp = execute_command(
-        &json!({ "id": "1", "action": "launch", "headless": true }),
-        &mut state,
-    )
-    .await;
+    let mut launch = json!({ "id": "1", "action": "launch", "headless": true });
+    if let Some(domains) = allowed_domains {
+        launch["allowedDomains"] = json!(domains);
+    }
+    let resp = execute_command(&launch, &mut state).await;
     assert_success(&resp);
     let resp = execute_command(
         &json!({
@@ -21732,6 +21740,121 @@ async fn e2e_poppy_join_keeps_the_local_testing_exception() {
     assert_eq!(get_data(&resp)["joined"], true);
     assert_eq!(get_data(&resp)["url"], format!("{}/after", target.origin));
     assert!(target.requests.load(Ordering::SeqCst) >= 1, "{resp}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_blocks_websocket_to_loopback_and_link_local() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    let ws_loopback = target.origin.replacen("http://", "ws://", 1);
+
+    let page = format!("{POPPY_FORM}<script>new WebSocket('{ws_loopback}/ws');</script>");
+    let (origin, site) =
+        poppy_site("[::1]:0", PoppyJoinPage::Html(page), "/done".to_string()).await;
+    let resp = run_poppy_join_with(&origin, "sleep 1; echo '{\"signed_in\":true}'").await;
+    site.abort();
+    assert_eq!(target.connections.load(Ordering::SeqCst), 0, "{resp}");
+    assert_error_code(&resp, "request_blocked");
+
+    for ws_url in [
+        "ws://169.254.169.254/latest/meta-data",
+        "wss://10.0.0.1/internal",
+    ] {
+        let page = format!("{POPPY_FORM}<script>new WebSocket('{ws_url}');</script>");
+        let (origin, site) =
+            poppy_site("[::1]:0", PoppyJoinPage::Html(page), "/done".to_string()).await;
+        let resp = run_poppy_join(&origin).await;
+        site.abort();
+        assert_error_code(&resp, "request_blocked");
+    }
+
+    target.server.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_blocks_websocket_from_popup() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    let ws_loopback = target.origin.replacen("http://", "ws://", 1);
+
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let origin = format!("http://{host}");
+    let discovery = json!({
+        "protocol_version": "1.0",
+        "organization": { "domain": host },
+        "web": { "browser_session_endpoint": format!("{origin}/join") },
+    })
+    .to_string();
+    let join_html = format!("{POPPY_FORM}<script>window.open('/popup-ws');</script>");
+    let popup_html = format!("<script>new WebSocket('{ws_loopback}/popup');</script>");
+    let site = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let request = read_http_request(&mut stream).await;
+            let response = if request.starts_with("GET /.well-known/poppy.json ") {
+                http_response("200 OK", "Content-Type: application/json\r\n", &discovery)
+            } else if request.starts_with("GET /join ") {
+                http_response("200 OK", "Content-Type: text/html\r\n", &join_html)
+            } else if request.starts_with("GET /popup-ws ") {
+                http_response("200 OK", "Content-Type: text/html\r\n", &popup_html)
+            } else if request.starts_with("POST /join ") {
+                http_response("302 Found", "Location: /done\r\n", "")
+            } else {
+                http_response("200 OK", "Content-Type: text/html\r\n", "<p>joined</p>")
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let resp = run_poppy_join_with(&origin, "sleep 1; echo '{\"signed_in\":true}'").await;
+    site.abort();
+    target.server.abort();
+    assert_eq!(target.connections.load(Ordering::SeqCst), 0, "{resp}");
+    assert_error_code(&resp, "request_blocked");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_blocks_websocket_with_allowed_domains() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    let ws_loopback = target.origin.replacen("http://", "ws://", 1);
+
+    let page = format!("{POPPY_FORM}<script>new WebSocket('{ws_loopback}/ws');</script>");
+    let (origin, site) =
+        poppy_site("[::1]:0", PoppyJoinPage::Html(page), "/done".to_string()).await;
+
+    // Even if --allowed-domains permits both the join host and 127.0.0.1,
+    // the join address guard still blocks the loopback WebSocket.
+    let resp = run_poppy_join_with_options(
+        &origin,
+        "sleep 1; echo '{\"signed_in\":true}'",
+        Some(&["[::1]", "127.0.0.1"]),
+    )
+    .await;
+    assert_eq!(target.connections.load(Ordering::SeqCst), 0, "{resp}");
+    assert_error_code(&resp, "request_blocked");
+
+    // When --allowed-domains permits only the join host, the blocked WebSocket
+    // still fails the join rather than succeeding silently.
+    let resp = run_poppy_join_with_options(
+        &origin,
+        "sleep 1; echo '{\"signed_in\":true}'",
+        Some(&["[::1]"]),
+    )
+    .await;
+    site.abort();
+    target.server.abort();
+    assert_eq!(target.connections.load(Ordering::SeqCst), 0, "{resp}");
+    assert_error_code(&resp, "request_blocked");
 }
 
 /// A local page for restore tests: cookies need an http origin.
