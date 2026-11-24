@@ -7030,6 +7030,251 @@ async fn e2e_save_state_cross_domain() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_state_save_with_allowed_domains_does_not_stall_or_hit_previous_origin() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p1 = l1.local_addr().unwrap().port();
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p2 = l2.local_addr().unwrap().port();
+
+    let p1_hits = Arc::new(AtomicUsize::new(0));
+    let p1_hits_srv = Arc::clone(&p1_hits);
+    let s1 = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = l1.accept().await {
+            let hits = Arc::clone(&p1_hits_srv);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                hits.fetch_add(1, Ordering::SeqCst);
+                let body = "<!doctype html><title>p1</title>p1";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    let s2 = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = l2.accept().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let body = "<!doctype html><title>p2</title>p2";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let env = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+    env.set("AGENT_BROWSER_ALLOWED_DOMAINS", "127.0.0.1,localhost");
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{p1}/")}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "storage_set", "type": "local", "key": "k1", "value": "v1"}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "4", "action": "navigate", "url": format!("http://localhost:{p2}/")}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "5", "action": "storage_set", "type": "local", "key": "k2", "value": "v2"}),
+            &mut state,
+        )
+        .await,
+    );
+
+    let hits_before = p1_hits.load(Ordering::SeqCst);
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let save_path = tmp_dir.path().join("state.json");
+    let started = std::time::Instant::now();
+    assert_success(
+        &execute_command(
+            &json!({"id": "6", "action": "state_save", "path": save_path.to_str().unwrap()}),
+            &mut state,
+        )
+        .await,
+    );
+    let elapsed = started.elapsed();
+    let hits_after = p1_hits.load(Ordering::SeqCst);
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "state_save took {:?} with --allowed-domains",
+        elapsed
+    );
+    assert_eq!(
+        hits_after, hits_before,
+        "state_save should not send HTTP requests to the previously visited origin"
+    );
+
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&save_path).unwrap()).unwrap();
+    let origins = saved["origins"].as_array().unwrap();
+    assert!(
+        origins.iter().any(|o| {
+            o["origin"] == format!("http://127.0.0.1:{p1}")
+                && o["localStorage"]
+                    .as_array()
+                    .is_some_and(|ls| ls.iter().any(|e| e["name"] == "k1" && e["value"] == "v1"))
+        }),
+        "missing p1 storage: {origins:?}"
+    );
+    assert!(
+        origins.iter().any(|o| {
+            o["origin"] == format!("http://localhost:{p2}")
+                && o["localStorage"]
+                    .as_array()
+                    .is_some_and(|ls| ls.iter().any(|e| e["name"] == "k2" && e["value"] == "v2"))
+        }),
+        "missing p2 storage: {origins:?}"
+    );
+
+    assert_success(&execute_command(&json!({"id": "99", "action": "close"}), &mut state).await);
+    s1.abort();
+    s2.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_save_state_includes_attached_session_origin() {
+    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p1 = l1.local_addr().unwrap().port();
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p2 = l2.local_addr().unwrap().port();
+
+    let spawn_page = |listener: tokio::net::TcpListener, label: &'static str| {
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let body = format!("<!doctype html><title>{label}</title>{label}");
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        })
+    };
+    let s1 = spawn_page(l1, "host");
+    let s2 = spawn_page(l2, "attached");
+
+    let mut host = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut host,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{p1}/")}),
+            &mut host,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "storage_set", "type": "local", "key": "host_k", "value": "host_v"}),
+            &mut host,
+        )
+        .await,
+    );
+    let cdp_resp = execute_command(&json!({"id": "4", "action": "cdp_url"}), &mut host).await;
+    assert_success(&cdp_resp);
+    let ws_url = get_data(&cdp_resp)["cdpUrl"].as_str().unwrap().to_string();
+
+    // Attached session opens origin p2 in a separate tab and stores a token there.
+    let mut attached = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "a1", "action": "launch", "cdpUrl": ws_url}),
+            &mut attached,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "a2", "action": "tab_new", "url": format!("http://localhost:{p2}/")}),
+            &mut attached,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "a3", "action": "storage_set", "type": "local", "key": "att_k", "value": "att_v"}),
+            &mut attached,
+        )
+        .await,
+    );
+
+    // Host never navigated to localhost:p2; its save must still include it via Target.getTargets.
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let save_path = tmp_dir.path().join("attached-state.json");
+    assert_success(
+        &execute_command(
+            &json!({"id": "5", "action": "state_save", "path": save_path.to_str().unwrap()}),
+            &mut host,
+        )
+        .await,
+    );
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&save_path).unwrap()).unwrap();
+    let origins = saved["origins"].as_array().unwrap();
+    assert!(
+        origins.iter().any(|o| {
+            o["origin"] == format!("http://localhost:{p2}")
+                && o["localStorage"].as_array().is_some_and(|ls| {
+                    ls.iter()
+                        .any(|e| e["name"] == "att_k" && e["value"] == "att_v")
+                })
+        }),
+        "host save should include attached session origin p2: {origins:?}"
+    );
+
+    let _ = execute_command(&json!({"id": "98", "action": "close"}), &mut attached).await;
+    let _ = execute_command(&json!({"id": "99", "action": "close"}), &mut host).await;
+    s1.abort();
+    s2.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Domain filter
 // ---------------------------------------------------------------------------

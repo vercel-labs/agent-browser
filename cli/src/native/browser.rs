@@ -1150,6 +1150,7 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        ..Default::default()
                     },
                     None,
                 )
@@ -1433,6 +1434,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    ..Default::default()
                 },
                 None,
             )
@@ -2058,6 +2060,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    ..Default::default()
                 },
                 None,
             )
@@ -2403,6 +2406,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    ..Default::default()
                 },
                 None,
             )
@@ -3022,6 +3026,17 @@ impl BrowserManager {
 
     pub fn visited_origins(&self) -> &HashSet<String> {
         &self.visited_origins
+    }
+
+    pub fn record_visited_origins(&mut self, origins: impl IntoIterator<Item = String>) {
+        for origin in origins {
+            if let Ok(parsed) = url::Url::parse(&origin) {
+                let o = parsed.origin().ascii_serialization();
+                if o != "null" && !o.is_empty() {
+                    self.visited_origins.insert(o);
+                }
+            }
+        }
     }
 
     /// Keep the configured download location and turn on `Browser.download*`

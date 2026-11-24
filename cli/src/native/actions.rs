@@ -1153,6 +1153,12 @@ impl DaemonState {
                             .get("waitingForDebugger")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
+                        let is_storage_session = target_info.as_ref().is_some_and(|target| {
+                            state::owns_storage_attachment(&target.target_id, waiting_for_debugger)
+                        });
+                        if is_storage_session {
+                            continue;
+                        }
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
@@ -1199,6 +1205,9 @@ impl DaemonState {
                             .unwrap_or("")
                             .to_string();
                         let sid = event.session_id.clone().unwrap_or_default();
+                        if state::owns_storage_session(&sid) {
+                            continue;
+                        }
 
                         let paused = FetchPausedRequest {
                             request_id,
@@ -5514,10 +5523,11 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         }
     };
     if let Some(path) = state::find_auto_state_file(&session_name) {
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                match state::load_state(&mgr.client, session_id, &path).await {
-                    Ok(skipped) => {
+        if let Some(ref mut mgr) = state.browser {
+            if let Ok(session_id) = mgr.active_session_id().map(ToString::to_string) {
+                match state::load_state_with_origins(&mgr.client, &session_id, &path).await {
+                    Ok((skipped, restored)) => {
+                        mgr.record_visited_origins(restored);
                         state.restore_status = "loaded".to_string();
                         state.restore_status_detail = None;
                         state.restore_skipped_origins = skipped;
@@ -5745,9 +5755,12 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
         ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
             .await?;
         let mut skipped = None;
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                skipped = Some(state::load_state(&mgr.client, session_id, path).await?);
+        if let Some(ref mut mgr) = state.browser {
+            if let Ok(session_id) = mgr.active_session_id().map(ToString::to_string) {
+                let (s, restored) =
+                    state::load_state_with_origins(&mgr.client, &session_id, path).await?;
+                mgr.record_visited_origins(restored);
+                skipped = Some(s);
             }
         }
         if let Some(skipped) = skipped {
@@ -8662,15 +8675,20 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
 }
 
 async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let path = cmd
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' parameter")?;
 
     ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    let skipped = state::load_state(&mgr.client, &session_id, path).await?;
+    let skipped = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let session_id = mgr.active_session_id()?.to_string();
+        let (skipped, restored) =
+            state::load_state_with_origins(&mgr.client, &session_id, path).await?;
+        mgr.record_visited_origins(restored);
+        skipped
+    };
     mark_explicit_storage_state_loaded(state, path);
     Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
 }

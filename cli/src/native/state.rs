@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CloseTargetParams, CreateTargetParams,
-    CreateTargetResult, EvaluateParams,
+    CreateTargetResult, EvaluateParams, GetTargetsResult, TargetInfo,
 };
 use super::cookies::{self, Cookie};
 use crate::validation::{is_valid_session_name, sanitize_session_component, session_name_error};
@@ -90,7 +90,7 @@ async fn eval_origin_storage(
     client: &CdpClient,
     session_id: &str,
     origin_js: &str,
-) -> Option<OriginStorage> {
+) -> Result<Option<OriginStorage>, String> {
     let result = client
         .send_command_typed::<_, super::cdp::types::EvaluateResult>(
             "Runtime.evaluate",
@@ -101,33 +101,153 @@ async fn eval_origin_storage(
             },
             Some(session_id),
         )
-        .await
-        .ok()?;
+        .await?;
+    if let Some(details) = result.exception_details {
+        return Err(format!(
+            "Failed to read page storage: {}",
+            details
+                .exception
+                .and_then(|e| e.description)
+                .unwrap_or(details.text)
+        ));
+    }
     let data = result.result.value.unwrap_or(Value::Null);
-    parse_origin_storage(&data)
+    Ok(parse_origin_storage(&data))
+}
+
+/// Temporary targets opened to read other origins' storage, from creation
+/// until `Target.closeTarget` has answered.
+static STORAGE_TARGETS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Explicit CDP sessions attached to temporary storage targets. The global
+/// `Fetch.requestPaused` handler skips these so the collector answers its own
+/// paused requests without hitting the network.
+static STORAGE_SESSIONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+struct StorageTargetGuard(String);
+
+impl StorageTargetGuard {
+    fn register(target_id: String) -> Self {
+        STORAGE_TARGETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(target_id.clone());
+        Self(target_id)
+    }
+}
+
+impl Drop for StorageTargetGuard {
+    fn drop(&mut self) {
+        let mut targets = STORAGE_TARGETS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = targets.iter().position(|id| id == &self.0) {
+            targets.swap_remove(pos);
+        }
+    }
+}
+
+struct StorageSessionGuard(String);
+
+impl StorageSessionGuard {
+    fn register(session_id: String) -> Self {
+        STORAGE_SESSIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(session_id.clone());
+        Self(session_id)
+    }
+}
+
+impl Drop for StorageSessionGuard {
+    fn drop(&mut self) {
+        let mut sessions = STORAGE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = sessions.iter().position(|id| id == &self.0) {
+            sessions.swap_remove(pos);
+        }
+    }
+}
+
+pub(crate) fn owns_storage_attachment(target_id: &str, waiting_for_debugger: bool) -> bool {
+    let targets = STORAGE_TARGETS.lock().unwrap_or_else(|e| e.into_inner());
+    is_own_storage_attachment(&targets, target_id, waiting_for_debugger)
+}
+
+fn is_own_storage_attachment(
+    storage_targets: &[String],
+    target_id: &str,
+    waiting_for_debugger: bool,
+) -> bool {
+    !waiting_for_debugger && storage_targets.iter().any(|id| id == target_id)
+}
+
+pub(crate) fn owns_storage_session(session_id: &str) -> bool {
+    let sessions = STORAGE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    sessions.iter().any(|id| id == session_id)
+}
+
+fn is_cdp_error(error: &str) -> bool {
+    error.starts_with("CDP error (")
+}
+
+/// Create the scratch page used to read storage from other origins without
+/// foregrounding Chrome, stepping down when a browser rejects `hidden` or
+/// `background`.
+async fn create_scratch_target(client: &CdpClient) -> Result<CreateTargetResult, String> {
+    let [hidden, background_only, plain] =
+        [(Some(true), Some(true)), (Some(true), None), (None, None)].map(|(background, hidden)| {
+            CreateTargetParams {
+                url: "about:blank".to_string(),
+                background,
+                hidden,
+            }
+        });
+    for params in [&hidden, &background_only] {
+        match client
+            .send_command_typed("Target.createTarget", params, None)
+            .await
+        {
+            Err(error) if is_cdp_error(&error) => continue,
+            result => return result,
+        }
+    }
+    client
+        .send_command_typed("Target.createTarget", &plain, None)
+        .await
+}
+
+/// Origins of open page targets in the browser, excluding scratch storage
+/// targets and internal pages.
+fn origins_from_targets(target_infos: &[TargetInfo]) -> HashSet<String> {
+    let storage_targets = STORAGE_TARGETS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut origins = HashSet::new();
+    for target in target_infos {
+        if storage_targets.iter().any(|id| id == &target.target_id) {
+            continue;
+        }
+        if !super::browser::should_track_target(target) {
+            continue;
+        }
+        if let Ok(parsed) = url::Url::parse(&target.url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" && !origin.is_empty() {
+                origins.insert(origin);
+            }
+        }
+    }
+    origins
 }
 
 /// Create a temporary CDP target, navigate it to each origin to collect localStorage,
-/// then close it. Uses Fetch interception to serve blank HTML instead of making real
-/// network requests.
+/// then close it. Uses private Fetch interception to serve blank HTML instead of
+/// making real network requests.
 async fn collect_storage_via_temp_target(
     client: &CdpClient,
     origins: &[String],
     origin_js: &str,
 ) -> Result<Vec<OriginStorage>, String> {
-    let create_result: CreateTargetResult = client
-        .send_command_typed(
-            "Target.createTarget",
-            &CreateTargetParams {
-                url: "about:blank".to_string(),
-            },
-            None,
-        )
-        .await?;
-
+    let create_result = create_scratch_target(client).await?;
     let target_id = create_result.target_id;
+    let _target_guard = StorageTargetGuard::register(target_id.clone());
 
-    // Ensure the target is closed even if attach or later steps fail
     let result = collect_storage_in_target(client, &target_id, origins, origin_js).await;
 
     let _ = client
@@ -139,6 +259,48 @@ async fn collect_storage_via_temp_target(
         .await;
 
     result
+}
+
+async fn handle_storage_fetch_paused(
+    client: &CdpClient,
+    temp_session: &str,
+    params: &Value,
+    blank_html_b64: &str,
+) {
+    let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let resource_type = params
+        .get("resourceType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if resource_type == "Document" {
+        let _ = client
+            .send_command(
+                "Fetch.fulfillRequest",
+                Some(json!({
+                    "requestId": request_id,
+                    "responseCode": 200,
+                    "responseHeaders": [
+                        { "name": "Content-Type", "value": "text/html" }
+                    ],
+                    "body": blank_html_b64
+                })),
+                Some(temp_session),
+            )
+            .await;
+    } else {
+        let _ = client
+            .send_command(
+                "Fetch.failRequest",
+                Some(json!({
+                    "requestId": request_id,
+                    "errorReason": "Aborted"
+                })),
+                Some(temp_session),
+            )
+            .await;
+    }
 }
 
 async fn collect_storage_in_target(
@@ -158,91 +320,112 @@ async fn collect_storage_in_target(
         )
         .await?;
 
-    let temp_session = &attach_result.session_id;
+    let temp_session = attach_result.session_id;
+    let _session_guard = StorageSessionGuard::register(temp_session.clone());
+    let mut event_rx = client.subscribe_session(&temp_session);
 
-    client
-        .send_command_no_params("Page.enable", Some(temp_session))
-        .await?;
-    client
-        .send_command_no_params("Runtime.enable", Some(temp_session))
-        .await?;
+    let outcome = async {
+        client
+            .send_command_no_params("Page.enable", Some(&temp_session))
+            .await?;
+        client
+            .send_command_no_params("Runtime.enable", Some(&temp_session))
+            .await?;
 
-    // Blank HTML response body, pre-encoded to avoid repeated base64 work per request
-    let blank_html_b64 = base64::engine::general_purpose::STANDARD.encode("<html></html>");
+        let blank_html_b64 = base64::engine::general_purpose::STANDARD.encode("<html></html>");
 
-    let _ = client
-        .send_command(
-            "Fetch.enable",
-            Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
-            Some(temp_session),
-        )
-        .await;
-
-    let mut event_rx = client.subscribe();
-    let mut results = Vec::new();
-
-    for target_origin in origins {
-        let nav_url = format!("{}/", target_origin.trim_end_matches('/'));
-        if client
+        client
             .send_command(
+                "Fetch.enable",
+                Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
+                Some(&temp_session),
+            )
+            .await?;
+
+        let mut results = Vec::new();
+
+        for target_origin in origins {
+            let nav_url = format!("{}/", target_origin.trim_end_matches('/'));
+            let nav_fut = client.send_command(
                 "Page.navigate",
                 Some(json!({ "url": nav_url })),
-                Some(temp_session),
-            )
-            .await
-            .is_err()
-        {
-            continue;
-        }
+                Some(&temp_session),
+            );
+            tokio::pin!(nav_fut);
 
-        // Fulfill intercepted requests with blank HTML until the page loads
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-        let mut page_loaded = false;
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(tokio::time::Duration::from_secs(2), event_rx.recv()).await {
-                Ok(Ok(evt)) if evt.session_id.as_deref() == Some(temp_session) => {
-                    if evt.method == "Fetch.requestPaused" {
-                        if let Some(request_id) =
-                            evt.params.get("requestId").and_then(|v| v.as_str())
-                        {
-                            let _ = client
-                                .send_command(
-                                    "Fetch.fulfillRequest",
-                                    Some(json!({
-                                        "requestId": request_id,
-                                        "responseCode": 200,
-                                        "responseHeaders": [
-                                            { "name": "Content-Type", "value": "text/html" }
-                                        ],
-                                        "body": &blank_html_b64
-                                    })),
-                                    Some(temp_session),
-                                )
-                                .await;
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+            let mut nav_done = false;
+            let mut nav_failed = false;
+            let mut page_loaded = false;
+
+            while tokio::time::Instant::now() < deadline {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                if !nav_done {
+                    tokio::select! {
+                        res = &mut nav_fut => {
+                            nav_done = true;
+                            if res.is_err() {
+                                nav_failed = true;
+                                break;
+                            }
+                            if page_loaded {
+                                break;
+                            }
                         }
-                    } else if evt.method == "Page.loadEventFired" {
-                        page_loaded = true;
-                        break;
+                        evt = tokio::time::timeout(remaining, event_rx.recv()) => {
+                            match evt {
+                                Ok(Some(evt)) if evt.method == "Fetch.requestPaused" => {
+                                    handle_storage_fetch_paused(client, &temp_session, &evt.params, &blank_html_b64).await;
+                                }
+                                Ok(Some(evt)) if evt.method == "Page.loadEventFired" => {
+                                    page_loaded = true;
+                                }
+                                Ok(Some(_)) => {}
+                                Ok(None) | Err(_) => break,
+                            }
+                        }
+                    }
+                } else {
+                    match tokio::time::timeout(remaining, event_rx.recv()).await {
+                        Ok(Some(evt)) if evt.method == "Fetch.requestPaused" => {
+                            handle_storage_fetch_paused(
+                                client,
+                                &temp_session,
+                                &evt.params,
+                                &blank_html_b64,
+                            )
+                            .await;
+                        }
+                        Ok(Some(evt)) if evt.method == "Page.loadEventFired" => {
+                            page_loaded = true;
+                            break;
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(_) => break,
                     }
                 }
-                Ok(Ok(_)) => continue,  // event for a different session
-                Ok(Err(_)) => continue, // lagged or closed — retry within deadline
-                Err(_) => break,        // outer timeout elapsed
+            }
+
+            if nav_failed || !page_loaded {
+                continue;
+            }
+
+            if let Ok(Some(storage)) = eval_origin_storage(client, &temp_session, origin_js).await {
+                if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
+                    results.push(storage);
+                }
             }
         }
 
-        if !page_loaded {
-            continue;
-        }
-
-        if let Some(storage) = eval_origin_storage(client, temp_session, origin_js).await {
-            if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
-                results.push(storage);
-            }
-        }
+        Ok(results)
     }
+    .await;
 
-    Ok(results)
+    client.unsubscribe_session(&temp_session);
+    outcome
 }
 
 pub async fn save_state(
@@ -272,7 +455,7 @@ pub async fn save_state(
         return result;
     })()"#;
 
-    // Merge visited origins with current frame tree origins
+    // Merge visited origins with current frame tree origins and open page targets
     let mut all_origins = visited_origins.clone();
     if let Ok(tree_result) = client
         .send_command_no_params("Page.getFrameTree", Some(session_id))
@@ -282,12 +465,18 @@ pub async fn save_state(
             collect_frame_origins(tree, &mut all_origins);
         }
     }
+    if let Ok(targets) = client
+        .send_command_typed::<_, GetTargetsResult>("Target.getTargets", &json!({}), None)
+        .await
+    {
+        all_origins.extend(origins_from_targets(&targets.target_infos));
+    }
 
     // 1. Collect localStorage from the current page
     let mut origins = Vec::new();
     let mut current_origin = String::new();
 
-    if let Some(storage) = eval_origin_storage(client, session_id, origin_js).await {
+    if let Some(storage) = eval_origin_storage(client, session_id, origin_js).await? {
         current_origin = storage.origin.clone();
         if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
             origins.push(storage);
@@ -298,11 +487,8 @@ pub async fn save_state(
     all_origins.remove(&current_origin);
     if !all_origins.is_empty() {
         let remaining: Vec<String> = all_origins.into_iter().collect();
-        if let Ok(temp_origins) =
-            collect_storage_via_temp_target(client, &remaining, origin_js).await
-        {
-            origins.extend(temp_origins);
-        }
+        let temp_origins = collect_storage_via_temp_target(client, &remaining, origin_js).await?;
+        origins.extend(temp_origins);
     }
 
     let state = StorageState { cookies, origins };
@@ -468,6 +654,15 @@ pub async fn load_state(
     session_id: &str,
     path: &str,
 ) -> Result<Vec<String>, String> {
+    let (skipped, _) = load_state_with_origins(client, session_id, path).await?;
+    Ok(skipped)
+}
+
+pub async fn load_state_with_origins(
+    client: &CdpClient,
+    session_id: &str,
+    path: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
     let json_str = read_state_json(path)?;
 
     let state: StorageState =
@@ -483,6 +678,7 @@ pub async fn load_state(
     }
 
     let mut skipped = Vec::new();
+    let mut restored = Vec::new();
     for origin in &state.origins {
         if origin.local_storage.is_empty() && origin.session_storage.is_empty() {
             continue;
@@ -492,10 +688,12 @@ pub async fn load_state(
             .is_err()
         {
             skipped.push(origin.origin.clone());
+        } else {
+            restored.push(origin.origin.clone());
         }
     }
 
-    Ok(skipped)
+    Ok((skipped, restored))
 }
 
 async fn restore_origin_storage(
@@ -1062,5 +1260,151 @@ mod tests {
         let result = dispatch_state_command(&cmd).unwrap();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Missing 'name' parameter");
+    }
+
+    #[test]
+    fn test_storage_attachment_and_session_guards() {
+        assert!(is_own_storage_attachment(&["t1".to_string()], "t1", false));
+        assert!(!is_own_storage_attachment(&["t1".to_string()], "t1", true));
+        assert!(!is_own_storage_attachment(&["t1".to_string()], "t2", false));
+
+        {
+            let _tg = StorageTargetGuard::register("guard-t1".to_string());
+            let _sg = StorageSessionGuard::register("guard-s1".to_string());
+            assert!(owns_storage_attachment("guard-t1", false));
+            assert!(!owns_storage_attachment("guard-t1", true));
+            assert!(owns_storage_session("guard-s1"));
+            assert!(!owns_storage_session("other-s"));
+        }
+        assert!(!owns_storage_attachment("guard-t1", false));
+        assert!(!owns_storage_session("guard-s1"));
+    }
+
+    #[test]
+    fn test_origins_from_targets_filters_internal_and_storage_targets() {
+        let _tg = StorageTargetGuard::register("scratch-1".to_string());
+        let mk = |id: &str, ttype: &str, url: &str| TargetInfo {
+            target_id: id.to_string(),
+            target_type: ttype.to_string(),
+            title: String::new(),
+            url: url.to_string(),
+            attached: Some(false),
+            browser_context_id: None,
+        };
+        let targets = vec![
+            mk("p1", "page", "http://127.0.0.1:8001/a"),
+            mk("p2", "page", "https://example.test/path?q=1"),
+            mk("scratch-1", "page", "http://127.0.0.1:8002/"),
+            mk("sw1", "service_worker", "https://sw.test/sw.js"),
+            mk("int1", "page", "chrome://settings"),
+            mk("blank", "page", "about:blank"),
+        ];
+        let origins = origins_from_targets(&targets);
+        assert!(origins.contains("http://127.0.0.1:8001"));
+        assert!(origins.contains("https://example.test"));
+        assert!(!origins.contains("http://127.0.0.1:8002"));
+        assert!(!origins.contains("https://sw.test"));
+        assert_eq!(origins.len(), 2);
+    }
+
+    #[test]
+    fn test_is_cdp_error() {
+        assert!(is_cdp_error(
+            "CDP error (Target.createTarget): {\"code\":-32602,\"message\":\"Invalid parameters\"}"
+        ));
+        assert!(!is_cdp_error("CDP command timed out: Target.createTarget"));
+        assert!(!is_cdp_error("CDP response channel closed"));
+    }
+
+    #[tokio::test]
+    async fn test_create_scratch_target_steps_down_and_preserves_autosave_on_capture_error() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // 1. Verify create_scratch_target steps down from hidden+background -> background -> plain.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut seen = Vec::new();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let id = cmd["id"].clone();
+                let method = cmd["method"].as_str().unwrap_or("");
+                let reply = if method == "Target.createTarget" {
+                    seen.push(cmd["params"].clone());
+                    if cmd["params"].get("hidden").is_some()
+                        || cmd["params"].get("background").is_some()
+                    {
+                        json!({ "id": id, "error": { "code": -32602, "message": "Invalid parameters" } })
+                    } else {
+                        json!({ "id": id, "result": { "targetId": "t-plain" } })
+                    }
+                } else {
+                    json!({ "id": id, "result": {} })
+                };
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
+            }
+            seen
+        });
+
+        let client = CdpClient::connect(&ws_url).await.unwrap();
+        let created = create_scratch_target(&client).await.unwrap();
+        assert_eq!(created.target_id, "t-plain");
+        drop(client);
+        let seen = server.await.unwrap();
+        assert_eq!(
+            seen,
+            vec![
+                json!({ "url": "about:blank", "background": true, "hidden": true }),
+                json!({ "url": "about:blank", "background": true }),
+                json!({ "url": "about:blank" }),
+            ]
+        );
+
+        // 2. Verify save_auto_state_transactional preserves an existing file when active capture fails.
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url2 = format!("ws://{}", listener2.local_addr().unwrap());
+        let server2 = tokio::spawn(async move {
+            let (stream, _) = listener2.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let id = cmd["id"].clone();
+                let method = cmd["method"].as_str().unwrap_or("");
+                let reply = match method {
+                    "Network.getAllCookies" => json!({ "id": id, "result": { "cookies": [] } }),
+                    "Runtime.evaluate" => json!({
+                        "id": id,
+                        "error": { "code": -32000, "message": "Execution context was destroyed" }
+                    }),
+                    _ => json!({ "id": id, "result": {} }),
+                };
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
+            }
+        });
+
+        let tmp_home = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp_home.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let state_file = sessions_dir.join("preserve-test-s1.json");
+        let original = r#"{"cookies":[],"origins":[{"origin":"https://keep.test","localStorage":[{"name":"tok","value":"ok"}]}]}"#;
+        fs::write(&state_file, original).unwrap();
+
+        let client2 = CdpClient::connect(&ws_url2).await.unwrap();
+        let save_res = save_state(
+            &client2,
+            "s1",
+            Some(state_file.to_str().unwrap()),
+            Some("preserve-test"),
+            "s1",
+            &HashSet::new(),
+        )
+        .await;
+        assert!(save_res.is_err(), "capture error should propagate");
+        assert_eq!(fs::read_to_string(&state_file).unwrap(), original);
+        drop(client2);
+        server2.abort();
     }
 }
