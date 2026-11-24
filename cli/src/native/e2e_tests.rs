@@ -20197,6 +20197,180 @@ async fn e2e_firefox_snapshot_refs_cursor_interactive() {
     firefox_close(&mut state).await;
 }
 
+async fn firefox_log(state: &mut DaemonState) -> Vec<String> {
+    firefox_eval(state, "window.__log")
+        .await
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_click_buttons_modifiers_and_double_click() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+
+    let setup = r#"
+        document.body.innerHTML = '<button id="target" style="width:200px;height:80px">t</button>';
+        window.__log = [];
+        for (const type of ["mousedown", "mouseup", "click", "auxclick", "dblclick", "contextmenu"]) {
+            document.addEventListener(type, (e) => {
+                if (type === "contextmenu") e.preventDefault();
+                window.__log.push(`${type}:${e.button}:${e.detail}:${+e.metaKey}${+e.shiftKey}`);
+            }, true);
+        }
+        true
+    "#;
+    assert_eq!(firefox_eval(&mut state, setup).await, json!(true));
+
+    let reset = "window.__log = []; true";
+    assert_eq!(firefox_eval(&mut state, reset).await, json!(true));
+    assert_success(
+        &firefox_act(&mut state, "click", "#target", json!({ "button": "right" })).await,
+    );
+    let lines = firefox_log(&mut state).await;
+    assert!(
+        lines.iter().any(|line| line.starts_with("contextmenu:2:")),
+        "a right click must open the context menu: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("click:")),
+        "a right click must not fire click: {lines:?}"
+    );
+
+    assert_eq!(firefox_eval(&mut state, reset).await, json!(true));
+    assert_success(
+        &firefox_act(
+            &mut state,
+            "click",
+            "#target",
+            json!({ "button": "middle" }),
+        )
+        .await,
+    );
+    let lines = firefox_log(&mut state).await;
+    assert!(
+        lines.iter().any(|line| line.starts_with("auxclick:1:")),
+        "a middle click must fire auxclick with button 1: {lines:?}"
+    );
+
+    assert_eq!(firefox_eval(&mut state, reset).await, json!(true));
+    assert_success(
+        &firefox_act(
+            &mut state,
+            "click",
+            "#target",
+            json!({ "modifiers": 4 | 8 }),
+        )
+        .await,
+    );
+    let lines = firefox_log(&mut state).await;
+    assert!(
+        lines.iter().any(|line| line == "click:0:1:11"),
+        "meta and shift must be held during the click: {lines:?}"
+    );
+
+    assert_eq!(firefox_eval(&mut state, reset).await, json!(true));
+    assert_success(&firefox_act(&mut state, "dblclick", "#target", json!({})).await);
+    let clicks = firefox_log(&mut state)
+        .await
+        .into_iter()
+        .filter(|line| line.starts_with("click:"))
+        .count();
+    assert_eq!(clicks, 2, "a double click must send two full clicks");
+
+    let rejected = firefox_act(&mut state, "click", "#target", json!({ "button": "bogus" })).await;
+    assert!(
+        rejected.get("error").is_some(),
+        "an unknown button must fail: {rejected}"
+    );
+
+    firefox_close(&mut state).await;
+}
+
+/// Clicking with `--modifiers` when `onclick` or `onmousedown` opens `confirm()` returns
+/// `dialogOpened` promptly and releases the modifier (and any held button) once the dialog closes.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_modified_click_opening_dialog_defers_modifier_release() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(
+        &mut state,
+        "data:text/html,\
+        <button id=on-click>Click confirm</button>\
+        <button id=on-down>Down confirm</button>\
+        <button id=plain>Plain</button>\
+        <script>\
+          window.log = [];\
+          document.getElementById('on-click').addEventListener('click', e => {\
+            window.log.push('click:' + e.shiftKey);\
+            confirm('from click');\
+          });\
+          document.getElementById('on-down').addEventListener('mousedown', e => {\
+            window.log.push('down:' + e.shiftKey);\
+            confirm('from down');\
+          });\
+          document.getElementById('plain').addEventListener('click', e => {\
+            window.log.push('plain:' + e.shiftKey + ':' + e.buttons);\
+          });\
+        </script>",
+    )
+    .await;
+
+    let click_resp = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        firefox_act(&mut state, "click", "#on-click", json!({ "modifiers": 8 })),
+    )
+    .await
+    .expect("shift-click opening confirm() must not block on modifier release");
+    assert_success(&click_resp);
+    assert_eq!(get_data(&click_resp)["dialogOpened"], true, "{click_resp}");
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "d1", "action": "dialog", "response": "accept" }),
+        )
+        .await,
+    );
+    assert_success(&firefox_act(&mut state, "click", "#plain", json!({})).await);
+
+    let down_resp = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        firefox_act(&mut state, "click", "#on-down", json!({ "modifiers": 8 })),
+    )
+    .await
+    .expect("shift-mousedown opening confirm() must not block on modifier release");
+    assert_success(&down_resp);
+    assert_eq!(get_data(&down_resp)["dialogOpened"], true, "{down_resp}");
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({ "id": "d2", "action": "dialog", "response": "accept" }),
+        )
+        .await,
+    );
+    assert_success(&firefox_act(&mut state, "click", "#plain", json!({})).await);
+
+    assert_eq!(
+        firefox_eval(&mut state, "JSON.stringify(window.log)").await,
+        "[\"click:true\",\"plain:false:0\",\"down:true\",\"plain:false:0\"]"
+    );
+    firefox_close(&mut state).await;
+}
+
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_role_selector_semantics() {

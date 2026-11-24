@@ -1567,7 +1567,7 @@ impl DaemonState {
                 &mut self.pending_dialog,
                 &mut self.pending_pointer_release,
             );
-            let held = hold.as_ref().map(|release| release.button);
+            let held = hold.as_ref().and_then(|release| release.button);
             let active_changed = firefox
                 .as_mut()
                 .is_some_and(|ff| ff.drain_events_with(dialog, hold));
@@ -1593,7 +1593,7 @@ impl DaemonState {
         let held = self
             .pending_pointer_release
             .as_ref()
-            .map(|release| release.button);
+            .and_then(|release| release.button);
         if let Some(ff) = self.firefox.as_mut() {
             let reconciled = ff
                 .reconcile_event_loss(&mut self.pending_dialog, &mut self.pending_pointer_release)
@@ -23665,7 +23665,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             owner_position: (12.0, 34.0),
             x: 12.0,
             y: 34.0,
-            button: crate::native::pointer::MouseButton::Left,
+            button: Some(crate::native::pointer::MouseButton::Left),
             click_count: 1,
             modifiers: crate::native::pointer::Modifiers::default(),
         });

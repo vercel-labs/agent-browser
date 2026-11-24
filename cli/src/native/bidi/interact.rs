@@ -347,7 +347,8 @@ fn hold_release(
     owner_tab: &str,
     position: (f64, f64),
     owner_position: (f64, f64),
-    button: MouseButton,
+    button: Option<MouseButton>,
+    modifiers: Modifiers,
 ) -> PendingRelease {
     PendingRelease {
         session_id: context.to_string(),
@@ -358,7 +359,7 @@ fn hold_release(
         y: position.1,
         button,
         click_count: 1,
-        modifiers: Modifiers::default(),
+        modifiers,
     }
 }
 
@@ -379,9 +380,33 @@ fn defer_release(
             owner_tab,
             position,
             (mouse.x, mouse.y),
-            button,
+            Some(button),
+            Modifiers::default(),
         ));
     }
+}
+
+/// Notes the modifier keys a dialog left held, so they are released once it closes. Keys the same
+/// hold already waits on are merged into it.
+fn defer_modifier_release(
+    state: &mut DaemonState,
+    context: &str,
+    owner_tab: &str,
+    modifiers: Modifiers,
+) {
+    if modifiers.is_empty() {
+        return;
+    }
+    if let Some(release) = state.pending_pointer_release.as_mut() {
+        if release.session_id == context && release.owner_tab() == owner_tab && release.blocked {
+            release.modifiers = release.modifiers.union(modifiers);
+            return;
+        }
+    }
+    let point = (state.mouse_state.x, state.mouse_state.y);
+    state.pending_pointer_release = Some(hold_release(
+        context, owner_tab, point, point, None, modifiers,
+    ));
 }
 
 /// Moves the mouse along the planned path and records where it landed. Points on the way are
@@ -483,8 +508,12 @@ async fn perform_pointer(
                 commit_mouse_position(state.mouse, root);
             }
             apply_mouse_action(state.mouse, &pointer_action);
-            if let Some(release) = state.pending_release.as_ref() {
-                state.mouse.buttons |= release.button.mask();
+            if let Some(button) = state
+                .pending_release
+                .as_ref()
+                .and_then(|release| release.button)
+            {
+                state.mouse.buttons |= button.mask();
             }
             match pointer_action["type"].as_str() {
                 Some("pointerDown") if dialog_opened && state.pending_release.is_none() => {
@@ -496,7 +525,8 @@ async fn perform_pointer(
                             &owner_tab,
                             position,
                             (state.mouse.x, state.mouse.y),
-                            button,
+                            Some(button),
+                            Modifiers::default(),
                         ));
                     }
                 }
@@ -639,7 +669,7 @@ pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 }
 
 /// Decodes the click the way Chrome does, then presses the requested button the requested number
-/// of times. Modifier keys are refused: nothing here holds them yet.
+/// of times while holding any requested modifier keys.
 async fn click_with(
     cmd: &Value,
     state: &mut DaemonState,
@@ -654,16 +684,25 @@ async fn click_with(
     let ClickPlan::Pointer(spec) = plan else {
         return click_new_tab(selector, state).await;
     };
-    if spec.modifiers != Modifiers::default() {
-        return Err("--modifiers is not supported with --engine firefox".to_string());
-    }
     let target = resolve_target(state, selector).await?;
+    let top_context = {
+        let ff = session(state)?;
+        ff.contexts
+            .tab_of(&target.context)
+            .unwrap_or_else(|| ff.contexts.active_tab())
+            .to_string()
+    };
+    let keys = spec.modifiers.key_names();
     let actions = pointer_click(
         &Origin::Element(target.shared_id.clone()),
-        spec.button.name(),
+        spec.button,
         u32::from(spec.count),
     );
-    Ok(act_pointer(
+    if hold_modifiers(state, &target.context, &keys, "keyDown").await? {
+        defer_modifier_release(state, &target.context, &top_context, spec.modifiers);
+        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
+    }
+    let outcome = act_pointer(
         state,
         cmd,
         &target,
@@ -672,8 +711,65 @@ async fn click_with(
         actions,
         json!({ "clicked": selector }),
     )
-    .await?
-    .value)
+    .await;
+    match outcome {
+        Ok(outcome) if outcome.dialog_opened => {
+            defer_modifier_release(state, &target.context, &top_context, spec.modifiers);
+            Ok(outcome.value)
+        }
+        Ok(mut outcome) => {
+            if release_modifiers(state, &target.context, &top_context, &keys).await?
+                && action.reports_dialog()
+            {
+                outcome.value["dialogOpened"] = json!(true);
+            }
+            Ok(outcome.value)
+        }
+        Err(error) => {
+            if dialog_holds_tab(state.pending_dialog.as_ref(), &top_context) {
+                defer_modifier_release(state, &target.context, &top_context, spec.modifiers);
+            } else {
+                let _ = release_modifiers(state, &target.context, &top_context, &keys).await;
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Presses or releases the modifier keys for one gesture so they stay held across it, reporting
+/// whether a prompt took the command before it answered.
+async fn hold_modifiers(
+    state: &mut DaemonState,
+    context: &str,
+    keys: &[&str],
+    event_type: &str,
+) -> Result<bool, String> {
+    if keys.is_empty() {
+        return Ok(false);
+    }
+    let ff = state.firefox.as_ref().ok_or("Browser not launched")?;
+    perform_actions(ff, context, modifier_actions(event_type, keys)).await
+}
+
+/// Releases held modifier keys, falling back to the owning top-level tab if the click removed its
+/// containing iframe. Reports whether a prompt took the release before it answered.
+async fn release_modifiers(
+    state: &mut DaemonState,
+    target_context: &str,
+    top_context: &str,
+    keys: &[&str],
+) -> Result<bool, String> {
+    if keys.is_empty() {
+        return Ok(false);
+    }
+    let first = hold_modifiers(state, target_context, keys, "keyUp").await;
+    if let Ok(preempted) = &first {
+        return Ok(*preempted);
+    }
+    if top_context == target_context {
+        return first;
+    }
+    hold_modifiers(state, top_context, keys, "keyUp").await
 }
 
 /// Opens the target link in a new tab, returning Chrome's `{clicked, newTab, url}` shape.
@@ -1192,26 +1288,38 @@ pub async fn input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         ),
     };
     let value = json!({ "dispatched": raw.event_type });
-    let modifiers = modifier_names(raw.modifiers.unwrap_or(0));
-    if modifiers.is_empty() {
+    let mask = raw.modifiers.unwrap_or(0) & 15;
+    let mods = Modifiers::from_mask(i64::from(mask)).unwrap_or_default();
+    if mods.is_empty() {
         return Ok(act_raw(state, actions, (x, y), value).await?.value);
     }
 
     let context = session(state)?.contexts.active().to_string();
-    perform_actions(
-        session(state)?,
-        &context,
-        modifier_actions("keyDown", &modifiers),
-    )
-    .await?;
+    let top_context = host_tab(session(state)?, &context);
+    let keys = modifier_names(mask);
+    if hold_modifiers(state, &context, &keys, "keyDown").await? {
+        defer_modifier_release(state, &context, &top_context, mods);
+        return Ok(value);
+    }
     let outcome = act_raw(state, actions, (x, y), value).await;
-    perform_actions(
-        session(state)?,
-        &context,
-        modifier_actions("keyUp", &modifiers),
-    )
-    .await?;
-    Ok(outcome?.value)
+    match outcome {
+        Ok(outcome) if outcome.dialog_opened => {
+            defer_modifier_release(state, &context, &top_context, mods);
+            Ok(outcome.value)
+        }
+        Ok(outcome) => {
+            release_modifiers(state, &context, &top_context, &keys).await?;
+            Ok(outcome.value)
+        }
+        Err(error) => {
+            if dialog_holds_tab(state.pending_dialog.as_ref(), &top_context) {
+                defer_modifier_release(state, &context, &top_context, mods);
+            } else {
+                let _ = release_modifiers(state, &context, &top_context, &keys).await;
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Low-level touch input over the supplied points, releasing the previous ones on end. Points are
@@ -1367,10 +1475,33 @@ async fn send_release(
         x: position.0,
         y: position.1,
     };
+    let mut actions: Vec<Value> = Vec::new();
+    if let Some(button) = release.button {
+        if let Some(sources) = pointer_up(&origin, button.name()).as_array() {
+            actions.extend(sources.iter().cloned());
+        }
+    }
+    let keys = release.modifiers.key_names();
+    if !keys.is_empty() {
+        let mut key_source = modifier_actions("keyUp", &keys);
+        if release.button.is_some() {
+            if let Some(steps) = key_source[0]["actions"].as_array_mut() {
+                for _ in 0..2 {
+                    steps.insert(0, json!({ "type": "pause", "duration": 0 }));
+                }
+            }
+        }
+        if let Some(sources) = key_source.as_array() {
+            actions.extend(sources.iter().cloned());
+        }
+    }
+    if actions.is_empty() {
+        return Ok(());
+    }
     ff.bidi
         .send_raw(
             "input.performActions",
-            json!({ "context": context, "actions": pointer_up(&origin, release.button.name()) }),
+            json!({ "context": context, "actions": actions }),
         )
         .await
         .map(|_| ())
@@ -2878,12 +3009,89 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clicks_refuse_modifier_keys() {
+    async fn modified_click_releases_modifiers_on_parent_tab_when_iframe_is_removed() {
+        use crate::native::bidi::session::tests::{fake_session_with_replies, FakeReply};
+
+        let key_up_contexts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = key_up_contexts.clone();
+        let (mut ff, _tx, _calls) = fake_session_with_replies(move |request| {
+            let params = &request["params"];
+            match request["method"].as_str() {
+                Some("browsingContext.getTree") => FakeReply::Result(json!({
+                    "contexts": [{ "context": "ctx-tab", "children": [{ "context": "ctx-iframe" }] }]
+                })),
+                Some("browsingContext.locateNodes") => FakeReply::Result(json!({
+                    "nodes": [{ "sharedId": "frame" }]
+                })),
+                Some("script.callFunction") if params["this"]["sharedId"] == "frame" => {
+                    FakeReply::Result(hop_reply(plain_hop(), false))
+                }
+                Some("script.callFunction")
+                    if params.get("this").is_none()
+                        && params["functionDeclaration"]
+                            .as_str()
+                            .is_some_and(|source| source.contains("innerWidth")) =>
+                {
+                    FakeReply::Result(viewport_reply())
+                }
+                Some("script.callFunction") if params.get("this").is_none() => {
+                    FakeReply::Result(json!({
+                        "type": "success",
+                        "result": { "type": "node", "sharedId": "iframe-btn" }
+                    }))
+                }
+                Some("script.callFunction") => FakeReply::Result(located_at((10.0, 12.0), None)),
+                Some("input.performActions") => {
+                    let context = request["params"]["context"].as_str().unwrap_or("");
+                    let is_key_up = request["params"]["actions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|src| src["actions"].as_array().into_iter().flatten())
+                        .any(|step| step["type"] == "keyUp");
+                    if is_key_up {
+                        recorded.lock().unwrap().push(context.to_string());
+                        if context == "ctx-iframe" {
+                            return FakeReply::Error {
+                                error: "no such frame".into(),
+                                message: "frame was removed".into(),
+                            };
+                        }
+                    }
+                    FakeReply::Result(json!({}))
+                }
+                _ => FakeReply::Result(json!({})),
+            }
+        })
+        .await;
+        ff.contexts = super::super::contexts::Contexts::from_tree(&json!({
+            "contexts": [{
+                "context": "ctx-tab",
+                "url": "https://example.test/",
+                "children": [{
+                    "context": "ctx-iframe",
+                    "url": "https://example.test/frame",
+                    "children": []
+                }]
+            }]
+        }))
+        .unwrap();
+        ff.contexts.activate("ctx-iframe");
         let mut state = DaemonState::new();
-        let held = json!({"selector": "#a", "modifiers": 2});
-        let refused = "--modifiers is not supported with --engine firefox";
-        assert_eq!(click(&held, &mut state).await.unwrap_err(), refused);
-        assert_eq!(dblclick(&held, &mut state).await.unwrap_err(), refused);
+        state.firefox = Some(ff);
+
+        let result = click(
+            &json!({ "selector": "#close-iframe", "modifiers": 8 }),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, json!({ "clicked": "#close-iframe" }));
+        assert_eq!(
+            *key_up_contexts.lock().unwrap(),
+            vec!["ctx-iframe", "ctx-tab"]
+        );
     }
 
     const LOCAL_POINT: (f64, f64) = (40.0, 50.0);
@@ -2897,7 +3105,7 @@ mod tests {
             owner_position: OWNER_POINT,
             x: LOCAL_POINT.0,
             y: LOCAL_POINT.1,
-            button,
+            button: Some(button),
             click_count: 1,
             modifiers: Modifiers::default(),
         }
@@ -2907,6 +3115,357 @@ mod tests {
         let mut release = held_release(tab, context, button);
         release.blocked = false;
         Some(release)
+    }
+
+    /// The event Firefox sends when a `confirm` prompt opens in `context`.
+    fn prompt_event(context: &str) -> Value {
+        json!({
+            "type": "event",
+            "method": "browsingContext.userPromptOpened",
+            "params": { "context": context, "type": "confirm", "message": "sure?" },
+        })
+    }
+
+    /// The prompt the daemon tracks for `context`.
+    fn tracked_prompt(context: &str) -> PendingDialog {
+        PendingDialog {
+            dialog_type: "confirm".into(),
+            message: "sure?".into(),
+            session_id: Some(context.into()),
+            owner_context: Some(context.into()),
+            ..Default::default()
+        }
+    }
+
+    /// The action types one `input.performActions` request carries.
+    fn input_steps(request: &Value) -> Vec<String> {
+        request["params"]["actions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|source| source["actions"].as_array().into_iter().flatten())
+            .filter_map(|step| step["type"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Every `input.performActions` request the session received, oldest first.
+    fn input_requests(requests: &Arc<Mutex<Vec<Value>>>) -> Vec<Value> {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request["method"] == "input.performActions")
+            .cloned()
+            .collect()
+    }
+
+    /// True when one of the recorded requests carries `step`.
+    fn sent_step(requests: &Arc<Mutex<Vec<Value>>>, step: &str) -> bool {
+        input_requests(requests)
+            .iter()
+            .any(|request| input_steps(request).iter().any(|name| name == step))
+    }
+
+    /// The last recorded request that carries `step`.
+    fn request_with(requests: &Arc<Mutex<Vec<Value>>>, step: &str) -> Option<Value> {
+        input_requests(requests)
+            .into_iter()
+            .rev()
+            .find(|request| input_steps(request).iter().any(|name| name == step))
+    }
+
+    /// A session where clicking one element opens a prompt at the `prompt_on` input step and leaves
+    /// that command unanswered. Every request is recorded.
+    async fn clicking_session(prompt_on: &'static str) -> (DaemonState, Arc<Mutex<Vec<Value>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let events: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>> =
+            Arc::new(Mutex::new(None));
+        let sender = events.clone();
+        let (mut ff, tx, _calls) = fake_session_with_replies(move |request| {
+            recorded.lock().unwrap().push(request.clone());
+            let params = &request["params"];
+            let function = params["functionDeclaration"].as_str().unwrap_or_default();
+            match request["method"].as_str() {
+                Some("browsingContext.getTree") => FakeReply::Result(json!({
+                    "contexts": [{ "context": "ctx-active", "url": "https://example.test/" }]
+                })),
+                Some("script.callFunction") if params["this"]["sharedId"].as_str().is_some() => {
+                    FakeReply::Result(located_at(LOCAL_POINT, None))
+                }
+                Some("script.callFunction") if function.contains("innerWidth") => {
+                    FakeReply::Result(viewport_reply())
+                }
+                Some("script.callFunction") => FakeReply::Result(json!({
+                    "type": "success",
+                    "result": { "type": "node", "sharedId": "sid-1" }
+                })),
+                Some("input.performActions") => {
+                    if input_steps(request).iter().any(|step| step == prompt_on) {
+                        if let Some(tx) = sender.lock().unwrap().as_ref() {
+                            tx.send(prompt_event("ctx-active")).unwrap();
+                        }
+                        return FakeReply::Silent;
+                    }
+                    FakeReply::Result(json!({}))
+                }
+                _ => FakeReply::Result(json!({})),
+            }
+        })
+        .await;
+        *events.lock().unwrap() = Some(tx);
+        ff.contexts = super::super::contexts::Contexts::from_tree(&json!({
+            "contexts": [{ "context": "ctx-active", "url": "https://example.test/" }]
+        }))
+        .unwrap();
+        ff.contexts.activate("ctx-active");
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        (state, requests)
+    }
+
+    #[tokio::test]
+    async fn modified_click_opening_prompt_on_pointer_up_returns_dialog_opened_and_defers_key_up() {
+        let (mut state, requests) = clicking_session("pointerUp").await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            click(
+                &json!({ "selector": "#dialog", "modifiers": 8 }),
+                &mut state,
+            ),
+        )
+        .await
+        .expect("a modified click must not wait for the prompt")
+        .unwrap();
+
+        assert_eq!(
+            result,
+            json!({ "clicked": "#dialog", "dialogOpened": true })
+        );
+        let hold = state
+            .pending_pointer_release
+            .as_ref()
+            .expect("the held shift waits for the prompt");
+        assert!(hold.button.is_none(), "the button was already released");
+        assert_eq!(hold.modifiers, Modifiers::parse_list("shift").unwrap());
+        assert!(
+            !sent_step(&requests, "keyUp"),
+            "no key release may be sent while the prompt is open"
+        );
+
+        state.pending_dialog = Some(tracked_prompt("ctx-active"));
+        dialog(&json!({ "response": "accept" }), &mut state)
+            .await
+            .unwrap();
+
+        assert!(state.pending_pointer_release.is_none());
+        let release = request_with(&requests, "keyUp").expect("the shift is released");
+        assert_eq!(release["params"]["context"], "ctx-active");
+        assert_eq!(
+            release["params"]["actions"],
+            json!([{
+                "type": "key",
+                "id": "key",
+                "actions": [{ "type": "keyUp", "value": "\u{E008}" }],
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn modified_click_opening_prompt_on_pointer_down_releases_button_and_modifiers_after_dialog(
+    ) {
+        let (mut state, requests) = clicking_session("pointerDown").await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            click(
+                &json!({ "selector": "#dialog", "modifiers": 8 }),
+                &mut state,
+            ),
+        )
+        .await
+        .expect("a modified click must not wait for the prompt")
+        .unwrap();
+
+        assert_eq!(
+            result,
+            json!({ "clicked": "#dialog", "dialogOpened": true })
+        );
+        let hold = state
+            .pending_pointer_release
+            .as_ref()
+            .expect("the press waits for the prompt");
+        assert_eq!(hold.button, Some(MouseButton::Left));
+        assert_eq!(hold.modifiers, Modifiers::parse_list("shift").unwrap());
+        assert_eq!(state.mouse_state.buttons, 1);
+
+        state.pending_dialog = Some(tracked_prompt("ctx-active"));
+        dialog(&json!({ "response": "accept" }), &mut state)
+            .await
+            .unwrap();
+
+        assert!(state.pending_pointer_release.is_none());
+        assert_eq!(state.mouse_state.buttons, 0);
+        let release = request_with(&requests, "keyUp").expect("the press and shift are released");
+        let actions = release["params"]["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0]["type"], "pointer");
+        assert_eq!(
+            actions[0]["actions"][1],
+            json!({ "type": "pointerUp", "button": 0 })
+        );
+        assert_eq!(
+            actions[1]["actions"],
+            json!([
+                { "type": "pause", "duration": 0 },
+                { "type": "pause", "duration": 0 },
+                { "type": "keyUp", "value": "\u{E008}" },
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_modifier_release_falls_back_to_owner_tab_when_iframe_is_gone() {
+        let key_up_contexts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = key_up_contexts.clone();
+        let (mut ff, _tx, _calls) = fake_session_with_replies(move |request| {
+            if request["method"] == "input.performActions" {
+                let context = request["params"]["context"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                recorded.lock().unwrap().push(context.clone());
+                if context == "ctx-frame" {
+                    return FakeReply::Error {
+                        error: "no such frame",
+                        message: "frame was removed",
+                    };
+                }
+            }
+            FakeReply::Result(json!({}))
+        })
+        .await;
+        ff.contexts = super::super::contexts::Contexts::from_tree(&json!({
+            "contexts": [{
+                "context": "ctx-tab",
+                "url": "https://example.test/",
+                "children": [{ "context": "ctx-frame", "url": "https://example.test/frame" }]
+            }]
+        }))
+        .unwrap();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        let mut hold = hold_release(
+            "ctx-frame",
+            "ctx-tab",
+            LOCAL_POINT,
+            OWNER_POINT,
+            None,
+            Modifiers::parse_list("shift").unwrap(),
+        );
+        hold.blocked = false;
+        state.pending_pointer_release = Some(hold);
+
+        release_pending(
+            state.firefox.as_ref().unwrap(),
+            None,
+            &mut state.pending_pointer_release,
+            &mut state.mouse_state.buttons,
+        )
+        .await;
+
+        assert_eq!(*key_up_contexts.lock().unwrap(), ["ctx-frame", "ctx-tab"]);
+        assert!(state.pending_pointer_release.is_none());
+    }
+
+    #[tokio::test]
+    async fn input_mouse_defers_modifier_release_when_prompt_opens() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let events: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>> =
+            Arc::new(Mutex::new(None));
+        let sender = events.clone();
+        let (mut ff, tx, _calls) = fake_session_with_replies(move |request| {
+            recorded.lock().unwrap().push(request.clone());
+            if request["method"] == "input.performActions"
+                && input_steps(request)
+                    .iter()
+                    .any(|step| step == "pointerDown")
+            {
+                if let Some(tx) = sender.lock().unwrap().as_ref() {
+                    tx.send(prompt_event("ctx-active")).unwrap();
+                }
+                return FakeReply::Silent;
+            }
+            FakeReply::Result(json!({}))
+        })
+        .await;
+        *events.lock().unwrap() = Some(tx);
+        ff.contexts = super::super::contexts::Contexts::from_tree(&json!({
+            "contexts": [{ "context": "ctx-active", "url": "https://example.test/" }]
+        }))
+        .unwrap();
+        ff.contexts.activate("ctx-active");
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.mouse_state.x = 10.0;
+        state.mouse_state.y = 20.0;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            input_mouse(
+                &json!({ "type": "mousePressed", "x": 40, "y": 50, "modifiers": 8 }),
+                &mut state,
+            ),
+        )
+        .await
+        .expect("a modified raw press must not wait for the prompt")
+        .unwrap();
+
+        assert_eq!(result, json!({ "dispatched": "mousePressed" }));
+        let hold = state
+            .pending_pointer_release
+            .as_ref()
+            .expect("the press and shift wait for the prompt");
+        assert_eq!(hold.button, Some(MouseButton::Left));
+        assert_eq!(hold.modifiers, Modifiers::parse_list("shift").unwrap());
+        assert_eq!(state.mouse_state.buttons, 1);
+        assert!(
+            !sent_step(&requests, "keyUp"),
+            "no key release may be sent while the prompt is open"
+        );
+    }
+
+    #[tokio::test]
+    async fn hold_modifiers_opening_prompt_defers_release_without_clicking() {
+        let (mut state, requests) = clicking_session("keyDown").await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            click(
+                &json!({ "selector": "#dialog", "modifiers": 8 }),
+                &mut state,
+            ),
+        )
+        .await
+        .expect("a modified click must not wait for the prompt")
+        .unwrap();
+
+        assert_eq!(
+            result,
+            json!({ "clicked": "#dialog", "dialogOpened": true })
+        );
+        assert!(
+            !sent_step(&requests, "pointerDown") && !sent_step(&requests, "pointerUp"),
+            "the click must not be pressed once a prompt took the key down"
+        );
+        let hold = state
+            .pending_pointer_release
+            .as_ref()
+            .expect("the held shift waits for the prompt");
+        assert!(hold.button.is_none(), "no button was pressed");
+        assert_eq!(hold.modifiers, Modifiers::parse_list("shift").unwrap());
     }
 
     /// A BiDi socket that answers `input.performActions` aimed at `release_error_context` (every

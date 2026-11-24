@@ -35,7 +35,7 @@ pub struct PendingRelease {
     pub owner_position: (f64, f64),
     pub x: f64,
     pub y: f64,
-    pub button: MouseButton,
+    pub button: Option<MouseButton>,
     pub click_count: u8,
     pub modifiers: Modifiers,
 }
@@ -58,7 +58,9 @@ impl PendingRelease {
 
     /// Clears the bit this hold kept pressed.
     pub fn clear_pressed(&self, buttons: &mut i32) {
-        *buttons &= !self.button.mask();
+        if let Some(button) = self.button {
+            *buttons &= !button.mask();
+        }
     }
 }
 
@@ -1072,7 +1074,7 @@ async fn dispatch_click(
                         owner_position: (x, y),
                         x,
                         y,
-                        button: spec.button,
+                        button: Some(spec.button),
                         click_count: n,
                         modifiers: spec.modifiers,
                     }),
@@ -1101,6 +1103,9 @@ pub async fn dispatch_pending_release(
     client: &CdpClient,
     release: &PendingRelease,
 ) -> Result<(), String> {
+    let Some(button) = release.button else {
+        return Ok(());
+    };
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
@@ -1108,7 +1113,7 @@ pub async fn dispatch_pending_release(
                 event_type: "mouseReleased".to_string(),
                 x: release.x,
                 y: release.y,
-                button: Some(release.button.name().to_string()),
+                button: Some(button.name().to_string()),
                 buttons: Some(0),
                 click_count: Some(i32::from(release.click_count)),
                 delta_x: None,
