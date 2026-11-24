@@ -371,6 +371,13 @@ impl FirefoxSession {
                 e["method"].as_str(),
                 Some("browsingContext.contextCreated" | "browsingContext.domContentLoaded")
             ) {
+                if e["method"].as_str() == Some("browsingContext.domContentLoaded") {
+                    if let (Some(context), Some(url)) =
+                        (e["params"]["context"].as_str(), e["params"]["url"].as_str())
+                    {
+                        self.contexts.set_url(context, url);
+                    }
+                }
                 if let Some(url) = e["params"]["url"].as_str() {
                     self.note_visit(url);
                 }
@@ -513,7 +520,10 @@ impl FirefoxSession {
         release: &mut Option<PendingRelease>,
     ) -> Result<bool, String> {
         let lost = self.bidi.take_event_loss();
-        if !lost && !self.events.has_lost_events() && !self.contexts.active().is_empty() {
+        if !lost
+            && !self.events.has_lost_events()
+            && (!self.contexts.active().is_empty() || self.contexts.pinned_gone().is_some())
+        {
             return Ok(false);
         }
         let lost = lost || self.events.has_lost_events();
@@ -710,6 +720,11 @@ impl FirefoxSession {
     /// The tab that holds the active context.
     pub fn active_tab(&self) -> &str {
         self.contexts.active_tab()
+    }
+
+    /// Enables or disables strict tab pinning on this Firefox session.
+    pub fn set_pin(&mut self, pin: bool) {
+        self.contexts.set_pin(pin);
     }
 
     /// URL of `context`, read from the browsing context tree.
