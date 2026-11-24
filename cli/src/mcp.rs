@@ -993,7 +993,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FILL,
             "Fill input",
-            "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly; a color input takes any CSS color Chrome accepts and stores it as #rrggbb. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome backend only.",
+            "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly; a color input takes any CSS color Chrome accepts and stores it as #rrggbb. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome and Firefox.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to fill." }
@@ -6910,7 +6910,12 @@ mod tests {
             let error = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap_err();
             assert!(error.message.contains("may not set"), "{:?}", bad);
         }
-        for ok in [vec!["--engine", "obscura"], vec!["--full"], vec!["-i"]] {
+        for ok in [
+            vec!["--engine", "obscura"],
+            vec!["--engine", "firefox"],
+            vec!["--full"],
+            vec!["-i"],
+        ] {
             let arguments = json!({ "extraArgs": ok });
             assert!(cli_tool_args(&arguments, vec!["open".to_string()], None).is_ok());
         }

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::bidi::{remote_to_json, Events, SANDBOX};
+use super::client::{remote_to_json, Events, SANDBOX};
 use super::daemon;
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
@@ -408,9 +408,7 @@ pub(super) fn neterror_message(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{
-        fake_session, fake_session_with_replies, FakeReply,
-    };
+    use crate::native::bidi::session::tests::{fake_session, fake_session_with_replies, FakeReply};
 
     #[test]
     fn neterror_url_becomes_chromes_message() {
@@ -541,9 +539,9 @@ mod tests {
     /// gives up, and the failure must name the load timeout rather than the client's own.
     #[tokio::test(start_paused = true)]
     async fn a_load_past_the_client_default_reports_the_load_timeout() {
-        use crate::native::firefox::session::tests::FakeReply;
+        use crate::native::bidi::session::tests::FakeReply;
         let (ff, _events, _calls) =
-            crate::native::firefox::session::tests::fake_session_with_replies(|cmd: &Value| {
+            crate::native::bidi::session::tests::fake_session_with_replies(|cmd: &Value| {
                 if cmd["method"] == "browsingContext.navigate" {
                     FakeReply::Silent
                 } else {
@@ -576,7 +574,7 @@ mod tests {
     async fn mock_history_socket() -> (DaemonState, Socket) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
-        let client = super::super::bidi::BidiClient::connect(&url);
+        let client = super::super::client::BidiClient::connect(&url);
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
             tokio_tungstenite::accept_async(stream).await.unwrap()

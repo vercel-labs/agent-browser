@@ -170,7 +170,7 @@ async fn measure_target(
         .bidi
         .call_function_on_in_sandbox(
             &target.context,
-            super::bidi::SANDBOX,
+            super::client::SANDBOX,
             &prepare_js(matches!(action, PointerAction::Check)),
             target.node_ref(),
         )
@@ -225,7 +225,7 @@ async fn map_through_frames(
         let js = frame_transform::hop_js(point, child_viewport);
         let mapped = ff
             .bidi
-            .call_function_on_in_sandbox(parent, super::bidi::SANDBOX, &js, frame)
+            .call_function_on_in_sandbox(parent, super::client::SANDBOX, &js, frame)
             .await?;
         if let Some(error) = mapped["error"].as_str() {
             return Err(frame_transform::hop_error(label, error));
@@ -400,7 +400,7 @@ async fn move_mouse(
         .bidi
         .call_function_in_sandbox(
             context,
-            super::bidi::SANDBOX,
+            super::client::SANDBOX,
             "() => [innerWidth - 1, innerHeight - 1]",
             vec![],
         )
@@ -1362,7 +1362,7 @@ async fn send_release(
     context: &str,
     position: (f64, f64),
     release: &PendingRelease,
-) -> Result<(), super::bidi::BidiError> {
+) -> Result<(), super::client::BidiError> {
     let origin = Origin::Viewport {
         x: position.0,
         y: position.1,
@@ -1384,11 +1384,11 @@ fn retire_release(hold: &mut Option<PendingRelease>, buttons: &mut i32) {
 }
 
 /// True when a BiDi error means the prompt, context or tab a command targeted is already gone.
-fn prompt_gone(error: &super::bidi::BidiError) -> bool {
+fn prompt_gone(error: &super::client::BidiError) -> bool {
     error.code.as_deref() == Some("no such alert") || context_gone(error)
 }
 
-fn context_gone(error: &super::bidi::BidiError) -> bool {
+fn context_gone(error: &super::client::BidiError) -> bool {
     matches!(
         error.code.as_deref(),
         Some("no such frame" | "no such context" | "no such window")
@@ -1468,10 +1468,10 @@ fn dialog_status(dialog: Option<&PendingDialog>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{
+    use crate::native::bidi::session::tests::{
         fake_session_with, fake_session_with_replies, fake_session_with_script, Calls, FakeReply,
     };
-    use crate::native::firefox::target::IN_DOCUMENT_JS;
+    use crate::native::bidi::target::IN_DOCUMENT_JS;
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
@@ -1667,9 +1667,9 @@ mod tests {
             wheel(&command, &mut state).await.unwrap();
             let request = requests.lock().unwrap().pop().unwrap();
             let scroll = &request["params"]["actions"][0]["actions"][0];
-            assert_eq!(scroll["x"], json!(expected.0));
-            assert_eq!(scroll["y"], json!(expected.1));
-            assert_eq!(scroll["deltaY"], json!(12.0));
+            assert_eq!(scroll["x"].as_f64(), Some(expected.0));
+            assert_eq!(scroll["y"].as_f64(), Some(expected.1));
+            assert_eq!(scroll["deltaY"].as_f64(), Some(12.0));
             assert_eq!((state.mouse_state.x, state.mouse_state.y), expected);
             assert_eq!(state.mouse_state.buttons, 1);
         }
@@ -1703,7 +1703,7 @@ mod tests {
             }
             let _ = finished.await;
         });
-        ff.bidi = super::super::bidi::BidiClient::connect(&address)
+        ff.bidi = super::super::client::BidiClient::connect(&address)
             .await
             .unwrap()
             .into();
@@ -2842,6 +2842,40 @@ mod tests {
         assert!(state.pending_dialog.is_none());
         assert_eq!(*calls.lock().unwrap(), ["browsingContext.handleUserPrompt"]);
     }
+    #[tokio::test]
+    async fn dialog_targets_the_tab_that_opened_the_prompt() {
+        use crate::native::bidi::session::tests::{fake_session_with_replies, FakeReply};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let (mut ff, _tx, _calls) = fake_session_with_replies(move |request| {
+            recorded.lock().unwrap().push(request.clone());
+            FakeReply::Result(json!({}))
+        })
+        .await;
+        ff.contexts.activate("ctx-active");
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "confirm".into(),
+            message: "sure?".into(),
+            session_id: Some("ctx-other".into()),
+            ..Default::default()
+        });
+
+        dialog(&json!({ "response": "accept" }), &mut state)
+            .await
+            .unwrap();
+
+        let params = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request["method"] == "browsingContext.handleUserPrompt")
+            .map(|request| request["params"].clone())
+            .expect("the prompt command is sent");
+        assert_eq!(params["context"], "ctx-other");
+        assert!(state.pending_dialog.is_none());
+    }
 
     #[tokio::test]
     async fn clicks_refuse_modifier_keys() {
@@ -2927,7 +2961,7 @@ mod tests {
             }
         });
         let (mut ff, _tx, _) = fake_session_with(|_| json!({})).await;
-        ff.bidi = super::super::bidi::BidiClient::connect(&address)
+        ff.bidi = super::super::client::BidiClient::connect(&address)
             .await
             .unwrap()
             .into();

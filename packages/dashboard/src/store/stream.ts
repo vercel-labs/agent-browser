@@ -130,7 +130,9 @@ export function useStreamSync(port: number) {
     };
 
     ws.onclose = () => {
+      if (wsRef.current !== ws) return;
       setConnected(false);
+      setTabs([]);
       const delay = Math.min(2000 * 2 ** retryCountRef.current, 30000);
       retryCountRef.current++;
       reconnectTimerRef.current = setTimeout(connect, delay);
@@ -151,6 +153,10 @@ export function useStreamSync(port: number) {
       switch (msg.type) {
         case "frame":
           setFrame(msg.data);
+          break;
+
+        case "frame_clear":
+          setFrame(null);
           break;
 
         case "status":
@@ -224,8 +230,12 @@ export function useStreamSync(port: number) {
     connect();
     return () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      wsRef.current?.close();
+      const ws = wsRef.current;
+      wsRef.current = null;
+      ws?.close();
+      setConnected(false);
+      setTabs([]);
       setWsRef(null);
     };
-  }, [connect, setWsRef]);
+  }, [connect, setConnected, setTabs, setWsRef]);
 }

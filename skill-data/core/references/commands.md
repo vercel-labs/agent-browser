@@ -111,7 +111,13 @@ agent-browser upload @e1 file.pdf # Upload files (relative to cwd; errors: file_
 
 On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
 
+Firefox cancels an HTTP auth challenge that the session has no credentials for, so the page loads the server's 401 response instead of waiting on a browser prompt. Run `set credentials` before you open the page.
+
+Pointer commands inside an iframe that has a CSS transform can miss their target.
+
 `type` focuses the element without clearing its current value. Printable characters are inserted as text; Enter, Tab, and line breaks use key events. Use `fill` to replace the current value.
+
+On Firefox, `fill`, `type`, `check`, `uncheck`, and `select` run the same prechecks, refusal codes, and warnings as Chrome, and `select --by value|label` restricts matching. `check` and `uncheck` target the checkbox control itself rather than its label or wrapper, refuse covered checkboxes, and use a DOM click for hidden native checkboxes. `fill` and `type` return `dialogOpened: true` when interrupted by a page dialog.
 
 `upload` fails with `file_not_found` when a path does not exist and with `not_file_input` when the target is not a file input; relative paths resolve against the current directory. `diff snapshot` compares against the last snapshot taken on the tab with that snapshot's options, failing with `no_baseline` when there is none and `baseline_mismatch` when a named option differs.
 

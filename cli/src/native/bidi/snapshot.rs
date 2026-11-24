@@ -5,8 +5,8 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
-use super::bidi::SANDBOX;
-use super::rdp::RdpClient;
+use super::client::SANDBOX;
+use super::firefox_devtools::RdpClient;
 use super::session::FirefoxSession;
 use super::target::{current_document_id, find_element};
 use crate::native::actions::{self as chrome, DaemonState};
@@ -1053,7 +1053,7 @@ mod tests {
 
     #[tokio::test]
     async fn lagged_frame_events_do_not_abort_wait() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         let (tx, events) = broadcast::channel(1024);
         ff.frames = Some(FrameWatch {
             events,
@@ -1086,7 +1086,7 @@ mod tests {
 
     #[tokio::test]
     async fn frame_actor_reports_deadline_and_closed_stream() {
-        let (mut ff, _, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session().await;
         ff.frames = Some(FrameWatch {
             events: ff.rdp.subscribe(),
             actors: HashMap::new(),
@@ -1104,7 +1104,6 @@ mod tests {
 
         assert!(error.contains("child-context"), "{error}");
         assert!(error.contains("snapshot deadline"), "{error}");
-
         let (tx, events) = broadcast::channel(1024);
         drop(tx);
         ff.frames = Some(FrameWatch {
@@ -1130,12 +1129,12 @@ mod tests {
     async fn tab_lookup_session(
         answer: impl Fn(&str, &str) -> Option<Value> + Send + 'static,
     ) -> FirefoxSession {
-        use crate::native::firefox::rdp::tests::{get, pair, put};
+        use crate::native::bidi::firefox_devtools::tests::{get, pair, put};
 
         let secret = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let placed = secret.clone();
         let (mut ff, _, _) =
-            crate::native::firefox::session::tests::fake_session_with(move |v: &Value| {
+            crate::native::bidi::session::tests::fake_session_with(move |v: &Value| {
                 if let Some(value) = v["params"]["arguments"][1]["value"].as_str() {
                     *placed.lock().unwrap() = value.to_string();
                 }
@@ -1404,7 +1403,7 @@ mod tests {
         let mut state = DaemonState::new();
         state.ref_map = map;
         let error =
-            crate::native::firefox::target::resolve_target(&mut state, &format!("@{stale_ref}"))
+            crate::native::bidi::target::resolve_target(&mut state, &format!("@{stale_ref}"))
                 .await
                 .unwrap_err();
         assert_eq!(error, format!("Unknown ref: {stale_ref}"));
@@ -1483,7 +1482,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_capture_without_a_document_change_rolls_back_tracking() {
-        let (mut ff, tx, _) = crate::native::firefox::session::tests::fake_session().await;
+        let (mut ff, tx, _) = crate::native::bidi::session::tests::fake_session().await;
         std::mem::forget(tx);
         ff.refs
             .insert(("ctx-active".into(), "node-1".into(), "doc-1".into()), 7);
@@ -1512,9 +1511,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_capture_after_a_document_change_restores_document_scoped_refs() {
+        let (mut ff, tx, _) = crate::native::bidi::session::tests::fake_session().await;
+        std::mem::forget(tx);
+        ff.refs
+            .insert(("ctx-active".into(), "node-1".into(), "loader-1".into()), 7);
+        ff.shadow_ids.insert(7);
+
+        let checkpoint = SnapshotCheckpoint::capture(&ff);
+        ff.refs
+            .insert(("ctx-active".into(), "node-2".into(), "loader-2".into()), 8);
+        ff.shadow_ids.insert(8);
+        recover_failed_capture(&mut ff, checkpoint);
+
+        assert_eq!(ff.refs.len(), 1);
+        assert!(ff.refs.contains_key(&(
+            "ctx-active".to_string(),
+            "node-1".to_string(),
+            "loader-1".to_string()
+        )));
+        assert!(!ff.refs.contains_key(&(
+            "ctx-active".to_string(),
+            "node-2".to_string(),
+            "loader-2".to_string()
+        )));
+        assert_eq!(ff.shadow_ids, HashSet::from([7]));
+    }
+
+    #[tokio::test]
     async fn annotation_rejects_a_document_change_since_capture() {
         let (mut ff, _tx, _) =
-            crate::native::firefox::session::tests::fake_session_with_script(|params| {
+            crate::native::bidi::session::tests::fake_session_with_script(|params| {
                 if params["functionDeclaration"] != RESOLVE_JS {
                     return json!({});
                 }
@@ -1592,7 +1619,7 @@ mod tests {
         let log = calls.clone();
         let level = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (ff, _tx, _methods) =
-            crate::native::firefox::session::tests::fake_session_with_script(move |params| {
+            crate::native::bidi::session::tests::fake_session_with_script(move |params| {
                 log.lock().unwrap().push(params.clone());
                 let hosts = match level.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                     0 => json!([closed_root("host-1", "sr-1"), open_root("open-host", "sr-open")]),
@@ -1627,7 +1654,7 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let log = calls.clone();
         let (mut ff, _tx, _methods) =
-            crate::native::firefox::session::tests::fake_session_with_script(move |params| {
+            crate::native::bidi::session::tests::fake_session_with_script(move |params| {
                 log.lock().unwrap().push(params.clone());
                 let value = match params["functionDeclaration"].as_str().unwrap_or("") {
                     CLOSED_SHADOW_HOSTS_JS => json!([closed_root("host-1", "sr-1")]),
@@ -1659,9 +1686,9 @@ mod tests {
                 json!({"type": "success", "result": {"type": "array", "value": value}, "realm": "r"})
             })
             .await;
-        let (rdp, mut peer) = crate::native::firefox::rdp::tests::pair().await;
+        let (rdp, mut peer) = crate::native::bidi::firefox_devtools::tests::pair().await;
         tokio::spawn(async move {
-            use crate::native::firefox::rdp::tests::{get, put};
+            use crate::native::bidi::firefox_devtools::tests::{get, put};
             loop {
                 let request = get(&mut peer).await;
                 let reply = match (request["to"].as_str(), request["type"].as_str()) {

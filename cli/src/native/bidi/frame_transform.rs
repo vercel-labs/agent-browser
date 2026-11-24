@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::bidi::SANDBOX;
+use super::client::SANDBOX;
 use super::session::FirefoxSession;
 use crate::native::element::BLOCKER_AT_JS;
 
@@ -442,7 +442,7 @@ fn read_pair(value: &Value, first: &str, second: &str) -> Result<(f64, f64), Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session_with;
+    use crate::native::bidi::session::tests::fake_session_with;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 

@@ -58,19 +58,27 @@ pub struct Contexts {
     pin: PinState,
 }
 
-impl Contexts {
-    /// Builds the registry from a full `browsingContext.getTree` reply with its first tab active.
-    pub fn from_tree(tree: &Value) -> Result<Self, String> {
-        let active = tree["contexts"][0]["context"]
-            .as_str()
-            .ok_or("Firefox reported no browsing context")?
-            .to_string();
-        let mut contexts = Self {
+impl Default for Contexts {
+    fn default() -> Self {
+        Self {
             nodes: HashMap::new(),
-            active,
+            active: String::new(),
             next_tab: 1,
             owned_user_contexts: HashSet::new(),
             pin: PinState::Off,
+        }
+    }
+}
+
+impl Contexts {
+    /// Builds the registry from a full `browsingContext.getTree` reply with its first tab active.
+    pub fn from_tree(tree: &Value) -> Result<Self, String> {
+        let mut contexts = Self {
+            active: tree["contexts"][0]["context"]
+                .as_str()
+                .ok_or("Firefox reported no browsing context")?
+                .to_string(),
+            ..Self::default()
         };
         contexts.sync(tree);
         Ok(contexts)

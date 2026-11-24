@@ -4,7 +4,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-use super::bidi::SANDBOX;
+use super::client::SANDBOX;
 use super::daemon::session;
 use super::navigation::{self, Load, Wait};
 use super::session::FirefoxSession;
@@ -753,7 +753,7 @@ mod tests {
             }
         });
         let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
-        ff.bidi = super::super::bidi::BidiClient::connect(&url)
+        ff.bidi = super::super::client::BidiClient::connect(&url)
             .await
             .unwrap()
             .into();
@@ -903,7 +903,7 @@ mod tests {
             }
         });
         let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
-        ff.bidi = super::super::bidi::BidiClient::connect(&url)
+        ff.bidi = super::super::client::BidiClient::connect(&url)
             .await
             .unwrap()
             .into();
@@ -997,7 +997,11 @@ mod tests {
             }
         });
         let (mut ff, _tx, _) = super::super::session::tests::fake_session().await;
-        ff.bidi = std::sync::Arc::new(super::super::bidi::BidiClient::connect(&url).await.unwrap());
+        ff.bidi = std::sync::Arc::new(
+            super::super::client::BidiClient::connect(&url)
+                .await
+                .unwrap(),
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(
