@@ -68,6 +68,14 @@
       {
         "from": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser dblclick <sel> # Double-click",
         "to": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser click <sel> --button right # Right-click (fires contextmenu) agent-browser click <sel> --modifiers control,shift # Hold keys during the click agent-browser dblclick <sel> # Double-click agent-browser dblclick <sel> --modifiers shift # Double-click with Shift held"
+      },
+      {
+        "from": "agent-browser state save <path>       # Save auth state to file",
+        "to": "agent-browser state save <path>       # Save auth state to file (device-bound cookies are left out)"
+      },
+      {
+        "from": "agent-browser --profile Default open https://gmail.com  # Reuse a profile's login state",
+        "to": "agent-browser --profile Default open https://app.example.com  # Reuse a profile's login state"
       }
     ],
     "/configuration": [
@@ -318,6 +326,14 @@
       {
         "from": "Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use agent-browser session id to generate a valid key:",
         "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, café-東京_7 is valid, while my session is rejected because it contains a space.\n\nUse agent-browser session id to generate a valid key:"
+      },
+      {
+        "from": "agent-browser --profile Default open https://gmail.com",
+        "to": "agent-browser --profile Default open https://app.example.com"
+      },
+      {
+        "from": "AGENT_BROWSER_PROFILE=Default agent-browser open https://gmail.com",
+        "to": "AGENT_BROWSER_PROFILE=Default agent-browser open https://app.example.com"
       }
     ],
     "/skills": [

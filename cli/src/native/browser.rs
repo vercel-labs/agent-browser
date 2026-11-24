@@ -531,6 +531,9 @@ pub struct BrowserManager {
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
     pub download_path: Option<String>,
+    /// Messages about the launch that the user should see in the command
+    /// output, such as a profile copy that left device-bound sessions behind.
+    pub profile_notices: Vec<String>,
     /// Whether to ignore HTTPS certificate errors, re-applied to new contexts (e.g., recording)
     pub ignore_https_errors: bool,
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
@@ -713,6 +716,7 @@ impl BrowserManager {
         let download_path = options.download_path.clone();
         let headless = options.effectively_headless();
 
+        let mut profile_notices = Vec::new();
         let (ws_url, process) = match engine {
             "lightpanda" => {
                 let lp_options = LightpandaLaunchOptions {
@@ -740,6 +744,7 @@ impl BrowserManager {
                     .await
                     .map_err(|e| format!("Chrome launch task failed: {}", e))??;
                 let url = chrome.ws_url.clone();
+                profile_notices = chrome.profile_notices.clone();
                 (url, BrowserProcess::Chrome(chrome))
             }
         };
@@ -759,6 +764,7 @@ impl BrowserManager {
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
+                profile_notices,
                 ignore_https_errors,
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
@@ -870,6 +876,7 @@ impl BrowserManager {
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            profile_notices: Vec::new(),
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
@@ -1770,6 +1777,7 @@ impl BrowserManager {
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            profile_notices: Vec::new(),
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
@@ -2972,6 +2980,7 @@ async fn initialize_lightpanda_manager(
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            profile_notices: Vec::new(),
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
@@ -3084,6 +3093,7 @@ async fn initialize_obscura_manager(
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            profile_notices: Vec::new(),
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
@@ -3990,6 +4000,7 @@ mod tests {
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            profile_notices: Vec::new(),
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 100,
@@ -4053,6 +4064,7 @@ mod tests {
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            profile_notices: Vec::new(),
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,

@@ -586,6 +586,8 @@ pub struct DaemonState {
     pub restore_validation_pending: bool,
     pub restore_save_status: String,
     pub restore_saved_path: Option<String>,
+    /// Warnings produced while launching, shown on the command that launched.
+    launch_notices: Vec<String>,
     /// When the most recent browser-touching command finished. Periodic
     /// autosaves wait for a quiet period after this so a multi-second save
     /// never lands in the middle of an active command burst.
@@ -801,6 +803,7 @@ impl DaemonState {
             restore_validation_pending: false,
             restore_save_status: "not_attempted".to_string(),
             restore_saved_path: None,
+            launch_notices: Vec::new(),
             last_command_finished: None,
             last_autosave_attempt: None,
             session_id,
@@ -3187,6 +3190,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     } else {
         false
     };
+    state.launch_notices.clear();
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
     let mut lifecycle_relaunched_browser = false;
@@ -3717,6 +3721,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         (Ok(data), None) => success_response(&id, data),
         (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
+    attach_launch_notices(&mut resp, state);
     attach_tab_gone_data(&mut resp, state);
     attach_flow_stop(&mut resp, state);
     if resp.get("success").and_then(Value::as_bool) == Some(false) {
@@ -4537,6 +4542,17 @@ fn append_warning(resp: &mut Value, warning: &str) {
     resp["warning"] = json!(merged);
 }
 
+/// Moves launch-time notices into the response's `warning`, which the CLI
+/// prints and JSON mode includes. They travel out of band instead of in the
+/// response data, so nothing a handler returns can turn into a warning. The
+/// daemon's stderr is not the user's terminal, so a notice printed there would
+/// never be seen.
+fn attach_launch_notices(resp: &mut Value, state: &mut DaemonState) {
+    for notice in state.launch_notices.drain(..) {
+        append_warning(resp, &notice);
+    }
+}
+
 async fn install_network_controls_or_close(
     state: &mut DaemonState,
     handle_auth_requests: bool,
@@ -5042,6 +5058,7 @@ async fn auto_launch_inner(
     }
     state.session_setup = SessionSetup::from_launch_options(&options);
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
+    let profile_notices = mgr.profile_notices.clone();
     state.reset_input_state();
     state.browser = Some(mgr);
     state.launch_identity = Some(state.settings.launch_identity());
@@ -5055,6 +5072,7 @@ async fn auto_launch_inner(
     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
     try_auto_restore_state(state).await;
     load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
+    state.launch_notices.extend(profile_notices);
     Ok(json!({}))
 }
 
@@ -24494,5 +24512,17 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
         assert!(elsewhere.domain_filter.read().await.is_none());
         assert!(sibling.domain_filter.read().await.is_none());
+    }
+
+    #[test]
+    fn launch_notices_become_command_warnings() {
+        let mut state = DaemonState::new();
+        state.launch_notices = vec!["first".to_string(), "second".to_string()];
+        let mut resp = json!({ "id": "1", "success": true, "data": {} });
+
+        attach_launch_notices(&mut resp, &mut state);
+
+        assert_eq!(resp["warning"], json!("first\nsecond"));
+        assert!(state.launch_notices.is_empty());
     }
 }

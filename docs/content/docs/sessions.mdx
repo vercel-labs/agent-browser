@@ -110,14 +110,14 @@ AGENT_BROWSER_PROFILE=Default agent-browser open https://app.example.com
   <tbody>
     <tr><td>Supported browsers</td><td>Chrome, Chrome Canary, Chromium, Brave</td></tr>
     <tr><td>What's copied</td><td>Cookies, local storage, extensions state (cache dirs excluded for speed)</td></tr>
-    <tr><td>Not copied</td><td>Device-bound sessions (DBSC), so sites that bind sign-in to the device may ask you to sign in again in the copy</td></tr>
+    <tr><td>Not copied</td><td>Device-bound sessions (DBSC), so the copy cannot refresh a bound session, and sites that bind sign-in to the device may ask you to sign in again in the copy</td></tr>
     <tr><td>Original profile</td><td>Never modified (read-only snapshot)</td></tr>
     <tr><td>Cleanup</td><td>Temp copy deleted when browser closes</td></tr>
     <tr><td>Windows note</td><td>Close Chrome before using <code>--profile &lt;name&gt;</code> if Chrome is running</td></tr>
   </tbody>
 </table>
 
-Some sites bind a signed-in session to the device with [Device Bound Session Credentials](https://w3c.github.io/webappsec-dbsc/) (DBSC). Google sign-in does this by default in Chrome on macOS and Windows. Chrome keeps each bound session and its wrapped device key in the profile, and a copy run by the same Chrome could use that key to refresh the session alongside your own browser. A site that sees two browsers refreshing one device-bound session can end it, which signs you out of your own Chrome. agent-browser therefore never copies device-bound sessions, and prints a warning when the source profile has any. For those sites, sign in once inside a dedicated persistent profile (below) instead of reusing your everyday profile.
+Some sites bind a signed-in session to the device with [Device Bound Session Credentials](https://w3c.github.io/webappsec-dbsc/) (DBSC). Google sign-in does this by default in Chrome on macOS and Windows. Chrome keeps each bound session and its wrapped device key in the profile, and a copy run by the same Chrome could use that key to refresh the session alongside your own browser. A site that sees two browsers refreshing one device-bound session can end it, which signs you out of your own Chrome. agent-browser therefore never copies device-bound sessions, and reports when the source profile has any. The copy still contains the cookies the profile held when it was copied, including bound cookies, but it has no session store to refresh them, so they are not renewed. For those sites, sign in once inside a dedicated persistent profile (below) instead of reusing your everyday profile.
 
 ## Persistent profiles
 
@@ -180,7 +180,7 @@ agent-browser open https://app.example.com/dashboard
 
 Saved localStorage and sessionStorage are written through Chrome DevTools, not page JavaScript, and only while the page is on the saved origin. If an origin redirects elsewhere or fails to load, its storage is skipped, the rest still loads, and `state load` lists it under `skippedOrigins`. For `--state` and `--restore` at launch, `session info` lists it under `restoreSkippedOrigins`.
 
-Cookies that a [Device Bound Session Credentials](https://w3c.github.io/webappsec-dbsc/) (DBSC) session lists as its credentials are never exported or written. `state save` leaves them out of the file, and `state load` will not overwrite a cookie that one of the target browser's bound sessions owns. Both list what they skipped under `skippedDeviceBoundCookies`. A bound cookie is refreshed with a device key that stays in the browser that signed in, so a copy replayed elsewhere lets the site see the session in two places, and the site can end it in your own browser too. Google sign-in uses DBSC by default in Chrome on macOS and Windows, so those Google cookies stay behind. Sign in to such sites inside a dedicated `--profile <path>` instead.
+Cookies that a [Device Bound Session Credentials](https://w3c.github.io/webappsec-dbsc/) (DBSC) session lists as its credentials are never exported or written. `state save` leaves them out of the file, and `state load` will not overwrite a cookie that one of the target browser's bound sessions owns. Both list what they skipped under `skippedDeviceBoundCookies`. A bound cookie is refreshed with a device key that stays in the browser that signed in, so a copy replayed elsewhere lets the site see the session in two places, and the site can end it in your own browser too. Google sign-in uses DBSC by default in Chrome on macOS and Windows, so a state file saved by a browser that holds the session leaves those Google cookies behind. Sign in to such sites inside a dedicated `--profile <path>` instead.
 
 Combine with `--session <id> --restore` so the imported auth auto-persists across restarts:
 

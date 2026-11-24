@@ -188,10 +188,28 @@ pub fn describe_cookies(cookies: &[Cookie]) -> Vec<String> {
 /// event once it has read the session store, which takes a few milliseconds.
 const BOUND_SESSIONS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// True when the error says the browser does not implement
+/// `Network.enableDeviceBoundSessions`, as older Chrome and engines without
+/// DBSC do. A browser that does not implement the command has no bound
+/// sessions to report. Any other error means the session list is unknown.
+fn dbsc_is_unsupported(error: &str) -> bool {
+    error.contains("Network.enableDeviceBoundSessions")
+        && (error.contains("wasn't found")
+            || error.contains("Method not found")
+            || error.contains("-32601"))
+}
+
 /// Lists the cookies that the browser's device bound sessions are bound to.
-/// Returns an empty list when the browser has no sessions or does not support
-/// DBSC (older Chrome, Linux builds without DBSC, other engines).
-pub async fn get_device_bound_cookies(client: &CdpClient, session_id: &str) -> Vec<BoundCookie> {
+///
+/// Returns an empty list when the browser does not support DBSC (older Chrome,
+/// Linux builds without DBSC, other engines). An empty list also means "no
+/// bound cookies", so a session list that cannot be read is an error rather
+/// than an empty result: the caller must not export or overwrite bound cookies
+/// just because enumeration failed.
+pub async fn get_device_bound_cookies(
+    client: &CdpClient,
+    session_id: &str,
+) -> Result<Vec<BoundCookie>, String> {
     let mut events = client.subscribe_methods(&["Network.deviceBoundSessionsAdded"]);
     let enabled = client
         .send_command(
@@ -200,8 +218,14 @@ pub async fn get_device_bound_cookies(client: &CdpClient, session_id: &str) -> V
             Some(session_id),
         )
         .await;
-    if enabled.is_err() {
-        return Vec::new();
+    if let Err(error) = enabled {
+        if dbsc_is_unsupported(&error) {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "Could not list the browser's device-bound sessions: {}",
+            error
+        ));
     }
     let mut bound = Vec::new();
     let deadline = tokio::time::Instant::now() + BOUND_SESSIONS_TIMEOUT;
@@ -218,7 +242,7 @@ pub async fn get_device_bound_cookies(client: &CdpClient, session_id: &str) -> V
             Some(session_id),
         )
         .await;
-    bound
+    Ok(bound)
 }
 
 #[cfg(test)]
@@ -313,6 +337,24 @@ mod tests {
                 "bound (localhost)",
             ]
         );
+    }
+
+    #[test]
+    fn only_a_missing_dbsc_command_counts_as_no_bound_sessions() {
+        assert!(dbsc_is_unsupported(
+            "CDP error (Network.enableDeviceBoundSessions): 'Network.enableDeviceBoundSessions' wasn't found"
+        ));
+        assert!(dbsc_is_unsupported(
+            "CDP error (Network.enableDeviceBoundSessions): Method not found (-32601)"
+        ));
+        // Any other failure leaves the session list unknown, so it must not
+        // pass for "the browser has no bound sessions".
+        assert!(!dbsc_is_unsupported(
+            "CDP error (Network.enableDeviceBoundSessions): Internal error"
+        ));
+        assert!(!dbsc_is_unsupported(
+            "CDP command timed out: Network.enableDeviceBoundSessions"
+        ));
     }
 
     #[test]

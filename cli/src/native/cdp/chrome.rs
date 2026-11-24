@@ -16,6 +16,9 @@ pub struct ChromeProcess {
     child: Child,
     pub ws_url: String,
     temp_user_data_dir: Option<PathBuf>,
+    /// Messages about the launch that the user should see in the command
+    /// output, such as a profile copy that left device-bound sessions behind.
+    pub profile_notices: Vec<String>,
     temp_nss_home: Option<PreparedNssHome>,
     /// On Unix, the process group ID used to kill the entire Chrome process tree.
     #[cfg(unix)]
@@ -844,6 +847,7 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     // rewrite options so the retry loop uses the copied profile.
     let mut resolved_options: Option<LaunchOptions> = None;
     let mut profile_temp_dir: Option<PathBuf> = None;
+    let mut profile_notices = Vec::new();
 
     if let Some(ref profile) = options.profile {
         if is_chrome_profile_name(profile) {
@@ -853,7 +857,16 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
                     .to_string()
             })?;
             let resolved = resolve_chrome_profile(&user_data_dir, profile)?;
-            let temp_path = copy_chrome_profile(&user_data_dir, &resolved)?;
+            let copied = copy_chrome_profile(&user_data_dir, &resolved)?;
+            if copied.device_bound_sessions_skipped {
+                profile_notices.push(format!(
+                    "Device-bound sessions in profile \"{}\" were not copied. Sites that bind \
+                     sign-in to this device (such as Google) may ask you to sign in again in the \
+                     agent-browser copy. Your Chrome keeps its sessions.",
+                    resolved
+                ));
+            }
+            let temp_path = copied.path;
 
             let mut opts = options.clone();
             opts.profile = Some(temp_path.display().to_string());
@@ -878,6 +891,7 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
                 if let Some(ref dir) = profile_temp_dir {
                     process.temp_user_data_dir = Some(dir.clone());
                 }
+                process.profile_notices = profile_notices.clone();
                 return Ok(process);
             }
             Err(e) => {
@@ -1040,6 +1054,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         child,
         ws_url,
         temp_user_data_dir,
+        profile_notices: Vec::new(),
         temp_nss_home,
         #[cfg(unix)]
         pgid,
@@ -1611,9 +1626,18 @@ const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
 const PROFILE_COPY_EXCLUDE_FILES: &[&str] =
     &["Device Bound Sessions", "Device Bound Sessions-journal"];
 
+/// A Chrome profile copied for `--user-data-dir`.
+#[derive(Debug)]
+pub struct CopiedProfile {
+    /// Temp directory holding the copy.
+    pub path: PathBuf,
+    /// True when the source profile had a device-bound session store, which is
+    /// never copied.
+    pub device_bound_sessions_skipped: bool,
+}
+
 /// Copies a Chrome profile subdirectory and `Local State` to a temp directory
-/// with a two-level structure suitable for `--user-data-dir`. Returns the temp
-/// directory path on success.
+/// with a two-level structure suitable for `--user-data-dir`.
 ///
 /// The copy is best-effort: individual file failures (e.g., `SingletonLock`)
 /// are skipped with a warning. If the source profile directory is missing or
@@ -1623,7 +1647,7 @@ const PROFILE_COPY_EXCLUDE_FILES: &[&str] =
 pub fn copy_chrome_profile(
     user_data_dir: &Path,
     profile_directory: &str,
-) -> Result<PathBuf, String> {
+) -> Result<CopiedProfile, String> {
     let temp_dir =
         std::env::temp_dir().join(format!("agent-browser-profile-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir)
@@ -1654,15 +1678,9 @@ pub fn copy_chrome_profile(
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(format!("Failed to copy profile: {}", e));
     }
-    if src_profile.join(PROFILE_COPY_EXCLUDE_FILES[0]).is_file() {
-        let _ = writeln!(
-            std::io::stderr(),
-            "Warning: device-bound sessions in profile \"{}\" were not copied. Sites that \
-             bind sign-in to this device (such as Google) may ask you to sign in again in \
-             the agent-browser copy. Your Chrome keeps its sessions.",
-            profile_directory
-        );
-    }
+    // The daemon's stderr is not the user's terminal, so this is reported to
+    // the launching command instead of printed here.
+    let device_bound_sessions_skipped = src_profile.join(PROFILE_COPY_EXCLUDE_FILES[0]).is_file();
 
     let preferences_path = dst_profile.join("Preferences");
     let normalized = (|| {
@@ -1683,7 +1701,10 @@ pub fn copy_chrome_profile(
         let _ = std::fs::remove_file(&candidate);
     }
 
-    Ok(temp_dir)
+    Ok(CopiedProfile {
+        path: temp_dir,
+        device_bound_sessions_skipped,
+    })
 }
 
 /// Recursively copies a directory, skipping entries in [`PROFILE_COPY_EXCLUDE_DIRS`]
@@ -2728,6 +2749,7 @@ exec sleep 60
                 child,
                 ws_url: String::new(),
                 temp_user_data_dir: Some(dir.clone()),
+                profile_notices: Vec::new(),
                 temp_nss_home: None,
                 #[cfg(unix)]
                 pgid: None,
@@ -2954,8 +2976,9 @@ exec sleep 60
         create_fake_local_state(&src, &[("Default", "Person 1")]);
         create_fake_profile(&src, "Default");
 
-        let temp_path = copy_chrome_profile(&src, "Default").unwrap();
-        let temp = TempDir(temp_path);
+        let copied = copy_chrome_profile(&src, "Default").unwrap();
+        assert!(!copied.device_bound_sessions_skipped);
+        let temp = TempDir(copied.path);
 
         assert!(temp.join("Local State").is_file());
         assert!(temp.join("Default/Cookies").is_file());
@@ -2997,7 +3020,7 @@ exec sleep 60
             if let Some(p) = prefs {
                 std::fs::write(src.join("Default/Preferences"), p).unwrap();
             }
-            let temp = TempDir(copy_chrome_profile(&src, "Default").unwrap());
+            let temp = TempDir(copy_chrome_profile(&src, "Default").unwrap().path);
             let copied = std::fs::read(temp.join("Default/Preferences")).ok();
             match prefs {
                 None => assert!(copied.is_none(), "{name}"),
@@ -3025,7 +3048,12 @@ exec sleep 60
             std::fs::write(src.join("Default").join(name), "bound-session-state").unwrap();
         }
 
-        let temp = TempDir(copy_chrome_profile(&src, "Default").unwrap());
+        let copied = copy_chrome_profile(&src, "Default").unwrap();
+        assert!(
+            copied.device_bound_sessions_skipped,
+            "the launch must report that the sessions were left behind"
+        );
+        let temp = TempDir(copied.path);
 
         assert!(temp.join("Default/Cookies").is_file());
         for name in PROFILE_COPY_EXCLUDE_FILES {
@@ -3059,8 +3087,8 @@ exec sleep 60
         std::fs::create_dir_all(&profile_path).unwrap();
         std::fs::write(profile_path.join("Cookies"), "data").unwrap();
 
-        let temp_path = copy_chrome_profile(&src, "Default").unwrap();
-        let temp = TempDir(temp_path);
+        let copied = copy_chrome_profile(&src, "Default").unwrap();
+        let temp = TempDir(copied.path);
 
         assert!(!temp.join("Local State").exists());
         assert!(temp.join("Default/Cookies").is_file());

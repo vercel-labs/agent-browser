@@ -289,7 +289,9 @@ pub async fn save_state(
     visited_origins: &HashSet<String>,
 ) -> Result<SavedState, String> {
     let all_cookies = cookies::get_all_cookies(client, session_id).await?;
-    let bound = cookies::get_device_bound_cookies(client, session_id).await;
+    let bound = cookies::get_device_bound_cookies(client, session_id)
+        .await
+        .map_err(|error| format!("Refusing to save state: {}", error))?;
     let (cookies, skipped) = cookies::partition_bound_cookies(all_cookies, &bound);
     let skipped_bound_cookies = cookies::describe_cookies(&skipped);
     warn_skipped_bound_cookies("state save", &skipped_bound_cookies);
@@ -523,7 +525,9 @@ pub async fn load_state(
     let mut outcome = LoadedState::default();
     let mut file_cookies = state.cookies;
     if !file_cookies.is_empty() {
-        let bound = cookies::get_device_bound_cookies(client, session_id).await;
+        let bound = cookies::get_device_bound_cookies(client, session_id)
+            .await
+            .map_err(|error| format!("Refusing to load state: {}", error))?;
         let (kept, skipped) = cookies::partition_bound_cookies(file_cookies, &bound);
         outcome.skipped_bound_cookies = cookies::describe_cookies(&skipped);
         warn_skipped_bound_cookies("state load", &outcome.skipped_bound_cookies);
