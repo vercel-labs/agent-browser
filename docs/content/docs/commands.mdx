@@ -43,7 +43,7 @@ agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf <path>              # Save page as PDF
 agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
-agent-browser connect <port|url>      # Connect to browser via CDP
+agent-browser connect <port|url>      # Connect to a browser via CDP or Firefox BiDi
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
 agent-browser webmcp list                     # List experimental page tools
 agent-browser webmcp invoke <tool> --params @input.json
@@ -730,7 +730,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script r
 --headed                 # Show browser window (not headless)
 --webgpu                 # Enable WebGPU (software Vulkan on Linux, no GPU needed)
 --no-webmcp              # Disable default experimental WebMCP Chrome features (or AGENT_BROWSER_NO_WEBMCP env)
---cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional
+--cdp <port|url>         # Connect via CDP or Firefox WebDriver BiDi; Firefox accepts ?devtools=<port>
 --cdp-headers <json>     # Headers for --cdp discovery and WebSocket handshake (or AGENT_BROWSER_CDP_HEADERS env)
 --auto-connect           # Auto-discover and connect to running Chrome
 --no-auto-connect        # Return an --auto-connect session to a local launch (overrides AGENT_BROWSER_AUTO_CONNECT)
@@ -756,7 +756,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script r
 
 In a `batch`, `--relaunch` relaunches the browser once: the first command that can launch a browser carries it. Commands that never launch one, such as `read`, and commands denied by policy or waiting for confirmation pass it on to the next command.
 
-Firefox rejects `--cdp`, `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. Authenticated proxies work through `--proxy` with credentials. Firefox takes `http://`, `socks4://`, and `socks5://` proxies and rejects `https://` proxies instead of connecting to them without TLS.
+A Firefox agent-browser launches rejects `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. An attached Firefox ignores the options that describe a browser agent-browser launches, including extensions and `--webgpu`, and rejects `--pin-tab`, `--allowed-domains`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. Authenticated proxies work through `--proxy` with credentials. Firefox takes `http://`, `socks4://`, and `socks5://` proxies and rejects `https://` proxies instead of connecting to them without TLS.
 
 See [Configuration](/configuration) for config files and environment variables. See [Proxy](/proxy) for proxy server, bypass, and credential settings.
 

@@ -13,12 +13,14 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
 use crate::session_files::SessionFile;
 use crate::session_settings::{
-    named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running, Store, RESTORE_UNIT,
+    named, spec, Change, Connection, Effect, Engine, Key, Patch, Persist, Requested, Running,
+    Store, Transition, RESTORE_UNIT,
 };
 
 use super::a11y;
 use super::auth;
 use super::bidi;
+use super::bidi::attach::target_label;
 use super::browser::{should_track_target, BrowserManager, TabKeep, WaitUntil, WedgeReport};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::{is_session_detached_error, CdpClient};
@@ -321,6 +323,7 @@ const LOCAL_ONLY_LAUNCH_FIELDS: &[&str] = &[
 enum AttachedTarget {
     CdpUrl(String),
     CdpPort(u64),
+    Firefox(String),
     AutoConnect,
     Provider(String),
 }
@@ -356,13 +359,22 @@ impl AttachedTarget {
             .filter(|target| !matches!(target, Self::Provider(p) if is_webdriver_provider(p)))
     }
 
+    fn from_successful_launch(cmd: &Value, engine: &str) -> Option<Self> {
+        Some(match Self::from_launch_command(cmd)? {
+            Self::CdpUrl(url) if engine == "firefox" => Self::Firefox(url),
+            Self::CdpPort(port) if engine == "firefox" => Self::Firefox(port.to_string()),
+            Self::Provider(provider) if provider == "ios" || provider == "safari" => return None,
+            target => target,
+        })
+    }
+
     /// Whether the browser runs on another machine than the daemon, so it
     /// reads local file paths on its own host.
     fn is_remote(&self) -> bool {
         match self {
             Self::Provider(_) => true,
             Self::CdpPort(_) | Self::AutoConnect => false,
-            Self::CdpUrl(url) => {
+            Self::CdpUrl(url) | Self::Firefox(url) => {
                 let authority = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
                 let authority = authority.split(['/', '?']).next().unwrap_or("");
                 let authority = authority.rsplit('@').next().unwrap_or("");
@@ -384,6 +396,7 @@ impl AttachedTarget {
         let (key, value) = match self {
             Self::CdpUrl(url) => ("cdpUrl", json!(url)),
             Self::CdpPort(port) => ("cdpPort", json!(port)),
+            Self::Firefox(target) => ("cdpUrl", json!(target)),
             Self::AutoConnect => ("autoConnect", json!(true)),
             Self::Provider(provider) => ("provider", json!(provider)),
         };
@@ -393,7 +406,8 @@ impl AttachedTarget {
 
 /// Points a launch that names no connection target at the browser the session is
 /// attached to, without the fields only a local launch honors, so it runs exactly
-/// like the original attach. Returns `None` when the launch needs no rewrite.
+/// like the original attach. A Firefox attachment supplies the endpoint without
+/// becoming an engine setting. Returns `None` when the launch needs no rewrite.
 fn resolve_launch_target(cmd: &Value, attached: Option<&AttachedTarget>) -> Option<Value> {
     let attached = attached?;
     if AttachedTarget::named_by(cmd).is_some() {
@@ -404,6 +418,11 @@ fn resolve_launch_target(cmd: &Value, attached: Option<&AttachedTarget>) -> Opti
         resolved.remove(*field);
     }
     attached.insert_into(&mut resolved);
+    if matches!(attached, AttachedTarget::Firefox(_)) {
+        if let Some(engine) = cmd.get("engine").and_then(Value::as_str) {
+            resolved.insert("engine".to_string(), json!(engine));
+        }
+    }
     Some(Value::Object(resolved))
 }
 
@@ -1073,7 +1092,10 @@ impl DaemonState {
             self.browser
                 .as_ref()
                 .is_some_and(BrowserManager::blocks_default_idle_shutdown)
-                || self.firefox.as_ref().is_some_and(|ff| !ff.headless),
+                || self
+                    .firefox
+                    .as_ref()
+                    .is_some_and(bidi::session::FirefoxSession::blocks_default_idle_shutdown),
         )
     }
 
@@ -3609,28 +3631,46 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // the browser and these settings alone.
     let launches = command_launches_browser(cmd);
     let mut launch_patch: Option<Patch> = None;
+    let mut settings_patch: Option<Patch> = None;
     let wire_patch = match Patch::from_wire(cmd.get("settings")) {
         Ok(patch) => patch,
         Err(e) => return error_response(&id, &e.to_string()),
     };
-    let (patch, restore_patch) = wire_patch.split_restore_unit();
+    let (mut patch, restore_patch) = wire_patch.split_restore_unit();
     let mut settings_outcome = if action == "close" {
         SettingsOutcome::default()
     } else {
+        if action == "launch" {
+            let engine = cmd
+                .get("engine")
+                .and_then(Value::as_str)
+                .or_else(|| patch.value(Key::Engine).and_then(Value::as_str));
+            let envelope = match launch_envelope_patch(cmd, engine) {
+                Ok(envelope) => envelope,
+                Err(e) => return error_response(&id, &e),
+            };
+            patch = patch.with_envelope(&envelope);
+        }
         if let Err(e) = check_capture_setting(&patch) {
             return error_response(&id, &e);
         }
-        let outcome = match apply_settings_patch(state, &patch, false).await {
+        let outcome = match Box::pin(apply_settings_patch(
+            state,
+            &patch,
+            SettingsPass::BeforeGates,
+        ))
+        .await
+        {
             Ok(outcome) => outcome,
             Err(e) => return error_response(&id, &e),
         };
         if launches {
-            let mut patch = patch;
             if let Err(e) = adjust_ca_patch(state, &mut patch) {
                 return error_response(&id, &e);
             }
-            launch_patch = Some(patch);
+            launch_patch = Some(patch.clone());
         }
+        settings_patch = Some(patch);
         outcome
     };
     // A new restore key replaces the running browser.
@@ -3643,14 +3683,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .as_ref()
         .map(|patch| state.settings.plan(patch))
         .filter(|plan| plan.relaunch);
-    if let Some(plan) = launch_plan.as_ref() {
-        if let Err(e) = validate_firefox_relaunch(&plan.next, &plugins_from_command_or_env(cmd)) {
-            let mut resp = error_response(&id, &e);
-            attach_settings_outcome(&mut resp, &settings_outcome);
-            return resp;
-        }
-    }
-
     let skip_launch = skip_launch_action(action);
     let needs_launch = if !skip_launch && !auth_login_no_navigate {
         // Check if existing connection is stale and needs re-launch.
@@ -3659,7 +3691,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         if launch_plan.is_some() || restore_replaces_browser {
             true
         } else if state.engine == "firefox" {
-            state.firefox.as_mut().is_none_or(|ff| ff.has_exited())
+            match state.firefox.as_mut() {
+                Some(ff) => ff.has_exited(),
+                None => true,
+            }
         } else if let Some(ref mut mgr) = state.browser {
             mgr.has_process_exited() || !mgr.is_connection_alive().await
         } else {
@@ -3687,7 +3722,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             )
         })
     });
-    let policy_actions = policy_actions_for_command(
+    let effective_settings = launch_plan
+        .as_ref()
+        .map_or(&state.settings, |plan| &plan.next);
+    let mut policy_actions = policy_actions_for_command(
         cmd,
         action,
         needs_launch,
@@ -3696,10 +3734,26 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             .as_ref()
             .filter(|_| !switches_connection),
         run_flow.as_deref(),
-        launch_plan
-            .as_ref()
-            .map_or(&state.settings, |plan| &plan.next),
+        effective_settings,
     );
+    if action == "launch" || (!skip_launch && needs_launch) {
+        if let Some(("provider", value)) = settings_launch_target(effective_settings) {
+            if let Some(provider) = value.as_str() {
+                let plugins = plugins_from_command_or_env(cmd);
+                let mut provider_actions = Vec::new();
+                append_browser_provider_policy_action_for(
+                    &mut provider_actions,
+                    provider,
+                    &plugins,
+                );
+                for policy_action in provider_actions {
+                    if !policy_actions.contains(&policy_action) {
+                        policy_actions.push(policy_action);
+                    }
+                }
+            }
+        }
+    }
 
     // Hot-reload and check action policy
     if let Some(ref mut policy) = state.policy {
@@ -3778,7 +3832,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // A write `--allow-write` does not cover needs an explicit confirmation,
     // whatever the policy file and --confirm-actions say.
-    if let Some(resp) = park_unconfirmed_flow_write(&id, cmd, action, run_flow.as_deref(), state) {
+    if let Some(mut resp) =
+        park_unconfirmed_flow_write(&id, cmd, action, run_flow.as_deref(), state)
+    {
+        attach_settings_outcome(&mut resp, &settings_outcome);
         return resp;
     }
 
@@ -3786,6 +3843,42 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .as_ref()
         .map_or(state.settings.engine(), |plan| plan.next.engine());
     if needs_launch && engine.as_deref() == Some("firefox") {
+        if let Some(error) = bidi::actions::unsupported_error(action) {
+            let mut resp = error_response(&id, &error);
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            return resp;
+        }
+    }
+
+    let must_prepare = launches
+        && (needs_launch
+            || launch_plan.is_some()
+            || restore_plan.relaunch
+            || !has_active_browser_session(state));
+    let (mut prepared, resolved_engine) = if must_prepare {
+        match launch_patch.as_ref() {
+            Some(patch) => match Box::pin(prepare_transition(state, patch, cmd)).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let message = if action == "launch" {
+                        error
+                    } else {
+                        let next = state.settings.plan(patch).next;
+                        let context =
+                            auto_launch_error_context(&next.connection(), next.engine().as_deref());
+                        format!("{context}: {error}")
+                    };
+                    let mut resp = error_response(&id, &message);
+                    attach_settings_outcome(&mut resp, &settings_outcome);
+                    return resp;
+                }
+            },
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    if needs_launch && resolved_engine == Some(Engine::Firefox) {
         if let Some(error) = bidi::actions::unsupported_error(action) {
             let mut resp = error_response(&id, &error);
             attach_settings_outcome(&mut resp, &settings_outcome);
@@ -3804,7 +3897,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // Past every gate: the restore unit takes effect for any command, whether
     // or not it launches.
-    let restore_applied = match apply_restore_unit(state, &restore_patch).await {
+    let restore_applied = match Box::pin(apply_restore_unit(state, &restore_patch)).await {
         Ok(applied) => applied,
         Err(e) => {
             let mut resp = error_response(&id, &e);
@@ -3815,12 +3908,32 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     settings_outcome
         .changes
         .extend(restore_applied.changes.iter().cloned());
+
+    if let Some(patch) = settings_patch.as_ref() {
+        if !needs_launch && action != "launch" && !(launches && launch_plan.is_some()) {
+            match Box::pin(apply_settings_patch(state, patch, SettingsPass::InPlace)).await {
+                Ok(outcome) => settings_outcome.absorb_in_place(outcome),
+                Err(e) => {
+                    let mut resp = error_response(&id, &e);
+                    attach_settings_outcome(&mut resp, &settings_outcome);
+                    return resp;
+                }
+            }
+        }
+    }
+
     if !skip_launch {
         if needs_launch {
             lifecycle_relaunched_browser |= restore_applied.relaunched_browser;
-            // The launch settings take effect now.
-            if let (Some(patch), Some(_)) = (launch_patch.as_ref(), launch_plan.as_ref()) {
-                match apply_settings_patch(state, patch, true).await {
+            if let Some(patch) = launch_patch.as_ref() {
+                match Box::pin(apply_settings_patch_with_engine(
+                    state,
+                    patch,
+                    SettingsPass::Launch,
+                    resolved_engine,
+                ))
+                .await
+                {
                     Ok(outcome) => settings_outcome.absorb(outcome),
                     Err(e) => {
                         let cleanup = Box::pin(rollback_restore_unit(
@@ -3838,7 +3951,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_relaunched_browser |= settings_outcome.relaunched_browser;
             lifecycle_relaunched_browser |= has_active_browser_session(state);
             if has_active_browser_session(state) {
-                let _ = auto_save_restore_state(state).await;
+                let _ = Box::pin(auto_save_restore_state(state)).await;
             }
             let strict_state = launch_patch
                 .as_ref()
@@ -3848,6 +3961,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 plugins_from_command_or_env(cmd),
                 &Value::Null,
                 strict_state,
+                prepared.take(),
             ))
             .await;
             let launched = match launched {
@@ -3855,10 +3969,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 Err(e) => Err(e),
             };
             if let Err(e) = launched {
-                let context = auto_launch_error_context(matches!(
-                    state.settings.connection(),
-                    Connection::Cdp(_)
-                ));
+                let connection = state.settings.connection();
+                let context =
+                    auto_launch_error_context(&connection, state.settings.engine().as_deref());
                 let e = Box::pin(rollback_launch(
                     state,
                     &restore_applied,
@@ -3870,6 +3983,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 attach_settings_outcome(&mut resp, &settings_outcome);
                 return resp;
             }
+            settle_awaited_settings(state, &mut settings_outcome);
             state.webmcp_enabled = state.settings.webmcp();
             lifecycle_launched = true;
         } else {
@@ -3945,19 +4059,32 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
         "launch" => {
             let applied = match launch_patch.as_ref() {
-                Some(patch) => apply_settings_patch(state, patch, true)
-                    .await
-                    .map(|outcome| settings_outcome.absorb(outcome)),
+                Some(patch) => Box::pin(apply_settings_patch_with_engine(
+                    state,
+                    patch,
+                    SettingsPass::Launch,
+                    resolved_engine,
+                ))
+                .await
+                .map(|outcome| settings_outcome.absorb(outcome)),
                 None => Ok(()),
             };
             lifecycle_relaunched_browser |=
                 restore_applied.relaunched_browser || settings_outcome.relaunched_browser;
             let result = match applied {
-                Ok(()) => handle_launch(cmd, state).await,
+                Ok(()) => {
+                    Box::pin(handle_launch_prepared(
+                        cmd,
+                        state,
+                        LaunchRequest::Planned(prepared.take()),
+                    ))
+                    .await
+                }
                 Err(e) => Err(e),
             };
             match result {
                 Ok(data) => {
+                    settle_awaited_settings(state, &mut settings_outcome);
                     state.webmcp_enabled = state.settings.webmcp();
                     Ok(data)
                 }
@@ -4306,11 +4433,15 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     resp
 }
 
-fn auto_launch_error_context(has_cdp: bool) -> &'static str {
-    if has_cdp {
-        "CDP connection failed"
-    } else {
-        "Auto-launch failed"
+/// The label a failed implicit launch reports, named for the browser it tried to reach.
+fn auto_launch_error_context(connection: &Connection, engine: Option<&str>) -> &'static str {
+    let firefox = engine == Some("firefox")
+        || matches!(connection, Connection::Cdp(target)
+            if bidi::attach::parse_attach_url(target).is_ok_and(|target| target.is_some()));
+    match connection {
+        Connection::Cdp(_) if firefox => "Firefox attach failed",
+        Connection::Cdp(_) => "CDP connection failed",
+        _ => "Auto-launch failed",
     }
 }
 
@@ -5299,7 +5430,7 @@ async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
 ) -> Result<Value, String> {
-    auto_launch_with(state, plugins, &Value::Null, false).await
+    auto_launch_with(state, plugins, &Value::Null, false, None).await
 }
 
 /// Launches or attaches the session's browser from its settings. `cmd` is the
@@ -5313,24 +5444,32 @@ async fn auto_launch_with(
     plugins: Vec<crate::plugins::PluginConfig>,
     cmd: &Value,
     strict_state: bool,
+    prepared: Option<AttachConnection>,
 ) -> Result<Value, String> {
     let resumed = state.attached_target.is_some() && cmd.is_null();
-    let result = Box::pin(auto_launch_with_settings(state, plugins, cmd, strict_state)).await;
+    let result = Box::pin(auto_launch_with_settings(
+        state,
+        plugins,
+        cmd,
+        strict_state,
+        prepared,
+    ))
+    .await;
     if result.is_ok() && !resumed {
-        state.attached_target = attached_target_for(&state.settings.connection());
+        state.attached_target = attached_target_for(&state.settings.connection(), &state.engine);
     }
     result
 }
 
 /// The external browser a session's connection setting attaches to, if any.
-fn attached_target_for(connection: &Connection) -> Option<AttachedTarget> {
+fn attached_target_for(connection: &Connection, engine: &str) -> Option<AttachedTarget> {
     let named = match connection {
         Connection::Local => return None,
         Connection::Cdp(cdp) => json!({ "cdpUrl": cdp }),
         Connection::AutoConnect => json!({ "autoConnect": true }),
         Connection::Provider(provider) => json!({ "provider": provider }),
     };
-    AttachedTarget::from_launch_command(&named)
+    AttachedTarget::from_successful_launch(&named, engine)
 }
 
 async fn auto_launch_with_settings(
@@ -5338,24 +5477,42 @@ async fn auto_launch_with_settings(
     plugins: Vec<crate::plugins::PluginConfig>,
     cmd: &Value,
     strict_state: bool,
+    prepared: Option<AttachConnection>,
 ) -> Result<Value, String> {
     if state.attached_target.is_some() && cmd.is_null() {
-        // Resume the attached browser; the launch handler resolves the target.
         let launch = json!({ "action": "launch", "plugins": plugins });
-        return Box::pin(handle_launch(&launch, state)).await;
+        return Box::pin(handle_launch_prepared(
+            &launch,
+            state,
+            LaunchRequest::Planned(prepared),
+        ))
+        .await;
     }
     let connection = state.settings.connection();
     if matches!(connection, Connection::Cdp(_) | Connection::AutoConnect)
         || !matches!(&connection, Connection::Provider(provider) if provider_is_browser_use(provider))
     {
-        return Box::pin(auto_launch_inner(state, plugins, cmd, strict_state)).await;
+        return Box::pin(auto_launch_inner(
+            state,
+            plugins,
+            cmd,
+            strict_state,
+            prepared,
+        ))
+        .await;
     }
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
     let result = match tokio::time::timeout(
         BROWSER_USE_SETUP_DEADLINE,
-        Box::pin(auto_launch_inner(state, plugins, cmd, strict_state)),
+        Box::pin(auto_launch_inner(
+            state,
+            plugins,
+            cmd,
+            strict_state,
+            prepared,
+        )),
     )
     .await
     {
@@ -5370,11 +5527,23 @@ async fn auto_launch_with_settings(
     result
 }
 
+/// Whether the session settings, endpoint, or current attachment select Firefox.
+fn launch_targets_firefox(
+    engine: Option<&str>,
+    firefox_target: bool,
+    attached: Option<&AttachedTarget>,
+) -> bool {
+    engine == Some("firefox")
+        || firefox_target
+        || (engine.is_none() && matches!(attached, Some(AttachedTarget::Firefox(_))))
+}
+
 async fn auto_launch_inner(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
     cmd: &Value,
     strict_state: bool,
+    prepared: Option<AttachConnection>,
 ) -> Result<Value, String> {
     // Only a browser agent-browser launches itself keeps its session setup
     // across a relaunch; an attached or provider browser starts without one,
@@ -5385,7 +5554,7 @@ async fn auto_launch_inner(
             std::mem::take(&mut state.touch_sessions),
         )
     });
-    let result = launch_browser_from_settings(state, plugins, cmd, strict_state).await;
+    let result = launch_browser_from_settings(state, plugins, cmd, strict_state, prepared).await;
     if let (Err(_), Some((setup, touch))) = (&result, saved) {
         state.session_setup = setup;
         state.touch_sessions = touch;
@@ -5398,12 +5567,13 @@ async fn launch_browser_from_settings(
     plugins: Vec<crate::plugins::PluginConfig>,
     cmd: &Value,
     strict_state: bool,
+    prepared: Option<AttachConnection>,
 ) -> Result<Value, String> {
     let mut options = state.settings.launch_options();
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
     if state.settings.engine().as_deref() == Some("firefox") {
-        validate_firefox_launch(state, &options, &plugins).await?;
+        validate_firefox_launch(state, &options, &plugins, &state.settings.connection()).await?;
     }
     if has_active_browser_session(state) {
         close_before_implicit_relaunch(state).await?;
@@ -5429,8 +5599,29 @@ async fn launch_browser_from_settings(
     let enable_features = state.settings.enable_features();
     let init_script_paths = state.settings.init_scripts();
     let contained = state.domain_filter.read().await.is_some();
-    if engine.as_deref() == Some("firefox") {
-        return Box::pin(launch_firefox(state, options, &plugins, strict_state)).await;
+    let (prepared_firefox, prepared_cdp) = match prepared {
+        Some(AttachConnection::Firefox(target)) => (Some(target), None),
+        Some(AttachConnection::Cdp(url)) => (None, Some(url)),
+        None => (None, None),
+    };
+    let firefox_target = cdp
+        .as_deref()
+        .and_then(|target| bidi::attach::parse_attach_url(target).ok().flatten());
+    if launch_targets_firefox(
+        engine.as_deref(),
+        firefox_target.is_some() || prepared_firefox.is_some(),
+        state.attached_target.as_ref(),
+    ) {
+        return Box::pin(launch_firefox_prepared(
+            state,
+            options,
+            plugins,
+            connection,
+            contained,
+            strict_state,
+            prepared_firefox,
+        ))
+        .await;
     }
     if let Some(ref server) = state.stream_server {
         options.viewport_size = Some(server.viewport().await);
@@ -5475,7 +5666,27 @@ async fn launch_browser_from_settings(
         })?;
         let headers =
             cdp_headers_for(state, &cdp).or_else(|| cdp_headers_from_settings(&state.settings));
-        let mgr = BrowserManager::connect_cdp_when_listening(&cdp, headers.clone()).await?;
+        let target = match prepared_cdp {
+            Some(url) => AttachConnection::Cdp(url),
+            None => detect_attach_connection(&cdp, headers.clone()).await?,
+        };
+        let mgr = match target {
+            AttachConnection::Cdp(url) => {
+                BrowserManager::connect_cdp_with_headers(&url, headers.clone()).await?
+            }
+            AttachConnection::Firefox(target) => {
+                return Box::pin(launch_firefox_prepared(
+                    state,
+                    options,
+                    plugins,
+                    connection,
+                    contained,
+                    strict_state,
+                    Some(target),
+                ))
+                .await;
+            }
+        };
         state.cdp_headers = headers.map(|headers| (cdp.clone(), headers));
         state.reset_input_state();
         state.browser = Some(mgr);
@@ -6264,23 +6475,46 @@ fn cdp_headers_from_command(cmd: &Value) -> Option<Vec<(String, String)>> {
     }
 }
 
+#[cfg(test)]
 async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    handle_launch_with_deadline(cmd, state, BROWSER_USE_SETUP_DEADLINE).await
+    handle_launch_prepared(cmd, state, LaunchRequest::Unplanned).await
 }
 
+async fn handle_launch_prepared(
+    cmd: &Value,
+    state: &mut DaemonState,
+    request: LaunchRequest,
+) -> Result<Value, String> {
+    handle_launch_with_deadline_prepared(cmd, state, BROWSER_USE_SETUP_DEADLINE, request).await
+}
+
+#[cfg(test)]
 async fn handle_launch_with_deadline(
     cmd: &Value,
     state: &mut DaemonState,
     deadline: std::time::Duration,
+) -> Result<Value, String> {
+    handle_launch_with_deadline_prepared(cmd, state, deadline, LaunchRequest::Unplanned).await
+}
+
+async fn handle_launch_with_deadline_prepared(
+    cmd: &Value,
+    state: &mut DaemonState,
+    deadline: std::time::Duration,
+    request: LaunchRequest,
 ) -> Result<Value, String> {
     let mut resolved = resolve_launch_target(cmd, state.attached_target.as_ref());
     if let Some(launch) = resolved.as_mut() {
         attach_saved_cdp_headers(launch, state);
     }
     let cmd = resolved.as_ref().unwrap_or(cmd);
-    let result = handle_launch_for_target(cmd, state, deadline).await;
+    let result = handle_launch_for_target(cmd, state, deadline, request).await;
     if result.is_ok() {
-        state.attached_target = AttachedTarget::from_launch_command(cmd);
+        if let Some(target) = AttachedTarget::from_successful_launch(cmd, &state.engine) {
+            state.attached_target = Some(target);
+        } else if AttachedTarget::named_by(cmd).is_some() {
+            state.attached_target = None;
+        }
         Box::pin(start_flow_capture(state)).await?;
     }
     result
@@ -6331,6 +6565,7 @@ async fn handle_launch_for_target(
     cmd: &Value,
     state: &mut DaemonState,
     deadline: std::time::Duration,
+    request: LaunchRequest,
 ) -> Result<Value, String> {
     if cmd.get("cdpUrl").and_then(Value::as_str).is_some()
         || cmd.get("cdpPort").and_then(Value::as_u64).is_some()
@@ -6340,16 +6575,20 @@ async fn handle_launch_for_target(
             .and_then(Value::as_str)
             .is_some_and(provider_is_browser_use)
     {
-        return Box::pin(handle_launch_inner(cmd, state)).await;
+        return Box::pin(handle_launch_inner_prepared(cmd, state, request)).await;
     }
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
-    let result =
-        match tokio::time::timeout(deadline, Box::pin(handle_launch_inner(cmd, state))).await {
-            Ok(result) => result,
-            Err(_) => Err(browser_use_setup_timeout(state).await),
-        };
+    let result = match tokio::time::timeout(
+        deadline,
+        Box::pin(handle_launch_inner_prepared(cmd, state, request)),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(browser_use_setup_timeout(state).await),
+    };
     if result.is_err() {
         // The stored security settings decide what survives a failed launch, so
         // the live filter follows them.
@@ -6362,8 +6601,189 @@ async fn handle_launch_for_target(
     result
 }
 
+fn combine_cdp_and_firefox_attach_errors(
+    cdp_error: &str,
+    target: &str,
+    bidi_error: &str,
+) -> String {
+    format!(
+        "{cdp_error}; WebDriver BiDi: no Firefox remote agent for {} ({bidi_error})",
+        target_label(target)
+    )
+}
+
+#[derive(Debug)]
+enum AttachConnection {
+    Cdp(String),
+    Firefox(bidi::attach::AttachTarget),
+}
+
+enum LaunchRequest {
+    Planned(Option<AttachConnection>),
+    #[cfg(test)]
+    Unplanned,
+}
+
+async fn detect_attach_connection(
+    target: &str,
+    headers: Option<Vec<(String, String)>>,
+) -> Result<AttachConnection, String> {
+    let parsed = bidi::attach::parse_attach_url(target);
+    if let Ok(Some(target)) = &parsed {
+        return Ok(AttachConnection::Firefox(target.clone()));
+    }
+    let cdp_error = match BrowserManager::resolve_cdp_target(target, headers).await {
+        Ok(url) => return Ok(AttachConnection::Cdp(url)),
+        Err(error) => error,
+    };
+    let bidi = match parsed {
+        Err(error) => Err(error),
+        Ok(_) if bidi::attach::can_probe_attach_target(target) => {
+            bidi::attach::probe_attach_target(target).await
+        }
+        Ok(_) => return Err(cdp_error),
+    };
+    match bidi {
+        Ok(target) => Ok(AttachConnection::Firefox(target)),
+        Err(error) => Err(combine_cdp_and_firefox_attach_errors(
+            &cdp_error, target, &error,
+        )),
+    }
+}
+
+async fn resolve_firefox_attach_target(target: &str) -> Result<bidi::attach::AttachTarget, String> {
+    if let Some(parsed) = bidi::attach::parse_attach_url(target)? {
+        return Ok(parsed);
+    }
+    bidi::attach::probe_attach_target(target)
+        .await
+        .map_err(|reason| {
+            format!(
+                "No Firefox WebDriver BiDi endpoint at {}; {}",
+                target_label(target),
+                reason
+            )
+        })
+}
+
+async fn prepare_transition(
+    state: &DaemonState,
+    patch: &Patch,
+    cmd: &Value,
+) -> Result<(Option<AttachConnection>, Option<Engine>), String> {
+    let provisional = state.settings.plan(patch);
+    let connection = provisional.next.connection();
+    let contained = state.settings.security().allowed_domains.is_some()
+        || provisional.next.security().allowed_domains.is_some()
+        || state.domain_filter.read().await.is_some();
+    if let Connection::Cdp(target) = &connection {
+        if provisional.next.pin_tab()
+            && (provisional.next.engine().as_deref() == Some("firefox")
+                || matches!(bidi::attach::parse_attach_url(target), Ok(Some(_))))
+        {
+            return Err(FIREFOX_ATTACH_PIN_TAB_ERROR.to_string());
+        }
+        ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+            contained,
+            cdp_url: Some(target.as_str()),
+            cdp_port: None,
+            auto_connect: false,
+            profile: None,
+            provider_name: None,
+            args: &[],
+            restore_key: None,
+            storage_state: None,
+        })?;
+        let mut options = provisional.next.launch_options();
+        options.ca_cert = provisional
+            .next
+            .get(Key::CaCert)
+            .and_then(Value::as_str)
+            .map(String::from);
+        validate_ca_cert_launch_mode(&options, provisional.next.engine().as_deref(), true)?;
+    }
+    let prepared = match &connection {
+        Connection::Cdp(target) => {
+            let headers = cdp_headers_from_settings(&provisional.next);
+            let target = if provisional.next.engine().as_deref() == Some("firefox") {
+                AttachConnection::Firefox(resolve_firefox_attach_target(target).await?)
+            } else {
+                detect_attach_connection(target, headers).await?
+            };
+            Some(target)
+        }
+        _ => None,
+    };
+    let engine = match prepared.as_ref() {
+        Some(AttachConnection::Firefox(_)) => Some(Engine::Firefox),
+        Some(AttachConnection::Cdp(_)) => Some(Engine::Other),
+        None => None,
+    };
+    let plan = match engine {
+        Some(engine) => state
+            .settings
+            .plan_with_transition(patch, engine, Transition::Replace),
+        None => provisional,
+    };
+    let mut options = plan.next.launch_options();
+    options.ca_cert = plan
+        .next
+        .get(Key::CaCert)
+        .and_then(Value::as_str)
+        .map(String::from);
+    validate_ca_cert_launch_mode(
+        &options,
+        plan.next.engine().as_deref(),
+        !matches!(&connection, Connection::Local),
+    )?;
+    let firefox = matches!(engine, Some(Engine::Firefox))
+        || engine.is_none() && plan.next.engine().as_deref() == Some("firefox");
+    if firefox {
+        let plugins = plan
+            .next
+            .get(Key::Plugins)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_else(|| plugins_from_command_or_env(cmd));
+        check_firefox_launch_flags(&plan.next, &options, &plugins, &connection)?;
+        if matches!(&connection, Connection::Cdp(_)) && plan.next.pin_tab() {
+            return Err(FIREFOX_ATTACH_PIN_TAB_ERROR.to_string());
+        }
+        let cdp = match &connection {
+            Connection::Cdp(target) => Some(target.as_str()),
+            _ => None,
+        };
+        let contained = plan.next.security().allowed_domains.is_some()
+            || state.domain_filter.read().await.is_some();
+        let restore = cmd
+            .get("restoreKey")
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+            .map(String::from)
+            .or_else(|| plan.next.restore().key)
+            .or_else(|| state.session_name.clone());
+        ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+            contained,
+            cdp_url: cdp,
+            cdp_port: None,
+            auto_connect: false,
+            profile: options.profile.as_deref(),
+            provider_name: None,
+            args: &options.args,
+            restore_key: restore.as_deref(),
+            storage_state: options.storage_state.as_deref(),
+        })?;
+    }
+    Ok((prepared, engine))
+}
+
+/// Why `--pin-tab` is refused for an attached Firefox: the binding cannot be enforced there, so
+/// a closed tab would hand later commands to another tab.
+const FIREFOX_ATTACH_PIN_TAB_ERROR: &str =
+    "--pin-tab is not supported with Firefox attach; pass --no-pin-tab to disable it";
+
 /// Rejects a relaunch into Firefox whose settings it cannot launch with. It runs on the planned
 /// settings before the relaunch closes the running browser, so a rejected option leaves it alone.
+#[cfg(test)]
 fn validate_firefox_relaunch(
     next: &Running,
     plugins: &[crate::plugins::PluginConfig],
@@ -6376,92 +6796,144 @@ fn validate_firefox_relaunch(
         .get(Key::CaCert)
         .and_then(Value::as_str)
         .map(String::from);
-    check_firefox_launch_flags(next, &options, plugins)
+    check_firefox_launch_flags(next, &options, plugins, &next.connection())
 }
 
-/// Rejects the options and settings owned Firefox cannot launch with.
+/// Rejects the options and settings Firefox cannot start or attach with.
 fn check_firefox_launch_flags(
     settings: &Running,
     options: &LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
+    connection: &Connection,
 ) -> Result<(), String> {
-    let connection = settings.connection();
-    let cdp = match &connection {
-        Connection::Cdp(cdp) => Some(cdp.clone()),
-        _ => None,
-    };
-    let provider = match &connection {
-        Connection::Provider(provider) => Some(provider.clone()),
-        _ => None,
-    };
-    let enable_features = settings.enable_features();
-    let init_scripts = settings.init_scripts();
-    bidi::firefox::validate_launch(
-        options,
-        bidi::firefox::LaunchFlags {
-            cdp: cdp.as_deref(),
-            auto_connect: matches!(connection, Connection::AutoConnect),
-            provider: provider.as_deref(),
-            capture_flow: settings.captures_flow(),
-            enable_features: &enable_features,
-            init_scripts: &init_scripts,
-            plugins,
-        },
+    if settings.captures_flow() {
+        return Err("--capture flow is not supported with --engine firefox".to_string());
+    }
+    bidi::firefox::validate_firefox_options(options, connection)?;
+    bidi::firefox::validate_firefox_settings(
+        &settings.enable_features(),
+        &settings.init_scripts(),
+        plugins,
     )
 }
 
-/// Rejects the settings Firefox cannot launch with. It runs before a relaunch closes the running
-/// browser, so a rejected option leaves that browser and its pages alone.
+/// Rejects the launch Firefox cannot start or attach with: its flags, a pinned tab it cannot
+/// enforce on an attached browser, and an allowlist it cannot enforce. It runs before a relaunch
+/// closes the running browser, so a rejected option leaves that browser and its pages alone.
 async fn validate_firefox_launch(
     state: &DaemonState,
     options: &LaunchOptions,
     plugins: &[crate::plugins::PluginConfig],
+    connection: &Connection,
 ) -> Result<(), String> {
-    check_firefox_launch_flags(&state.settings, options, plugins)?;
+    check_firefox_launch_flags(&state.settings, options, plugins, connection)?;
+    let cdp = match connection {
+        Connection::Cdp(cdp) => Some(cdp.as_str()),
+        _ => None,
+    };
+    if cdp.is_some() && state.pin_tab {
+        return Err(FIREFOX_ATTACH_PIN_TAB_ERROR.to_string());
+    }
     let contained = state.domain_filter.read().await.is_some();
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
         contained,
-        cdp_url: None,
+        cdp_url: cdp,
         cdp_port: None,
         auto_connect: false,
-        profile: None,
+        profile: options.profile.as_deref(),
         provider_name: None,
-        args: &[],
+        args: &options.args,
         restore_key: state.session_name.as_deref(),
         storage_state: options.storage_state.as_deref(),
     })
 }
 
-/// Launches owned Firefox with the session's resolved settings.
+/// Starts or attaches to Firefox with the session's resolved settings.
+#[cfg(test)]
 async fn launch_firefox(
     state: &mut DaemonState,
-    mut options: LaunchOptions,
-    plugins: &[crate::plugins::PluginConfig],
+    options: LaunchOptions,
+    plugins: Vec<crate::plugins::PluginConfig>,
+    connection: Connection,
+    contained: bool,
     strict_state: bool,
 ) -> Result<Value, String> {
-    validate_firefox_launch(state, &options, plugins).await?;
-    let contained = state.domain_filter.read().await.is_some();
+    launch_firefox_prepared(
+        state,
+        options,
+        plugins,
+        connection,
+        contained,
+        strict_state,
+        None,
+    )
+    .await
+}
+
+async fn launch_firefox_prepared(
+    state: &mut DaemonState,
+    mut options: LaunchOptions,
+    plugins: Vec<crate::plugins::PluginConfig>,
+    connection: Connection,
+    contained: bool,
+    strict_state: bool,
+    prepared: Option<bidi::attach::AttachTarget>,
+) -> Result<Value, String> {
+    validate_firefox_launch(state, &options, &plugins, &connection).await?;
+    let cdp = match connection {
+        Connection::Cdp(cdp) => Some(cdp),
+        _ => None,
+    };
+    let attached = cdp.is_some();
+    let attach_target = match (prepared, cdp.as_deref()) {
+        (Some(target), _) => Some(target),
+        (None, Some(target)) => Some(resolve_firefox_attach_target(target).await?),
+        (None, None) => None,
+    };
     options.restrict_webrtc = contained;
-    store_proxy_credentials(state, &options, true).await;
+    if attached {
+        options.proxy = None;
+        options.proxy_bypass = None;
+        options.proxy_username = None;
+        options.proxy_password = None;
+        options.storage_state = None;
+    }
+    store_proxy_credentials(state, &options, !attached).await;
     let storage_state = options.storage_state.clone();
     state.ref_map.invalidate_all_documents();
     state.reset_input_state();
-    let setup = state.session_setup.for_owned_firefox_launch(&options);
+    let setup = match attach_target.as_ref() {
+        Some(_) => SessionSetup::default(),
+        None => state.session_setup.for_owned_firefox_launch(&options),
+    };
     let net = bidi::network::NetContext::from_state(
         state,
         setup.extra_headers.clone().unwrap_or_default(),
     );
-    let mut session =
-        bidi::session::FirefoxSession::launch(&options, net, state.auto_dialog, (&setup).into())
-            .await?;
+    let mut session = match attach_target.as_ref() {
+        Some(target) => {
+            bidi::session::FirefoxSession::attach(target, &options, net, state.auto_dialog).await?
+        }
+        None => {
+            bidi::session::FirefoxSession::launch(&options, net, state.auto_dialog, (&setup).into())
+                .await?
+        }
+    };
     if contained
         || state.proxy_credentials.read().await.is_some()
         || !state.routes.read().await.is_empty()
         || !state.origin_headers.read().await.is_empty()
     {
-        bidi::network::ensure_intercept(&mut session).await?;
+        if let Err(error) = bidi::network::ensure_intercept(&mut session).await {
+            session.close().await;
+            return Err(error);
+        }
     }
     state.engine = "firefox".to_string();
+    state.settings.set(Key::Engine, Value::from("firefox"));
+    if let Some(target) = cdp {
+        state.attached_target = Some(AttachedTarget::Firefox(target));
+    }
     write_engine_file(&state.session_id, &state.engine);
     state.launch_identity = Some(state.settings.launch_identity());
     state.firefox = Some(session);
@@ -6486,7 +6958,9 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Result<Patch, Str
     let list = |field: &str| string_array_from_command(cmd, field).map(Value::from);
 
     match AttachedTarget::named_by(cmd) {
-        Some(AttachedTarget::CdpUrl(url)) => set(Key::Cdp, Value::from(url)),
+        Some(AttachedTarget::CdpUrl(url) | AttachedTarget::Firefox(url)) => {
+            set(Key::Cdp, Value::from(url))
+        }
         Some(AttachedTarget::CdpPort(port)) => set(Key::Cdp, Value::from(port.to_string())),
         Some(AttachedTarget::AutoConnect) => set(Key::AutoConnect, Value::Bool(true)),
         Some(AttachedTarget::Provider(provider)) => set(Key::Provider, Value::from(provider)),
@@ -6598,6 +7072,8 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Result<Patch, Str
 struct SettingsOutcome {
     /// Each change, as reported in `lifecycle.settings.changes`.
     changes: Vec<Value>,
+    /// Changes the plan carried into an attach whose engine was not known yet.
+    awaiting_engine: Vec<Change>,
     /// The patch asked for a relaunch whether or not anything changed.
     forced: bool,
     /// A running browser was closed so the next launch uses the new settings.
@@ -6623,7 +7099,6 @@ impl SettingsOutcome {
     /// was applied. The launch changes were reported as pending; they are
     /// replaced by what the launch actually did.
     fn absorb(&mut self, launch: SettingsOutcome) {
-        // The restore unit applied before the launch and is reported as it was.
         self.changes.retain(|change| {
             change["effect"] == "live" && change["applied"] == true
                 || RESTORE_UNIT
@@ -6634,11 +7109,25 @@ impl SettingsOutcome {
         self.forced = launch.forced;
         self.relaunched_browser = launch.relaunched_browser;
         self.pending = launch.pending;
+        self.awaiting_engine = launch.awaiting_engine;
+    }
+
+    /// Takes the in-place changes a pass applied after the gates. They replace
+    /// the not-applied report the pre-gate pass made for the same options.
+    fn absorb_in_place(&mut self, applied: SettingsOutcome) {
+        self.changes.retain(|change| {
+            !applied
+                .changes
+                .iter()
+                .any(|in_place| in_place["option"] == change["option"])
+        });
+        self.changes.extend(applied.changes);
     }
 
     /// Called when the launch failed and the launch settings were put back.
     fn mark_rolled_back(&mut self, keys: &[Key]) {
         self.relaunched_browser = false;
+        self.awaiting_engine.clear();
         let names: Vec<&str> = keys.iter().map(|key| spec(*key).name).collect();
         for change in &mut self.changes {
             if change["option"]
@@ -6702,6 +7191,26 @@ async fn rollback_launch_settings(
     None
 }
 
+/// Settles the settings a plan carried into an attach before the engine was known. An attached
+/// Firefox took them; for any other browser they are put back and reported as ignored.
+fn settle_awaited_settings(state: &mut DaemonState, outcome: &mut SettingsOutcome) {
+    let awaited = std::mem::take(&mut outcome.awaiting_engine);
+    if awaited.is_empty() || state.firefox.is_some() {
+        return;
+    }
+    for change in awaited {
+        state.settings.put_back(change.key, change.running.clone());
+        let name = spec(change.key).name;
+        outcome
+            .changes
+            .retain(|reported| reported["option"] != name);
+        outcome.changes.push(change.to_ignored_json());
+    }
+    if state.launch_identity.is_some() {
+        state.launch_identity = Some(state.settings.launch_identity());
+    }
+}
+
 /// What applying the restore unit changed, kept to put it back if the launch
 /// that follows fails.
 struct RestoreUnitApplied {
@@ -6719,7 +7228,7 @@ async fn apply_restore_unit(
 ) -> Result<RestoreUnitApplied, String> {
     let before = state.settings.clone();
     let attached = state.attached_target.clone();
-    let outcome = apply_settings_patch(state, unit, true).await?;
+    let outcome = apply_settings_patch(state, unit, SettingsPass::Launch).await?;
     Ok(RestoreUnitApplied {
         before,
         attached,
@@ -6833,43 +7342,92 @@ fn persist_pin_tab(session_id: &str, pin: bool) -> Result<bool, String> {
     }
 }
 
-/// Plans `patch` against the session's settings and applies the plan. Live
-/// settings change in place. Launch settings close the running browser so the
-/// launch that follows uses them, and they are committed for good only once
-/// that launch succeeds (`rollback_launch_settings` puts them back).
-///
-/// A command that never launches a browser (`launches` is false) applies only
-/// the live settings. Its launch changes are reported as not applied and stay
-/// pending until a command that launches carries them again.
+/// Which part of a settings patch a call applies.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsPass {
+    /// Session-level settings, applied before the policy and confirmation gates so they govern the command.
+    BeforeGates,
+    /// Changes an attached browser takes in place, applied only once the gates have passed.
+    InPlace,
+    /// The whole plan, applied by a command that launches or attaches.
+    Launch,
+}
+
+/// Plans `patch` against the session's settings and applies `pass` of the plan.
+/// Launch settings are kept only once the launch succeeds (`rollback_launch_settings`
+/// puts them back), and a `BeforeGates` pass leaves the attached browser alone.
 async fn apply_settings_patch(
     state: &mut DaemonState,
     patch: &Patch,
-    launches: bool,
+    pass: SettingsPass,
 ) -> Result<SettingsOutcome, String> {
+    apply_settings_patch_with_engine(state, patch, pass, None).await
+}
+
+async fn apply_settings_patch_with_engine(
+    state: &mut DaemonState,
+    patch: &Patch,
+    pass: SettingsPass,
+    engine: Option<crate::session_settings::Engine>,
+) -> Result<SettingsOutcome, String> {
+    let launches = pass == SettingsPass::Launch;
     check_allowed_domains_setting(patch)?;
     let mut patch = patch.clone();
     if launches {
         adjust_ca_patch(state, &mut patch)?;
     }
 
-    let full = state.settings.plan(&patch);
+    let full = match engine {
+        Some(engine) => state
+            .settings
+            .plan_with_transition(&patch, engine, Transition::Replace),
+        None => state.settings.plan(&patch),
+    };
     if full.is_empty() && full.ignored.is_empty() {
         return Ok(SettingsOutcome::default());
     }
-    let ignored: Vec<Value> = full.ignored.iter().map(|c| c.to_ignored_json()).collect();
-    let (plan, deferred) = if launches {
-        (full, Vec::new())
-    } else {
-        let deferred: Vec<Value> = full
-            .changes
-            .iter()
-            .filter(|change| change.effect() == Effect::Launch)
-            .map(|change| change.to_json(false))
-            .collect();
-        let live = patch.without_launch_settings_for(state.session_name.as_deref());
-        (state.settings.plan(&live), deferred)
+    let changes_destination = full.changes.iter().any(|change| {
+        matches!(
+            change.key,
+            Key::Cdp | Key::AutoConnect | Key::Provider | Key::Engine
+        )
+    });
+    let (plan, deferred) = match pass {
+        SettingsPass::Launch => (full, Vec::new()),
+        SettingsPass::BeforeGates => {
+            let deferred: Vec<Value> = full
+                .changes
+                .iter()
+                .filter(|change| change.effect == Effect::Launch || change.in_place)
+                .map(|change| change.to_json(false))
+                .collect();
+            let live_patch = patch.without_launch_settings_for(state.session_name.as_deref());
+            let live = full.live_only(&state.settings);
+            let plan = if live
+                .changes
+                .iter()
+                .all(|change| live_patch.get(change.key).is_some())
+            {
+                live
+            } else {
+                state.settings.plan(&live_patch).live_only(&state.settings)
+            };
+            (plan, deferred)
+        }
+        SettingsPass::InPlace => (full.in_place_only(&state.settings), Vec::new()),
     };
+    let ignored: Vec<Value> = plan.ignored.iter().map(|c| c.to_ignored_json()).collect();
     let changed = |key: Key| plan.changes.iter().any(|change| change.key == key);
+
+    if plan.next.pin_tab()
+        && !changes_destination
+        && state
+            .firefox
+            .as_ref()
+            .is_some_and(bidi::session::FirefoxSession::is_attached)
+    {
+        return Err(FIREFOX_ATTACH_PIN_TAB_ERROR.to_string());
+    }
 
     // Load the CA trust first: a bad bundle fails before anything changes.
     let ca_cert = if changed(Key::CaCert) || changed(Key::ClearCaCert) {
@@ -6910,7 +7468,7 @@ async fn apply_settings_patch(
         .changes
         .iter()
         .map(|change| {
-            let applied = match change.effect() {
+            let applied = match change.effect {
                 Effect::Live => true,
                 // The domain filter is installed at once, browser or not.
                 Effect::Launch => had_browser || change.key == Key::AllowedDomains,
@@ -6926,31 +7484,54 @@ async fn apply_settings_patch(
     let touched: Vec<Key> = plan.changes.iter().map(|change| change.key).collect();
     let was = |key: Key| touched.contains(&key);
 
-    let pending = if plan.relaunch {
+    let browser_is_live = state.firefox.as_mut().is_some_and(|ff| !ff.has_exited())
+        || state
+            .browser
+            .as_mut()
+            .is_some_and(|mgr| !mgr.has_process_exited())
+        || state.webdriver_backend.is_some();
+    let will_launch = launches && (plan.relaunch || !browser_is_live);
+
+    let pending = if will_launch {
         let mut keys: Vec<Key> = plan
             .changes
             .iter()
-            .filter(|change| change.effect() == Effect::Launch)
+            .filter(|change| change.effect == Effect::Launch || change.in_place)
             .map(|change| change.key)
             .collect();
         if keys.contains(&Key::ClearCaCert) {
             keys.push(Key::CaCert);
         }
-        // Values dropped because the session went external come back with it.
-        keys.extend(plan.ignored.iter().map(|change| change.key));
-        Some(PendingSettings {
-            keys,
-            before: state.settings.clone(),
-            proxy_credentials: state.proxy_credentials.read().await.clone(),
-            filter: state.domain_filter.read().await.clone(),
-            ca_cert: state.effective_ca_cert.clone(),
-            attached: state.attached_target.clone(),
-            cdp_headers: state.cdp_headers.clone(),
-        })
+        if plan.relaunch {
+            keys.extend(plan.ignored.iter().map(|change| change.key));
+        }
+        if !keys.is_empty() || plan.relaunch {
+            Some(PendingSettings {
+                keys,
+                before: state.settings.clone(),
+                proxy_credentials: state.proxy_credentials.read().await.clone(),
+                filter: state.domain_filter.read().await.clone(),
+                ca_cert: state.effective_ca_cert.clone(),
+                attached: state.attached_target.clone(),
+                cdp_headers: state.cdp_headers.clone(),
+            })
+        } else {
+            None
+        }
     } else {
         None
     };
+    let awaiting_engine = plan.awaiting_engine.clone();
     let (next, relaunch) = (plan.next, plan.relaunch);
+
+    if !will_launch {
+        if let Some(ff) = state.firefox.as_mut() {
+            if !ff.has_exited() {
+                ff.apply_attached_settings(&next.launch_options(), &touched)
+                    .await?;
+            }
+        }
+    }
 
     if was(Key::DefaultTimeout) {
         state.default_timeout_ms = next.default_timeout_ms();
@@ -7021,6 +7602,10 @@ async fn apply_settings_patch(
     }
     if connection_changed {
         state.attached_target = None;
+    } else if changed(Key::Engine) {
+        if let Some(AttachedTarget::Firefox(target)) = state.attached_target.as_ref() {
+            state.attached_target = Some(AttachedTarget::CdpUrl(target.clone()));
+        }
     }
     state.settings = next;
 
@@ -7049,6 +7634,7 @@ async fn apply_settings_patch(
 
     Ok(SettingsOutcome {
         changes,
+        awaiting_engine,
         forced: launches && patch.forces_relaunch(),
         relaunched_browser,
         pending,
@@ -7112,26 +7698,44 @@ fn attach_settings_outcome(resp: &mut Value, outcome: &SettingsOutcome) {
     }
 }
 
+#[cfg(test)]
 async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    handle_launch_inner_prepared(cmd, state, LaunchRequest::Unplanned).await
+}
+
+async fn handle_launch_inner_prepared(
+    cmd: &Value,
+    state: &mut DaemonState,
+    request: LaunchRequest,
+) -> Result<Value, String> {
     let engine = cmd
         .get("engine")
         .and_then(Value::as_str)
         .map(String::from)
         .or_else(|| state.settings.engine());
     let patch = launch_envelope_patch(cmd, engine.as_deref())?;
-    check_capture_setting(&patch)?;
-    validate_firefox_relaunch(
-        &state.settings.plan(&patch).next,
-        &plugins_from_command_or_env(cmd),
-    )?;
     let had_browser_before_launch = has_active_browser_session(state);
-
-    let mut outcome = apply_settings_patch(state, &patch, true).await?;
+    let (prepared, mut outcome) = match request {
+        LaunchRequest::Planned(prepared) => (prepared, SettingsOutcome::default()),
+        #[cfg(test)]
+        LaunchRequest::Unplanned => {
+            check_capture_setting(&patch)?;
+            validate_firefox_relaunch(
+                &state.settings.plan(&patch).next,
+                &plugins_from_command_or_env(cmd),
+            )?;
+            let outcome = apply_settings_patch(state, &patch, SettingsPass::Launch).await?;
+            (None, outcome)
+        }
+    };
     let reusable = !outcome.relaunched_browser
         && match (state.browser.as_mut(), state.webdriver_backend.as_ref()) {
             (Some(mgr), _) => !mgr.has_process_exited() && mgr.is_connection_alive().await,
             (None, Some(webdriver)) => webdriver.is_connection_alive().await,
-            (None, None) => state.firefox.as_mut().is_some_and(|ff| !ff.has_exited()),
+            (None, None) => match state.firefox.as_mut() {
+                Some(ff) => !ff.has_exited(),
+                None => false,
+            },
         };
     if reusable {
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
@@ -7141,8 +7745,17 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
     let strict_state = patch.value(Key::StorageState).is_some()
         || Patch::from_wire(cmd.get("settings"))
             .is_ok_and(|settings| settings.value(Key::StorageState).is_some());
-    match auto_launch_with(state, plugins_from_command_or_env(cmd), cmd, strict_state).await {
+    match auto_launch_with(
+        state,
+        plugins_from_command_or_env(cmd),
+        cmd,
+        strict_state,
+        prepared,
+    )
+    .await
+    {
         Ok(extras) => {
+            settle_awaited_settings(state, &mut outcome);
             let mut result = json!({
                 "launched": true,
                 "relaunchedBrowser": had_browser_before_launch,
@@ -19748,9 +20361,16 @@ mod tests {
         assert_eq!(staged.viewport, Some(viewport(800, 600, false)));
 
         let before = format!("{:?}", state.session_setup);
-        let error = launch_firefox(&mut state, changed, &[], false)
-            .await
-            .unwrap_err();
+        let error = launch_firefox(
+            &mut state,
+            changed,
+            Vec::new(),
+            Connection::Local,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("Firefox executable not found"), "{error}");
         assert_eq!(format!("{:?}", state.session_setup), before);
     }
@@ -20277,7 +20897,12 @@ mod tests {
         launches: bool,
     ) -> Result<SettingsOutcome, String> {
         let patch = Patch::from_wire(Some(&settings)).map_err(|e| e.to_string())?;
-        apply_settings_patch(state, &patch, launches).await
+        let pass = if launches {
+            SettingsPass::Launch
+        } else {
+            SettingsPass::BeforeGates
+        };
+        apply_settings_patch(state, &patch, pass).await
     }
 
     #[tokio::test]
@@ -21820,8 +22445,10 @@ mod tests {
             Vec::new(),
             &cmd,
             false,
+            None,
         ));
-        let outer = std::mem::size_of_val(&auto_launch_with(&mut state, Vec::new(), &cmd, false));
+        let outer =
+            std::mem::size_of_val(&auto_launch_with(&mut state, Vec::new(), &cmd, false, None));
         assert!(
             outer < inner,
             "auto_launch_with embeds the launch future ({outer} >= {inner} bytes)"
@@ -23580,6 +24207,203 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             resolve_launch_target(&cmd, Some(&attached)),
             Some(json!({ "action": "launch", "cdpPort": 9222, "allowedDomains": ["example.com"] }))
         );
+        let attached =
+            AttachedTarget::Firefox("ws://127.0.0.1:9333/session?devtools=6080".to_string());
+        assert_eq!(
+            resolve_launch_target(&cmd, Some(&attached)),
+            Some(json!({
+                "action": "launch",
+                "cdpUrl": "ws://127.0.0.1:9333/session?devtools=6080",
+                "allowedDomains": ["example.com"]
+            }))
+        );
+    }
+
+    #[test]
+    fn test_firefox_attach_does_not_persist_an_inferred_engine() {
+        let attached = AttachedTarget::Firefox("9333".to_string());
+        let reconnect =
+            resolve_launch_target(&json!({ "action": "launch" }), Some(&attached)).unwrap();
+        assert_eq!(reconnect, json!({ "action": "launch", "cdpUrl": "9333" }));
+        assert_eq!(
+            launch_envelope_patch(&reconnect, None)
+                .unwrap()
+                .get(Key::Engine),
+            None
+        );
+        assert!(launch_targets_firefox(None, false, Some(&attached)));
+        assert!(launch_targets_firefox(
+            Some("firefox"),
+            false,
+            Some(&AttachedTarget::CdpPort(9333))
+        ));
+        assert!(!launch_targets_firefox(
+            Some("chrome"),
+            false,
+            Some(&attached)
+        ));
+        let configured =
+            launch_envelope_patch(&json!({ "action": "launch", "engine": "firefox" }), None)
+                .unwrap();
+        assert_eq!(configured.value(Key::Engine), Some(&json!("firefox")));
+
+        let chrome = json!({ "action": "launch", "cdpPort": 9333 });
+        let patch = launch_envelope_patch(&chrome, None).unwrap();
+        assert_eq!(patch.get(Key::Engine), None);
+    }
+
+    #[tokio::test]
+    async fn test_chrome_launch_replaces_an_inferred_firefox_attachment() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Cdp, json!("9333"));
+        state.attached_target = Some(AttachedTarget::Firefox("9333".to_string()));
+        state.engine = "firefox".to_string();
+        let reconnect = resolve_launch_target(
+            &json!({ "action": "launch" }),
+            state.attached_target.as_ref(),
+        )
+        .unwrap();
+        let reconnect_patch = launch_envelope_patch(&reconnect, None).unwrap();
+        apply_settings_patch(&mut state, &reconnect_patch, SettingsPass::Launch)
+            .await
+            .unwrap();
+        assert_eq!(state.settings.engine(), None);
+        let (target, server) = bare_cdp_server().await;
+
+        let result = handle_launch(
+            &json!({ "action": "launch", "cdpUrl": target.clone() }),
+            &mut state,
+        )
+        .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(state.attached_target, Some(AttachedTarget::CdpUrl(target)));
+        assert_eq!(state.settings.engine(), None);
+        assert_eq!(state.engine, "chrome");
+        server.abort();
+    }
+
+    #[test]
+    fn test_firefox_attach_target_keeps_an_explicit_engine_switch() {
+        let target = AttachedTarget::Firefox("9333".to_string());
+        let command = json!({ "action": "launch", "engine": "chrome" });
+        assert_eq!(
+            resolve_launch_target(&command, Some(&target)),
+            Some(json!({ "action": "launch", "engine": "chrome", "cdpUrl": "9333" }))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_firefox_attach_detection_preserves_explicit_devtools() {
+        for (suffix, explicit) in [
+            ("/session", false),
+            ("/session?devtools=6080", true),
+            ("/session?devtools=6000", true),
+        ] {
+            let target = format!("ws://127.0.0.1:9333{suffix}");
+            let AttachConnection::Firefox(parsed) =
+                detect_attach_connection(&target, None).await.unwrap()
+            else {
+                panic!("expected a Firefox attach target");
+            };
+            assert_eq!(parsed.bidi_url, "ws://127.0.0.1:9333/session");
+            assert_eq!(parsed.devtools_explicit, explicit);
+        }
+    }
+
+    async fn bare_cdp_server() -> (String, tokio::task::JoinHandle<()>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    continue;
+                };
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let result = match request["method"].as_str().unwrap_or("") {
+                        "Target.getTargets" => json!({
+                            "targetInfos": [{
+                                "targetId": "page-1",
+                                "type": "page",
+                                "title": "",
+                                "url": "about:blank",
+                                "attached": false
+                            }]
+                        }),
+                        "Target.attachToTarget" => json!({ "sessionId": "session-1" }),
+                        _ => json!({}),
+                    };
+                    let reply = json!({ "id": request["id"], "result": result });
+                    if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn bare_websocket_root_uses_cdp_before_firefox_detection() {
+        let (target, server) = bare_cdp_server().await;
+
+        let AttachConnection::Cdp(url) = detect_attach_connection(&target, None).await.unwrap()
+        else {
+            panic!("a local CDP server at a bare WebSocket root must win");
+        };
+
+        assert_eq!(url, target);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn detect_attempts_cdp_before_returning_a_firefox_parse_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = accepted.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        let connection = detect_attach_connection(
+            &format!("ws://127.0.0.1:{port}/session?devtools=nope"),
+            None,
+        )
+        .await;
+        let error = connection.expect_err("invalid Firefox target must fail");
+
+        assert!(accepted.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            error.starts_with("CDP WebSocket connect failed:"),
+            "{error}"
+        );
+        assert!(error.contains("invalid devtools port"), "{error}");
+        server.abort();
+    }
+
+    #[test]
+    fn test_cdp_and_firefox_attach_failure_keeps_both_errors() {
+        assert_eq!(
+            combine_cdp_and_firefox_attach_errors(
+                "CDP discovery failed: connection refused",
+                "http://127.0.0.1:9333?devtools=6080",
+                "handshake failed"
+            ),
+            "CDP discovery failed: connection refused; WebDriver BiDi: no Firefox remote agent for http://127.0.0.1:9333 (handshake failed)"
+        );
+        assert_eq!(
+            target_label("https://user:pass@[::1]:9333/session?token=secret"),
+            "https://[::1]:9333"
+        );
     }
 
     #[tokio::test]
@@ -24336,21 +25160,33 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[test]
     fn test_connection_setting_maps_to_attached_target() {
-        assert_eq!(attached_target_for(&Connection::Local), None);
+        assert_eq!(attached_target_for(&Connection::Local, "chrome"), None);
         assert_eq!(
-            attached_target_for(&Connection::AutoConnect),
+            attached_target_for(&Connection::AutoConnect, "chrome"),
             Some(AttachedTarget::AutoConnect)
         );
         assert_eq!(
-            attached_target_for(&Connection::Cdp("http://0.0.0.0:9222".to_string())),
+            attached_target_for(
+                &Connection::Cdp("http://0.0.0.0:9222".to_string()),
+                "chrome"
+            ),
             Some(AttachedTarget::CdpUrl("http://0.0.0.0:9222".to_string()))
         );
         assert_eq!(
-            attached_target_for(&Connection::Provider("Browserless".to_string())),
+            attached_target_for(
+                &Connection::Cdp("ws://127.0.0.1:9222/session".to_string()),
+                "firefox"
+            ),
+            Some(AttachedTarget::Firefox(
+                "ws://127.0.0.1:9222/session".to_string()
+            ))
+        );
+        assert_eq!(
+            attached_target_for(&Connection::Provider("Browserless".to_string()), "chrome"),
             Some(AttachedTarget::Provider("browserless".to_string()))
         );
         assert_eq!(
-            attached_target_for(&Connection::Provider("ios".to_string())),
+            attached_target_for(&Connection::Provider("ios".to_string()), "chrome"),
             None
         );
     }
@@ -25322,9 +26158,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let mut state = DaemonState::new();
         let capture = Patch::from_entries([(Key::Capture, Requested::Set(json!(["flow"])))]);
         state.settings = state.settings.plan(&capture).next;
-        let error = launch_firefox(&mut state, LaunchOptions::default(), &[], false)
-            .await
-            .unwrap_err();
+        let error = launch_firefox(
+            &mut state,
+            LaunchOptions::default(),
+            Vec::new(),
+            Connection::Local,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             error,
             "--capture flow is not supported with --engine firefox"
@@ -25343,7 +26186,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         ]);
         state.settings = state.settings.plan(&rejected).next;
 
-        let error = auto_launch_inner(&mut state, Vec::new(), &json!({}), false)
+        let error = auto_launch_inner(&mut state, Vec::new(), &json!({}), false, None)
             .await
             .unwrap_err();
 
@@ -25560,8 +26403,31 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[test]
     fn test_auto_launch_error_context_distinguishes_cdp_connections() {
-        assert_eq!(auto_launch_error_context(true), "CDP connection failed");
-        assert_eq!(auto_launch_error_context(false), "Auto-launch failed");
+        assert_eq!(
+            auto_launch_error_context(&Connection::Cdp("invalid-cdp-target".into()), None),
+            "CDP connection failed"
+        );
+        assert_eq!(
+            auto_launch_error_context(&Connection::Local, None),
+            "Auto-launch failed"
+        );
+    }
+
+    #[test]
+    fn test_auto_launch_error_context_names_a_firefox_attach() {
+        for target in [
+            "ws://127.0.0.1:9333/session",
+            "ws://127.0.0.1:9333/session?devtools=6080",
+        ] {
+            assert_eq!(
+                auto_launch_error_context(&Connection::Cdp(target.into()), None),
+                "Firefox attach failed"
+            );
+        }
+        assert_eq!(
+            auto_launch_error_context(&Connection::Cdp("9333".into()), Some("firefox")),
+            "Firefox attach failed"
+        );
     }
 
     #[tokio::test]
@@ -26498,7 +27364,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::IdleTimeout, json!("120000")),
         ]);
 
-        let outcome = apply_settings_patch(&mut state, &patch, true)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -26528,7 +27394,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             Key::ActionPolicy,
             json!(path.to_str().unwrap()),
         )]);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -26543,11 +27409,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::Profile, json!("/tmp/p")),
             set_to(Key::DefaultTimeout, json!(9000)),
         ]);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
-        let again = apply_settings_patch(&mut state, &patch, true)
+        let again = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -26561,7 +27427,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.settings = Running::defaults();
         let patch = patch_with(vec![set_to(Key::Profile, json!("/tmp/p"))]);
 
-        let outcome = apply_settings_patch(&mut state, &patch, true)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -26576,6 +27442,212 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    async fn test_a_user_agent_awaited_for_an_attach_is_ignored_for_anything_but_firefox() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        let patch = patch_with(vec![
+            set_to(Key::Cdp, json!("9553")),
+            set_to(Key::UserAgent, json!("ProbeUA/5")),
+        ]);
+
+        let mut outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
+            .await
+            .unwrap();
+        assert_eq!(outcome.awaiting_engine.len(), 1);
+        assert_eq!(
+            state.settings.user_agent().as_deref(),
+            Some("ProbeUA/5"),
+            "the attach carries it"
+        );
+
+        settle_awaited_settings(&mut state, &mut outcome);
+
+        assert_eq!(state.settings.user_agent(), None);
+        let reported: Vec<&Value> = outcome
+            .changes
+            .iter()
+            .filter(|change| change["option"] == "user-agent")
+            .collect();
+        assert_eq!(reported.len(), 1, "{:?}", outcome.changes);
+        assert_eq!(reported[0]["effect"], "ignored");
+    }
+
+    #[tokio::test]
+    async fn test_a_user_agent_awaited_for_an_attach_stays_when_the_attach_found_firefox() {
+        use crate::native::bidi::session::tests::fake_session;
+
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        let patch = patch_with(vec![
+            set_to(Key::Cdp, json!("9550")),
+            set_to(Key::UserAgent, json!("ProbeUA/5")),
+        ]);
+        let mut outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
+            .await
+            .unwrap();
+
+        let (ff, _tx, _calls) = fake_session().await;
+        state.firefox = Some(ff);
+        settle_awaited_settings(&mut state, &mut outcome);
+
+        assert_eq!(state.settings.user_agent().as_deref(), Some("ProbeUA/5"));
+        assert!(outcome.awaiting_engine.is_empty());
+        assert!(outcome
+            .changes
+            .iter()
+            .all(|change| change["option"] != "user-agent" || change["effect"] != "ignored"));
+    }
+
+    async fn attached_firefox_state() -> (
+        IsolatedEnv,
+        DaemonState,
+        crate::native::bidi::session::tests::Calls,
+    ) {
+        use crate::native::bidi::session::tests::fake_session;
+
+        let (env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Cdp, json!("9333"));
+        state.settings.set(Key::Engine, json!("firefox"));
+        let (ff, _tx, calls) = fake_session().await;
+        state.firefox = Some(ff);
+        (env, state, calls)
+    }
+
+    #[tokio::test]
+    async fn test_pin_tab_is_refused_on_a_firefox_that_is_already_attached() {
+        let (_env, mut state, calls) = attached_firefox_state().await;
+        for _ in 0..2 {
+            let resp = execute_command(
+                &json!({ "id": "1", "action": "url", "settings": { "pin-tab": true } }),
+                &mut state,
+            )
+            .await;
+            assert_eq!(resp["success"], false, "{resp}");
+            assert!(
+                resp["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("--pin-tab is not supported")),
+                "{resp}"
+            );
+            assert!(!state.pin_tab, "a refused pin must not be recorded");
+        }
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "a refused command must not reach the browser"
+        );
+    }
+
+    fn attached_firefox_settings_command() -> Value {
+        json!({
+            "id": "1",
+            "action": "session_info",
+            "settings": { "download-path": "/tmp/x", "user-agent": "X/1" },
+        })
+    }
+
+    fn attached_browser_untouched(
+        state: &DaemonState,
+        calls: &crate::native::bidi::session::tests::Calls,
+    ) {
+        let sent = calls.lock().unwrap().clone();
+        assert!(
+            !sent
+                .iter()
+                .any(|method| method == "browser.setDownloadBehavior"),
+            "{sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|method| method == "emulation.setUserAgentOverride"),
+            "{sent:?}"
+        );
+        assert_eq!(state.settings.user_agent(), None);
+        assert_eq!(state.settings.launch_options().download_path, None);
+    }
+
+    fn reported_setting(resp: &Value, option: &str) -> Value {
+        let changes = resp["data"]["lifecycle"]["settings"]["changes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let reported: Vec<&Value> = changes
+            .iter()
+            .filter(|change| change["option"] == option)
+            .collect();
+        assert_eq!(reported.len(), 1, "{changes:?}");
+        reported[0].clone()
+    }
+
+    #[tokio::test]
+    async fn a_denied_command_does_not_change_the_attached_browser() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        fs::write(&path, r#"{"default":"allow","deny":["session_info"]}"#).unwrap();
+        let (_env, mut state, calls) = attached_firefox_state().await;
+        state.policy = Some(ActionPolicy::load(path.to_str().unwrap()).unwrap());
+
+        let resp = execute_command(&attached_firefox_settings_command(), &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        attached_browser_untouched(&state, &calls);
+        for option in ["user-agent", "download-path"] {
+            assert_eq!(reported_setting(&resp, option)["applied"], false, "{resp}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_command_parked_for_confirmation_does_not_change_the_attached_browser() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        fs::write(&path, r#"{"default":"allow","confirm":["session_info"]}"#).unwrap();
+        let (_env, mut state, calls) = attached_firefox_state().await;
+        state.policy = Some(ActionPolicy::load(path.to_str().unwrap()).unwrap());
+
+        let resp = execute_command(&attached_firefox_settings_command(), &mut state).await;
+
+        assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
+        attached_browser_untouched(&state, &calls);
+        for option in ["user-agent", "download-path"] {
+            assert_eq!(reported_setting(&resp, option)["applied"], false, "{resp}");
+        }
+
+        state
+            .confirmed_policy_actions
+            .insert("session_info".to_string());
+        let resp = execute_command(&attached_firefox_settings_command(), &mut state).await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(state.settings.user_agent().as_deref(), Some("X/1"));
+        assert_eq!(
+            state.settings.launch_options().download_path.as_deref(),
+            Some("/tmp/x")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allowed_command_changes_the_attached_browser_once() {
+        let (_env, mut state, calls) = attached_firefox_state().await;
+
+        let resp = execute_command(&attached_firefox_settings_command(), &mut state).await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        let sent = calls.lock().unwrap().clone();
+        let count = |method: &str| sent.iter().filter(|sent| *sent == method).count();
+        assert_eq!(count("browser.setDownloadBehavior"), 1, "{sent:?}");
+        assert_eq!(count("emulation.setUserAgentOverride"), 1, "{sent:?}");
+        assert_eq!(state.settings.user_agent().as_deref(), Some("X/1"));
+        assert_eq!(
+            state.settings.launch_options().download_path.as_deref(),
+            Some("/tmp/x")
+        );
+        for option in ["user-agent", "download-path"] {
+            assert_eq!(reported_setting(&resp, option)["applied"], true, "{resp}");
+        }
+    }
+
+    #[tokio::test]
     async fn test_allowed_domains_change_updates_the_domain_filter() {
         let (_env, mut state) = isolated_state();
         state.settings = Running::defaults();
@@ -26583,7 +27655,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![set_to(Key::AllowedDomains, json!(["a.test"]))]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -26592,11 +27664,32 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![(Key::AllowedDomains, Requested::Default)]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
         assert!(state.domain_filter.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resetting_external_firefox_engine_keeps_a_generic_attach_target() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Cdp, json!("9333"));
+        state.settings.set(Key::Engine, json!("firefox"));
+        state.attached_target = Some(AttachedTarget::Firefox("9333".to_string()));
+        apply_settings_patch(
+            &mut state,
+            &patch_with(vec![(Key::Engine, Requested::Default)]),
+            SettingsPass::Launch,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.settings.engine(), None);
+        assert_eq!(
+            state.attached_target,
+            Some(AttachedTarget::CdpUrl("9333".to_string()))
+        );
     }
 
     #[tokio::test]
@@ -26608,7 +27701,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![set_to(Key::Provider, json!("browserless"))]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -26705,13 +27798,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::Cdp, json!("wss://a.example/cdp")),
             set_to(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer a"}"#)),
         ]);
-        apply_settings_patch(&mut state, &first, true)
+        apply_settings_patch(&mut state, &first, SettingsPass::Launch)
             .await
             .unwrap();
         assert!(cdp_headers_from_settings(&state.settings).is_some());
 
         let second = patch_with(vec![set_to(Key::Cdp, json!("wss://b.example/cdp"))]);
-        apply_settings_patch(&mut state, &second, true)
+        apply_settings_patch(&mut state, &second, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -26727,7 +27820,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::DefaultTimeout, json!(9000)),
         ]);
 
-        let outcome = apply_settings_patch(&mut state, &patch, false)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::BeforeGates)
             .await
             .unwrap();
 
@@ -26771,7 +27864,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.settings.set(Key::Profile, json!("/tmp/inherited"));
         let patch = patch_with(vec![set_to(Key::StorageState, json!("/tmp/s.json"))]);
 
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -26787,7 +27880,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.settings = Running::defaults();
         state.settings.set(Key::Profile, json!("/tmp/p"));
 
-        let outcome = apply_settings_patch(&mut state, &Patch::default(), true)
+        let outcome = apply_settings_patch(&mut state, &Patch::default(), SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -26925,7 +28018,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 set_to(Key::UserAgent, json!("ua")),
             ]);
 
-            let outcome = apply_settings_patch(&mut state, &patch, true)
+            let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
                 .await
                 .unwrap();
 
@@ -27034,6 +28127,214 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             assert_eq!(state.settings.get(Key::Provider), None, "{resp}");
         }
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn conflicting_connect_and_settings_keep_the_positional_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker_path = dir.path().join("provider-plugin-invoked");
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+printf invoked > "$1"
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:1/devtools/browser/x"}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+        let plugins = json!([
+            {
+                "name": "browserbox",
+                "command": plugin_path.to_string_lossy(),
+                "args": [marker_path.to_string_lossy()],
+                "capabilities": ["browser.provider"]
+            }
+        ]);
+
+        for rule in ["deny", "confirm"] {
+            let policy = dir.path().join(format!("{rule}.json"));
+            fs::write(
+                &policy,
+                format!(r#"{{"{rule}": ["plugin:browserbox:browser.provider"]}}"#),
+            )
+            .unwrap();
+            let (_env, mut state) = isolated_state();
+            state.settings = Running::defaults();
+            let cmd = json!({
+                "id": "1",
+                "action": "launch",
+                "cdpUrl": "ws://127.0.0.1:1/devtools/browser/x",
+                "plugins": plugins.clone(),
+                "settings": {
+                    "provider": "browserbox",
+                    "action-policy": policy.to_str().unwrap()
+                }
+            });
+
+            let resp = execute_command(&cmd, &mut state).await;
+
+            assert_ne!(
+                resp["data"]["confirmation_required"], true,
+                "{rule}: {resp}"
+            );
+            assert!(
+                !resp["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("denied by policy"),
+                "{rule}: {resp}"
+            );
+            assert!(
+                !marker_path.exists(),
+                "{rule}: the plugin must not run: {resp}"
+            );
+            assert_ne!(
+                state.settings.connection(),
+                Connection::Provider("browserbox".to_string()),
+                "{rule}: {resp}"
+            );
+        }
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn conflicting_connect_and_settings_gate_the_positional_provider() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker_path = dir.path().join("provider-plugin-invoked");
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+printf invoked > "$1"
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:1/devtools/browser/x"}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+        let plugins = json!([
+            {
+                "name": "browserbox",
+                "command": plugin_path.to_string_lossy(),
+                "args": [marker_path.to_string_lossy()],
+                "capabilities": ["browser.provider"]
+            }
+        ]);
+
+        for rule in ["deny", "confirm"] {
+            let policy = dir.path().join(format!("{rule}.json"));
+            fs::write(
+                &policy,
+                format!(r#"{{"{rule}": ["plugin:browserbox:browser.provider"]}}"#),
+            )
+            .unwrap();
+            let (_env, mut state) = isolated_state();
+            state.settings = Running::defaults();
+            let cmd = json!({
+                "id": "1",
+                "action": "launch",
+                "provider": "browserbox",
+                "plugins": plugins.clone(),
+                "settings": {
+                    "cdp": "9222",
+                    "action-policy": policy.to_str().unwrap()
+                }
+            });
+
+            let resp = execute_command(&cmd, &mut state).await;
+
+            if rule == "deny" {
+                assert_eq!(resp["success"], false, "{resp}");
+                assert!(
+                    resp["error"].as_str().unwrap().contains("denied by policy"),
+                    "{resp}"
+                );
+            } else {
+                assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
+                assert_eq!(resp["data"]["action"], "plugin:browserbox:browser.provider");
+            }
+            assert!(
+                !marker_path.exists(),
+                "{rule}: the plugin must not run: {resp}"
+            );
+            assert_eq!(state.settings.get(Key::Provider), None, "{resp}");
+        }
+    }
+
+    #[tokio::test]
+    async fn page_command_on_connected_provider_does_not_reconfirm_provider_plugin() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let command: Value = serde_json::from_str(&text).unwrap();
+                        let reply = json!({ "id": command["id"], "result": {} });
+                        if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        for rule in ["deny", "confirm"] {
+            let policy = dir.path().join(format!("{rule}.json"));
+            fs::write(
+                &policy,
+                format!(r#"{{"{rule}": ["plugin:browserbox:browser.provider"]}}"#),
+            )
+            .unwrap();
+            let (_env, mut state) = isolated_state();
+            state.settings = Running::defaults();
+            state.settings.set(Key::Provider, json!("browserbox"));
+            let client = CdpClient::connect(&url).await.unwrap();
+            state.browser = Some(BrowserManager::for_test(client, url.clone()));
+            let cmd = json!({
+                "id": "1",
+                "action": "url",
+                "plugins": provider_plugins(),
+                "settings": {
+                    "action-policy": policy.to_str().unwrap()
+                }
+            });
+
+            let resp = execute_command(&cmd, &mut state).await;
+
+            assert_ne!(
+                resp["data"]["confirmation_required"], true,
+                "{rule}: {resp}"
+            );
+            assert!(
+                !resp["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("denied by policy"),
+                "{rule}: {resp}"
+            );
+        }
+        server.abort();
+    }
     #[tokio::test]
     async fn test_changed_cdp_headers_replace_the_cached_ones_for_the_endpoint() {
         let (_env, mut state) = isolated_state();
@@ -27043,7 +28344,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::Cdp, json!(endpoint)),
             set_to(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer one"}"#)),
         ]);
-        apply_settings_patch(&mut state, &first, true)
+        apply_settings_patch(&mut state, &first, SettingsPass::Launch)
             .await
             .unwrap();
         assert_eq!(
@@ -27058,7 +28359,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             Key::CdpHeaders,
             json!(r#"{"Authorization":"Bearer two"}"#),
         )]);
-        apply_settings_patch(&mut state, &changed, true)
+        apply_settings_patch(&mut state, &changed, SettingsPass::Launch)
             .await
             .unwrap();
         assert_eq!(
@@ -27070,7 +28371,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         );
 
         let cleared = patch_with(vec![(Key::CdpHeaders, Requested::Default)]);
-        apply_settings_patch(&mut state, &cleared, true)
+        apply_settings_patch(&mut state, &cleared, SettingsPass::Launch)
             .await
             .unwrap();
         assert_eq!(cdp_headers_for(&state, endpoint), None);
@@ -27108,7 +28409,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         fs::write(&config, r#"{"debug":false,"default_timeout":90000}"#).unwrap();
 
         let patch = patch_with(vec![set_to(Key::DefaultTimeout, json!(5000))]);
-        apply_settings_patch(&mut state, &patch, false)
+        apply_settings_patch(&mut state, &patch, SettingsPass::BeforeGates)
             .await
             .unwrap();
 
@@ -27274,7 +28575,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.attached_target = Some(AttachedTarget::AutoConnect);
         let patch = patch_with(vec![(Key::AutoConnect, Requested::Default)]);
 
-        let outcome = apply_settings_patch(&mut state, &patch, true)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -27433,7 +28734,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.settings.set(Key::ProxyPassword, json!("pw"));
 
         let patch = patch_with(vec![set_to(Key::Cdp, json!("ws://127.0.0.1:9999/x"))]);
-        let outcome = apply_settings_patch(&mut state, &patch, true)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -27684,7 +28985,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let store: Arc<dyn Store> = Arc::new(FsStore::new(dir.path(), "s"));
         let mut first = DaemonState::with_store(Running::defaults(), store.clone());
         let patch = security_patch(policy.to_str().unwrap());
-        apply_settings_patch(&mut first, &patch, true)
+        apply_settings_patch(&mut first, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         drop(first);
@@ -27714,7 +29015,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut first,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -27746,7 +29047,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut first,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -27769,7 +29070,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut first,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -27793,7 +29094,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut first,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -27824,7 +29125,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             domains(&["example.com"]),
             set_to(Key::ActionPolicy, json!(file.to_str().unwrap())),
         ]);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         (state, store)
@@ -27880,18 +29181,18 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let mut state = DaemonState::with_store(Running::defaults(), store.clone());
         let patch = patch_with(vec![domains(&["example.com"])]);
 
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         assert_eq!(store.saves(), 1);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
-        apply_settings_patch(&mut state, &Patch::default(), true)
+        apply_settings_patch(&mut state, &Patch::default(), SettingsPass::Launch)
             .await
             .unwrap();
         let other = patch_with(vec![set_to(Key::UserAgent, json!("ua"))]);
-        apply_settings_patch(&mut state, &other, true)
+        apply_settings_patch(&mut state, &other, SettingsPass::Launch)
             .await
             .unwrap();
 
@@ -27903,9 +29204,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let (_env, _) = isolated_state();
         let store = FlakyStore::counting();
         let mut state = DaemonState::with_store(Running::defaults(), store.clone());
-        apply_settings_patch(&mut state, &patch_with(vec![domains(&["a.com"])]), true)
-            .await
-            .unwrap();
+        apply_settings_patch(
+            &mut state,
+            &patch_with(vec![domains(&["a.com"])]),
+            SettingsPass::Launch,
+        )
+        .await
+        .unwrap();
         let cmd = json!({
             "action": "launch",
             "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/test",
@@ -27944,9 +29249,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let (_env, _) = isolated_state();
         let store = FlakyStore::new(2);
         let mut state = DaemonState::with_store(Running::defaults(), store.clone());
-        apply_settings_patch(&mut state, &patch_with(vec![domains(&["a.com"])]), true)
-            .await
-            .unwrap();
+        apply_settings_patch(
+            &mut state,
+            &patch_with(vec![domains(&["a.com"])]),
+            SettingsPass::Launch,
+        )
+        .await
+        .unwrap();
         let cmd = json!({
             "action": "launch",
             "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/test",
@@ -27974,15 +29283,19 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut first,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
 
-        let err = apply_settings_patch(&mut first, &patch_with(vec![domains(&[])]), true)
-            .await
-            .err()
-            .expect("empty allowlist must be rejected");
+        let err = apply_settings_patch(
+            &mut first,
+            &patch_with(vec![domains(&[])]),
+            SettingsPass::Launch,
+        )
+        .await
+        .err()
+        .expect("empty allowlist must be rejected");
         assert_eq!(err, network::EMPTY_ALLOWED_DOMAINS_ERROR);
         assert_eq!(current_allowed_domains(&first).await, vec!["example.com"]);
         drop(first);
@@ -27998,10 +29311,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let mut state = DaemonState::with_store(Running::defaults(), store.clone());
         let before = state.settings.clone();
 
-        let err = apply_settings_patch(&mut state, &security_patch("/p.json"), true)
-            .await
-            .err()
-            .expect("the write fails");
+        let err =
+            apply_settings_patch(&mut state, &security_patch("/p.json"), SettingsPass::Launch)
+                .await
+                .err()
+                .expect("the write fails");
 
         assert!(err.contains("disk full"), "{err}");
         assert!(state.domain_filter.read().await.is_none());
@@ -28032,7 +29346,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::ActionPolicy, json!("/p.json")),
         ]);
 
-        let err = apply_settings_patch(&mut state, &patch, true)
+        let err = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .err()
             .expect("the store write fails");
@@ -28074,7 +29388,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![domains(&["example.com"])]),
-            true,
+            SettingsPass::Launch,
         )
         .await
         .unwrap();
@@ -28085,12 +29399,396 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(elsewhere.domain_filter.read().await.is_none());
         assert!(sibling.domain_filter.read().await.is_none());
     }
+
+    async fn bidi_only_server() -> (
+        u16,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handshakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = handshakes.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    continue;
+                };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let refusal = json!({
+                        "id": request["id"],
+                        "error": { "code": -32601, "message": "no CDP on this port" },
+                    });
+                    if ws.send(Message::Text(refusal.to_string())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        (port, handshakes, server)
+    }
+
+    #[tokio::test]
+    async fn connect_waits_for_policy_before_discovering_the_target() {
+        for decision in ["deny", "confirm"] {
+            let (_env, mut state) = isolated_state();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("policy.json");
+            fs::write(
+                &path,
+                format!(r#"{{"default":"allow","{decision}":["launch"]}}"#),
+            )
+            .unwrap();
+            state.policy = Some(ActionPolicy::load(path.to_str().unwrap()).unwrap());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = format!("ws://{}", listener.local_addr().unwrap());
+            let resp = execute_command(
+                &json!({"id":"1","action":"launch","cdpUrl":target}),
+                &mut state,
+            )
+            .await;
+            if decision == "deny" {
+                assert_eq!(resp["success"], false, "{resp}");
+                assert!(resp["error"].as_str().unwrap().contains("denied by policy"));
+            } else {
+                assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
+            }
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_under_allowed_domains_never_contacts_the_target() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cases = [
+            json!({
+                "id": "1",
+                "action": "launch",
+                "cdpUrl": format!("ws://127.0.0.1:{port}/devtools/browser/leak?secret=token"),
+            }),
+            json!({
+                "id": "2",
+                "action": "launch",
+                "cdpUrl": format!("ws://127.0.0.1:{port}/session?secret=token"),
+            }),
+            json!({
+                "id": "3",
+                "action": "launch",
+                "cdpPort": port,
+            }),
+            json!({
+                "id": "4",
+                "action": "navigate",
+                "url": "https://example.com",
+                "settings": {
+                    "allowed-domains": ["example.com"],
+                    "cdp": format!("ws://127.0.0.1:{port}/devtools/browser/leak?secret=token"),
+                },
+            }),
+        ];
+
+        for (index, cmd) in cases.iter().enumerate() {
+            let (_env, mut state) = isolated_state();
+            if index < 3 {
+                state
+                    .settings
+                    .set(Key::AllowedDomains, json!(["example.com"]));
+                *state.domain_filter.write().await =
+                    Some(crate::native::network::DomainFilter::new("example.com"));
+            }
+            let resp = execute_command(cmd, &mut state).await;
+            assert_eq!(resp["success"], false, "{resp}");
+            assert!(
+                resp["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("--allowed-domains"),
+                "{resp}"
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "allowlisted connect contacted the target endpoint for {cmd}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_firefox_only_modes_are_refused_before_the_live_session_closes() {
+        let (port, handshakes, server) = bidi_only_server().await;
+        let direct = json!({
+            "id": "1",
+            "action": "launch",
+            "cdpUrl": "ws://127.0.0.1:9/session?devtools=6080",
+            "restoreKey": "next-session",
+        });
+        let probed =
+            json!({ "id": "1", "action": "launch", "cdpPort": port, "restoreKey": "next-session" });
+
+        for cmd in [&direct, &probed] {
+            for (key, value, expected) in [
+                (Key::Capture, json!(["flow"]), "--capture flow"),
+                (Key::Enable, json!(["downloads"]), "--enable"),
+                (
+                    Key::InitScripts,
+                    json!(["window.marker = 1"]),
+                    "--init-script",
+                ),
+            ] {
+                let (_env, mut state) = isolated_state();
+                state.settings = Running::defaults();
+                state.settings.set(key, value.clone());
+                let previous = state.settings.clone();
+                let session_name = state.session_name.clone();
+                let (ff, _, calls) = bidi::session::tests::fake_session().await;
+                state.firefox = Some(ff);
+
+                let resp = execute_command(cmd, &mut state).await;
+
+                assert_eq!(resp["success"], false, "{key:?} {resp}");
+                let error = resp["error"].as_str().unwrap_or("");
+                assert!(error.contains(expected), "{key:?} {resp}");
+                assert!(state.firefox.is_some(), "{key:?} {error}");
+                assert!(
+                    !calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|call| call == "session.end"),
+                    "{key:?} closed the live session before refusing the launch"
+                );
+                assert_eq!(state.settings.get(key), Some(&value), "{key:?}");
+                assert_eq!(state.settings, previous, "{key:?}");
+                assert_eq!(state.session_name, session_name, "{key:?}");
+            }
+        }
+
+        assert!(handshakes.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_a_session_endpoint_is_parsed_while_a_port_is_detected_over_bidi() {
+        let parsed = detect_attach_connection("ws://127.0.0.1:9/session?devtools=6080", None)
+            .await
+            .unwrap();
+        let AttachConnection::Firefox(target) = parsed else {
+            panic!("a /session endpoint is Firefox without a probe");
+        };
+        assert_eq!(target.bidi_url, "ws://127.0.0.1:9/session");
+        assert!(target.devtools_explicit);
+
+        let (port, handshakes, server) = bidi_only_server().await;
+        let detected = detect_attach_connection(&port.to_string(), None)
+            .await
+            .unwrap();
+        let AttachConnection::Firefox(target) = detected else {
+            panic!("a port that refuses CDP but answers the BiDi handshake is Firefox");
+        };
+        assert_eq!(target.bidi_url, format!("ws://127.0.0.1:{port}/session"));
+        assert!(!target.devtools_explicit);
+        assert!(handshakes.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_a_positional_attach_carries_the_user_agent_and_ignores_launch_only_flags() {
+        use crate::native::bidi::session::tests::{fake_bidi_with, fake_devtools};
+
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        let (cdp_url, cdp_server) = bare_cdp_server().await;
+        state.browser = Some(BrowserManager::connect_cdp(&cdp_url).await.unwrap());
+        state.engine = "chrome".into();
+        state.settings.set(Key::Cdp, json!(cdp_url.clone()));
+        state.settings.set(Key::Engine, json!("chrome"));
+        state.settings.set(Key::UserAgent, json!("CarriedUA/1.0"));
+        state.attached_target = Some(AttachedTarget::CdpUrl(cdp_url));
+
+        let (bidi_url, _tx, _calls, messages) =
+            fake_bidi_with(|v: &Value| match v["method"].as_str() {
+                Some("session.new") => json!({"capabilities": {"browserVersion": "150.0"}}),
+                Some("browsingContext.getTree") => json!({"contexts": [
+                    {"context": "ctx-1", "url": "https://a.example/", "userContext": "default"},
+                ]}),
+                Some("script.callFunction") => {
+                    json!({"type": "success", "result": {"type": "number", "value": 7}})
+                }
+                _ => json!({}),
+            })
+            .await;
+        let devtools_port = match fake_devtools().await {
+            bidi::firefox::DevtoolsEndpoint::Tcp { port, .. } => port,
+            bidi::firefox::DevtoolsEndpoint::Unix(_) => unreachable!(),
+        };
+
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "cdpUrl": format!("{bidi_url}/session?devtools={devtools_port}"),
+                "settings": {
+                    "user-agent": "CarriedUA/1.0",
+                    "allow-file-access": true,
+                    "webgpu": true,
+                }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+
+        let sent: Vec<Value> = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m["method"] == "emulation.setUserAgentOverride")
+            .map(|m| m["params"]["userAgent"].clone())
+            .collect();
+        assert!(
+            !sent.is_empty(),
+            "the attach applies the user agent: {resp}"
+        );
+        assert!(
+            sent.iter().all(|value| *value == json!("CarriedUA/1.0")),
+            "{sent:?}"
+        );
+
+        let reported = |resp: &Value, option: &str| -> Value {
+            resp["data"]["lifecycle"]["settings"]["changes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|change| change["option"] == option)
+                .cloned()
+                .unwrap_or_else(|| panic!("{option} is reported in {resp}"))
+        };
+        let user_agent = reported(&resp, "user-agent");
+        assert_eq!(user_agent["applied"], true, "{resp}");
+        assert_ne!(user_agent["effect"], "ignored", "{resp}");
+        for option in ["allow-file-access", "webgpu"] {
+            assert_eq!(reported(&resp, option)["effect"], "ignored", "{resp}");
+            assert_eq!(reported(&resp, option)["applied"], false, "{resp}");
+        }
+        cdp_server.abort();
+
+        let (next_cdp, next_server) = bare_cdp_server().await;
+        let resp = execute_command(
+            &json!({
+                "id": "2",
+                "action": "launch",
+                "cdpUrl": next_cdp,
+                "settings": { "user-agent": "CarriedUA/2.0" }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(reported(&resp, "user-agent")["effect"], "ignored", "{resp}");
+        assert_eq!(reported(&resp, "user-agent")["applied"], false, "{resp}");
+
+        let unchanged = execute_command(
+            &json!({
+                "id": "3",
+                "action": "launch",
+                "cdpUrl": next_cdp,
+                "settings": { "user-agent": "CarriedUA/1.0" }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(unchanged["success"], true, "{unchanged}");
+        assert!(
+            unchanged["data"]["lifecycle"]["settings"]["changes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|change| change["option"] != "user-agent"),
+            "{unchanged}"
+        );
+        next_server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_a_local_session_attaching_to_firefox_ignores_launch_only_flags() {
+        use crate::native::bidi::session::tests::{fake_bidi_with, fake_devtools};
+
+        for (named, settings) in [
+            (true, json!({ "allow-file-access": true, "webgpu": true })),
+            (false, json!({})),
+        ] {
+            let (_env, mut state) = isolated_state();
+            state.settings = Running::defaults();
+            state.engine = "chrome".into();
+            if !named {
+                state.settings.set(Key::AllowFileAccess, json!(true));
+                state.settings.set(Key::Webgpu, json!(true));
+            }
+
+            let (bidi_url, _tx, _calls, _messages) =
+                fake_bidi_with(|v: &Value| match v["method"].as_str() {
+                    Some("session.new") => json!({"capabilities": {"browserVersion": "150.0"}}),
+                    Some("browsingContext.getTree") => json!({"contexts": [
+                        {"context": "ctx-1", "url": "https://a.example/", "userContext": "default"},
+                    ]}),
+                    Some("script.callFunction") => {
+                        json!({"type": "success", "result": {"type": "number", "value": 7}})
+                    }
+                    _ => json!({}),
+                })
+                .await;
+            let devtools_port = match fake_devtools().await {
+                bidi::firefox::DevtoolsEndpoint::Tcp { port, .. } => port,
+                bidi::firefox::DevtoolsEndpoint::Unix(_) => unreachable!(),
+            };
+            let target = format!("{bidi_url}/session?devtools={devtools_port}");
+
+            let resp = execute_command(
+                &json!({
+                    "id": "1",
+                    "action": "launch",
+                    "cdpUrl": target.clone(),
+                    "settings": settings,
+                }),
+                &mut state,
+            )
+            .await;
+
+            assert_eq!(resp["success"], true, "{named} {resp}");
+            assert!(state.firefox.is_some(), "{named} {resp}");
+            assert_eq!(state.attached_target, Some(AttachedTarget::Firefox(target)));
+            let reported = |option: &str| -> Value {
+                resp["data"]["lifecycle"]["settings"]["changes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|change| change["option"] == option)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{option} is reported in {resp}"))
+            };
+            for option in ["allow-file-access", "webgpu"] {
+                assert_eq!(reported(option)["effect"], "ignored", "{named} {resp}");
+                assert_eq!(reported(option)["applied"], false, "{named} {resp}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod firefox_routing_tests {
     use super::*;
-    use crate::native::bidi::session::tests::fake_session;
+    use crate::native::bidi::session::tests::{fake_session, fake_session_dead};
     use crate::test_utils::EnvGuard;
 
     const ENV: &[&str] = &[
@@ -28109,16 +29807,37 @@ mod firefox_routing_tests {
         "AGENT_BROWSER_PROXY_BYPASS",
         "AGENT_BROWSER_PROXY_USERNAME",
         "AGENT_BROWSER_PROXY_PASSWORD",
+        "AGENT_BROWSER_SOCKET_DIR",
         "AGENT_BROWSER_PIN_TAB",
     ];
 
-    fn clean_env() -> EnvGuard<'static> {
+    /// The cleared environment of a routing test, with session files going to a scratch directory
+    /// instead of the user's. The directory outlives the environment guard's restore.
+    struct RoutingEnv {
+        _guard: EnvGuard<'static>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for RoutingEnv {
+        type Target = EnvGuard<'static>;
+
+        fn deref(&self) -> &Self::Target {
+            &self._guard
+        }
+    }
+
+    fn clean_env() -> RoutingEnv {
         let guard = EnvGuard::new(ENV);
         for name in ENV {
             guard.remove(name);
         }
         guard.set("AGENT_BROWSER_ENGINE", "firefox");
-        guard
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        RoutingEnv {
+            _guard: guard,
+            _dir: dir,
+        }
     }
 
     async fn firefox_state() -> (DaemonState, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -28127,6 +29846,17 @@ mod firefox_routing_tests {
         std::mem::forget(tx);
         state.firefox = Some(ff);
         (state, calls)
+    }
+
+    #[tokio::test]
+    async fn attached_firefox_liveness_checks_the_bidi_connection() {
+        let _guard = clean_env();
+        let (mut session, _tx, calls) = fake_session().await;
+        assert!(!session.has_exited());
+        assert!(calls.lock().unwrap().is_empty());
+
+        let mut session = fake_session_dead().await;
+        assert!(session.has_exited());
     }
 
     fn navigations(calls: &Arc<std::sync::Mutex<Vec<String>>>) -> usize {
@@ -28182,7 +29912,7 @@ mod firefox_routing_tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(accepts(), 0);
         let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(false)))]);
-        let outcome = apply_settings_patch(&mut state, &patch, true)
+        let outcome = apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         assert!(!outcome.relaunched_browser);
@@ -28206,7 +29936,7 @@ mod firefox_routing_tests {
         }
         assert_eq!(accepts(), 1);
         let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(true)))]);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         events.send(prompt("alert")).unwrap();
@@ -28219,7 +29949,7 @@ mod firefox_routing_tests {
         events.send(prompt("prompt")).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         let patch = Patch::from_entries(vec![(Key::NoAutoDialog, Requested::Set(json!(false)))]);
-        apply_settings_patch(&mut state, &patch, true)
+        apply_settings_patch(&mut state, &patch, SettingsPass::Launch)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -28232,27 +29962,9 @@ mod firefox_routing_tests {
     }
 
     #[tokio::test]
-    async fn connect_rejects_the_firefox_engine_like_cdp_settings() {
-        let _guard = clean_env();
-        let (mut state, _calls) = firefox_state().await;
-        let resp = execute_command(
-            &json!({"id":"1","action":"launch","cdpPort":9,"settings":{"engine":"firefox"}}),
-            &mut state,
-        )
-        .await;
-        assert_eq!(resp["success"], false);
-        let error = resp["error"].as_str().unwrap();
-        assert!(
-            error.contains("connect and --cdp are not supported with --engine firefox"),
-            "{error}"
-        );
-        assert!(state.browser.is_none());
-    }
-
-    #[tokio::test]
     async fn implicit_launch_rejects_cdp_settings_before_launching() {
         let _guard = clean_env();
-        let (mut state, _calls) = firefox_state().await;
+        let mut state = DaemonState::new();
         let resp = execute_command(
             &json!({"id":"1","action":"navigate","url":"https://a.test","settings":{"engine":"firefox","cdp":"ws://127.0.0.1:9222"}}),
             &mut state,
@@ -28261,10 +29973,46 @@ mod firefox_routing_tests {
         assert_eq!(resp["success"], false);
         let error = resp["error"].as_str().unwrap();
         assert!(
-            error.contains("connect and --cdp are not supported with --engine firefox"),
+            error.contains("No Firefox WebDriver BiDi endpoint"),
             "{error}"
         );
-        assert!(state.firefox.is_some());
+        assert!(state.firefox.is_none());
+    }
+
+    #[tokio::test]
+    async fn pin_tab_is_refused_for_an_attached_firefox_before_anything_changes() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        assert!(state.firefox.as_ref().unwrap().is_attached());
+        let before = state.settings.clone();
+        let patch = Patch::from_entries(vec![(Key::PinTab, Requested::Set(json!(true)))]);
+
+        let error = match apply_settings_patch(&mut state, &patch, SettingsPass::BeforeGates).await
+        {
+            Ok(_) => panic!("the pin was accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, FIREFOX_ATTACH_PIN_TAB_ERROR);
+        assert!(!state.pin_tab);
+        assert_eq!(state.settings, before);
+    }
+
+    #[tokio::test]
+    async fn a_relaunch_rejected_for_its_allowlist_leaves_the_running_firefox_alone() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        state.settings.set(Key::Engine, json!("firefox"));
+        state.session_name = Some("k".into());
+        *state.domain_filter.write().await = Some(network::DomainFilter::new("a.test"));
+
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+
+        assert!(
+            error.contains("--allowed-domains") && error.contains("--restore"),
+            "{error}"
+        );
+        assert!(state.firefox.is_some(), "the running Firefox was closed");
     }
 
     #[tokio::test]
@@ -28404,15 +30152,22 @@ mod firefox_routing_tests {
     }
 
     #[tokio::test]
-    async fn implicit_launch_rejects_allowed_domains_with_a_session_name() {
+    async fn launch_rejects_allowed_domains_with_a_session_name() {
         let _guard = clean_env();
-        let (mut state, _calls) = firefox_state().await;
+        let mut state = DaemonState::new();
         state.session_name = Some("k".into());
         *state.domain_filter.write().await = Some(network::DomainFilter::new("a.test"));
         let options = state.settings.launch_options();
-        let e = launch_firefox(&mut state, options, &[], true)
-            .await
-            .unwrap_err();
+        let e = launch_firefox(
+            &mut state,
+            options,
+            Vec::new(),
+            Connection::Local,
+            true,
+            true,
+        )
+        .await
+        .unwrap_err();
         assert!(
             e.contains("--allowed-domains") && e.contains("--restore"),
             "{e}"
@@ -28420,7 +30175,43 @@ mod firefox_routing_tests {
     }
 
     #[tokio::test]
-    async fn chrome_only_action_errors_without_touching_the_browser_and_before_other_gates() {
+    async fn retained_cdp_target_is_checked_before_firefox_allowlist_validation() {
+        let _guard = clean_env();
+        let mut state = DaemonState::new();
+        state.settings.set(Key::Cdp, json!("9333"));
+
+        let error = handle_launch(
+            &json!({
+                "action": "launch",
+                "engine": "firefox",
+                "allowedDomains": ["a.test"]
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("not supported with --cdp"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn firefox_attach_rejects_conflicting_connection_options() {
+        let _guard = clean_env();
+        for (connection, expected) in [
+            (Connection::AutoConnect, "--auto-connect"),
+            (Connection::Provider("browserbox".to_string()), "--provider"),
+        ] {
+            let mut state = DaemonState::new();
+            let options = state.settings.launch_options();
+            let error = launch_firefox(&mut state, options, Vec::new(), connection, false, false)
+                .await
+                .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn chrome_only_action_errors_after_checking_attached_firefox_liveness() {
         let _guard = clean_env();
         let (mut state, calls) = firefox_state().await;
         state.backend_type = BackendType::WebDriver;
@@ -28505,9 +30296,162 @@ mod firefox_routing_tests {
     }
 
     #[tokio::test]
+    async fn firefox_attach_rejects_pin_tab_and_keeps_domains() {
+        let guard = clean_env();
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        let mut state = DaemonState::new();
+        *state.domain_filter.write().await = Some(DomainFilter::new("blocked.test"));
+
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "settings": { "pin-tab": true },
+                "cdpUrl": "ws://127.0.0.1:9333/session"
+            }),
+            &mut state,
+        )
+        .await;
+
+        let error = resp["error"].as_str().unwrap();
+        assert!(
+            error.contains("--pin-tab") && error.contains("--no-pin-tab"),
+            "{error}"
+        );
+        assert!(state.pin_tab);
+        assert_eq!(
+            state
+                .domain_filter
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .allowed_domains,
+            vec!["blocked.test".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_attached_firefox_reattaches_when_in_place_settings_change() {
+        let _guard = clean_env();
+        let (bidi_url, _tx, _calls, messages) =
+            bidi::session::tests::fake_bidi_with(|v: &Value| match v["method"].as_str() {
+                Some("session.new") => json!({"capabilities": {"browserVersion": "150.0"}}),
+                Some("browsingContext.getTree") => json!({"contexts": [
+                    {"context": "ctx-1", "url": "https://a.example/", "userContext": "default"},
+                    {"context": "ctx-2", "url": "https://b.example/", "userContext": "default"},
+                ]}),
+                Some("script.callFunction") => {
+                    json!({"type": "success", "result": {"type": "number", "value": 7}})
+                }
+                Some("script.evaluate") => {
+                    json!({"type": "success", "result": {"type": "string", "value": "Reattached"}})
+                }
+                _ => json!({}),
+            })
+            .await;
+        let devtools_port = match bidi::session::tests::fake_devtools().await {
+            bidi::firefox::DevtoolsEndpoint::Tcp { port, .. } => port,
+            bidi::firefox::DevtoolsEndpoint::Unix(_) => unreachable!(),
+        };
+        let target = format!("{bidi_url}/session?devtools={devtools_port}");
+
+        let mut state = DaemonState::new();
+        state.engine = "firefox".to_string();
+        state.settings.set(Key::Engine, json!("firefox"));
+        state.settings.set(Key::Cdp, json!(target.clone()));
+        state
+            .settings
+            .set(Key::UserAgent, json!("ReattachedAgent/1.0"));
+        state.attached_target = Some(AttachedTarget::Firefox(target));
+        state.firefox = Some(bidi::session::tests::fake_session_dead().await);
+
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "title",
+                "settings": {
+                    "user-agent": "ReattachedAgent/1.0",
+                    "download-path": "/tmp/reattached-downloads"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(resp["data"]["title"], "Reattached");
+        assert!(resp["data"]["lifecycle"]["settings"]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| change["option"] == "user-agent" && change["applied"] == true));
+        assert_eq!(
+            state.settings.get(Key::UserAgent),
+            Some(&json!("ReattachedAgent/1.0"))
+        );
+        assert_eq!(
+            state.settings.get(Key::DownloadPath),
+            Some(&json!("/tmp/reattached-downloads"))
+        );
+
+        let ua_overrides: Vec<Value> = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m["method"] == "emulation.setUserAgentOverride")
+            .map(|m| m["params"].clone())
+            .collect();
+        assert_eq!(ua_overrides.len(), 2, "{ua_overrides:?}");
+        assert!(messages.lock().unwrap().iter().any(|m| {
+            m["method"] == "browser.setDownloadBehavior"
+                && m["params"]["downloadBehavior"]["destinationFolder"]
+                    == "/tmp/reattached-downloads"
+        }));
+
+        let unreachable = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            format!("ws://127.0.0.1:{port}/session?devtools={port}")
+        };
+        state.settings.set(Key::Cdp, json!(unreachable.clone()));
+        state.attached_target = Some(AttachedTarget::Firefox(unreachable));
+        state.firefox = Some(bidi::session::tests::fake_session_dead().await);
+
+        let failed = execute_command(
+            &json!({
+                "id": "2",
+                "action": "title",
+                "settings": {
+                    "user-agent": "ShouldRollback/2.0",
+                    "download-path": "/tmp/rollback-downloads"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(failed["success"], false, "{failed}");
+        let error = failed["error"].as_str().unwrap_or("");
+        assert!(
+            !error.contains("BiDi connection closed"),
+            "must try re-attaching instead of writing to dead session: {error}"
+        );
+        assert_eq!(
+            state.settings.get(Key::UserAgent),
+            Some(&json!("ReattachedAgent/1.0"))
+        );
+        assert_eq!(
+            state.settings.get(Key::DownloadPath),
+            Some(&json!("/tmp/reattached-downloads"))
+        );
+    }
+
+    #[tokio::test]
     async fn pin_tab_propagates_to_firefox_and_reports_structured_tab_gone() {
         let _guard = clean_env();
         let (mut state, calls) = firefox_state().await;
+        state.firefox.as_mut().unwrap().mark_owned();
         let activity = Arc::new(IdleActivity::new());
         let (server, slot) =
             StreamServer::start_without_client(0, "firefox-pin-test".into(), true, activity)

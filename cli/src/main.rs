@@ -339,19 +339,6 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
         );
     }
 
-    if cdp && !flags.extensions.is_empty() {
-        return Some("Cannot use --extension with --cdp (extensions require local browser)");
-    }
-
-    // The WebGPU preset is Chrome launch flags; it cannot be applied to a
-    // browser agent-browser did not launch. Rejecting (rather than silently
-    // ignoring) matches the --extension handling above. `--webgpu false`
-    // overrides an env/config-enabled preset for these modes.
-    if flags.webgpu && cdp {
-        return Some(
-            "Cannot use --webgpu with --cdp (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
-        );
-    }
     if flags.webgpu && provider {
         return Some(
             "Cannot use --webgpu with -p/--provider (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
@@ -2559,6 +2546,27 @@ mod tests {
     }
 
     #[test]
+    fn firefox_cdp_flags_travel_with_the_command_settings() {
+        let (command, wire) = settings_of(&[
+            "--engine",
+            "firefox",
+            "--cdp",
+            "9222",
+            "--download-path",
+            "/tmp/downloads",
+            "--allowed-domains",
+            "example.com",
+            "get",
+            "url",
+        ]);
+        assert_eq!(command["action"], "url");
+        assert_eq!(wire["engine"], "firefox");
+        assert_eq!(wire["cdp"], "9222");
+        assert_eq!(wire["download-path"], "/tmp/downloads");
+        assert_eq!(wire["allowed-domains"], json!(["example.com"]));
+    }
+
+    #[test]
     fn settings_distinguish_ca_trust_set_omitted_and_cleared() {
         let (_, omitted) = settings_of(&["get", "url"]);
         assert!(omitted.get("ca-cert").is_none() && omitted.get("clear-ca-cert").is_none());
@@ -3355,10 +3363,6 @@ mod tests {
                 launch_mode_flags(false, false, true, true),
                 "Cannot use --extension with -p/--provider (extensions require local browser)",
             ),
-            (
-                launch_mode_flags(false, true, false, true),
-                "Cannot use --extension with --cdp (extensions require local browser)",
-            ),
         ];
 
         for (flags, expected) in cases {
@@ -3382,16 +3386,12 @@ mod tests {
     }
 
     #[test]
-    fn test_incompatible_launch_mode_error_rejects_webgpu_attach_modes() {
+    fn test_incompatible_launch_mode_error_rejects_webgpu_for_provider_and_auto_connect() {
         let with_webgpu = |mut flags: Flags| {
             flags.webgpu = true;
             flags
         };
         let cases = [
-            (
-                with_webgpu(launch_mode_flags(false, true, false, false)),
-                "Cannot use --webgpu with --cdp (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
-            ),
             (
                 with_webgpu(launch_mode_flags(false, false, true, false)),
                 "Cannot use --webgpu with -p/--provider (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
@@ -3416,6 +3416,31 @@ mod tests {
         assert_eq!(
             incompatible_launch_mode_error(&launch_mode_flags(false, true, false, false)),
             None
+        );
+    }
+
+    #[test]
+    fn test_incompatible_launch_mode_error_allows_launch_only_flags_with_explicit_cdp() {
+        let attach = |engine: Option<&str>| {
+            let mut flags = launch_mode_flags(false, true, false, true);
+            flags.webgpu = true;
+            flags.engine = engine.map(str::to_string);
+            flags.ca_cert = None;
+            flags
+        };
+        assert_eq!(incompatible_launch_mode_error(&attach(None)), None);
+        assert_eq!(
+            incompatible_launch_mode_error(&attach(Some("firefox"))),
+            None
+        );
+
+        let mut ca_cert = launch_mode_flags(false, true, false, true);
+        ca_cert.ca_cert = Some("/tmp/ca.pem".to_string());
+        assert_eq!(
+            incompatible_launch_mode_error(&ca_cert),
+            Some(
+                "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)"
+            )
         );
     }
 

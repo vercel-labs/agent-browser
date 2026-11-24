@@ -595,9 +595,9 @@ agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless; on displayless Linux an Xvfb display starts automatically)
 agent-browser --webgpu ...            # Enable WebGPU (SwiftShader software Vulkan on Linux, no GPU needed)
 agent-browser --no-webmcp ...         # Disable default experimental WebMCP Chrome features (or AGENT_BROWSER_NO_WEBMCP env)
-agent-browser --cdp <port|url> ...    # Connect via CDP; root query slash is optional
+agent-browser --cdp <port|url> ...    # CDP or Firefox BiDi; Firefox accepts ?devtools=<port>
 agent-browser --cdp <url> --cdp-headers '{"Authorization":"Bearer <token>"}' ...  # Auth headers for discovery and handshake
-agent-browser --pin-tab ...           # Pin the session to its bound tab (strict tab binding)
+agent-browser --pin-tab ...           # Pin the session to its bound tab (CDP only; Firefox attach rejects it)
 agent-browser --no-pin-tab ...        # Disable a sticky pin previously enabled with --pin-tab
 agent-browser -p <provider> ...       # Browser provider or configured provider plugin
 agent-browser -p ladybird ...         # Ladybird over WebDriver: CSS selectors, no snapshot refs
@@ -627,7 +627,7 @@ agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
 ```
 
-Firefox rejects `--cdp`, `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. Authenticated proxies work through `--proxy` with credentials. Firefox takes `http://`, `socks4://`, and `socks5://` proxies and rejects `https://` proxies instead of connecting to them without TLS.
+A Firefox agent-browser launches rejects `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. An attached Firefox ignores the options that describe a browser agent-browser launches, including extensions and `--webgpu`, and rejects `--pin-tab`, `--allowed-domains`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. Authenticated proxies work through `--proxy` with credentials. Firefox takes `http://`, `socks4://`, and `socks5://` proxies and rejects `https://` proxies instead of connecting to them without TLS.
 
 ## Debugging
 

@@ -53,6 +53,10 @@ const AMBIENT_FIELD: &str = "ambient";
 pub(super) const AMBIENT_KEYS: [Key; 4] =
     [Key::Cdp, Key::AutoConnect, Key::Provider, Key::CdpHeaders];
 
+/// The mutually exclusive connection targets. A patch that names more than one
+/// is resolved by order, so a launch envelope that names one drops the rest.
+const TARGET_KEYS: [Key; 3] = [Key::Cdp, Key::AutoConnect, Key::Provider];
+
 /// The connection targets of one invocation after the environment and config
 /// defaults are resolved against the command line.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -184,6 +188,38 @@ impl Patch {
         for key in std::mem::take(&mut patch.ambient) {
             if key != Key::CdpHeaders {
                 patch.entries.remove(&key);
+            }
+        }
+        patch
+    }
+
+    /// This patch with a launch envelope layered over it. The envelope is what
+    /// the command itself asked for, so it wins on a key both name, and a
+    /// connection target it names displaces the other targets and the headers
+    /// that belonged to them.
+    pub fn with_envelope(&self, envelope: &Patch) -> Patch {
+        let mut patch = self.clone();
+        for key in envelope.entries.keys() {
+            patch.ambient.remove(key);
+        }
+        patch.entries.extend(
+            envelope
+                .entries
+                .iter()
+                .map(|(key, value)| (*key, value.clone())),
+        );
+        patch.ambient.extend(envelope.ambient.iter().copied());
+        patch.relaunch |= envelope.relaunch;
+        if let Some(target) = TARGET_KEYS
+            .iter()
+            .copied()
+            .find(|key| envelope.value(*key).is_some())
+        {
+            for key in TARGET_KEYS.iter().copied().filter(|key| *key != target) {
+                patch.remove(key);
+            }
+            if target != Key::Cdp && envelope.get(Key::CdpHeaders).is_none() {
+                patch.remove(Key::CdpHeaders);
             }
         }
         patch
