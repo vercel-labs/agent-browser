@@ -1175,7 +1175,7 @@ impl DaemonState {
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
                         let joining_guard = match poppy_guard.read().await.as_ref() {
-                            Some(guard) if waiting_for_debugger => {
+                            Some(guard) if waiting_for_debugger && guard.is_active() => {
                                 let target_id = target_info
                                     .as_ref()
                                     .map(|t| t.target_id.clone())
@@ -1220,7 +1220,7 @@ impl DaemonState {
                                         .params
                                         .get("responseStatusCode")
                                         .and_then(|v| v.as_i64());
-                                    guard.admits_response(network_id, status).await
+                                    guard.admits_response_for(&sid, network_id, status).await
                                 }
                                 None => true,
                             };
@@ -1280,7 +1280,7 @@ impl DaemonState {
 
                         let guard = poppy_guard.read().await.clone();
                         if let Some(guard) = guard.filter(|g| g.guards(&paused.session_id)) {
-                            if !guard.admits(&paused.url).await {
+                            if !guard.admits_for(&paused.session_id, &paused.url).await {
                                 let _ = client
                                     .send_command(
                                         "Fetch.failRequest",
@@ -7142,6 +7142,7 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
         None => None,
     };
     close_all_browser_backends(state).await?;
+    *state.poppy_guard.write().await = None;
     state.attached_target = None;
 
     // Stop background Fetch handler
@@ -14830,6 +14831,13 @@ async fn resolve_fetch_paused(
 /// and origin headers state.  When domain filtering or origin-scoped headers
 /// are active a wildcard pattern is included so all requests are intercepted.
 async fn build_fetch_patterns(state: &DaemonState) -> Vec<Value> {
+    build_fetch_patterns_for_session(state, None).await
+}
+
+async fn build_fetch_patterns_for_session(
+    state: &DaemonState,
+    session_id: Option<&str>,
+) -> Vec<Value> {
     let routes = state.routes.read().await;
     let mut patterns: Vec<Value> = routes
         .iter()
@@ -14838,7 +14846,20 @@ async fn build_fetch_patterns(state: &DaemonState) -> Vec<Value> {
     let has_domain_filter = state.domain_filter.read().await.is_some();
     let has_origin_headers = !state.origin_headers.read().await.is_empty();
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-    let has_poppy_guard = state.poppy_guard.read().await.is_some();
+    let has_poppy_guard = match session_id {
+        Some(sid) => state
+            .poppy_guard
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|g| g.guards(sid)),
+        None => state
+            .poppy_guard
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|g| g.is_active()),
+    };
     if (has_domain_filter || has_origin_headers || has_proxy_creds || has_poppy_guard)
         && !patterns.iter().any(|p| p["urlPattern"] == "*")
     {
@@ -14869,7 +14890,7 @@ pub(super) async fn sync_fetch_interception(
     session_id: &str,
 ) -> Result<(), String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let patterns = build_fetch_patterns(state).await;
+    let patterns = build_fetch_patterns_for_session(state, Some(session_id)).await;
     if patterns.is_empty() {
         mgr.client
             .send_command("Fetch.disable", None, Some(session_id))

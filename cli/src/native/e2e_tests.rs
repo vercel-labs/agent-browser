@@ -22121,6 +22121,86 @@ async fn e2e_poppy_join_closes_stalled_failed_page_fail_closed() {
     assert_eq!(get_data(&follow_up)["result"], "about:blank", "{follow_up}");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_subsequent_join_preserves_retained_fail_closed_session() {
+    let target = poppy_forbidden_target().await;
+    let (origin, site) = poppy_site(
+        "127.0.0.1:0",
+        PoppyJoinPage::Html(POPPY_FORM.to_string()),
+        "/done".to_string(),
+    )
+    .await;
+
+    let mut state = DaemonState::new();
+    let launch = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch);
+
+    // Tab 0 simulates a target retained fail-closed from an earlier failed join.
+    let retained_sid = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_session_id()
+        .unwrap()
+        .to_string();
+    let retained_guard = super::poppy::JoinGuard::new_retained_for_test(&retained_sid);
+    *state.poppy_guard.write().await = Some(retained_guard);
+    super::actions::sync_fetch_interception(&state, &retained_sid)
+        .await
+        .unwrap();
+
+    // Open a second tab and run a successful local join there.
+    let new_tab = execute_command(&json!({ "id": "2", "action": "tab_new" }), &mut state).await;
+    assert_success(&new_tab);
+    let join_resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "poppy_join",
+            "url": origin,
+            "authorizer": "echo '{\"signed_in\":true}'",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&join_resp);
+    assert_eq!(get_data(&join_resp)["joined"], true);
+
+    // Switch back to the retained tab and attempt an HTTP fetch: it must still
+    // be blocked fail-closed even after the second join succeeded.
+    let switch = execute_command(
+        &json!({ "id": "4", "action": "tab_switch", "tabId": "t1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&switch);
+    let _ = execute_command(
+        &json!({
+            "id": "5",
+            "action": "evaluate",
+            "script": format!("fetch('{}/leak').catch(() => 'blocked')", target.origin),
+        }),
+        &mut state,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    site.abort();
+    target.server.abort();
+
+    assert_eq!(
+        target.connections.load(Ordering::SeqCst),
+        0,
+        "retained tab bypassed fail-closed guard after a subsequent join"
+    );
+}
+
 /// A local page for restore tests: cookies need an http origin.
 async fn restore_fixture_page() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

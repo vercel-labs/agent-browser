@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::{timeout, timeout_at, Instant};
@@ -262,11 +262,11 @@ fn fail(code: &str, message: impl std::fmt::Display) -> String {
 #[derive(Clone)]
 pub struct JoinGuard {
     sessions: Arc<Mutex<HashSet<String>>>,
+    retained: Arc<Mutex<HashSet<String>>>,
     targets: Arc<Mutex<HashMap<String, (String, bool)>>>,
     guard_scripts: Arc<Mutex<Vec<(String, String)>>>,
     release_token: String,
     binding_events: Arc<AtomicUsize>,
-    retained_locked: Arc<AtomicBool>,
     local: bool,
     deadline: Instant,
     blocked: Arc<Mutex<Option<String>>>,
@@ -276,16 +276,27 @@ pub struct JoinGuard {
 }
 
 impl JoinGuard {
+    #[cfg(test)]
     fn new(session_id: &str, target_id: &str, local: bool, deadline: Instant) -> Self {
+        Self::new_with_retained(session_id, target_id, local, deadline, HashSet::new())
+    }
+
+    fn new_with_retained(
+        session_id: &str,
+        target_id: &str,
+        local: bool,
+        deadline: Instant,
+        retained: HashSet<String>,
+    ) -> Self {
         let mut targets = HashMap::new();
         targets.insert(session_id.to_string(), (target_id.to_string(), true));
         Self {
             sessions: Arc::new(Mutex::new(HashSet::from([session_id.to_string()]))),
+            retained: Arc::new(Mutex::new(retained)),
             targets: Arc::new(Mutex::new(targets)),
             guard_scripts: Arc::default(),
             release_token: generate_release_token(),
             binding_events: Arc::new(AtomicUsize::new(0)),
-            retained_locked: Arc::new(AtomicBool::new(false)),
             local,
             deadline,
             blocked: Arc::default(),
@@ -399,11 +410,33 @@ impl JoinGuard {
         }
     }
 
-    fn all_sessions(&self) -> HashSet<String> {
+    fn active_sessions(&self) -> HashSet<String> {
         self.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    fn retained_sessions(&self) -> HashSet<String> {
+        self.retained
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub(super) fn is_active(&self) -> bool {
+        !self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+
+    fn is_retained(&self, session_id: &str) -> bool {
+        self.retained
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(session_id)
     }
 
     fn target_info(&self, session_id: &str) -> Option<(String, bool)> {
@@ -414,10 +447,22 @@ impl JoinGuard {
             .cloned()
     }
 
-    fn retain_only(&self, retained: &HashSet<String>) {
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        sessions.retain(|s| retained.contains(s));
-        self.retained_locked.store(true, Ordering::SeqCst);
+    fn retain_only(&self, new_retained: &HashSet<String>) {
+        self.retained
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(new_retained.iter().cloned());
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    fn clear_active_keep_retained(&self) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     fn redact(&self, message: String) -> String {
@@ -469,7 +514,15 @@ impl JoinGuard {
         hops.iter().any(|(s, _)| *s == status).then_some(true)
     }
 
-    pub(super) async fn admits_response(&self, network_id: &str, status: Option<i64>) -> bool {
+    pub(super) async fn admits_response_for(
+        &self,
+        session_id: &str,
+        network_id: &str,
+        status: Option<i64>,
+    ) -> bool {
+        if self.is_retained(session_id) {
+            return false;
+        }
         let Some(status) = status.filter(|_| !self.local) else {
             return true;
         };
@@ -492,6 +545,19 @@ impl JoinGuard {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(session_id)
+            || self.is_retained(session_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_retained_for_test(session_id: &str) -> Self {
+        let guard = Self::new(
+            session_id,
+            "retained-target",
+            false,
+            Instant::now() + Duration::from_secs(60),
+        );
+        guard.retain_only(&HashSet::from([session_id.to_string()]));
+        guard
     }
 
     pub(super) fn adopt(&self, session_id: &str, target_id: String, is_page: bool) {
@@ -507,9 +573,11 @@ impl JoinGuard {
         }
     }
 
-    /// Whether the tab may request `url`; a refusal is recorded for the join.
-    pub(super) async fn admits(&self, url: &str) -> bool {
-        if self.retained_locked.load(Ordering::SeqCst) {
+    /// Whether `session_id` may request `url`; a refusal is recorded for the join.
+    /// Sessions retained from an earlier failed cleanup stay fail-closed
+    /// regardless of the active join's rules.
+    pub(super) async fn admits_for(&self, session_id: &str, url: &str) -> bool {
+        if self.is_retained(session_id) {
             return Url::parse(url)
                 .map(|u| !matches!(u.scheme(), "http" | "https"))
                 .unwrap_or(false);
@@ -725,7 +793,20 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
     super::actions::ensure_browser_auto_attach(state)
         .await
         .map_err(|e| fail("join_failed", e))?;
-    let guard = JoinGuard::new(&session_id, &target_id, discovery.local, deadline);
+    let prior_retained = state
+        .poppy_guard
+        .read()
+        .await
+        .as_ref()
+        .map(|g| g.retained_sessions())
+        .unwrap_or_default();
+    let guard = JoinGuard::new_with_retained(
+        &session_id,
+        &target_id,
+        discovery.local,
+        deadline,
+        prior_retained,
+    );
     let client = state
         .browser
         .as_ref()
@@ -828,8 +909,16 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
     let result = result.map_err(|e| guard.redact(e));
     let join_succeeded = result.is_ok();
     if join_succeeded {
-        let cleared = guard.all_sessions();
-        *state.poppy_guard.write().await = None;
+        let cleared: HashSet<String> = guard
+            .active_sessions()
+            .into_iter()
+            .filter(|sid| !guard.is_retained(sid))
+            .collect();
+        if guard.retained_sessions().is_empty() {
+            *state.poppy_guard.write().await = None;
+        } else {
+            guard.clear_active_keep_retained();
+        }
         let _ = timeout(CLEANUP_TIMEOUT, async {
             guard
                 .remove_session_guards_for(&client, &cleared, true)
@@ -841,12 +930,9 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
         .await;
     } else {
         let outcome = leave_join_page(state, &guard, &session_id).await;
-        if outcome.retained.is_empty() {
+        guard.retain_only(&outcome.retained);
+        if guard.retained_sessions().is_empty() {
             *state.poppy_guard.write().await = None;
-        } else {
-            // Keep the guard installed (fail-closed) for any target whose
-            // navigation to about:blank or destruction could not be confirmed.
-            guard.retain_only(&outcome.retained);
         }
         if outcome.replaced_main {
             let _ = timeout(
@@ -855,11 +941,16 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
             )
             .await;
         }
+        let cleared: HashSet<String> = outcome
+            .cleared
+            .into_iter()
+            .filter(|sid| !guard.is_retained(sid))
+            .collect();
         let _ = timeout(CLEANUP_TIMEOUT, async {
             guard
-                .remove_session_guards_for(&client, &outcome.cleared, false)
+                .remove_session_guards_for(&client, &cleared, false)
                 .await;
-            for sid in &outcome.cleared {
+            for sid in &cleared {
                 let _ = super::actions::sync_fetch_interception(state, sid).await;
             }
         })
@@ -1004,7 +1095,7 @@ async fn leave_join_page(
     guard: &JoinGuard,
     session_id: &str,
 ) -> LeaveOutcome {
-    let all_sessions = guard.all_sessions();
+    let all_sessions = guard.active_sessions();
     let Some(client) = state
         .browser
         .as_ref()
@@ -1445,10 +1536,38 @@ mod tests {
         guard.adopt("s2", "t2".to_string(), true);
         let retained = HashSet::from(["s2".to_string()]);
         guard.retain_only(&retained);
+        assert!(!guard.is_active());
         assert!(!guard.guards("s1"));
         assert!(guard.guards("s2"));
-        assert!(!guard.admits("https://93.184.216.34/").await);
-        assert!(!guard.admits("http://127.0.0.1:8080/leak").await);
-        assert!(guard.admits("about:blank").await);
+        assert!(!guard.admits_for("s2", "https://93.184.216.34/").await);
+        assert!(!guard.admits_for("s2", "http://127.0.0.1:8080/leak").await);
+        assert!(guard.admits_for("s2", "about:blank").await);
+        assert!(!guard.admits_response_for("s2", "req1", Some(200)).await);
+    }
+
+    #[tokio::test]
+    async fn subsequent_join_inherits_and_preserves_retained_sessions() {
+        let prior = JoinGuard::new("s1", "t1", false, in_ms(5_000));
+        prior.adopt("s2", "t2".to_string(), true);
+        prior.retain_only(&HashSet::from(["s2".to_string()]));
+
+        // Start a second join (even with local = true) inheriting prior retained sessions.
+        let next =
+            JoinGuard::new_with_retained("s3", "t3", true, in_ms(5_000), prior.retained_sessions());
+        assert!(next.is_active());
+        assert!(next.guards("s2"));
+        assert!(next.guards("s3"));
+        // The retained session stays fail-closed even though the new join is local.
+        assert!(!next.admits_for("s2", "http://127.0.0.1:8080/leak").await);
+        assert!(!next.admits_for("s2", "https://93.184.216.34/").await);
+        // The new local join's own session follows its own rules.
+        assert!(next.admits_for("s3", "http://127.0.0.1:8080/local").await);
+
+        // Finishing the second join clears only its active session and keeps s2 retained.
+        next.clear_active_keep_retained();
+        assert!(!next.is_active());
+        assert!(!next.guards("s3"));
+        assert!(next.guards("s2"));
+        assert!(!next.admits_for("s2", "http://127.0.0.1:8080/leak").await);
     }
 }
