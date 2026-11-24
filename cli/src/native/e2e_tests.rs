@@ -2517,6 +2517,103 @@ async fn e2e_semantic_find_honors_selected_frame() {
     assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_wait_selector_in_same_site_and_oopif_frames() {
+    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p1 = l1.local_addr().unwrap().port();
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p2 = l2.local_addr().unwrap().port();
+
+    let s1 = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = l1.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let body = format!(
+                    "<!doctype html><iframe id='frame' src='http://localhost:{p2}/late' width='400' height='200'></iframe>"
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let s2 = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = l2.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let body = "<!doctype html><body><script>\
+                    setTimeout(() => { const d = document.createElement('div'); d.id = 'late'; d.textContent = 'ready'; document.body.appendChild(d); }, 300);\
+                    </script></body>";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+
+    // Same-site cross-origin (localhost:p1 -> localhost:p2) and OOPIF (127.0.0.1:p1 -> localhost:p2).
+    for (idx, host) in ["localhost", "127.0.0.1"].into_iter().enumerate() {
+        assert_success(
+            &execute_command(
+                &json!({"id": format!("nav-{idx}"), "action": "navigate", "url": format!("http://{host}:{p1}/")}),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(
+            &execute_command(
+                &json!({"id": format!("frame-{idx}"), "action": "frame", "selector": "#frame"}),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(
+            &execute_command(
+                &json!({"id": format!("wait-{idx}"), "action": "wait", "selector": "#late", "timeout": 5000}),
+                &mut state,
+            )
+            .await,
+        );
+        let text = execute_command(
+            &json!({"id": format!("text-{idx}"), "action": "gettext", "selector": "#late"}),
+            &mut state,
+        )
+        .await;
+        assert_success(&text);
+        assert_eq!(get_data(&text)["text"], "ready", "host={host}");
+        assert_success(
+            &execute_command(
+                &json!({"id": format!("main-{idx}"), "action": "mainframe"}),
+                &mut state,
+            )
+            .await,
+        );
+    }
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    s1.abort();
+    s2.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------

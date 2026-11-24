@@ -8061,6 +8061,7 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
                         &mgr.client,
                         &session_id,
                         frame_id,
+                        &state.iframe_sessions,
                         selector,
                         state_str,
                         timeout_ms,
@@ -8367,59 +8368,77 @@ async fn wait_for_function(
 /// wait_for_selector inside a same-process iframe selected via `frame <sel>`:
 /// polls through the owner element's contentDocument, which stays correct
 /// even if the frame navigates (the getter re-resolves every poll).
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_selector_in_frame(
     client: &super::cdp::client::CdpClient,
     session_id: &str,
     frame_id: &str,
+    iframe_sessions: &HashMap<String, String>,
     selector: &str,
     state: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let owner_object_id =
-        super::element::frame_owner_object_id(client, session_id, frame_id).await?;
+    let host_session =
+        super::element::find_frame_host_session(client, session_id, frame_id, iframe_sessions)
+            .await;
     let sel = serde_json::to_string(selector).unwrap_or_default();
     let check = match state {
-        "attached" => format!("!!doc.querySelector({sel})"),
-        "detached" => format!("!doc.querySelector({sel})"),
+        "attached" => format!("!!document.querySelector({sel})"),
+        "detached" => format!("!document.querySelector({sel})"),
         "hidden" => format!(
             r#"(() => {{
-                const el = doc.querySelector({sel});
+                const el = document.querySelector({sel});
                 if (!el) return true;
-                const s = doc.defaultView.getComputedStyle(el);
+                const s = window.getComputedStyle(el);
                 return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
             }})()"#,
         ),
         _ => format!(
             r#"(() => {{
-                const el = doc.querySelector({sel});
+                const el = document.querySelector({sel});
                 if (!el) return false;
                 const r = el.getBoundingClientRect();
-                const s = doc.defaultView.getComputedStyle(el);
+                const s = window.getComputedStyle(el);
                 return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
             }})()"#,
         ),
     };
-    let function = format!(
-        "function() {{ const doc = this.contentDocument; if (!doc) return false; return {check}; }}",
-    );
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let mut ctx_id: Option<i64> = None;
     loop {
+        let context_id = match ctx_id {
+            Some(id) => id,
+            None => {
+                let id =
+                    super::element::create_frame_isolated_world(client, &host_session, frame_id)
+                        .await?;
+                ctx_id = Some(id);
+                id
+            }
+        };
         let result = client
             .send_command(
-                "Runtime.callFunctionOn",
+                "Runtime.evaluate",
                 Some(json!({
-                    "objectId": owner_object_id,
-                    "functionDeclaration": function,
+                    "expression": check,
+                    "contextId": context_id,
                     "returnByValue": true,
+                    "awaitPromise": false,
                 })),
-                Some(session_id),
+                Some(&host_session),
             )
-            .await?;
-        let satisfied = result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .await;
+        let satisfied = match result {
+            Ok(val) => val
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            Err(_) => {
+                ctx_id = None;
+                false
+            }
+        };
         if satisfied {
             return Ok(());
         }

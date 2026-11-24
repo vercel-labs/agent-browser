@@ -332,42 +332,6 @@ fn active_frame() -> Option<String> {
     ACTIVE_FRAME.get().and_then(|m| m.lock().unwrap().clone())
 }
 
-/// Object handle for the <iframe> element that owns a frame, resolved on the
-/// parent session. Works for same-process frames where no dedicated CDP
-/// session exists.
-pub(super) async fn frame_owner_object_id(
-    client: &CdpClient,
-    session_id: &str,
-    frame_id: &str,
-) -> Result<String, String> {
-    let owner = client
-        .send_command(
-            "DOM.getFrameOwner",
-            Some(serde_json::json!({ "frameId": frame_id })),
-            Some(session_id),
-        )
-        .await?;
-    let backend_node_id = owner
-        .get("backendNodeId")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| format!("Could not resolve the owner element of frame {}", frame_id))?;
-    let result: DomResolveNodeResult = client
-        .send_command_typed(
-            "DOM.resolveNode",
-            &DomResolveNodeParams {
-                backend_node_id: Some(backend_node_id),
-                node_id: None,
-                object_group: Some("agent-browser".to_string()),
-            },
-            Some(session_id),
-        )
-        .await?;
-    result
-        .object
-        .object_id
-        .ok_or_else(|| format!("No objectId for the owner element of frame {}", frame_id))
-}
-
 /// Create an isolated execution world for `frame_id` on `session_id`.
 /// Works for both same-origin and same-site cross-origin in-process frames
 /// without relying on `contentDocument`.
