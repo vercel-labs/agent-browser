@@ -677,6 +677,13 @@ pub(super) async fn capture(
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         };
+        // Chrome can answer a click before the page has reported the fetch
+        // the click started, so the wait below would see nothing to wait
+        // for. The page reports its requests on its own session in order, so
+        // one round trip to that session brings in every report the page
+        // sent before answering it.
+        let left = deadline.saturating_duration_since(Instant::now());
+        let _ = tokio::time::timeout(left, browser.eval("0")).await;
         // The next command may depend on what this one fetched (a token the
         // page keeps), so let its first-party requests finish first.
         loop {
