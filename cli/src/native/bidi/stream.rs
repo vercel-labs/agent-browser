@@ -180,7 +180,11 @@ async fn poll(
                     server.broadcast_status(false, false, width, height, "firefox").await;
                     break;
                 }
-                if frame.is_none() && !prompts.contains(&live.context) && server.has_clients().await {
+                if frame.is_none()
+                    && !live.context.is_empty()
+                    && !prompts.contains(&live.context)
+                    && server.has_clients().await
+                {
                     frame = Some(capture_frame(
                         &live,
                         server.screencast_config.quality,
@@ -370,6 +374,9 @@ fn input_actions(msg_type: &str, msg: &Value, held: u8) -> Option<(Value, u8)> {
 
 /// Sends dashboard input without waiting for a reply. Cached modifiers assume Firefox accepts successfully sent actions.
 pub async fn dispatch_input(live: &FirefoxLive, msg_type: &str, msg: &Value) {
+    if live.context.is_empty() {
+        return;
+    }
     let mut modifiers = live.modifiers.lock().await;
     let held = modifiers.get(&live.context).copied().unwrap_or(0);
     if let Some((actions, desired)) = input_actions(msg_type, msg, held) {
