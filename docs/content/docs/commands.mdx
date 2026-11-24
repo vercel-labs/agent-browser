@@ -546,7 +546,7 @@ agent-browser confirm c_8f3a1234
 ## State management
 
 ```bash
-agent-browser state save <path>       # Save auth state to file
+agent-browser state save <path>       # Save auth state to file (device-bound cookies are left out)
 agent-browser state load <path>       # Load auth state from file
 agent-browser state list              # List saved state files
 agent-browser state show <file>       # Show state summary
@@ -570,7 +570,7 @@ Session names accept Unicode letters and numbers, hyphens, and underscores only.
 ```bash
 agent-browser profiles               # List available Chrome profiles
 agent-browser profiles --json        # List profiles as JSON
-agent-browser --profile Default open https://gmail.com  # Reuse a profile's login state
+agent-browser --profile Default open https://app.example.com  # Reuse a profile's login state
 ```
 
 ## Dashboard

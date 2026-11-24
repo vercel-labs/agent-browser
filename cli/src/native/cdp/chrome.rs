@@ -1600,6 +1600,18 @@ const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
     "component_crx_cache",
 ];
 
+/// Files never copied out of a Chrome profile. `Device Bound Sessions` holds
+/// the profile's Device Bound Session Credentials (DBSC): each session's
+/// refresh URL and the wrapped device key that signs its refreshes. When the
+/// same signed Chrome runs a copy with the real keychain, it can unwrap those
+/// keys and refresh the original browser's sessions too. The server then sees
+/// two browsers rotating one device-bound session (Google sign-in uses DBSC by
+/// default on macOS and Windows) and can end it, signing the user out of their
+/// own browser. Without the store, the copy has no bound sessions to refresh,
+/// and the user's own Chrome stays the only browser holding the key.
+const PROFILE_COPY_EXCLUDE_FILES: &[&str] =
+    &["Device Bound Sessions", "Device Bound Sessions-journal"];
+
 /// Copies a Chrome profile subdirectory and `Local State` to a temp directory
 /// with a two-level structure suitable for `--user-data-dir`. Returns the temp
 /// directory path on success.
@@ -1607,6 +1619,7 @@ const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
 /// The copy is best-effort: individual file failures (e.g., `SingletonLock`)
 /// are skipped with a warning. If the source profile directory is missing or
 /// the temp dir cannot be created, returns an error after cleaning up.
+/// Device-bound session state ([`PROFILE_COPY_EXCLUDE_FILES`]) is never copied.
 /// A copied `Preferences` with `profile.exit_type` of `Crashed` is set to `Normal`, best effort.
 pub fn copy_chrome_profile(
     user_data_dir: &Path,
@@ -1642,6 +1655,15 @@ pub fn copy_chrome_profile(
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(format!("Failed to copy profile: {}", e));
     }
+    if src_profile.join(PROFILE_COPY_EXCLUDE_FILES[0]).is_file() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "Warning: device-bound sessions in profile \"{}\" were not copied. Sites that \
+             bind sign-in to this device (such as Google) may ask you to sign in again in \
+             the agent-browser copy. Your Chrome keeps its sessions.",
+            profile_directory
+        );
+    }
 
     let preferences_path = dst_profile.join("Preferences");
     let normalized = (|| {
@@ -1665,7 +1687,8 @@ pub fn copy_chrome_profile(
     Ok(temp_dir)
 }
 
-/// Recursively copies a directory, skipping entries in [`PROFILE_COPY_EXCLUDE_DIRS`].
+/// Recursively copies a directory, skipping entries in [`PROFILE_COPY_EXCLUDE_DIRS`]
+/// and [`PROFILE_COPY_EXCLUDE_FILES`].
 /// Individual file copy failures are logged to stderr but do not fail the operation.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dst)
@@ -1711,6 +1734,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
                 continue;
             }
             copy_dir_recursive(&src_path, &dst_path)?;
+        } else if PROFILE_COPY_EXCLUDE_FILES.contains(&name_str.as_ref()) {
+            continue;
         } else if let Err(e) = std::fs::copy(&src_path, &dst_path) {
             let _ = writeln!(
                 std::io::stderr(),
@@ -2994,6 +3019,32 @@ exec sleep 60
     }
 
     #[test]
+    fn test_copy_chrome_profile_skips_device_bound_sessions() {
+        let src = TempDir::new("copy-dbsc-src");
+        create_fake_local_state(&src, &[("Default", "Person 1")]);
+        create_fake_profile(&src, "Default");
+        for name in PROFILE_COPY_EXCLUDE_FILES {
+            std::fs::write(src.join("Default").join(name), "bound-session-state").unwrap();
+        }
+
+        let temp = TempDir(copy_chrome_profile(&src, "Default").unwrap());
+
+        assert!(temp.join("Default/Cookies").is_file());
+        for name in PROFILE_COPY_EXCLUDE_FILES {
+            assert!(
+                !temp.join("Default").join(name).exists(),
+                "{} must not be copied",
+                name
+            );
+            assert!(
+                src.join("Default").join(name).is_file(),
+                "source {} must be left in place",
+                name
+            );
+        }
+    }
+
+    #[test]
     fn test_copy_chrome_profile_missing_source() {
         let src = TempDir::new("copy-missing-src");
         std::fs::create_dir_all(&*src).unwrap();
@@ -3023,6 +3074,9 @@ exec sleep 60
         let dst = TempDir::new("copy-excludes-dst");
         std::fs::create_dir_all(src.join("keep")).unwrap();
         std::fs::write(src.join("keep/data"), "keep-data").unwrap();
+        for excluded in PROFILE_COPY_EXCLUDE_FILES {
+            std::fs::write(src.join("keep").join(excluded), "excluded").unwrap();
+        }
         for excluded in PROFILE_COPY_EXCLUDE_DIRS {
             std::fs::create_dir_all(src.join(excluded)).unwrap();
             std::fs::write(src.join(excluded).join("file"), "excluded").unwrap();
@@ -3031,6 +3085,9 @@ exec sleep 60
         copy_dir_recursive(&src, &dst).unwrap();
 
         assert!(dst.join("keep/data").is_file());
+        for excluded in PROFILE_COPY_EXCLUDE_FILES {
+            assert!(!dst.join("keep").join(excluded).exists(), "{}", excluded);
+        }
         for excluded in PROFILE_COPY_EXCLUDE_DIRS {
             assert!(
                 !dst.join(excluded).exists(),

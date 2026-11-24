@@ -5517,10 +5517,10 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 match state::load_state(&mgr.client, session_id, &path).await {
-                    Ok(skipped) => {
+                    Ok(loaded) => {
                         state.restore_status = "loaded".to_string();
                         state.restore_status_detail = None;
-                        state.restore_skipped_origins = skipped;
+                        state.restore_skipped_origins = loaded.skipped_origins;
                         state.restore_loaded_path = Some(path.clone());
                         state.restore_load_failed = false;
                         state.restore_validation_pending = state.restore_check_url.is_some()
@@ -5747,7 +5747,11 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
         let mut skipped = None;
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
-                skipped = Some(state::load_state(&mgr.client, session_id, path).await?);
+                skipped = Some(
+                    state::load_state(&mgr.client, session_id, path)
+                        .await?
+                        .skipped_origins,
+                );
             }
         }
         if let Some(skipped) = skipped {
@@ -8648,7 +8652,7 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
     let session_id = mgr.active_session_id()?.to_string();
     let path = cmd.get("path").and_then(|v| v.as_str());
 
-    let saved_path = state::save_state(
+    let saved = state::save_state(
         &mgr.client,
         &session_id,
         path,
@@ -8658,7 +8662,11 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
     )
     .await?;
 
-    Ok(json!({ "saved": true, "path": saved_path }))
+    Ok(json!({
+        "saved": true,
+        "path": saved.path,
+        "skippedDeviceBoundCookies": saved.skipped_bound_cookies,
+    }))
 }
 
 async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -8670,9 +8678,14 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .ok_or("Missing 'path' parameter")?;
 
     ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    let skipped = state::load_state(&mgr.client, &session_id, path).await?;
+    let loaded = state::load_state(&mgr.client, &session_id, path).await?;
     mark_explicit_storage_state_loaded(state, path);
-    Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
+    Ok(json!({
+        "loaded": true,
+        "path": path,
+        "skippedOrigins": loaded.skipped_origins,
+        "skippedDeviceBoundCookies": loaded.skipped_bound_cookies,
+    }))
 }
 
 // ---------------------------------------------------------------------------

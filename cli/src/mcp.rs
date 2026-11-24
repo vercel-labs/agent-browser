@@ -1710,14 +1710,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_SAVE,
             "State save",
-            "Save cookies and storage state.",
+            "Save cookies and storage state. Device-bound (DBSC) cookies are left out and listed in skippedDeviceBoundCookies.",
             json!({ "path": { "type": "string" } }),
             &["path"],
         ),
         tool(
             TOOL_STATE_LOAD,
             "State load",
-            "Load cookies and storage state. Origins whose page does not stay on the saved origin are skipped and listed in skippedOrigins.",
+            "Load cookies and storage state. Origins whose page does not stay on the saved origin are skipped and listed in skippedOrigins. Cookies owned by the browser's device bound sessions are not overwritten and are listed in skippedDeviceBoundCookies.",
             json!({ "path": { "type": "string" } }),
             &["path"],
         ),
@@ -5181,19 +5181,33 @@ fn response_text(value: &Value) -> Option<String> {
             if data.get("flows").is_some() && data.get("url").is_none() {
                 return crate::output::format_flow_text(Some("flow_list"), data);
             }
-            if let Some(skipped) = data
-                .get("skippedOrigins")
-                .and_then(|v| v.as_array())
-                .filter(|v| !v.is_empty())
-            {
-                let origins: Vec<&str> = skipped.iter().filter_map(|v| v.as_str()).collect();
-                return Some(format!(
-                    "{}\nSkipped storage for origins (page did not stay on that origin): {}",
-                    data.get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default(),
-                    origins.join(", ")
-                ));
+            let skipped_list = |key: &str| -> Vec<&str> {
+                data.get(key)
+                    .and_then(|v| v.as_array())
+                    .map(|v| v.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default()
+            };
+            let skipped_origins = skipped_list("skippedOrigins");
+            let skipped_bound = skipped_list("skippedDeviceBoundCookies");
+            if !skipped_origins.is_empty() || !skipped_bound.is_empty() {
+                let mut text = data
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if !skipped_origins.is_empty() {
+                    text.push_str(&format!(
+                        "\nSkipped storage for origins (page did not stay on that origin): {}",
+                        skipped_origins.join(", ")
+                    ));
+                }
+                if !skipped_bound.is_empty() {
+                    text.push_str(&format!(
+                        "\nSkipped device-bound cookies (bound to the browser that signed in): {}",
+                        skipped_bound.join(", ")
+                    ));
+                }
+                return Some(text);
             }
             for key in [
                 "snapshot", "text", "html", "report", "value", "content", "title", "url", "path",
@@ -6016,6 +6030,24 @@ mod tests {
 
         assert!(text.starts_with("./state.json\n"));
         assert!(text.contains("http://127.0.0.1:8001"));
+    }
+
+    #[test]
+    fn response_text_reports_skipped_device_bound_cookies() {
+        let text = response_text(&json!({
+            "success": true,
+            "data": {
+                "saved": true,
+                "path": "./state.json",
+                "skippedDeviceBoundCookies": ["__Secure-1PSIDTS (google.com)"]
+            }
+        }))
+        .unwrap();
+
+        assert!(text.starts_with("./state.json\n"));
+        assert!(text.contains("Skipped device-bound cookies"));
+        assert!(text.contains("__Secure-1PSIDTS (google.com)"));
+        assert!(!text.contains("Skipped storage for origins"));
     }
 
     #[test]
