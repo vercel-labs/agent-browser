@@ -93,6 +93,96 @@ function printableKeyCode(key: string): number {
   }
 }
 
+const CODE_KEY_INFO: Record<string, number> = {
+  Space: 32,
+  Minus: 189,
+  Equal: 187,
+  BracketLeft: 219,
+  BracketRight: 221,
+  Backslash: 220,
+  Semicolon: 186,
+  Quote: 222,
+  Backquote: 192,
+  Comma: 188,
+  Period: 190,
+  Slash: 191,
+  ShiftLeft: 16,
+  ShiftRight: 16,
+  ControlLeft: 17,
+  ControlRight: 17,
+  AltLeft: 18,
+  AltRight: 18,
+  MetaLeft: 91,
+  MetaRight: 92,
+  Insert: 45,
+};
+
+function vkCodeForEvent(e: KeyboardEvent): number {
+  const { code } = e;
+  if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3);
+  if (/^Digit[0-9]$/.test(code)) return 48 + Number(code[5]);
+  if (/^Numpad[0-9]$/.test(code)) return 96 + Number(code[6]);
+  if (/^F([1-9]|1[0-2])$/.test(code)) return 111 + Number(code.slice(1));
+  const fromCode = CODE_KEY_INFO[code];
+  if (fromCode !== undefined) return fromCode;
+  const info = KEY_INFO[e.key];
+  if (info) return info.keyCode;
+  return printableKeyCode(e.key);
+}
+
+function macKeyCommands(e: KeyboardEvent): string[] | undefined {
+  if (!e.metaKey) return undefined;
+  const shift = e.shiftKey;
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  switch (key) {
+    case "a":
+      return ["selectAll"];
+    case "c":
+      return ["copy"];
+    case "x":
+      return ["cut"];
+    case "v":
+      return ["paste"];
+    case "z":
+      return shift ? ["redo"] : ["undo"];
+    case "ArrowLeft":
+      return [
+        shift
+          ? "moveToBeginningOfLineAndModifySelection"
+          : "moveToBeginningOfLine",
+      ];
+    case "ArrowRight":
+      return [
+        shift ? "moveToEndOfLineAndModifySelection" : "moveToEndOfLine",
+      ];
+    case "ArrowUp":
+      return [
+        shift
+          ? "moveToBeginningOfDocumentAndModifySelection"
+          : "moveToBeginningOfDocument",
+      ];
+    case "ArrowDown":
+      return [
+        shift
+          ? "moveToEndOfDocumentAndModifySelection"
+          : "moveToEndOfDocument",
+      ];
+    case "Backspace":
+      return ["deleteToBeginningOfLine"];
+    default:
+      return undefined;
+  }
+}
+
+function keyModifiers(e: KeyboardEvent): number {
+  let m = 0;
+  if (e.altKey) m |= 1;
+  if (e.ctrlKey) m |= 2;
+  if (e.metaKey) m |= 4;
+  if (e.shiftKey) m |= 8;
+  return m;
+}
+
 function cdpButton(btn: number): string {
   switch (btn) {
     case 0: return "left";
@@ -383,33 +473,73 @@ export function Viewport() {
   const dispatchKey = useCallback(
     (e: KeyboardEvent, eventType: string) => {
       const info = KEY_INFO[e.key];
-      const text = eventType === "keyDown"
-        ? (info?.text ?? (Array.from(e.key).length === 1 ? e.key : undefined))
-        : undefined;
-      const keyCode = info?.keyCode ?? printableKeyCode(e.key);
-      let m = 0;
-      if (e.altKey) m |= 1;
-      if (e.ctrlKey) m |= 2;
-      if (e.metaKey) m |= 4;
-      if (e.shiftKey) m |= 8;
+      const hasShortcutModifier = e.ctrlKey || e.metaKey || e.altKey;
+      const isDown = eventType === "keyDown" || eventType === "rawKeyDown";
+      const text =
+        isDown && !hasShortcutModifier
+          ? (info?.text ?? (Array.from(e.key).length === 1 ? e.key : undefined))
+          : undefined;
+      const resolvedEventType =
+        eventType === "keyDown" && text === undefined ? "rawKeyDown" : eventType;
+      const commands = isDown ? macKeyCommands(e) : undefined;
       sendInput({
         type: "input_keyboard",
-        eventType,
+        eventType: resolvedEventType,
         key: e.key,
         code: e.code,
         text,
-        windowsVirtualKeyCode: keyCode,
-        modifiers: m,
+        windowsVirtualKeyCode: vkCodeForEvent(e),
+        modifiers: keyModifiers(e),
+        ...(commands ? { commands } : {}),
       });
     },
     [sendInput],
   );
 
   useEffect(() => {
+    const forwardPasteShortcut = (e: KeyboardEvent) => {
+      const readText = navigator.clipboard?.readText?.bind(navigator.clipboard);
+      if (!readText) {
+        dispatchKey(e, "rawKeyDown");
+        return;
+      }
+      readText()
+        .then((text) => {
+          if (text) {
+            sendInput({ type: "input_insert_text", text });
+          } else {
+            dispatchKey(e, "rawKeyDown");
+          }
+        })
+        .catch(() => dispatchKey(e, "rawKeyDown"));
+    };
+
     const handler = (e: KeyboardEvent) => {
       if (document.activeElement !== canvasRef.current) return;
       e.preventDefault();
       e.stopPropagation();
+      const isShortcut =
+        (e.ctrlKey || e.metaKey) && !e.altKey && e.key.length === 1;
+      if (e.type === "keydown" && isShortcut) {
+        const key = e.key.toLowerCase();
+        if (key === "v") {
+          forwardPasteShortcut(e);
+          return;
+        }
+        if (key === "c") {
+          dispatchKey(e, "rawKeyDown");
+          sendInput({ type: "input_read_clipboard" });
+          return;
+        }
+        if (key === "x") {
+          sendInput({
+            type: "input_read_clipboard",
+            cut: true,
+            modifiers: keyModifiers(e),
+          });
+          return;
+        }
+      }
       dispatchKey(e, e.type === "keydown" ? "keyDown" : "keyUp");
     };
     window.addEventListener("keydown", handler, true);
@@ -418,7 +548,7 @@ export function Viewport() {
       window.removeEventListener("keydown", handler, true);
       window.removeEventListener("keyup", handler, true);
     };
-  }, [dispatchKey]);
+  }, [dispatchKey, sendInput]);
 
   return (
     <div ref={containerRef} className="flex h-full flex-col">

@@ -2716,7 +2716,7 @@ pub(crate) fn shifted_char(key_name: &str) -> Option<char> {
         .map(|(_, shifted)| *shifted)
 }
 
-fn named_key_info(key: &str) -> (String, String, i32) {
+pub(crate) fn named_key_info(key: &str) -> (String, String, i32) {
     match key.to_lowercase().as_str() {
         "enter" | "return" => ("Enter".to_string(), "Enter".to_string(), 13),
         "tab" => ("Tab".to_string(), "Tab".to_string(), 9),

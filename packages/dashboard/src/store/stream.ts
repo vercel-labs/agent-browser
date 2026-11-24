@@ -214,6 +214,12 @@ export function useStreamSync(port: number) {
           );
           break;
 
+        case "clipboard":
+          if (msg.text != null) {
+            navigator.clipboard?.writeText(msg.text).catch(() => {});
+          }
+          break;
+
         case "error":
           break;
       }
