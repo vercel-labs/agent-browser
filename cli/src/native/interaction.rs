@@ -157,17 +157,6 @@ pub async fn hover(
     Ok((x + offset.0, y + offset.1))
 }
 
-pub(crate) const FOCUS_JS: &str = "function() { this.focus(); }";
-
-/// Resolves `this`'s href against the document base, or null for a non-link.
-pub(crate) const CLICK_HREF_JS: &str = "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }";
-
-pub(crate) const CLEAR_INPUT_JS: &str = r#"function() {
-                    this.select && this.select();
-                    this.value = '';
-                    this.dispatchEvent(new Event('input', { bubbles: true }));
-                }"#;
-
 /// Stable codes for refusals before acting. An error message that starts with
 /// `<code>: ` surfaces the code in the JSON envelope.
 pub const FORM_ERROR_CODES: &[&str] = &[
@@ -1316,117 +1305,6 @@ pub async fn scroll(
     Ok(())
 }
 
-pub(crate) const SELECT_OPTION_JS: &str = r#"async function(vals) {
-            const normalize = (value) => String(value ?? '')
-                .replace(/[\u200B\u200C\u200D\u2060\uFEFF]/g, '')
-                .replace(/\s+/g, ' ')
-                .trim();
-            if (!(this instanceof HTMLSelectElement)) {
-                const role = this.getAttribute('role');
-                if (role !== 'combobox' && role !== 'listbox') {
-                    return { error: 'select target <' + this.tagName.toLowerCase() + '> is not a <select> or a role=combobox/listbox element' };
-                }
-                const realClick = (el) => {
-                    const r = el.getBoundingClientRect();
-                    const o = { bubbles: true, cancelable: true, composed: true,
-                                clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
-                                button: 0, pointerId: 1, isPrimary: true };
-                    el.dispatchEvent(new PointerEvent('pointerdown', o));
-                    el.dispatchEvent(new MouseEvent('mousedown', o));
-                    el.dispatchEvent(new PointerEvent('pointerup', o));
-                    el.dispatchEvent(new MouseEvent('mouseup', o));
-                    el.dispatchEvent(new MouseEvent('click', o));
-                };
-                if (role === 'combobox' && this.getAttribute('aria-expanded') !== 'true') {
-                    realClick(this);
-                }
-                const collect = () => {
-                    let scope = role === 'listbox' ? this : null;
-                    if (!scope) {
-                        const controls = this.getAttribute('aria-controls');
-                        if (controls) {
-                            scope = document.getElementById(controls);
-                            if (!scope) return [];
-                        }
-                    }
-                    const nodes = Array.from((scope || document).querySelectorAll('[role=option]'));
-                    return nodes.filter((o) => o.getClientRects().length > 0);
-                };
-                let options = collect();
-                for (let i = 0; i < 40 && options.length === 0; i++) {
-                    await new Promise((r) => setTimeout(r, 50));
-                    options = collect();
-                }
-                if (options.length === 0) {
-                    return { error: 'combobox opened but no visible role=option elements were found' };
-                }
-                const nameOf = (o) => {
-                    const labels = (o.getAttribute('aria-labelledby') || '').trim();
-                    if (labels) {
-                        const text = labels.split(/\s+/)
-                            .map((id) => { const el = document.getElementById(id); return el ? el.textContent : ''; })
-                            .join(' ');
-                        if (normalize(text)) return normalize(text);
-                    }
-                    return normalize(o.getAttribute('aria-label')) || normalize(o.textContent);
-                };
-                const valueOf = (o) => normalize(o.getAttribute('data-value')) || normalize(o.getAttribute('value'));
-                const wanted = new Set();
-                for (const value of vals) {
-                    const want = normalize(value);
-                    const matches = options.filter((o) => nameOf(o) === want || (valueOf(o) && valueOf(o) === want));
-                    if (matches.length === 0) {
-                        const available = options.map((o) => '"' + nameOf(o) + '"').join(', ');
-                        return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-                    }
-                    if (matches.length > 1) {
-                        return { error: 'Multiple options matched ' + JSON.stringify(value) };
-                    }
-                    if (matches[0].getAttribute('aria-disabled') === 'true') {
-                        return { error: 'Option "' + nameOf(matches[0]) + '" is disabled' };
-                    }
-                    wanted.add(matches[0]);
-                }
-                const multi = role === 'listbox' && this.getAttribute('aria-multiselectable') === 'true';
-                for (const opt of wanted) {
-                    if (multi && opt.getAttribute('aria-selected') === 'true') continue;
-                    opt.scrollIntoView({ block: 'nearest' });
-                    realClick(opt);
-                }
-                return { matched: wanted.size };
-            }
-            const options = Array.from(this.options);
-            const wanted = new Set();
-            for (const value of vals) {
-                let matches = options.filter((opt) =>
-                    value === opt.value ||
-                    value === opt.label.trim() ||
-                    value === opt.textContent.trim()
-                );
-                if (matches.length === 0) {
-                    const normalizedValue = normalize(value);
-                    matches = options.filter((opt) =>
-                        normalize(opt.label) === normalizedValue
-                    );
-                    if (matches.length > 1) {
-                        return { error: 'Multiple options matched ' + JSON.stringify(value) + ' after whitespace normalization' };
-                    }
-                }
-                if (matches.length === 0) {
-                    const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
-                    return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-                }
-                for (const opt of matches) wanted.add(opt);
-            }
-            if (wanted.size === 0) {
-                const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
-                return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-            }
-            for (const opt of options) opt.selected = wanted.has(opt);
-            this.dispatchEvent(new Event('change', { bubbles: true }));
-            return { matched: wanted.size };
-        }"#;
-
 /// A refused `select`: the message is fixed text; the options the page offered
 /// travel separately as error data.
 pub struct SelectError {
@@ -1606,8 +1484,34 @@ pub async fn select_option(
             for (const opt of options) opt.selected = wanted.has(opt);
             this.dispatchEvent(new Event('change', { bubbles: true }));
             return { matched: wanted.size };
-        }"#
-    .to_string();
+        }"#;
+
+pub async fn select_option(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    values: &[String],
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    // Matching nothing must be an error, not a silent success: an agent that
+    // selects a misspelled option otherwise sees "Done", and only discovers
+    // the page state is wrong after more commands. List what was available.
+    //
+    // Native <select> keeps its own path. For a div-based ARIA combobox/listbox
+    // (Radix, Headless UI, ui-sdk) there is no `this.options`, so open the widget
+    // when it is not already expanded, wait for its role=option items, and click
+    // the ones whose accessible name or value matches.
+    let js = SELECT_OPTION_JS.to_string();
 
     let result = client
         .send_command_typed::<_, Value>(
@@ -1845,6 +1749,7 @@ async fn toggle(
         ref_map,
         selector_or_ref,
         iframe_sessions,
+        want_checked,
     )
     .await
     else {
