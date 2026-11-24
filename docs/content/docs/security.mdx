@@ -310,6 +310,19 @@ Pending confirmations auto-deny after 60 seconds.
 
 > **Non-TTY behavior:** When `--confirm-interactive` is set but stdin is not a TTY (e.g., piped input or running inside an automated pipeline), actions are automatically denied. This prevents accidental approval in non-interactive contexts.
 
+### MCP Elicitation
+
+When running through `agent-browser mcp`, parked confirmations from `--confirm-actions`, `--action-policy`, and unconfirmed `flow run` writes automatically prompt the human user through MCP form-mode elicitation (`elicitation/create`) whenever the connected client declares form-mode elicitation support. Approving runs `confirm <id>` in the daemon; declining or cancelling runs `deny <id>`.
+
+You can also enable MCP-level confirmation gates directly with `--elicit <categories>` (or `AGENT_BROWSER_MCP_ELICIT`):
+
+```bash
+agent-browser mcp --elicit high-risk
+agent-browser mcp --elicit download,upload,eval --require-elicitation
+```
+
+`high-risk` enables `submit`, `download`, `upload`, `eval`, and `auth`; `state` is also available. Form-mode elicitation asks only for explicit confirmation and never requests or echoes passwords, tokens, or payment credentials. When a client does not support elicitation, existing behavior stays unchanged unless `--require-elicitation` (`AGENT_BROWSER_MCP_REQUIRE_ELICITATION=1`) is set to fail closed.
+
 ## Output Length Limits
 
 Prevent context flooding by truncating large page outputs:

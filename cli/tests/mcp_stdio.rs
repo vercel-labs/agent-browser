@@ -863,3 +863,441 @@ fn legacy_2025_tasks_lifecycle_list_result_and_non_task_rejection() {
     assert!(status.success());
     drop(daemon);
 }
+
+#[cfg(unix)]
+fn setup_confirm_mock_daemon(
+    home: &TempDir,
+    session: &str,
+    expected_commands: usize,
+) -> (
+    thread::JoinHandle<Vec<Value>>,
+    std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+) {
+    use std::os::unix::net::UnixListener;
+    use std::sync::{Arc, Mutex};
+
+    let sockets = home.path().join("s");
+    std::fs::create_dir_all(&sockets).unwrap();
+    let bootstrap = Command::new(env!("CARGO_BIN_EXE_agent-browser"))
+        .env("HOME", home.path())
+        .env("AGENT_BROWSER_SOCKET_DIR", &sockets)
+        .env("NO_COLOR", "1")
+        .args(["--session", session, "stream", "status", "--json"])
+        .output()
+        .unwrap();
+    assert!(bootstrap.status.success(), "{bootstrap:?}");
+
+    if let Ok(pid_str) = std::fs::read_to_string(sockets.join(format!("{session}.pid"))) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(sockets.join(format!("{session}.pid")));
+    let sock_path = sockets.join(format!("{session}.sock"));
+    let _ = std::fs::remove_file(&sock_path);
+    let listener = UnixListener::bind(&sock_path).unwrap();
+
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let rec_clone = Arc::clone(&recorded);
+    let handle = thread::spawn(move || {
+        let mut count = 0;
+        while count < expected_commands {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut line = String::new();
+            if BufReader::new(&stream).read_line(&mut line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let req: Value = serde_json::from_str(&line).unwrap_or_default();
+            rec_clone.lock().unwrap().push(req.clone());
+            count += 1;
+            let req_id = req["id"].clone();
+            let action = req["action"].as_str().unwrap_or("");
+            let resp = match action {
+                "evaluate" | "wait" => json!({
+                    "id": req_id,
+                    "success": true,
+                    "data": {
+                        "confirmation_required": true,
+                        "confirmation_id": "c_42",
+                        "action": action
+                    }
+                }),
+                "confirm" => json!({
+                    "id": req_id,
+                    "success": true,
+                    "data": {
+                        "confirmed": true,
+                        "action": "eval",
+                        "result": {
+                            "success": true,
+                            "data": { "result": "confirmed-ok" }
+                        }
+                    }
+                }),
+                "deny" => json!({
+                    "id": req_id,
+                    "success": true,
+                    "data": { "denied": true, "confirmation_id": req["confirmation_id"] }
+                }),
+                _ => json!({
+                    "id": req_id,
+                    "success": true,
+                    "data": { "ok": true }
+                }),
+            };
+            let _ = writeln!(stream, "{}", resp);
+            let _ = stream.flush();
+        }
+        rec_clone.lock().unwrap().clone()
+    });
+    (handle, recorded)
+}
+
+#[cfg(unix)]
+#[test]
+fn modern_elicitation_mrtr_preflight_daemon_bridge_and_fallback() {
+    let home = tempfile::tempdir().unwrap();
+    let (daemon, recorded) = setup_confirm_mock_daemon(&home, "mcp-elicit-mod", 3);
+
+    let mut client = McpStdioClient::spawn_in(home, &["--elicit", "eval"]);
+    let elicit_caps = json!({ "elicitation": { "form": {} } });
+
+    // 1. Pre-flight MRTR: first call returns InputRequiredResult with signed requestState.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": { "script": "document.title", "session": "mcp-elicit-mod" },
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    let (ir, _) = client.recv_for_id(&json!(1), Duration::from_secs(5));
+    assert_eq!(ir["result"]["resultType"], "input_required");
+    let state_token = ir["result"]["requestState"].as_str().unwrap().to_string();
+    let req_key = ir["result"]["inputRequests"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        ir["result"]["inputRequests"][&req_key]["method"],
+        "elicitation/create"
+    );
+
+    // 2. Retry with decline: refused without touching the daemon.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": { "script": "document.title", "session": "mcp-elicit-mod" },
+            "requestState": &state_token,
+            "inputResponses": {
+                &req_key: { "action": "decline" }
+            },
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    let (declined, _) = client.recv_for_id(&json!(2), Duration::from_secs(5));
+    assert_eq!(declined["result"]["isError"], true);
+    assert!(recorded.lock().unwrap().is_empty());
+
+    // 3. Replaying the already-consumed requestState fails with -32602.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": { "script": "document.title", "session": "mcp-elicit-mod" },
+            "requestState": &state_token,
+            "inputResponses": {
+                &req_key: { "action": "accept", "content": { "approve": true } }
+            },
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    let (replayed, _) = client.recv_for_id(&json!(3), Duration::from_secs(5));
+    assert_eq!(replayed["error"]["code"], -32602);
+
+    // 4. Approve pre-flight -> daemon parks confirmation_required -> MRTR daemon bridge -> approve -> confirm c_42!
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": { "script": "1+1", "session": "mcp-elicit-mod" },
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    let (ir_pre, _) = client.recv_for_id(&json!(4), Duration::from_secs(5));
+    let tok_pre = ir_pre["result"]["requestState"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let key_pre = ir_pre["result"]["inputRequests"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": { "script": "1+1", "session": "mcp-elicit-mod" },
+            "requestState": &tok_pre,
+            "inputResponses": {
+                &key_pre: { "action": "accept", "content": { "approve": true } }
+            },
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    let (ir_daemon, _) = client.recv_for_id(&json!(5), Duration::from_secs(5));
+    assert_eq!(ir_daemon["result"]["resultType"], "input_required");
+    let tok_daemon = ir_daemon["result"]["requestState"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let key_daemon = ir_daemon["result"]["inputRequests"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": { "script": "1+1", "session": "mcp-elicit-mod" },
+            "requestState": &tok_daemon,
+            "inputResponses": {
+                &key_daemon: { "action": "accept", "content": { "approve": true } }
+            },
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    let (confirmed, _) = client.recv_for_id(&json!(6), Duration::from_secs(5));
+    assert_eq!(confirmed["result"]["resultType"], "complete");
+    assert_eq!(confirmed["result"]["isError"], false);
+    assert_eq!(
+        confirmed["result"]["structuredContent"]["response"]["data"]["confirmed"],
+        true
+    );
+
+    // 5. Client WITHOUT elicitation capability (and no --require-elicitation) keeps current behavior unchanged.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": { "script": "2+2", "session": "mcp-elicit-mod" },
+            "_meta": modern_meta(json!({}))
+        }
+    }));
+    let (unchanged, _) = client.recv_for_id(&json!(7), Duration::from_secs(5));
+    assert_eq!(unchanged["result"]["resultType"], "complete");
+    assert_eq!(
+        unchanged["result"]["structuredContent"]["response"]["data"]["confirmation_required"],
+        true
+    );
+
+    let status = client.close();
+    assert!(status.success());
+    let commands = daemon.join().unwrap();
+    assert_eq!(commands.len(), 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn modern_task_mid_flight_elicitation_via_tasks_update() {
+    let home = tempfile::tempdir().unwrap();
+    let (daemon, _) = setup_confirm_mock_daemon(&home, "mcp-elicit-task", 2);
+
+    let mut client = McpStdioClient::spawn_in(home, &[]);
+    let caps = json!({
+        "elicitation": { "form": {} },
+        "extensions": { "io.modelcontextprotocol/tasks": {} }
+    });
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_wait_ms",
+            "arguments": { "ms": 50, "session": "mcp-elicit-task" },
+            "_meta": modern_meta(caps.clone())
+        }
+    }));
+    let (created, _) = client.recv_for_id(&json!(1), Duration::from_secs(5));
+    assert_eq!(created["result"]["resultType"], "task");
+    assert_eq!(created["result"]["status"], "input_required");
+    let task_id = created["result"]["taskId"].as_str().unwrap().to_string();
+
+    // Poll tasks/get to inspect inputRequests.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tasks/get",
+        "params": {
+            "taskId": &task_id,
+            "_meta": modern_meta(caps.clone())
+        }
+    }));
+    let (polled, _) = client.recv_for_id(&json!(2), Duration::from_secs(5));
+    assert_eq!(polled["result"]["status"], "input_required");
+    let input_key = polled["result"]["inputRequests"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+
+    // Submit approval via tasks/update.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tasks/update",
+        "params": {
+            "taskId": &task_id,
+            "inputResponses": {
+                &input_key: { "action": "accept", "content": { "approve": true } }
+            },
+            "_meta": modern_meta(caps.clone())
+        }
+    }));
+    let (ack, _) = client.recv_for_id(&json!(3), Duration::from_secs(5));
+    assert_eq!(ack["result"]["resultType"], "complete");
+
+    // Poll until completed with confirmed daemon result.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seq = 4;
+    let final_task = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for task completion"
+        );
+        client.send(&json!({
+            "jsonrpc": "2.0",
+            "id": seq,
+            "method": "tasks/get",
+            "params": {
+                "taskId": &task_id,
+                "_meta": modern_meta(caps.clone())
+            }
+        }));
+        let (resp, _) = client.recv_for_id(&json!(seq), Duration::from_secs(5));
+        seq += 1;
+        if resp["result"]["status"] == "completed" {
+            break resp;
+        }
+        thread::sleep(Duration::from_millis(30));
+    };
+    assert_eq!(
+        final_task["result"]["result"]["structuredContent"]["response"]["data"]["confirmed"],
+        true
+    );
+
+    let status = client.close();
+    assert!(status.success());
+    let commands = daemon.join().unwrap();
+    assert_eq!(commands[0]["action"], "wait");
+    assert_eq!(commands[1]["action"], "confirm");
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_2025_server_initiated_elicitation_and_require_elicitation_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let (daemon, _) = setup_confirm_mock_daemon(&home, "mcp-elicit-leg", 2);
+
+    let mut client = McpStdioClient::spawn_in(home, &[]);
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": { "elicitation": { "form": {} } },
+            "clientInfo": { "name": "legacy-elicit", "version": "1.0.0" }
+        }
+    }));
+    let _ = client.recv(Duration::from_secs(5));
+
+    // Call eval -> daemon parks confirmation_required -> server sends elicitation/create request to client.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": { "script": "document.title", "session": "mcp-elicit-leg" }
+        }
+    }));
+    let elicit_req = client.recv(Duration::from_secs(5));
+    assert_eq!(elicit_req["method"], "elicitation/create");
+    assert_eq!(elicit_req["params"]["mode"], "form");
+    let srv_id = elicit_req["id"].clone();
+
+    // Client responds accept + approve: true -> server runs `confirm c_42` and finishes tools/call.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": srv_id,
+        "result": {
+            "action": "accept",
+            "content": { "approve": true }
+        }
+    }));
+    let (final_resp, _) = client.recv_for_id(&json!(2), Duration::from_secs(5));
+    assert_eq!(final_resp["result"]["isError"], false);
+    assert_eq!(
+        final_resp["result"]["structuredContent"]["response"]["data"]["confirmed"],
+        true
+    );
+
+    let status = client.close();
+    assert!(status.success());
+    let commands = daemon.join().unwrap();
+    assert_eq!(commands[0]["action"], "evaluate");
+    assert_eq!(commands[1]["action"], "confirm");
+
+    // Verify --require-elicitation fails closed when client lacks elicitation capability.
+    let mut strict = McpStdioClient::spawn(&["--elicit", "eval", "--require-elicitation"]);
+    strict.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_eval",
+            "arguments": { "script": "1+1" },
+            "_meta": modern_meta(json!({}))
+        }
+    }));
+    let (err_resp, _) = strict.recv_for_id(&json!(1), Duration::from_secs(5));
+    assert_eq!(err_resp["error"]["code"], -32021);
+    assert!(err_resp["error"]["data"]["requiredCapabilities"]["elicitation"]["form"].is_object());
+    let status = strict.close();
+    assert!(status.success());
+}

@@ -11,13 +11,20 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 
+use crate::mcp_elicitation::{
+    build_confirmation_elicit_params, build_confirmation_input_request,
+    classify_preflight_category, daemon_confirmation_message, extract_daemon_confirmation,
+    missing_elicitation_capability_error, parse_elicit_decision, preflight_prompt_message,
+    refusal_tool_result, ElicitCategory, ElicitDecision, ElicitationState, RequestStateKind,
+    ELICITATION_TIMEOUT,
+};
 use crate::mcp_skills::{
     get_skill, list_resource_templates, list_resources, list_skills, read_resource,
     read_resource_directory, skills_extension_capability, SKILLS_EXTENSION_ID,
 };
 use crate::mcp_tasks::{
     is_task_eligible_tool, legacy_tasks_capability, TaskManager, TaskOutcome,
-    DEFAULT_TASK_GRACE_MS, TASKS_EXTENSION_ID,
+    DEFAULT_TASK_GRACE_MS, META_RELATED_TASK, TASKS_EXTENSION_ID,
 };
 use crate::mcp_transport::{
     current_tool_control, error_response_from, result_response, server_info_value,
@@ -217,6 +224,8 @@ struct McpConfig {
     profiles: Vec<ToolProfile>,
     enabled_tools: Option<BTreeSet<&'static str>>,
     task_grace_ms: u64,
+    elicit_categories: BTreeSet<ElicitCategory>,
+    require_elicitation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,11 +306,22 @@ impl McpConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_TASK_GRACE_MS);
+        let elicit_categories = env::var("AGENT_BROWSER_MCP_ELICIT")
+            .ok()
+            .and_then(|v| ElicitCategory::parse_list(&v).ok())
+            .unwrap_or_default();
+        let require_elicitation = env::var("AGENT_BROWSER_MCP_REQUIRE_ELICITATION")
+            .ok()
+            .is_some_and(|v| {
+                matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+            });
         if profiles.contains(&ToolProfile::All) {
             return Self {
                 profiles: vec![ToolProfile::All],
                 enabled_tools: None,
                 task_grace_ms,
+                elicit_categories,
+                require_elicitation,
             };
         }
 
@@ -314,6 +334,8 @@ impl McpConfig {
             profiles,
             enabled_tools: Some(enabled_tools),
             task_grace_ms,
+            elicit_categories,
+            require_elicitation,
         }
     }
 
@@ -593,6 +615,8 @@ struct SyncToolJob {
     params: Option<Value>,
     ctx: RequestContext,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    skip_preflight: bool,
+    direct_daemon_confirm: Option<(String, bool)>,
 }
 
 /// Run the MCP stdio server until stdin closes or a `shutdown` request is
@@ -611,11 +635,14 @@ fn run_mcp_with_io<R: BufRead>(
 ) -> Result<(), String> {
     let config = Arc::new(config);
     let tasks = Arc::new(TaskManager::new(writer.clone()));
+    let elicit = Arc::new(ElicitationState::new());
     let state = Arc::new(McpServerState::new(writer));
     let (tool_tx, tool_rx) = std::sync::mpsc::channel::<SyncToolJob>();
 
     let worker_config = Arc::clone(&config);
     let worker_state = Arc::clone(&state);
+    let worker_tasks = Arc::clone(&tasks);
+    let worker_elicit = Arc::clone(&elicit);
     let worker_handle = thread::spawn(move || {
         while let Ok(job) = tool_rx.recv() {
             if job.cancel.load(Ordering::SeqCst) {
@@ -638,11 +665,29 @@ fn run_mcp_with_io<R: BufRead>(
                     .progress_token
                     .as_ref()
                     .map(|_| worker_state.writer.clone()),
-                tool_name,
+                tool_name: tool_name.clone(),
             };
             let outcome = {
                 let _guard = ToolControlGuard::enter(control);
-                call_tool(job.params.as_ref(), &worker_config)
+                if let Some((confirm_id, approve)) = job.direct_daemon_confirm {
+                    let arguments = job
+                        .params
+                        .as_ref()
+                        .and_then(|p| p.get("arguments"))
+                        .unwrap_or(&Value::Null);
+                    run_daemon_confirm_or_deny(arguments, &confirm_id, approve)
+                } else {
+                    execute_tool_with_elicitation(
+                        job.params.as_ref(),
+                        &worker_config,
+                        &worker_state,
+                        &worker_tasks,
+                        &worker_elicit,
+                        &job.ctx,
+                        None,
+                        job.skip_preflight,
+                    )
+                }
             };
             worker_state.unregister_in_flight(&job.id);
             if !job.cancel.load(Ordering::SeqCst) {
@@ -675,7 +720,7 @@ fn run_mcp_with_io<R: BufRead>(
             continue;
         }
 
-        if dispatch_line(&line, &config, &state, &tasks, &tool_tx) || state.is_shutdown() {
+        if dispatch_line(&line, &config, &state, &tasks, &elicit, &tool_tx) || state.is_shutdown() {
             break;
         }
     }
@@ -697,6 +742,7 @@ fn dispatch_line(
     config: &Arc<McpConfig>,
     state: &Arc<McpServerState>,
     tasks: &Arc<TaskManager>,
+    elicit: &Arc<ElicitationState>,
     tool_tx: &std::sync::mpsc::Sender<SyncToolJob>,
 ) -> bool {
     let message: Value = match serde_json::from_str(line) {
@@ -805,7 +851,7 @@ fn dispatch_line(
     }
 
     if method == "tools/call" {
-        return dispatch_tools_call(id, params, config, state, tasks, &ctx, tool_tx);
+        return dispatch_tools_call(id, params, config, state, tasks, elicit, &ctx, tool_tx);
     }
 
     if method == "shutdown" {
@@ -840,15 +886,214 @@ fn dispatch_line(
     write_failed
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_tools_call(
     id: Value,
     params: Option<Value>,
     config: &Arc<McpConfig>,
     state: &Arc<McpServerState>,
     tasks: &Arc<TaskManager>,
+    elicit: &Arc<ElicitationState>,
     ctx: &RequestContext,
     tool_tx: &std::sync::mpsc::Sender<SyncToolJob>,
 ) -> bool {
+    let mut skip_preflight = false;
+
+    // Modern 2026-07-28 MRTR retry handling (`params.requestState` + `params.inputResponses`).
+    if ctx.is_modern() {
+        if let Some(request_state) = params
+            .as_ref()
+            .and_then(|p| p.get("requestState"))
+            .and_then(Value::as_str)
+        {
+            let tool_name = match validate_tool_call_request(params.as_ref(), config) {
+                Ok(name) => name,
+                Err(err) => {
+                    return state
+                        .writer
+                        .send_json(&error_response_from(id, &err))
+                        .is_err();
+                }
+            };
+            let arguments = params
+                .as_ref()
+                .and_then(|p| p.get("arguments"))
+                .unwrap_or(&Value::Null);
+            let verified = match elicit.verify_and_consume(request_state, &tool_name, arguments) {
+                Ok(v) => v,
+                Err(err) => {
+                    return state
+                        .writer
+                        .send_json(&error_response_from(id, &err))
+                        .is_err();
+                }
+            };
+            let response_entry = params
+                .as_ref()
+                .and_then(|p| p.get("inputResponses"))
+                .and_then(Value::as_object)
+                .and_then(|m| m.get(&verified.key));
+            let Some(response_entry) = response_entry else {
+                // Per MRTR spec: missing required response re-issues InputRequiredResult.
+                let msg = match &verified.kind {
+                    RequestStateKind::Preflight { category } => {
+                        format!(
+                            "Approval required to proceed with '{}' ({}).",
+                            tool_name, category
+                        )
+                    }
+                    RequestStateKind::DaemonConfirm {
+                        confirmation_id,
+                        action,
+                    } => daemon_confirmation_message(action, &tool_name, confirmation_id),
+                };
+                let reissued =
+                    elicit.issue_input_required(&tool_name, arguments, &msg, verified.kind);
+                return state
+                    .writer
+                    .send_json(&result_response(
+                        id,
+                        wrap_response_result(ProtocolEra::Modern, reissued),
+                    ))
+                    .is_err();
+            };
+            let decision = match parse_elicit_decision(response_entry) {
+                Ok(d) => d,
+                Err(err) => {
+                    return state
+                        .writer
+                        .send_json(&error_response_from(id, &err))
+                        .is_err();
+                }
+            };
+            match verified.kind {
+                RequestStateKind::DaemonConfirm {
+                    confirmation_id,
+                    action,
+                } => match decision {
+                    ElicitDecision::Approved => {
+                        let cancel = state.register_in_flight(&id);
+                        state.worker_enter();
+                        if tool_tx
+                            .send(SyncToolJob {
+                                id: id.clone(),
+                                params,
+                                ctx: ctx.clone(),
+                                cancel,
+                                skip_preflight: true,
+                                direct_daemon_confirm: Some((confirmation_id, true)),
+                            })
+                            .is_err()
+                        {
+                            state.unregister_in_flight(&id);
+                            state.worker_exit();
+                            return true;
+                        }
+                        return false;
+                    }
+                    ElicitDecision::Declined | ElicitDecision::Cancelled => {
+                        let reason = if decision == ElicitDecision::Declined {
+                            format!("User declined action '{}'.", action)
+                        } else {
+                            format!("User cancelled confirmation for action '{}'.", action)
+                        };
+                        let decision_label = if decision == ElicitDecision::Declined {
+                            "decline"
+                        } else {
+                            "cancel"
+                        };
+                        let deny_args = arguments.clone();
+                        let state_clone = Arc::clone(state);
+                        state.worker_enter();
+                        thread::spawn(move || {
+                            let _ = run_daemon_confirm_or_deny(&deny_args, &confirmation_id, false);
+                            let res = refusal_tool_result(&reason, decision_label);
+                            let _ = state_clone.writer.send_json(&result_response(
+                                id,
+                                wrap_response_result(ProtocolEra::Modern, res),
+                            ));
+                            state_clone.worker_exit();
+                        });
+                        return false;
+                    }
+                },
+                RequestStateKind::Preflight { category } => match decision {
+                    ElicitDecision::Approved => {
+                        skip_preflight = true;
+                    }
+                    ElicitDecision::Declined | ElicitDecision::Cancelled => {
+                        let reason = if decision == ElicitDecision::Declined {
+                            format!("User declined '{}' action ({}).", category, tool_name)
+                        } else {
+                            format!(
+                                "User cancelled confirmation for '{}' action ({}).",
+                                category, tool_name
+                            )
+                        };
+                        let decision_label = if decision == ElicitDecision::Declined {
+                            "decline"
+                        } else {
+                            "cancel"
+                        };
+                        let res = refusal_tool_result(&reason, decision_label);
+                        return state
+                            .writer
+                            .send_json(&result_response(
+                                id,
+                                wrap_response_result(ProtocolEra::Modern, res),
+                            ))
+                            .is_err();
+                    }
+                },
+            }
+        } else if !config.elicit_categories.is_empty() {
+            // Modern pre-flight check runs synchronously before task creation (per ext-tasks).
+            let tool_name = match validate_tool_call_request(params.as_ref(), config) {
+                Ok(name) => name,
+                Err(err) => {
+                    return state
+                        .writer
+                        .send_json(&error_response_from(id, &err))
+                        .is_err();
+                }
+            };
+            let arguments = params
+                .as_ref()
+                .and_then(|p| p.get("arguments"))
+                .unwrap_or(&Value::Null);
+            if let Some(cat) =
+                classify_preflight_category(&config.elicit_categories, &tool_name, arguments)
+            {
+                if ctx.supports_elicitation_form() {
+                    let msg = preflight_prompt_message(cat, &tool_name, arguments);
+                    let input_req = elicit.issue_input_required(
+                        &tool_name,
+                        arguments,
+                        &msg,
+                        RequestStateKind::Preflight {
+                            category: cat.as_str().to_string(),
+                        },
+                    );
+                    return state
+                        .writer
+                        .send_json(&result_response(
+                            id,
+                            wrap_response_result(ProtocolEra::Modern, input_req),
+                        ))
+                        .is_err();
+                } else if config.require_elicitation {
+                    return state
+                        .writer
+                        .send_json(&error_response_from(
+                            id,
+                            &missing_elicitation_capability_error(),
+                        ))
+                        .is_err();
+                }
+            }
+        }
+    }
+
     let legacy_task_param = if !ctx.is_modern() {
         params.as_ref().and_then(|p| p.get("task"))
     } else {
@@ -909,11 +1154,14 @@ fn dispatch_tools_call(
             task_id,
             tool_name,
             params,
+            ctx.clone(),
             cancel,
             ctx.progress_token.clone(),
+            skip_preflight,
             Arc::clone(config),
             Arc::clone(state),
             Arc::clone(tasks),
+            Arc::clone(elicit),
         );
         return false;
     }
@@ -948,12 +1196,15 @@ fn dispatch_tools_call(
                 task_id.clone(),
                 tool_name,
                 params,
+                ctx.clone(),
                 cancel,
                 // Per ext-tasks, notifications/progress MUST NOT be emitted for 2026-07-28 tasks.
                 None,
+                skip_preflight,
                 Arc::clone(config),
                 Arc::clone(state),
                 Arc::clone(tasks),
+                Arc::clone(elicit),
             );
             let grace = Duration::from_millis(config.task_grace_ms);
             let wait_state = Arc::clone(state);
@@ -990,6 +1241,8 @@ fn dispatch_tools_call(
             params,
             ctx: ctx.clone(),
             cancel,
+            skip_preflight,
+            direct_daemon_confirm: None,
         })
         .is_err()
     {
@@ -1005,11 +1258,14 @@ fn spawn_task_worker(
     task_id: String,
     tool_name: String,
     params: Option<Value>,
+    ctx: RequestContext,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     progress_token: Option<Value>,
+    skip_preflight: bool,
     config: Arc<McpConfig>,
     state: Arc<McpServerState>,
     tasks: Arc<TaskManager>,
+    elicit: Arc<ElicitationState>,
 ) {
     state.worker_enter();
     thread::spawn(move || {
@@ -1021,7 +1277,16 @@ fn spawn_task_worker(
         };
         let outcome = {
             let _guard = ToolControlGuard::enter(control);
-            call_tool(params.as_ref(), &config)
+            execute_tool_with_elicitation(
+                params.as_ref(),
+                &config,
+                &state,
+                &tasks,
+                &elicit,
+                &ctx,
+                Some(&task_id),
+                skip_preflight,
+            )
         };
         if !cancel.load(Ordering::SeqCst) {
             let task_outcome = match outcome {
@@ -1032,6 +1297,197 @@ fn spawn_task_worker(
         }
         state.worker_exit();
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_tool_with_elicitation(
+    params: Option<&Value>,
+    config: &McpConfig,
+    state: &McpServerState,
+    tasks: &TaskManager,
+    elicit: &ElicitationState,
+    ctx: &RequestContext,
+    active_task_id: Option<&str>,
+    skip_preflight: bool,
+) -> Result<Value, ProtocolError> {
+    let tool_name = validate_tool_call_request(params, config)?;
+    let arguments = params
+        .and_then(|p| p.get("arguments"))
+        .unwrap_or(&Value::Null);
+
+    // Legacy pre-flight elicitation (modern pre-flight is handled via MRTR before dispatch).
+    if !ctx.is_modern() && !skip_preflight {
+        if let Some(cat) =
+            classify_preflight_category(&config.elicit_categories, &tool_name, arguments)
+        {
+            if ctx.supports_elicitation_form() {
+                let msg = preflight_prompt_message(cat, &tool_name, arguments);
+                match elicit_legacy_confirmation(state, tasks, active_task_id, &msg)? {
+                    ElicitDecision::Approved => {}
+                    ElicitDecision::Declined => {
+                        return Ok(refusal_tool_result(
+                            &format!("User declined '{}' action ({}).", cat.as_str(), tool_name),
+                            "decline",
+                        ));
+                    }
+                    ElicitDecision::Cancelled => {
+                        return Ok(refusal_tool_result(
+                            &format!(
+                                "User cancelled confirmation for '{}' action ({}).",
+                                cat.as_str(),
+                                tool_name
+                            ),
+                            "cancel",
+                        ));
+                    }
+                }
+            } else if config.require_elicitation {
+                return Ok(refusal_tool_result(
+                    "Form-mode elicitation is required to approve this action, but the MCP client does not declare elicitation support.",
+                    "unsupported",
+                ));
+            }
+        }
+    }
+
+    let result = call_tool(params, config)?;
+
+    // Bridge parked daemon confirmations (`confirmation_required: true`) to MCP Elicitation.
+    let Some((confirmation_id, action)) = extract_daemon_confirmation(&result) else {
+        return Ok(result);
+    };
+
+    if !ctx.supports_elicitation_form() {
+        if config.require_elicitation {
+            let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+            if ctx.is_modern() {
+                return Err(missing_elicitation_capability_error());
+            }
+            return Ok(refusal_tool_result(
+                &format!(
+                    "Action '{}' requires user approval via MCP elicitation, which the client does not support.",
+                    action
+                ),
+                "unsupported",
+            ));
+        }
+        return Ok(result);
+    }
+
+    let msg = daemon_confirmation_message(&action, &tool_name, &confirmation_id);
+
+    if ctx.is_modern() {
+        if let Some(task_id) = active_task_id {
+            let key = format!("confirm_{}", uuid::Uuid::new_v4().simple());
+            let input_req = build_confirmation_input_request(&msg);
+            let reply =
+                match tasks.request_task_input(task_id, key, input_req, msg, ELICITATION_TIMEOUT) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+                        return Ok(refusal_tool_result(
+                            &format!("Confirmation for action '{}' timed out.", action),
+                            "cancel",
+                        ));
+                    }
+                };
+            return match parse_elicit_decision(&reply)? {
+                ElicitDecision::Approved => {
+                    run_daemon_confirm_or_deny(arguments, &confirmation_id, true)
+                }
+                ElicitDecision::Declined => {
+                    let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+                    Ok(refusal_tool_result(
+                        &format!("User declined action '{}'.", action),
+                        "decline",
+                    ))
+                }
+                ElicitDecision::Cancelled => {
+                    let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+                    Ok(refusal_tool_result(
+                        &format!("User cancelled confirmation for action '{}'.", action),
+                        "cancel",
+                    ))
+                }
+            };
+        }
+
+        return Ok(elicit.issue_input_required(
+            &tool_name,
+            arguments,
+            &msg,
+            RequestStateKind::DaemonConfirm {
+                confirmation_id,
+                action,
+            },
+        ));
+    }
+
+    // Legacy 2025-11-25 / 2025-06-18 server-initiated elicitation/create.
+    match elicit_legacy_confirmation(state, tasks, active_task_id, &msg)? {
+        ElicitDecision::Approved => run_daemon_confirm_or_deny(arguments, &confirmation_id, true),
+        ElicitDecision::Declined => {
+            let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+            Ok(refusal_tool_result(
+                &format!("User declined action '{}'.", action),
+                "decline",
+            ))
+        }
+        ElicitDecision::Cancelled => {
+            let _ = run_daemon_confirm_or_deny(arguments, &confirmation_id, false);
+            Ok(refusal_tool_result(
+                &format!("User cancelled confirmation for action '{}'.", action),
+                "cancel",
+            ))
+        }
+    }
+}
+
+fn elicit_legacy_confirmation(
+    state: &McpServerState,
+    tasks: &TaskManager,
+    active_task_id: Option<&str>,
+    message: &str,
+) -> Result<ElicitDecision, ProtocolError> {
+    let mut elicit_params = build_confirmation_elicit_params(message);
+    if let Some(task_id) = active_task_id {
+        elicit_params["_meta"] = json!({
+            META_RELATED_TASK: { "taskId": task_id }
+        });
+        tasks.set_legacy_input_required(task_id, true, message);
+    }
+    let response =
+        state.send_server_request("elicitation/create", elicit_params, ELICITATION_TIMEOUT);
+    if let Some(task_id) = active_task_id {
+        tasks.set_legacy_input_required(task_id, false, "Resuming after user confirmation");
+    }
+    let response = match response {
+        Ok(resp) => resp,
+        Err(_) => return Ok(ElicitDecision::Cancelled),
+    };
+    let Some(result) = response.get("result") else {
+        return Ok(ElicitDecision::Cancelled);
+    };
+    parse_elicit_decision(result)
+}
+
+fn run_daemon_confirm_or_deny(
+    original_arguments: &Value,
+    confirmation_id: &str,
+    approve: bool,
+) -> Result<Value, ProtocolError> {
+    let mut args_obj = serde_json::Map::new();
+    for shared in ["session", "namespace", "timeoutMs"] {
+        if let Some(val) = original_arguments.get(shared) {
+            args_obj.insert(shared.to_string(), val.clone());
+        }
+    }
+    let sub = if approve { "confirm" } else { "deny" };
+    call_cli_tool(
+        &Value::Object(args_obj),
+        vec![sub.to_string(), confirmation_id.to_string()],
+        None,
+    )
 }
 
 fn handle_notification(
@@ -1094,6 +1550,8 @@ fn handle_inline_request(
 fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
     let mut tools_arg: Option<String> = None;
     let mut task_grace_ms: Option<u64> = None;
+    let mut elicit_arg: Option<String> = None;
+    let mut require_elicitation = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -1122,9 +1580,21 @@ fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
                 .map_err(|_| format!("Invalid value for --task-grace-ms: {}", value))?;
             task_grace_ms = Some(parsed);
             i += 1;
+        } else if arg == "--elicit" {
+            let Some(value) = args.get(i + 1) else {
+                return Err("Missing value for --elicit".to_string());
+            };
+            elicit_arg = Some(value.to_string());
+            i += 2;
+        } else if let Some(value) = arg.strip_prefix("--elicit=") {
+            elicit_arg = Some(value.to_string());
+            i += 1;
+        } else if arg == "--require-elicitation" {
+            require_elicitation = true;
+            i += 1;
         } else {
             return Err(format!(
-                "Unknown mcp option: {}\nUsage: agent-browser mcp [--tools <profiles>] [--task-grace-ms <ms>] [--config <trusted-path>]",
+                "Unknown mcp option: {}\nUsage: agent-browser mcp [--tools <profiles>] [--task-grace-ms <ms>] [--elicit <categories>] [--require-elicitation] [--config <trusted-path>]",
                 arg
             ));
         }
@@ -1158,6 +1628,12 @@ fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
 
     if let Some(ms) = task_grace_ms {
         config.task_grace_ms = ms;
+    }
+    if let Some(raw_elicit) = elicit_arg {
+        config.elicit_categories = ElicitCategory::parse_list(&raw_elicit)?;
+    }
+    if require_elicitation {
+        config.require_elicitation = true;
     }
 
     Ok(config)
