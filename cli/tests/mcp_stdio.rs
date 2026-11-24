@@ -442,3 +442,153 @@ fn concurrent_ping_progress_and_cancellation_over_stdio() {
     assert!(status.success());
     drop(daemon_thread);
 }
+
+#[test]
+fn skills_over_mcp_discover_list_get_read_and_directory_read() {
+    use sha2::{Digest, Sha256};
+
+    let mut client = McpStdioClient::spawn(&[]);
+
+    // 2026-07-28 server/discover advertises resources and io.modelcontextprotocol/skills.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "disc-skills",
+        "method": "server/discover",
+        "params": {
+            "_meta": modern_meta(json!({}))
+        }
+    }));
+    let disc = client.recv(Duration::from_secs(5));
+    assert!(disc["result"]["capabilities"]["resources"].is_object());
+    assert_eq!(
+        disc["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/skills"]
+            ["directoryRead"],
+        true
+    );
+
+    // skills/list returns all non-hidden bundled skills with complete manifests.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "skills/list",
+        "params": {
+            "_meta": modern_meta(json!({}))
+        }
+    }));
+    let list_resp = client.recv(Duration::from_secs(5));
+    assert_eq!(list_resp["result"]["resultType"], "complete");
+    assert_eq!(list_resp["result"]["cacheScope"], "public");
+    let skills = list_resp["result"]["skills"].as_array().unwrap();
+    let core = skills
+        .iter()
+        .find(|s| s["uri"] == "skill://core/SKILL.md")
+        .expect("core skill in skills/list");
+    assert_eq!(core["frontmatter"]["name"], "core");
+
+    let core_manifest = core["resources"].as_array().unwrap();
+    let skill_md_entry = core_manifest
+        .iter()
+        .find(|r| r["uri"] == "skill://core/SKILL.md")
+        .expect("SKILL.md in manifest");
+
+    // resources/read returns exact bytes matching the manifest's digest and size.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "resources/read",
+        "params": {
+            "uri": "skill://core/SKILL.md",
+            "_meta": modern_meta(json!({}))
+        }
+    }));
+    let read_resp = client.recv(Duration::from_secs(5));
+    assert_eq!(read_resp["result"]["resultType"], "complete");
+    let text = read_resp["result"]["contents"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        skill_md_entry["size"].as_u64().unwrap() as usize,
+        text.len()
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    let actual_digest = format!("sha256:{}", hex::encode(hasher.finalize()));
+    assert_eq!(skill_md_entry["digest"], actual_digest);
+
+    // skills/get resolves individual skills including hidden discovery stub and errors on unknown.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "skills/get",
+        "params": {
+            "uri": "skill://agent-browser/SKILL.md",
+            "_meta": modern_meta(json!({}))
+        }
+    }));
+    let stub = client.recv(Duration::from_secs(5));
+    assert_eq!(
+        stub["result"]["skill"]["frontmatter"]["name"],
+        "agent-browser"
+    );
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "skills/get",
+        "params": {
+            "uri": "skill://does-not-exist/SKILL.md",
+            "_meta": modern_meta(json!({}))
+        }
+    }));
+    let missing = client.recv(Duration::from_secs(5));
+    assert_eq!(missing["error"]["code"], -32602);
+
+    // resources/directory/read lists direct children and marks subdirectories as inode/directory.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "resources/directory/read",
+        "params": {
+            "uri": "skill://core",
+            "_meta": modern_meta(json!({}))
+        }
+    }));
+    let dir_resp = client.recv(Duration::from_secs(5));
+    let dir_items = dir_resp["result"]["resources"].as_array().unwrap();
+    assert!(dir_items
+        .iter()
+        .any(|r| { r["uri"] == "skill://core/references" && r["mimeType"] == "inode/directory" }));
+
+    // Core resources/list also works for legacy initialize clients.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "legacy-skills", "version": "1.0.0" }
+        }
+    }));
+    let init = client.recv(Duration::from_secs(5));
+    assert_eq!(
+        init["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/skills"]
+            ["directoryRead"],
+        true
+    );
+    assert!(init["result"]["capabilities"]["resources"].is_object());
+
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "resources/list",
+        "params": {}
+    }));
+    let res_list = client.recv(Duration::from_secs(5));
+    assert!(res_list["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["uri"] == "skill://core/SKILL.md"));
+
+    let status = client.close();
+    assert!(status.success());
+}

@@ -13,6 +13,16 @@ npx skills add vercel-labs/agent-browser
 
 This installs a single discovery skill that teaches your agent about agent-browser and directs it to use the `agent-browser skills` CLI command for current instructions. The discovery skill contains trigger words so agents prefer agent-browser over built-in browser tools.
 
+## Skills over MCP
+
+MCP clients connected to `agent-browser mcp` can discover and read the same bundled skills directly over the protocol without running `npx skills add`. The server advertises the `resources` capability and the `io.modelcontextprotocol/skills` extension (`directoryRead: true`) in both `server/discover` (`2026-07-28`) and `initialize` (`2025-11-25`).
+
+- `skills/list` returns the non-hidden skills from `skill-data/` with verbatim YAML frontmatter and complete SHA-256 file manifests.
+- `skills/get` resolves any skill by its `skill://<name>/SKILL.md` URI.
+- `resources/read` serves `SKILL.md` and supporting files under `references/` and `templates/` directly from the same `skill-data/` source (falling back to assets compiled into the binary when no on-disk directory is present).
+- `resources/directory/read` lists direct children of a skill directory, marking subdirectories as `inode/directory`.
+- Clients that support core MCP Resources without the Skills extension can list and read the same `skill://` URIs via `resources/list` and `resources/read`.
+
 ## CLI Command
 
 Agents retrieve skill content at runtime using the `agent-browser skills` command. This always serves content matching the installed CLI version, so instructions never go stale.

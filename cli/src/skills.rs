@@ -1,10 +1,39 @@
-use serde_json::json;
+use rust_embed::Embed;
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
 use crate::color;
+
+#[derive(Embed)]
+#[folder = "../skill-data/"]
+struct EmbeddedSkillData;
+
+#[derive(Embed)]
+#[folder = "../skills/"]
+struct EmbeddedDiscoverySkills;
+
+/// A single file inside a skill package, preserving exact raw bytes.
+#[derive(Debug, Clone)]
+pub(crate) struct SkillFileEntry {
+    /// Forward-slash relative path inside the skill directory (e.g. `SKILL.md`, `references/commands.md`).
+    pub(crate) rel_path: String,
+    /// Exact raw bytes served for this file.
+    pub(crate) bytes: Vec<u8>,
+}
+
+/// Complete skill package shared by the CLI and `agent-browser mcp`.
+#[derive(Debug, Clone)]
+pub(crate) struct SkillPackage {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) hidden: bool,
+    pub(crate) frontmatter: Map<String, Value>,
+    pub(crate) files: Vec<SkillFileEntry>,
+}
 
 struct SkillInfo {
     name: String,
@@ -84,6 +113,396 @@ fn find_skills_dirs() -> Vec<PathBuf> {
         .map(|d| root.join(d))
         .filter(|p| p.is_dir())
         .collect()
+}
+
+/// Parse YAML frontmatter from a SKILL.md file into a verbatim JSON object.
+pub(crate) fn parse_frontmatter_json(content: &str) -> Option<Map<String, Value>> {
+    let content = content.trim_start();
+    if !content.starts_with("---") {
+        return None;
+    }
+    let after_opening = &content[3..];
+    let after_opening = after_opening
+        .strip_prefix("\r\n")
+        .or_else(|| after_opening.strip_prefix('\n'))?;
+    let end = find_frontmatter_end(after_opening)?;
+    let frontmatter = &after_opening[..end];
+    let lines: Vec<&str> = frontmatter.lines().collect();
+    let (map, _) = parse_yaml_mapping(&lines, 0, 0);
+    Some(map)
+}
+
+fn find_frontmatter_end(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    for segment in text.split_inclusive('\n') {
+        let trimmed = segment.trim_end_matches(&['\r', '\n'][..]);
+        if trimmed == "---" {
+            return Some(offset);
+        }
+        offset += segment.len();
+    }
+    if text.trim_end_matches(&['\r', '\n'][..]) == "---" {
+        return Some(0);
+    }
+    None
+}
+
+fn line_indent(line: &str) -> usize {
+    line.bytes()
+        .take_while(|b| *b == b' ' || *b == b'\t')
+        .count()
+}
+
+fn parse_yaml_mapping(
+    lines: &[&str],
+    mut i: usize,
+    base_indent: usize,
+) -> (Map<String, Value>, usize) {
+    let mut map = Map::new();
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            i += 1;
+            continue;
+        }
+        let indent = line_indent(line);
+        if indent < base_indent {
+            break;
+        }
+        let stripped = &line[indent..];
+        let Some((raw_key, rest)) = stripped.split_once(':') else {
+            i += 1;
+            continue;
+        };
+        let key = raw_key.trim().trim_matches(&['"', '\''][..]).to_string();
+        if key.is_empty() {
+            i += 1;
+            continue;
+        }
+        let val_str = rest.trim();
+        if val_str.is_empty() {
+            // Nested block mapping or sequence on following indented lines.
+            let mut next = i + 1;
+            while next < lines.len()
+                && (lines[next].trim().is_empty() || lines[next].trim().starts_with('#'))
+            {
+                next += 1;
+            }
+            if next < lines.len() && line_indent(lines[next]) > indent {
+                let child_indent = line_indent(lines[next]);
+                let child_first = lines[next][child_indent..].trim_start();
+                if child_first.starts_with("- ") || child_first == "-" {
+                    let (seq, after) = parse_yaml_sequence(lines, next, child_indent);
+                    map.insert(key, Value::Array(seq));
+                    i = after;
+                } else {
+                    let (child_map, after) = parse_yaml_mapping(lines, next, child_indent);
+                    map.insert(key, Value::Object(child_map));
+                    i = after;
+                }
+            } else {
+                map.insert(key, Value::Null);
+                i += 1;
+            }
+        } else if matches!(val_str, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
+            let folded = val_str.starts_with('>');
+            let strip_final = val_str.ends_with('-');
+            let mut block_lines: Vec<&str> = Vec::new();
+            let mut block_indent: Option<usize> = None;
+            i += 1;
+            while i < lines.len() {
+                let cur = lines[i];
+                if cur.trim().is_empty() {
+                    block_lines.push("");
+                    i += 1;
+                    continue;
+                }
+                let ind = line_indent(cur);
+                if ind <= indent {
+                    break;
+                }
+                let bi = *block_indent.get_or_insert(ind);
+                let cut = bi.min(cur.len());
+                block_lines.push(&cur[cut..]);
+                i += 1;
+            }
+            while block_lines.last() == Some(&"") {
+                block_lines.pop();
+            }
+            let mut joined = if folded {
+                block_lines.join(" ")
+            } else {
+                block_lines.join("\n")
+            };
+            if !strip_final && !joined.is_empty() {
+                joined.push('\n');
+            }
+            map.insert(key, Value::String(joined));
+        } else {
+            let mut scalar = val_str.to_string();
+            let is_quoted = (scalar.starts_with('"') && scalar.ends_with('"') && scalar.len() >= 2)
+                || (scalar.starts_with('\'') && scalar.ends_with('\'') && scalar.len() >= 2);
+            if !is_quoted {
+                while i + 1 < lines.len() {
+                    let next_line = lines[i + 1];
+                    if next_line.trim().is_empty() {
+                        break;
+                    }
+                    let next_indent = line_indent(next_line);
+                    if next_indent > indent && !next_line.trim_start().starts_with("- ") {
+                        i += 1;
+                        scalar.push(' ');
+                        scalar.push_str(next_line.trim());
+                    } else {
+                        break;
+                    }
+                }
+            }
+            map.insert(key, parse_yaml_scalar(&scalar));
+            i += 1;
+        }
+    }
+    (map, i)
+}
+
+fn parse_yaml_sequence(lines: &[&str], mut i: usize, base_indent: usize) -> (Vec<Value>, usize) {
+    let mut items = Vec::new();
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            i += 1;
+            continue;
+        }
+        let indent = line_indent(line);
+        if indent < base_indent {
+            break;
+        }
+        let stripped = &line[indent..];
+        let Some(rest) = stripped.strip_prefix('-') else {
+            break;
+        };
+        let val = rest.trim();
+        items.push(parse_yaml_scalar(val));
+        i += 1;
+    }
+    (items, i)
+}
+
+fn parse_yaml_scalar(raw: &str) -> Value {
+    let s = raw.trim();
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        if let Ok(parsed) = serde_json::from_str::<String>(s) {
+            return Value::String(parsed);
+        }
+        return Value::String(s[1..s.len() - 1].to_string());
+    }
+    if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2 {
+        return Value::String(s[1..s.len() - 1].replace("''", "'"));
+    }
+    if s.starts_with('[') && s.ends_with(']') {
+        let inner = s[1..s.len() - 1].trim();
+        if inner.is_empty() {
+            return Value::Array(Vec::new());
+        }
+        let items = inner.split(',').map(parse_yaml_scalar).collect();
+        return Value::Array(items);
+    }
+    match s {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" | "~" => Value::Null,
+        _ => {
+            if let Ok(n) = s.parse::<i64>() {
+                Value::Number(n.into())
+            } else {
+                Value::String(s.to_string())
+            }
+        }
+    }
+}
+
+/// Load skill packages from disk (`AGENT_BROWSER_SKILLS_DIR`, package root, or
+/// `~/.agent-browser/`), falling back to compile-time embedded `skill-data/`
+/// and `skills/` only when no filesystem skill directories exist and
+/// `AGENT_BROWSER_SKILLS_DIR` is not explicitly set.
+pub(crate) fn load_skill_packages() -> Vec<SkillPackage> {
+    if let Ok(dir) = env::var("AGENT_BROWSER_SKILLS_DIR") {
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            return load_skill_packages_from_dirs(&[p]);
+        }
+        return Vec::new();
+    }
+
+    let dirs = find_skills_dirs();
+    if !dirs.is_empty() {
+        let loaded = load_skill_packages_from_dirs(&dirs);
+        if !loaded.is_empty() {
+            return loaded;
+        }
+    }
+
+    load_embedded_skill_packages()
+}
+
+pub(crate) fn load_skill_packages_from_dirs(dirs: &[PathBuf]) -> Vec<SkillPackage> {
+    let mut by_name: BTreeMap<String, SkillPackage> = BTreeMap::new();
+    for skills_dir in dirs {
+        let Ok(entries) = fs::read_dir(skills_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let skill_md = path.join("SKILL.md");
+            if !skill_md.is_file() {
+                continue;
+            }
+            let Ok(md_bytes) = fs::read(&skill_md) else {
+                continue;
+            };
+            let Ok(md_text) = std::str::from_utf8(&md_bytes) else {
+                continue;
+            };
+            let Some(frontmatter) = parse_frontmatter_json(md_text) else {
+                continue;
+            };
+            let Some(name) = frontmatter
+                .get("name")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+            else {
+                continue;
+            };
+            let description = frontmatter
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let hidden = frontmatter
+                .get("hidden")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+
+            let mut files = Vec::new();
+            collect_dir_files_recursive(&path, &path, &mut files);
+            files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+            by_name.insert(
+                name.clone(),
+                SkillPackage {
+                    name,
+                    description,
+                    hidden,
+                    frontmatter,
+                    files,
+                },
+            );
+        }
+    }
+    by_name.into_values().collect()
+}
+
+fn collect_dir_files_recursive(root: &Path, current: &Path, out: &mut Vec<SkillFileEntry>) {
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    let mut items: Vec<_> = entries.flatten().collect();
+    items.sort_by_key(|e| e.file_name());
+    for entry in items {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dir_files_recursive(root, &path, out);
+        } else if path.is_file() {
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let rel_path = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            if let Ok(bytes) = fs::read(&path) {
+                out.push(SkillFileEntry { rel_path, bytes });
+            }
+        }
+    }
+}
+
+pub(crate) fn load_embedded_skill_packages() -> Vec<SkillPackage> {
+    let mut grouped: BTreeMap<String, Vec<SkillFileEntry>> = BTreeMap::new();
+
+    for path in EmbeddedDiscoverySkills::iter() {
+        if let Some((dir_name, rel_path)) = path.as_ref().split_once('/') {
+            if let Some(asset) = EmbeddedDiscoverySkills::get(path.as_ref()) {
+                grouped
+                    .entry(dir_name.to_string())
+                    .or_default()
+                    .push(SkillFileEntry {
+                        rel_path: rel_path.to_string(),
+                        bytes: asset.data.into_owned(),
+                    });
+            }
+        }
+    }
+
+    for path in EmbeddedSkillData::iter() {
+        if let Some((dir_name, rel_path)) = path.as_ref().split_once('/') {
+            if let Some(asset) = EmbeddedSkillData::get(path.as_ref()) {
+                grouped
+                    .entry(dir_name.to_string())
+                    .or_default()
+                    .push(SkillFileEntry {
+                        rel_path: rel_path.to_string(),
+                        bytes: asset.data.into_owned(),
+                    });
+            }
+        }
+    }
+
+    let mut by_name: BTreeMap<String, SkillPackage> = BTreeMap::new();
+    for (_dir_name, mut files) in grouped {
+        files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        let Some(skill_md) = files.iter().find(|f| f.rel_path == "SKILL.md") else {
+            continue;
+        };
+        let Ok(md_text) = std::str::from_utf8(&skill_md.bytes) else {
+            continue;
+        };
+        let Some(frontmatter) = parse_frontmatter_json(md_text) else {
+            continue;
+        };
+        let Some(name) = frontmatter
+            .get("name")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+        else {
+            continue;
+        };
+        let description = frontmatter
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let hidden = frontmatter
+            .get("hidden")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        by_name.insert(
+            name.clone(),
+            SkillPackage {
+                name,
+                description,
+                hidden,
+                frontmatter,
+                files,
+            },
+        );
+    }
+    by_name.into_values().collect()
 }
 
 /// Parse YAML frontmatter from a SKILL.md file. Returns (name, description, hidden).
