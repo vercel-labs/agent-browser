@@ -30350,7 +30350,6 @@ mod firefox_routing_tests {
     async fn pin_tab_propagates_to_firefox_and_reports_structured_tab_gone() {
         let _guard = clean_env();
         let (mut state, calls) = firefox_state().await;
-        state.firefox.as_mut().unwrap().mark_owned();
 
         let resp = execute_command(
             &json!({"id": "1", "action": "url", "settings": {"pin-tab": true}}),
