@@ -5531,6 +5531,86 @@ mod tests {
         assert_eq!(flow["steps"][1]["command"]["key"], REDACTED);
     }
 
+    #[test]
+    fn a_secret_typed_with_key_code_aliases_is_redacted_and_withheld() {
+        let secret = traits("password", "", "");
+        let refs = crate::native::element::RefMap::new();
+        let mut r = recorded(&[]);
+        r.begin(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/login" }),
+            &refs,
+            None,
+            None,
+            0,
+        );
+        let step = |r: &mut FlowRecorder, action: &str, key: &str, held: i32| {
+            r.begin(
+                action,
+                &json!({ "action": action, "key": key }),
+                &refs,
+                None,
+                Some(&secret),
+                held,
+            );
+        };
+        step(&mut r, "press", "KeyH", 0);
+        step(&mut r, "keydown", "Digit2", 0);
+        step(&mut r, "keyup", "Digit2", 0);
+        step(&mut r, "keydown", "ShiftRight", 0);
+        step(&mut r, "press", "KeyA", 8);
+        step(&mut r, "keyup", "ShiftRight", 8);
+        step(&mut r, "press", "ShiftLeft+Digit1", 0);
+        step(&mut r, "press", "Enter", 0);
+        step(&mut r, "press", "UnknownKey", 0);
+        r.tag_now("login");
+        r.tag_now("me");
+        let mut login = entry(
+            "login",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            r#"{"ok":true}"#,
+        );
+        login.method = "POST".to_string();
+        login.post_data = Some(r#"{"password":"h2A!"}"#.to_string());
+        let me = entry(
+            "me",
+            "https://api.example.com.ar/me",
+            "Fetch",
+            "application/json",
+            r#"{"name":"a"}"#,
+        );
+        let (flow, _) = build_flow_value(SaveInput {
+            name: "aliases",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[login, me],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+            local_names: &[],
+        })
+        .unwrap();
+        let text = serde_json::to_string(&flow).unwrap();
+        for forbidden in ["h2A!", "KeyH", "Digit2", "KeyA", "Digit1", "UnknownKey"] {
+            assert!(!text.contains(forbidden), "leaked {forbidden} in {text}");
+        }
+        assert!(
+            !text.contains("api.example.com.ar/login"),
+            "login request should be dropped: {text}"
+        );
+        assert_eq!(flow["steps"][1]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][2]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][3]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][5]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][7]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][8]["command"]["key"], "Enter");
+        assert_eq!(flow["steps"][9]["command"]["key"], REDACTED);
+    }
+
     fn secret_fill_recording() -> (FlowRecorder, HarEntry) {
         let mut r = recorded(&[]);
         r.begin_command(

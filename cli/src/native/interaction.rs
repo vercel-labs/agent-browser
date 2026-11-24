@@ -2608,7 +2608,7 @@ fn key_text(key_name: &str) -> Option<String> {
     }
 }
 
-fn modified_key_info(
+pub(crate) fn modified_key_info(
     key: &str,
     modifiers: Option<i32>,
 ) -> (String, String, i32, Option<String>, Option<String>) {
@@ -2627,6 +2627,55 @@ fn modified_key_info(
         (key_text(&key_name), key_text(&unmodified_key))
     };
     (key_name, code, key_code, text, unmodified_text)
+}
+
+pub(crate) fn parse_key_chord(input: &str) -> (String, Option<i32>) {
+    let parts: Vec<&str> = input.split('+').collect();
+    if parts.len() < 2 {
+        return (input.to_string(), None);
+    }
+
+    let mut modifiers = 0i32;
+    let mut key_parts: Vec<&str> = Vec::new();
+
+    for part in &parts {
+        if let Some(bit) = key_modifier_bit(part) {
+            modifiers |= bit;
+        } else {
+            key_parts.push(part);
+        }
+    }
+
+    if modifiers == 0 {
+        return (input.to_string(), None);
+    }
+
+    let actual_key = if key_parts.is_empty() {
+        input.to_string()
+    } else {
+        key_parts.join("+")
+    };
+
+    (actual_key, Some(modifiers))
+}
+
+pub(crate) fn is_non_printable_control_key(key_name: &str) -> bool {
+    matches!(
+        key_name,
+        "Enter"
+            | "Tab"
+            | "Escape"
+            | "Backspace"
+            | "Delete"
+            | "ArrowUp"
+            | "ArrowDown"
+            | "ArrowLeft"
+            | "ArrowRight"
+            | "Home"
+            | "End"
+            | "PageUp"
+            | "PageDown"
+    )
 }
 
 pub(crate) fn shifted_char(key_name: &str) -> Option<char> {
@@ -3301,5 +3350,10 @@ mod tests {
             modifier_key_names(1 | 2 | 4 | 8),
             vec!["Control", "Alt", "Shift", "Meta"]
         );
+        assert_eq!(
+            parse_key_chord("ShiftRight+KeyA"),
+            ("KeyA".to_string(), Some(8))
+        );
+        assert_eq!(parse_key_chord("ControlLeft+l"), ("l".to_string(), Some(2)));
     }
 }

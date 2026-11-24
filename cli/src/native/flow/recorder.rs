@@ -10,7 +10,9 @@ use super::{
 };
 use crate::native::actions::{HarEntry, FIND_ACTIONS};
 use crate::native::element::RefMap;
-use crate::native::interaction::{key_modifier_bit, shifted_char};
+use crate::native::interaction::{
+    is_non_printable_control_key, key_modifier_bit, modified_key_info, parse_key_chord,
+};
 
 /// Values `--capture` accepts.
 pub const CAPTURE_MODES: &[&str] = &["flow"];
@@ -615,32 +617,23 @@ impl FlowRecorder {
         let Some(key) = cmd["key"].as_str().map(String::from) else {
             return;
         };
-        let (mods, last): (Vec<String>, String) = if key == "+" {
-            (Vec::new(), key.clone())
-        } else {
-            let mut parts: Vec<&str> = key.split('+').collect();
-            let last = parts.pop().unwrap_or("").to_string();
-            (parts.iter().map(|m| m.to_ascii_lowercase()).collect(), last)
-        };
-        let held = self.held_modifiers;
-        let plain = mods.iter().all(|m| m == "shift") && held & !8 == 0;
-        let has = |names: &[&str]| mods.iter().any(|m| names.contains(&m.as_str()));
-        let shift = has(&["shift"]) || held & 8 != 0;
-        let paste = ((has(&["control", "ctrl", "meta", "command", "cmd"]) || held & (2 | 4) != 0)
-            && last.eq_ignore_ascii_case("v"))
-            || (shift && last.eq_ignore_ascii_case("insert"));
-        if plain && last.chars().count() == 1 {
+        let (actual_key, chord_mods) = parse_key_chord(&key);
+        let effective_mods = chord_mods.unwrap_or(0) | self.held_modifiers;
+        let mods_opt = (effective_mods != 0).then_some(effective_mods);
+        let (resolved_key, _, _, _, _) = modified_key_info(&actual_key, mods_opt);
+        let plain = effective_mods & (1 | 2 | 4) == 0;
+        let shift = effective_mods & 8 != 0;
+        let paste = ((effective_mods & (2 | 4) != 0) && resolved_key.eq_ignore_ascii_case("v"))
+            || (shift && resolved_key.eq_ignore_ascii_case("insert"));
+        if plain && resolved_key.chars().count() == 1 {
             if action != "keyup" {
                 let mut buffer = self.key_buffer.clone();
-                match shift.then(|| shifted_char(&last)).flatten() {
-                    Some(shifted) => buffer.push(shifted),
-                    None => buffer.push_str(&last),
-                }
+                buffer.push_str(&resolved_key);
                 self.set_key_buffer(buffer);
             }
             cmd["key"] = json!(REDACTED);
             cmd["redacted"] = json!(true);
-        } else if plain && last == "Backspace" {
+        } else if plain && resolved_key == "Backspace" {
             if action != "keyup" {
                 let mut buffer = self.key_buffer.clone();
                 buffer.pop();
@@ -656,8 +649,18 @@ impl FlowRecorder {
             }
             cmd["key"] = json!(REDACTED);
             cmd["redacted"] = json!(true);
-        } else if action != "keyup" {
-            self.reset_keys();
+        } else if is_non_printable_control_key(&resolved_key)
+            || key_modifier_bit(&actual_key).is_some()
+        {
+            if action != "keyup" {
+                self.reset_keys();
+            }
+        } else {
+            if action != "keyup" {
+                self.reset_keys();
+            }
+            cmd["key"] = json!(REDACTED);
+            cmd["redacted"] = json!(true);
         }
     }
 

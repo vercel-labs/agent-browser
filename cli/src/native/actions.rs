@@ -34,7 +34,7 @@ use super::element::RefMap;
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
-use super::pointer::{ClickPlan, ClickSpec, Modifiers, MouseButton};
+use super::pointer::{ClickPlan, ClickSpec, MouseButton};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
 use super::react;
@@ -7842,37 +7842,7 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 ///
 /// CDP modifier values: 1 = Alt, 2 = Control, 4 = Meta (Cmd), 8 = Shift.
 fn parse_key_chord(input: &str) -> (String, Option<i32>) {
-    let parts: Vec<&str> = input.split('+').collect();
-    if parts.len() < 2 {
-        return (input.to_string(), None);
-    }
-
-    let mut modifiers = 0i32;
-    let mut key_parts: Vec<&str> = Vec::new();
-
-    for part in &parts {
-        if let Some(bit) = Modifiers::bit(part) {
-            modifiers |= bit;
-        } else {
-            key_parts.push(part);
-        }
-    }
-
-    // If no modifiers were found, the '+' was part of the key name (e.g. "+")
-    // or the input was something unexpected — treat the whole string as the key.
-    if modifiers == 0 {
-        return (input.to_string(), None);
-    }
-
-    // The actual key is whatever remains after stripping modifiers.
-    // If nothing remains (e.g. "Control+"), treat the whole string as-is.
-    let actual_key = if key_parts.is_empty() {
-        input.to_string()
-    } else {
-        key_parts.join("+")
-    };
-
-    (actual_key, Some(modifiers))
+    interaction::parse_key_chord(input)
 }
 
 async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

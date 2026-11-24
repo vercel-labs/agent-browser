@@ -21158,6 +21158,54 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_flow_redacts_key_code_alias_passwords() {
+    let fx = flow_fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+    guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+    let mut state = DaemonState::new();
+    let mut n = 0;
+    fn run(n: &mut u32, mut cmd: Value) -> Value {
+        *n += 1;
+        cmd["id"] = json!(format!("ka{}", n));
+        cmd
+    }
+    for cmd in [
+        json!({ "action": "launch", "headless": true, "capture": ["flow"] }),
+        json!({ "action": "navigate", "url": format!("{}/", fx.site) }),
+        json!({ "action": "evaluate", "script": "document.getElementById('pw').value = ''" }),
+        json!({ "action": "click", "selector": "#pw" }),
+        json!({ "action": "press", "key": "KeyH" }),
+        json!({ "action": "keydown", "key": "Digit2" }),
+        json!({ "action": "keyup", "key": "Digit2" }),
+        json!({ "action": "keydown", "key": "Shift" }),
+        json!({ "action": "press", "key": "KeyA" }),
+        json!({ "action": "keyup", "key": "Shift" }),
+        json!({ "action": "click", "selector": "#login" }),
+        json!({ "action": "click", "selector": "#items" }),
+    ] {
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
+    }
+    assert!(fx.hits("h2A") >= 1, "the page did send the typed password");
+    let saved = exec(
+        &run(&mut n, json!({ "action": "flow_save", "name": "aliases" })),
+        &mut state,
+    )
+    .await;
+    assert_success(&saved);
+    let text = std::fs::read_to_string(dir.path().join("127.0.0.1").join("aliases.json")).unwrap();
+    for forbidden in ["h2A", "KeyH", "Digit2", "KeyA"] {
+        assert!(
+            !text.contains(forbidden),
+            "saved flow should not contain {forbidden}: {text}"
+        );
+    }
+    assert!(text.contains("<redacted>"));
+    let _ = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_flow_replay_runs_once_per_run() {
     let fx = flow_fixture().await;
     let dir = tempfile::tempdir().unwrap();
