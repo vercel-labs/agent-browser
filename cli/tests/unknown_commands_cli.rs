@@ -73,3 +73,22 @@ fn cookies_rejects_unknown_operations_without_starting_a_daemon() {
         .contains("Valid options: get, set, clear"));
     assert!(!temp.path().join("sockets").exists());
 }
+
+#[test]
+fn close_all_rejects_unknown_flags_before_closing_sessions() {
+    for args in [
+        &["close", "--all", "--bogus"][..],
+        &["quit", "--all", "--bogus"][..],
+        &["exit", "--all", "--bogus"][..],
+    ] {
+        let (temp, output) = run(args);
+        assert!(!output.status.success(), "{args:?}");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(text.contains("unknown flag '--bogus'"), "{args:?}: {text}");
+        assert!(!temp.path().join("sockets").exists(), "{args:?}");
+    }
+}

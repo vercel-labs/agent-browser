@@ -287,6 +287,7 @@ impl FlowRecorder {
         let mut recorded = cmd.clone();
         if let Some(obj) = recorded.as_object_mut() {
             obj.remove("id");
+            obj.retain(|k, _| !crate::native::actions::ENVELOPE_KEYS.contains(&k.as_str()));
         }
         let is_key = matches!(action, "press" | "keydown" | "keyup");
         if !is_key {

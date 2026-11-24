@@ -1,0 +1,48 @@
+---
+title: "Ladybird"
+navTitle: "Ladybird"
+---
+
+Drive the [Ladybird](https://ladybird.org/) browser, an independent engine built from scratch, through its WebDriver server. agent-browser spawns Ladybird's `WebDriver` binary, opens a session, and shuts both down on `close`.
+
+## Requirements
+
+Install Ladybird from [ladybird.org/download](https://ladybird.org/download/). agent-browser looks for the WebDriver binary in these places, in order:
+
+<table>
+  <thead>
+    <tr><th>Location</th><th>Installed by</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>/opt/ladybird/bin/WebDriver</code></td><td>Linux apt and rpm packages</td></tr>
+    <tr><td><code>/Applications/Ladybird.app/Contents/MacOS/WebDriver</code></td><td>macOS app</td></tr>
+    <tr><td><code>WebDriver</code> next to the <code>ladybird</code> executable on <code>PATH</code></td><td>Source builds and other installs</td></tr>
+  </tbody>
+</table>
+
+## Basic usage
+
+Use `-p ladybird` (or `AGENT_BROWSER_PROVIDER=ladybird`). Ladybird runs headless by default; add `--headed` to show the window.
+
+```bash
+agent-browser -p ladybird open https://example.com
+agent-browser -p ladybird get title
+agent-browser -p ladybird fill "#email" "user@example.com"
+agent-browser -p ladybird click "#submit"
+agent-browser -p ladybird eval "return document.title"
+agent-browser -p ladybird screenshot page.png
+agent-browser -p ladybird close
+```
+
+## Supported commands
+
+Ladybird uses the WebDriver backend, the same one Safari and iOS use. These commands work: `open`, `get url`, `get title`, `click` and `fill` with CSS selectors, `eval`, `screenshot`, `back`, `forward`, `reload`, `cookies`, and `close`.
+
+`eval` runs the script as a WebDriver function body, so use `return` to get a value back.
+
+## Limitations
+
+- Commands that need the Chrome DevTools Protocol are not available, including `snapshot` and `@ref` targeting, `a11y`, network routing and HAR, tracing, profiling, screencast, and init scripts.
+- `click` supports a plain left click only.
+- `--allowed-domains` is rejected because WebRTC containment cannot be enforced.
+- A headless Ladybird session follows the default idle timeout. A headed session is exempt, like other headed browsers.
