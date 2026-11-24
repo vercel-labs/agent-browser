@@ -7081,7 +7081,7 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
                 &state.iframe_sessions,
                 frame_id,
             )
-            .await
+            .await?
             .ok_or_else(|| "Could not locate the selected frame".to_string())?;
             let result = if host.is_dedicated_session {
                 mgr.evaluate_remote_object_in(script, &host.session_id)

@@ -21915,7 +21915,7 @@ async fn e2e_eval_in_same_origin_csp_cross_origin_and_oopif_frames() {
         .to_string();
     let mut oopif_frame = None;
     for fid in state.iframe_sessions.keys() {
-        if let Some(host) = super::a11y::frame_host_info(
+        if let Ok(Some(host)) = super::a11y::frame_host_info(
             &state.browser.as_ref().unwrap().client,
             &active_sid,
             &state.iframe_sessions,
@@ -21995,7 +21995,7 @@ async fn e2e_eval_popup_clears_active_frame_and_rejects_foreign_frame() {
         .to_string();
     let mut oopif_fid = None;
     for fid in state.iframe_sessions.keys() {
-        if let Some(host) = super::a11y::frame_host_info(
+        if let Ok(Some(host)) = super::a11y::frame_host_info(
             &state.browser.as_ref().unwrap().client,
             &tab1_sid,
             &state.iframe_sessions,
