@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
+use crate::native::tab_binding;
+
 const DEFAULT_USER_CONTEXT: &str = "default";
 
 /// A top-level browsing context.
@@ -17,12 +19,23 @@ pub struct Tab {
     pub user_context: String,
     /// The tab that opened this one as a popup.
     opener: Option<String>,
+    /// Last URL reported for this tab, used for `tab_gone` diagnostics.
+    url: String,
 }
 
 #[derive(Debug, Clone)]
 enum Node {
     Tab(Tab),
     Frame { parent: String },
+}
+
+/// Strict session-to-tab pin state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PinState {
+    Off,
+    Unbound,
+    Bound(String),
+    Gone { context: String, last_url: String },
 }
 
 /// Contexts that left the tree.
@@ -42,6 +55,7 @@ pub struct Contexts {
     active: String,
     next_tab: u32,
     owned_user_contexts: HashSet<String>,
+    pin: PinState,
 }
 
 impl Default for Contexts {
@@ -51,6 +65,7 @@ impl Default for Contexts {
             active: String::new(),
             next_tab: 1,
             owned_user_contexts: HashSet::new(),
+            pin: PinState::Off,
         }
     }
 }
@@ -69,22 +84,81 @@ impl Contexts {
         Ok(contexts)
     }
 
+    /// Enables or disables strict tab pinning. Enabling binds the active tab immediately and
+    /// preserves an existing `tab_gone` state; disabling clears `tab_gone` and restores a live tab.
+    pub fn set_pin(&mut self, on: bool) {
+        if on {
+            match &self.pin {
+                PinState::Bound(_) | PinState::Gone { .. } => {}
+                PinState::Off | PinState::Unbound => {
+                    self.pin = match self.tab_of(&self.active).map(str::to_string) {
+                        Some(tab) => PinState::Bound(tab),
+                        None => PinState::Unbound,
+                    };
+                }
+            }
+        } else {
+            self.pin = PinState::Off;
+            if !self.nodes.contains_key(&self.active) {
+                self.active = self
+                    .tabs()
+                    .min_by_key(|(_, tab)| tab.id)
+                    .map(|(context, _)| context.to_string())
+                    .unwrap_or_default();
+            }
+        }
+    }
+
+    /// True when strict tab pinning is active on this registry.
+    #[cfg(test)]
+    pub fn pinned(&self) -> bool {
+        !matches!(self.pin, PinState::Off)
+    }
+
+    /// Context id and sanitized last URL once a pinned tab has been destroyed.
+    pub fn pinned_gone(&self) -> Option<(&str, &str)> {
+        match &self.pin {
+            PinState::Gone { context, last_url } => Some((context.as_str(), last_url.as_str())),
+            PinState::Off | PinState::Unbound | PinState::Bound(_) => None,
+        }
+    }
+
+    /// Updates the last known URL for the tab `context` belongs to.
+    pub fn set_url(&mut self, context: &str, url: &str) {
+        if url.is_empty() {
+            return;
+        }
+        let Some(tab) = self.tab_of(context).map(str::to_string) else {
+            return;
+        };
+        if let Some(Node::Tab(tab)) = self.nodes.get_mut(&tab) {
+            tab.url = url.to_string();
+        }
+    }
+
     /// Records one `browsingContext.Info`, a `getTree` entry or a `contextCreated` event, along
     /// with the contexts nested in it. Returns true when it became the active context: no open
-    /// tab was active, or it is a popup the active tab just opened.
+    /// tab was active, or it is a popup the active tab just opened. While pinned to a bound or
+    /// gone tab, discovered tabs and popups are recorded without taking over.
     pub fn record(&mut self, info: &Value) -> bool {
         let context = info["context"].as_str().unwrap_or_default();
         let known = self.nodes.contains_key(context);
         self.record_under(info, None);
-        let adopted = match self.nodes.get(context) {
-            Some(Node::Tab(tab)) => {
-                !self.nodes.contains_key(&self.active)
-                    || (!known && tab.opener.as_deref() == Some(self.active_tab()))
-            }
-            _ => false,
+        let adopt_allowed = match &self.pin {
+            PinState::Off => true,
+            PinState::Unbound => self.active.is_empty(),
+            PinState::Bound(_) | PinState::Gone { .. } => false,
         };
+        let adopted = adopt_allowed
+            && match self.nodes.get(context) {
+                Some(Node::Tab(tab)) => {
+                    !self.nodes.contains_key(&self.active)
+                        || (!known && tab.opener.as_deref() == Some(self.active_tab()))
+                }
+                _ => false,
+            };
         if adopted {
-            self.active = context.to_string();
+            self.activate(context);
         }
         adopted
     }
@@ -104,8 +178,12 @@ impl Contexts {
                     .as_str()
                     .unwrap_or(DEFAULT_USER_CONTEXT)
                     .to_string();
+                let url = info["url"].as_str();
                 if let Some(Node::Tab(tab)) = self.nodes.get_mut(context) {
                     tab.user_context = user_context;
+                    if let Some(url) = url.filter(|u| !u.is_empty()) {
+                        tab.url = url.to_string();
+                    }
                 } else {
                     let id = self.next_tab;
                     self.next_tab += 1;
@@ -120,6 +198,7 @@ impl Contexts {
                             label: None,
                             user_context,
                             opener,
+                            url: url.unwrap_or_default().to_string(),
                         }),
                     );
                 }
@@ -208,19 +287,48 @@ impl Contexts {
         }
         let active_tab = self.active_tab().to_string();
         let opener = self.tab(&active_tab).and_then(|tab| tab.opener.clone());
+        let bound_before = match &self.pin {
+            PinState::Bound(tab) => Some((
+                tab.clone(),
+                self.tab(tab).map(|t| t.url.clone()).unwrap_or_default(),
+            )),
+            PinState::Off | PinState::Unbound | PinState::Gone { .. } => None,
+        };
         self.nodes.retain(|context, _| !gone.contains(context));
-        let active_changed = gone.contains(&self.active);
+        let bound_removed = bound_before
+            .as_ref()
+            .is_some_and(|(bound, _)| gone.contains(bound));
+        let active_changed = gone.contains(&self.active) || bound_removed;
         if active_changed {
-            self.active = [Some(active_tab), opener]
-                .into_iter()
-                .flatten()
-                .find(|context| self.nodes.contains_key(context))
-                .or_else(|| {
-                    self.tabs()
-                        .min_by_key(|(_, tab)| tab.id)
-                        .map(|(context, _)| context.to_string())
-                })
-                .unwrap_or_default();
+            match (&self.pin, bound_before) {
+                (PinState::Off, _) => {
+                    self.active = [Some(active_tab), opener]
+                        .into_iter()
+                        .flatten()
+                        .find(|context| self.nodes.contains_key(context))
+                        .or_else(|| {
+                            self.tabs()
+                                .min_by_key(|(_, tab)| tab.id)
+                                .map(|(context, _)| context.to_string())
+                        })
+                        .unwrap_or_default();
+                }
+                (PinState::Bound(bound), _) if !bound_removed && self.nodes.contains_key(bound) => {
+                    self.active = bound.clone();
+                }
+                (PinState::Bound(_), Some((bound, url))) => {
+                    self.pin = PinState::Gone {
+                        context: bound,
+                        last_url: tab_binding::sanitize_url(&url),
+                    };
+                    self.active.clear();
+                }
+                (PinState::Bound(_), None)
+                | (PinState::Unbound, _)
+                | (PinState::Gone { .. }, _) => {
+                    self.active.clear();
+                }
+            }
         }
         Removed {
             contexts: gone,
@@ -238,7 +346,7 @@ impl Contexts {
         .take(self.nodes.len() + 1)
     }
 
-    /// The context commands act on.
+    /// The context commands act on, or empty while a pinned tab is gone.
     pub fn active(&self) -> &str {
         &self.active
     }
@@ -248,9 +356,15 @@ impl Contexts {
         self.tab_of(&self.active).unwrap_or(&self.active)
     }
 
-    /// Makes `context` the one commands act on.
+    /// Makes `context` the one commands act on. While pinned, explicitly rebinds the pin to
+    /// `context`'s tab and clears any `tab_gone` state.
     pub fn activate(&mut self, context: &str) {
         self.active = context.to_string();
+        if !matches!(self.pin, PinState::Off) {
+            if let Some(tab) = self.tab_of(context).map(str::to_string) {
+                self.pin = PinState::Bound(tab);
+            }
+        }
     }
 
     /// Makes the tab holding the active frame the context commands act on.
@@ -480,5 +594,56 @@ mod tests {
         assert!(contexts.is_child_of("frame-a-inner", "frame-a"));
         assert!(!contexts.is_child_of("frame-a-inner", "tab-a"));
         assert!(!contexts.is_child_of("tab-a", "tab-a"));
+    }
+
+    #[test]
+    fn pinned_session_does_not_adopt_popups_and_marks_closed_bound_tab_gone() {
+        let mut contexts = Contexts::from_tree(&tree()).unwrap();
+        contexts.set_url("tab-a", "https://user:secret@app.test/account?token=1#frag");
+        contexts.activate("frame-a");
+        contexts.set_pin(true);
+        assert!(contexts.pinned());
+
+        let popup = json!({"context": "popup", "parent": null, "originalOpener": "frame-a-inner"});
+        assert!(!contexts.record(&popup));
+        assert_eq!(contexts.active(), "frame-a");
+        assert!(contexts.tab("popup").is_some());
+
+        assert!(contexts.remove("frame-a").active_changed);
+        assert_eq!(contexts.active(), "tab-a");
+        assert!(contexts.pinned_gone().is_none());
+
+        assert!(contexts.remove("tab-a").active_changed);
+        assert_eq!(contexts.active(), "");
+        assert_eq!(
+            contexts.pinned_gone(),
+            Some(("tab-a", "https://app.test/account"))
+        );
+
+        assert!(!contexts.record(&json!({"context": "tab-c", "parent": null})));
+        assert_eq!(contexts.active(), "");
+        assert!(contexts.pinned_gone().is_some());
+
+        contexts.set_pin(true);
+        assert!(contexts.pinned_gone().is_some());
+
+        contexts.activate("tab-b");
+        assert_eq!(contexts.active(), "tab-b");
+        assert!(contexts.pinned_gone().is_none());
+    }
+
+    #[test]
+    fn disabling_pin_clears_tab_gone_and_recovers_a_live_tab() {
+        let mut contexts = Contexts::from_tree(&tree()).unwrap();
+        contexts.set_url("tab-a", "data:text/html,secret");
+        contexts.set_pin(true);
+        contexts.remove("tab-a");
+        assert_eq!(contexts.pinned_gone(), Some(("tab-a", "")));
+        assert_eq!(contexts.active(), "");
+
+        contexts.set_pin(false);
+        assert!(!contexts.pinned());
+        assert!(contexts.pinned_gone().is_none());
+        assert_eq!(contexts.active(), "tab-b");
     }
 }
