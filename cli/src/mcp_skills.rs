@@ -591,4 +591,78 @@ mod tests {
             -32602
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_loader_rejects_symlinks_pointing_outside_package_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside_dir = tmp.path().join("outside");
+        let outside_secret = outside_dir.join("secret.txt");
+        let outside_skill_dir = outside_dir.join("external-skill");
+        std::fs::create_dir_all(&outside_skill_dir).unwrap();
+        std::fs::write(&outside_secret, "TOP_SECRET_VALUE").unwrap();
+        std::fs::write(
+            outside_skill_dir.join("SKILL.md"),
+            "---\nname: escaped-dir\ndescription: outside skill\n---\nsecret\n",
+        )
+        .unwrap();
+
+        let skills_root = tmp.path().join("skills-root");
+        let safe_pkg = skills_root.join("demo");
+        let refs_dir = safe_pkg.join("references");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+        std::fs::write(
+            safe_pkg.join("SKILL.md"),
+            "---\nname: demo\ndescription: demo skill\n---\n# Demo\n",
+        )
+        .unwrap();
+        std::fs::write(refs_dir.join("ok.md"), "safe content\n").unwrap();
+
+        // Symlink to a file outside the skill directory.
+        symlink(&outside_secret, refs_dir.join("leak.md")).unwrap();
+        // Symlink to a directory outside the skill directory.
+        symlink(&outside_dir, safe_pkg.join("linked-outside")).unwrap();
+        // Symlink within the same skill package stays allowed.
+        symlink(refs_dir.join("ok.md"), refs_dir.join("alias.md")).unwrap();
+        // Top-level symlinked skill directory pointing outside skills_root is rejected.
+        symlink(&outside_skill_dir, skills_root.join("escaped-dir")).unwrap();
+        // Skill whose SKILL.md is a symlink outside its package root is rejected.
+        let bad_md_pkg = skills_root.join("bad-md");
+        std::fs::create_dir_all(&bad_md_pkg).unwrap();
+        symlink(
+            outside_skill_dir.join("SKILL.md"),
+            bad_md_pkg.join("SKILL.md"),
+        )
+        .unwrap();
+
+        let packages = load_skill_packages_from_dirs(&[skills_root]);
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "demo");
+
+        let listed = list_skills_from_packages(None, &packages).unwrap();
+        let demo = &listed["skills"][0];
+        let uris: Vec<&str> = demo["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["uri"].as_str())
+            .collect();
+        assert!(uris.contains(&"skill://demo/SKILL.md"));
+        assert!(uris.contains(&"skill://demo/references/ok.md"));
+        assert!(uris.contains(&"skill://demo/references/alias.md"));
+        assert!(!uris.iter().any(|u| u.contains("leak.md")));
+        assert!(!uris.iter().any(|u| u.contains("linked-outside")));
+        assert!(!uris.iter().any(|u| u.contains("secret.txt")));
+
+        // Direct resources/read against the symlinked outside file fails with -32602.
+        let err = read_resource_from_packages(
+            Some(&json!({ "uri": "skill://demo/references/leak.md" })),
+            &packages,
+            ProtocolEra::Modern,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, -32602);
+    }
 }

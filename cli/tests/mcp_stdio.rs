@@ -592,3 +592,95 @@ fn skills_over_mcp_discover_list_get_read_and_directory_read() {
     let status = client.close();
     assert!(status.success());
 }
+
+#[cfg(unix)]
+#[test]
+fn skills_over_mcp_rejects_symlinks_escaping_package_root_via_env_dir() {
+    use std::os::unix::fs::symlink;
+
+    let home = tempfile::tempdir().unwrap();
+    let outside = home.path().join("outside-secret.txt");
+    std::fs::write(&outside, "SECRET_OUTSIDE_DATA").unwrap();
+
+    let skills_root = home.path().join("custom-skills");
+    let pkg = skills_root.join("demo");
+    let refs = pkg.join("references");
+    std::fs::create_dir_all(&refs).unwrap();
+    std::fs::write(
+        pkg.join("SKILL.md"),
+        "---\nname: demo\ndescription: demo skill\n---\n# Demo\n",
+    )
+    .unwrap();
+    std::fs::write(refs.join("safe.md"), "safe text\n").unwrap();
+    symlink(&outside, refs.join("escape.md")).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent-browser"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("AGENT_BROWSER_") {
+            cmd.env_remove(key);
+        }
+    }
+    cmd.current_dir(home.path())
+        .env("HOME", home.path())
+        .env("AGENT_BROWSER_SKILLS_DIR", &skills_root)
+        .env("NO_COLOR", "1")
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().flatten() {
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                let _ = tx.send(v);
+            }
+        }
+    });
+
+    let send = |stdin: &mut ChildStdin, msg: &Value| {
+        writeln!(stdin, "{}", msg).unwrap();
+        stdin.flush().unwrap();
+    };
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "skills/list",
+            "params": { "_meta": modern_meta(json!({})) }
+        }),
+    );
+    let listed = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let uris: Vec<&str> = listed["result"]["skills"][0]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["uri"].as_str())
+        .collect();
+    assert!(uris.contains(&"skill://demo/references/safe.md"));
+    assert!(!uris.iter().any(|u| u.contains("escape.md")));
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "resources/read",
+            "params": {
+                "uri": "skill://demo/references/escape.md",
+                "_meta": modern_meta(json!({}))
+            }
+        }),
+    );
+    let escaped = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(escaped["error"]["code"], -32602);
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+}

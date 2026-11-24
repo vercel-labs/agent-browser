@@ -1,9 +1,9 @@
 use rust_embed::Embed;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::exit;
 
 use crate::color;
@@ -350,19 +350,28 @@ pub(crate) fn load_skill_packages() -> Vec<SkillPackage> {
 pub(crate) fn load_skill_packages_from_dirs(dirs: &[PathBuf]) -> Vec<SkillPackage> {
     let mut by_name: BTreeMap<String, SkillPackage> = BTreeMap::new();
     for skills_dir in dirs {
-        let Ok(entries) = fs::read_dir(skills_dir) else {
+        let Ok(canon_skills_dir) = fs::canonicalize(skills_dir) else {
+            continue;
+        };
+        let Ok(entries) = fs::read_dir(&canon_skills_dir) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            let Ok(canon_pkg_root) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if !canon_pkg_root.is_dir() || !canon_pkg_root.starts_with(&canon_skills_dir) {
                 continue;
             }
             let skill_md = path.join("SKILL.md");
-            if !skill_md.is_file() {
+            let Ok(canon_skill_md) = fs::canonicalize(&skill_md) else {
+                continue;
+            };
+            if !canon_skill_md.is_file() || !canon_skill_md.starts_with(&canon_pkg_root) {
                 continue;
             }
-            let Ok(md_bytes) = fs::read(&skill_md) else {
+            let Ok(md_bytes) = fs::read(&canon_skill_md) else {
                 continue;
             };
             let Ok(md_text) = std::str::from_utf8(&md_bytes) else {
@@ -389,7 +398,15 @@ pub(crate) fn load_skill_packages_from_dirs(dirs: &[PathBuf]) -> Vec<SkillPackag
                 .unwrap_or(false);
 
             let mut files = Vec::new();
-            collect_dir_files_recursive(&path, &path, &mut files);
+            let mut visited_dirs = HashSet::new();
+            visited_dirs.insert(canon_pkg_root.clone());
+            collect_dir_files_recursive(
+                &canon_pkg_root,
+                &path,
+                &path,
+                &mut visited_dirs,
+                &mut files,
+            );
             files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
             by_name.insert(
                 name.clone(),
@@ -406,7 +423,13 @@ pub(crate) fn load_skill_packages_from_dirs(dirs: &[PathBuf]) -> Vec<SkillPackag
     by_name.into_values().collect()
 }
 
-fn collect_dir_files_recursive(root: &Path, current: &Path, out: &mut Vec<SkillFileEntry>) {
+fn collect_dir_files_recursive(
+    canon_root: &Path,
+    logical_root: &Path,
+    current: &Path,
+    visited_dirs: &mut HashSet<PathBuf>,
+    out: &mut Vec<SkillFileEntry>,
+) {
     let Ok(entries) = fs::read_dir(current) else {
         return;
     };
@@ -414,18 +437,37 @@ fn collect_dir_files_recursive(root: &Path, current: &Path, out: &mut Vec<SkillF
     items.sort_by_key(|e| e.file_name());
     for entry in items {
         let path = entry.path();
-        if path.is_dir() {
-            collect_dir_files_recursive(root, &path, out);
-        } else if path.is_file() {
-            let Ok(rel) = path.strip_prefix(root) else {
+        let Ok(canon_path) = fs::canonicalize(&path) else {
+            continue;
+        };
+        // Reject symlinks or resolved paths that escape the skill package root.
+        if !canon_path.starts_with(canon_root) {
+            continue;
+        }
+        if canon_path.is_dir() {
+            if visited_dirs.insert(canon_path) {
+                collect_dir_files_recursive(canon_root, logical_root, &path, visited_dirs, out);
+            }
+        } else if canon_path.is_file() {
+            let Ok(rel) = path.strip_prefix(logical_root) else {
                 continue;
             };
-            let rel_path = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/");
-            if let Ok(bytes) = fs::read(&path) {
+            let mut parts = Vec::new();
+            let mut valid = true;
+            for comp in rel.components() {
+                match comp {
+                    Component::Normal(seg) => parts.push(seg.to_string_lossy().into_owned()),
+                    _ => {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+            if !valid || parts.is_empty() {
+                continue;
+            }
+            let rel_path = parts.join("/");
+            if let Ok(bytes) = fs::read(&canon_path) {
                 out.push(SkillFileEntry { rel_path, bytes });
             }
         }
