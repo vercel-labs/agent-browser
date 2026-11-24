@@ -20660,7 +20660,11 @@ async fn e2e_firefox_restore_validation_failure_does_not_overwrite_state() {
     );
 
     let mut state = DaemonState::new();
-    launch_firefox(&mut state, json!({ "restoreKey": restore_key })).await;
+    launch_firefox(
+        &mut state,
+        json!({ "settings": { "restore-key": restore_key } }),
+    )
+    .await;
     firefox_open(&mut state, &fixture.url).await;
     let resp = firefox_command(
         &mut state,
@@ -20679,8 +20683,10 @@ async fn e2e_firefox_restore_validation_failure_does_not_overwrite_state() {
     launch_firefox(
         &mut state,
         json!({
-            "restoreKey": restore_key,
-            "restoreCheckText": "text-that-does-not-exist-in-the-page"
+            "settings": {
+                "restore-key": restore_key,
+                "restore-check-text": "text-that-does-not-exist-in-the-page"
+            }
         }),
     )
     .await;
