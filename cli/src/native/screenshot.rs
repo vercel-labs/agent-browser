@@ -25,6 +25,7 @@ struct RawAnnotation {
     role: String,
     name: Option<String>,
     rect: Rect,
+    in_iframe: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,8 +122,14 @@ pub async fn take_screenshot(
     };
 
     let overlay_items = filter_annotations(raw_annotations, target_rect.as_ref());
-    let overlay_injected = if options.annotate && !overlay_items.is_empty() {
-        inject_annotation_overlay(client, session_id, &overlay_items).await?;
+    let dom_overlay_items: Vec<&RawAnnotation> = overlay_items
+        .iter()
+        .filter(|item| !item.in_iframe)
+        .collect();
+    let has_iframe_annotations = overlay_items.iter().any(|item| item.in_iframe);
+
+    let overlay_injected = if options.annotate && !dom_overlay_items.is_empty() {
+        inject_annotation_overlay(client, session_id, &dom_overlay_items).await?;
         true
     } else {
         false
@@ -135,7 +142,7 @@ pub async fn take_screenshot(
         let _ = remove_annotation_overlay(client, session_id).await;
     }
 
-    let base64 = base64?;
+    let mut base64 = base64?;
     let annotations = if options.annotate {
         let scroll = if options.full_page {
             Some(get_scroll_offsets(client, session_id).await?)
@@ -146,6 +153,25 @@ pub async fn take_screenshot(
     } else {
         Vec::new()
     };
+
+    if options.annotate && has_iframe_annotations {
+        let iframe_boxes: Vec<&ScreenshotAnnotation> = overlay_items
+            .iter()
+            .zip(annotations.iter())
+            .filter(|(raw, _)| raw.in_iframe)
+            .map(|(_, projected)| projected)
+            .collect();
+        if !iframe_boxes.is_empty() {
+            let dpr = get_device_scale_factor(client, session_id).await;
+            base64 = compose_annotations_on_image(
+                &base64,
+                &iframe_boxes,
+                dpr,
+                &options.format,
+                options.quality,
+            )?;
+        }
+    }
 
     Ok(ScreenshotResult {
         base64,
@@ -300,7 +326,7 @@ async fn collect_annotations(
                     _ => continue,
                 };
                 let (ref_id, entry, _) = &resolved[i];
-                annotations.push(make_raw_annotation(ref_id, entry, rect));
+                annotations.push(make_raw_annotation(ref_id, entry, rect, false));
             }
         }
     }
@@ -343,7 +369,7 @@ async fn collect_annotations(
             if let Some(transform) = session_transforms.get(effective_session) {
                 rect = transform.map_rect(&rect);
             }
-            annotations.push(make_raw_annotation(ref_id, entry, rect));
+            annotations.push(make_raw_annotation(ref_id, entry, rect, true));
         }
     }
 
@@ -354,6 +380,7 @@ fn make_raw_annotation(
     ref_id: &str,
     entry: &super::element::RefEntry,
     rect: Rect,
+    in_iframe: bool,
 ) -> RawAnnotation {
     let number = ref_id
         .strip_prefix('e')
@@ -366,6 +393,7 @@ fn make_raw_annotation(
         role: entry.role.clone(),
         name: (!entry.name.is_empty()).then_some(entry.name.clone()),
         rect,
+        in_iframe,
     }
 }
 
@@ -703,7 +731,7 @@ fn overlaps(left: &Rect, right: &Rect) -> bool {
 async fn inject_annotation_overlay(
     client: &CdpClient,
     session_id: &str,
-    annotations: &[RawAnnotation],
+    annotations: &[&RawAnnotation],
 ) -> Result<(), String> {
     let overlay_data = annotations
         .iter()
@@ -808,6 +836,190 @@ async fn get_scroll_offsets(client: &CdpClient, session_id: &str) -> Result<(f64
     let x = value.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let y = value.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
     Ok((x, y))
+}
+
+async fn get_device_scale_factor(client: &CdpClient, session_id: &str) -> f64 {
+    let result: Result<EvaluateResult, _> = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression: "window.devicePixelRatio || 1".to_string(),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await;
+    result
+        .ok()
+        .and_then(|r| r.result.value)
+        .and_then(|v| v.as_f64())
+        .filter(|&d| d.is_finite() && d > 0.0)
+        .unwrap_or(1.0)
+}
+
+/// 5x7 pixel glyphs for digits 0-9 used to draw annotation badges onto captured
+/// images without touching any page DOM.
+const DIGIT_GLYPHS: [[u8; 7]; 10] = [
+    [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E], // 0
+    [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E], // 1
+    [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F], // 2
+    [0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E], // 3
+    [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02], // 4
+    [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E], // 5
+    [0x0E, 0x10, 0x1E, 0x11, 0x11, 0x11, 0x0E], // 6
+    [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08], // 7
+    [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E], // 8
+    [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C], // 9
+];
+
+fn blend_pixel(img: &mut image::RgbaImage, x: i64, y: i64, color: [u8; 4]) {
+    if x < 0 || y < 0 {
+        return;
+    }
+    let (ux, uy) = (x as u32, y as u32);
+    if ux >= img.width() || uy >= img.height() {
+        return;
+    }
+    let dst = img.get_pixel_mut(ux, uy);
+    let alpha = color[3] as u32;
+    let inv = 255 - alpha;
+    dst[0] = ((color[0] as u32 * alpha + dst[0] as u32 * inv + 127) / 255) as u8;
+    dst[1] = ((color[1] as u32 * alpha + dst[1] as u32 * inv + 127) / 255) as u8;
+    dst[2] = ((color[2] as u32 * alpha + dst[2] as u32 * inv + 127) / 255) as u8;
+    dst[3] = 255;
+}
+
+fn fill_rect(img: &mut image::RgbaImage, x: i64, y: i64, w: i64, h: i64, color: [u8; 4]) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(img.width() as i64);
+    let y1 = (y + h).min(img.height() as i64);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            blend_pixel(img, px, py, color);
+        }
+    }
+}
+
+fn draw_annotation_box(img: &mut image::RgbaImage, ann: &ScreenshotAnnotation, dpr: f64) {
+    let x = (ann.box_.x as f64 * dpr).round() as i64;
+    let y = (ann.box_.y as f64 * dpr).round() as i64;
+    let w = (ann.box_.width as f64 * dpr).round() as i64;
+    let h = (ann.box_.height as f64 * dpr).round() as i64;
+    if w <= 0 || h <= 0 {
+        return;
+    }
+
+    let border = (2.0 * dpr).round().max(1.0) as i64;
+    let border_color = [255, 0, 0, 204];
+    fill_rect(img, x, y, w, border.min(h), border_color);
+    fill_rect(
+        img,
+        x,
+        (y + h - border).max(y),
+        w,
+        border.min(h),
+        border_color,
+    );
+    fill_rect(
+        img,
+        x,
+        y + border,
+        border.min(w),
+        (h - 2 * border).max(0),
+        border_color,
+    );
+    fill_rect(
+        img,
+        (x + w - border).max(x),
+        y + border,
+        border.min(w),
+        (h - 2 * border).max(0),
+        border_color,
+    );
+
+    let text = ann.number.to_string();
+    let glyph_scale = dpr.round().max(1.0) as i64;
+    let pad_x = (4.0 * dpr).round().max(2.0) as i64;
+    let pad_y = (3.0 * dpr).round().max(2.0) as i64;
+    let char_w = 5 * glyph_scale;
+    let char_gap = glyph_scale;
+    let text_w = (text.len() as i64) * char_w + ((text.len().saturating_sub(1)) as i64) * char_gap;
+    let badge_w = text_w + 2 * pad_x;
+    let badge_h = 7 * glyph_scale + 2 * pad_y;
+    let badge_x = x;
+    let badge_y = if y < badge_h {
+        y + (2.0 * dpr).round() as i64
+    } else {
+        y - badge_h
+    };
+
+    fill_rect(img, badge_x, badge_y, badge_w, badge_h, [255, 0, 0, 230]);
+
+    let mut cursor_x = badge_x + pad_x;
+    let cursor_y = badge_y + pad_y;
+    for ch in text.bytes() {
+        if let Some(digit) = (ch as char).to_digit(10) {
+            let glyph = DIGIT_GLYPHS[digit as usize];
+            for (row, &bits) in glyph.iter().enumerate() {
+                for col in 0..5 {
+                    if (bits & (1 << (4 - col))) != 0 {
+                        fill_rect(
+                            img,
+                            cursor_x + col * glyph_scale,
+                            cursor_y + (row as i64) * glyph_scale,
+                            glyph_scale,
+                            glyph_scale,
+                            [255, 255, 255, 255],
+                        );
+                    }
+                }
+            }
+        }
+        cursor_x += char_w + char_gap;
+    }
+}
+
+fn compose_annotations_on_image(
+    base64_data: &str,
+    annotations: &[&ScreenshotAnnotation],
+    dpr: f64,
+    format: &str,
+    quality: Option<i32>,
+) -> Result<String, String> {
+    use base64::Engine;
+    use std::io::Cursor;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_data)
+        .map_err(|e| format!("Failed to decode screenshot for annotation overlay: {}", e))?;
+    let mut img = image::load_from_memory(&bytes)
+        .map_err(|e| format!("Failed to parse screenshot for annotation overlay: {}", e))?
+        .to_rgba8();
+
+    for ann in annotations {
+        draw_annotation_box(&mut img, ann, dpr);
+    }
+
+    let mut out = Vec::new();
+    if format == "jpeg" {
+        let q = quality.unwrap_or(80).clamp(1, 100) as u8;
+        let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, q);
+        encoder
+            .encode_image(&rgb)
+            .map_err(|e| format!("Failed to encode annotated JPEG screenshot: {}", e))?;
+    } else {
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+            .map_err(|e| format!("Failed to encode annotated PNG screenshot: {}", e))?;
+    }
+
+    Ok(base64::engine::general_purpose::STANDARD.encode(out))
 }
 
 fn project_annotations(
@@ -951,6 +1163,7 @@ mod tests {
                     width: 50.0,
                     height: 20.0,
                 },
+                in_iframe: false,
             },
             RawAnnotation {
                 ref_id: "e2".to_string(),
@@ -963,6 +1176,7 @@ mod tests {
                     width: 40.0,
                     height: 20.0,
                 },
+                in_iframe: false,
             },
         ];
 
@@ -991,6 +1205,7 @@ mod tests {
                 width: 40.0,
                 height: 20.0,
             },
+            in_iframe: false,
         }];
 
         let target = Rect {
@@ -1018,6 +1233,7 @@ mod tests {
                 width: 40.0,
                 height: 20.0,
             },
+            in_iframe: false,
         }];
 
         let projected = project_annotations(&annotations, None, Some((10.0, 1000.0)));
@@ -1111,5 +1327,46 @@ mod tests {
             ),
             (560.0, 410.0, 100.0, 40.0)
         );
+    }
+
+    #[test]
+    fn composes_iframe_annotations_onto_png_at_expected_pixels() {
+        use base64::Engine;
+        use std::io::Cursor;
+
+        let blank = image::RgbaImage::from_pixel(200, 120, image::Rgba([255, 255, 255, 255]));
+        let mut raw = Vec::new();
+        image::DynamicImage::ImageRgba8(blank)
+            .write_to(&mut Cursor::new(&mut raw), image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+
+        let ann = ScreenshotAnnotation {
+            ref_id: "e12".to_string(),
+            number: 12,
+            role: "button".to_string(),
+            name: Some("OopifScaledBtn".to_string()),
+            box_: AnnotationBox {
+                x: 40,
+                y: 30,
+                width: 60,
+                height: 24,
+            },
+        };
+
+        let out_b64 = compose_annotations_on_image(&b64, &[&ann], 1.0, "png", None).unwrap();
+        let out_bytes = base64::engine::general_purpose::STANDARD
+            .decode(out_b64)
+            .unwrap();
+        let img = image::load_from_memory(&out_bytes).unwrap().to_rgba8();
+
+        // Top-left and bottom-right border pixels are red-blended.
+        let tl = img.get_pixel(40, 30);
+        let br = img.get_pixel(99, 53);
+        assert!(tl[0] > 200 && tl[1] < 80 && tl[2] < 80, "tl={tl:?}");
+        assert!(br[0] > 200 && br[1] < 80 && br[2] < 80, "br={br:?}");
+        // Interior stays white.
+        let center = img.get_pixel(70, 42);
+        assert_eq!(*center, image::Rgba([255, 255, 255, 255]));
     }
 }

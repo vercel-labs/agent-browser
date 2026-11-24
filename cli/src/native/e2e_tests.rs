@@ -10429,8 +10429,22 @@ async fn e2e_screenshot_annotate_iframe_coordinates() {
     )
     .await;
 
+    // Observe every node added to the parent document during screenshot --annotate.
+    assert_evaluate(
+        &mut state,
+        "observer",
+        "(() => { window.__observed = []; new MutationObserver((records) => { for (const r of records) { for (const n of r.addedNodes) { if (n.nodeType === 1) window.__observed.push(n.outerHTML); } } }).observe(document.documentElement, { childList: true, subtree: true }); return true; })()",
+        json!(true),
+    )
+    .await;
+
+    let shot_file = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .expect("temp png path");
+    let shot_path = shot_file.path().to_string_lossy().to_string();
     let shot = execute_command(
-        &json!({ "id": "4", "action": "screenshot", "annotate": true }),
+        &json!({ "id": "4", "action": "screenshot", "annotate": true, "path": shot_path }),
         &mut state,
     )
     .await;
@@ -10450,6 +10464,13 @@ async fn e2e_screenshot_annotate_iframe_coordinates() {
             })
             .unwrap_or_else(|| panic!("missing annotation for {name}: {items:?}"))
     };
+    let num_of = |items: &[Value], name: &str| {
+        items
+            .iter()
+            .find(|a| a["name"] == name)
+            .and_then(|a| a["number"].as_u64())
+            .unwrap_or_else(|| panic!("missing number for {name}: {items:?}"))
+    };
 
     assert_eq!(box_of(&annotations, "MainBtn"), (30, 20, 80, 30));
     // same-origin iframe at (100, 250) + border 3 + child (40, 10)
@@ -10463,6 +10484,49 @@ async fn e2e_screenshot_annotate_iframe_coordinates() {
     // origin (500, 400) + translate(20, 10) = (520, 410),
     // child (15, 10) * scale(2) = (30, 20), size (50, 20) * scale(2) = (100, 40)
     assert_eq!(box_of(&annotations, "OopifScaledBtn"), (550, 430, 100, 40));
+
+    // Parent DOM must never observe any iframe child boxes or coordinates during or after capture.
+    let observed_resp = execute_command(
+        &json!({
+            "id": "4b",
+            "action": "evaluate",
+            "script": "({ observed: window.__observed.join('\\n'), leftover: document.getElementById('__agent_browser_annotations__') !== null })"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&observed_resp);
+    let observed_data = &get_data(&observed_resp)["result"];
+    assert_eq!(observed_data["leftover"], false);
+    let observed_html = observed_data["observed"].as_str().unwrap_or("");
+    for (label, x, y) in [
+        ("SameBtn", 143, 263),
+        ("CrossBtn", 479, 269),
+        ("ScaledBtn", 180, 450),
+        ("OopifScaledBtn", 550, 430),
+    ] {
+        let num = num_of(&annotations, label);
+        assert!(
+            !observed_html.contains(&format!("left:{x}px;top:{y}px")),
+            "parent DOM observed iframe box for {label} ({x},{y}): {observed_html}"
+        );
+        assert!(
+            !observed_html.contains(&format!(">{num}<")),
+            "parent DOM observed iframe label number {num} for {label}: {observed_html}"
+        );
+    }
+
+    // Verify the composed annotation box for the scaled OOPIF button is drawn on the PNG.
+    let shot_img = image::open(shot_file.path())
+        .expect("decode annotated screenshot")
+        .to_rgba8();
+    for (px, py) in [(550, 430), (649, 469)] {
+        let p = shot_img.get_pixel(px, py);
+        assert!(
+            p[0] > 180 && p[1] < 100 && p[2] < 100,
+            "expected red annotation border at ({px},{py}) for OopifScaledBtn, got {p:?}"
+        );
+    }
 
     // Parent scroll: viewport-relative annotations shift by -120, fullPage stays in document coords.
     assert_evaluate(
