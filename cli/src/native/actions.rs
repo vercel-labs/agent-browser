@@ -20744,6 +20744,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_viewport_reports_a_window_resize_the_driver_rejects() {
+        let (port, server) = start_webdriver_response_server(vec![(
+            "POST /session/test-session/window/rect",
+            json!({ "value": { "error": "unsupported operation", "message": "cannot resize", "stacktrace": "" } }),
+        )])
+        .await;
+        let mut state = DaemonState::new();
+        state.backend_type = BackendType::WebDriver;
+        state.webdriver_backend = Some(WebDriverBackend::new(
+            crate::native::webdriver::client::WebDriverClient::new_with_session(
+                port,
+                "test-session".to_string(),
+            ),
+        ));
+        let cmd = json!({ "action": "viewport", "id": "vp", "width": 1440, "height": 1000 });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"].as_str().unwrap().contains("cannot resize"));
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn test_viewport_scale_is_refused_on_a_webdriver_session() {
         let mut state = DaemonState::new();
         state.backend_type = BackendType::WebDriver;
