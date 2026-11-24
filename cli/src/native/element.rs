@@ -1734,16 +1734,21 @@ pub(crate) fn decide_check_plan<T>(
     CheckPlan::Pointer(target)
 }
 
-/// Evaluates `CHECK_CONTROL_FN_JS`, click geometry, and check-mode hit-testing on Chrome and
-/// returns the explicit `CheckPlan` for `toggle`.
-pub(crate) async fn plan_chrome_check(
+/// Formats the error when `check` or `uncheck` targets a non-checkable element.
+pub(crate) fn not_checkable_error(target: &str) -> String {
+    format!(
+        "Element '{}' is not a checkbox, radio button, or checkable control",
+        target
+    )
+}
+
+pub async fn is_element_checked(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-    want_checked: bool,
-) -> Result<CheckPlan<(f64, f64, String)>, String> {
+) -> Result<bool, String> {
     let (object_id, effective_session_id) = resolve_element_object_id(
         client,
         session_id,
@@ -1752,28 +1757,6 @@ pub(crate) async fn plan_chrome_check(
         iframe_sessions,
     )
     .await?;
-
-    let js = format!(
-        r#"async function() {{
-            const ctrl = ({CHECK_CONTROL_FN_JS})(this);
-            if (!ctrl) return null;
-            const isNative = !!(ctrl.tagName && ctrl.tagName.toUpperCase() === 'INPUT' && (ctrl.type === 'checkbox' || ctrl.type === 'radio'));
-            const checked = isNative ? !!ctrl.checked : ctrl.getAttribute('aria-checked') === 'true';
-            const r = ctrl.getClientRects && ctrl.getClientRects()[0];
-            const s = getComputedStyle(ctrl);
-            const clickable = !!(r && r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && parseFloat(s.opacity) > 0 && s.pointerEvents !== 'none');
-            if (!clickable) {{
-                return {{ checked: checked, native: isNative, clickable: false, blocker: null, x: null, y: null }};
-            }}
-            const clickPoint = {CLICK_POINT_JS};
-            const doc = ctrl.ownerDocument || document;
-            const point = await clickPoint(ctrl, doc);
-            const blockerAt = {BLOCKER_AT_JS};
-            const topDoc = (point.view && point.view.document) || doc;
-            const blocker = blockerAt(doc, ctrl, point.lx, point.ly, true) || blockerAt(topDoc, ctrl, point.x, point.y, true);
-            return {{ checked: checked, native: isNative, clickable: true, blocker: blocker, x: point.x, y: point.y }};
-        }}"#
-    );
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -1820,25 +1803,11 @@ pub(crate) async fn plan_chrome_check(
         )
         .await?;
 
-    Ok(result.result.value.and_then(|v| v.as_bool()))
-}
-
-pub async fn is_element_checked(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<bool, String> {
-    Ok(element_checked_state(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?
-    .unwrap_or(false))
+    Ok(result
+        .result
+        .value
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
 }
 
 pub(crate) const ELEMENT_INNER_TEXT_JS: &str = "function() { return this.innerText || ''; }";
