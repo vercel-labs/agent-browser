@@ -13888,6 +13888,7 @@ async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
     let page_port = page_listener.local_addr().unwrap().port();
     let page_body = "<!doctype html><html><body>\
         <textarea id='ta'>hello world</textarea>\
+        <textarea id='ta2'>second field</textarea>\
         <input id='pw' type='password' value='secret123'>\
         </body></html>";
     let page_server = tokio::spawn(async move {
@@ -14058,7 +14059,8 @@ async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
         "input_insert_text should replace selection with pasted text"
     );
 
-    // 4. Cut bridge: selectAll + input_read_clipboard { cut: true } returns text and clears textarea.
+    // 4. Cut bridge: selectAll + input_read_clipboard { cut: true } followed
+    // immediately by Tab to another textarea must cut only #ta and leave #ta2 intact.
     ws.send(Message::Text(
         json!({
             "type": "input_keyboard",
@@ -14079,17 +14081,30 @@ async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
     ))
     .await
     .unwrap();
+    ws.send(Message::Text(
+        json!({
+            "type": "input_keyboard",
+            "eventType": "rawKeyDown",
+            "key": "Tab",
+            "code": "Tab",
+            "windowsVirtualKeyCode": 9,
+            "modifiers": 0
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
     assert_eq!(recv_clipboard(&mut ws).await, "pasted text");
 
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
     let mut cut_cleared = false;
     while tokio::time::Instant::now() < deadline {
         let r = execute_command(
-            &json!({ "id": "6", "action": "evaluate", "script": "document.getElementById('ta').value" }),
+            &json!({ "id": "6", "action": "evaluate", "script": "[document.getElementById('ta').value, document.getElementById('ta2').value]" }),
             &mut state,
         )
         .await;
-        if get_data(&r)["result"] == json!("") {
+        if get_data(&r)["result"] == json!(["", "second field"]) {
             cut_cleared = true;
             break;
         }
@@ -14097,7 +14112,63 @@ async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
     }
     assert!(
         cut_cleared,
-        "cut should clear the selected textarea content"
+        "cut should clear only #ta and leave #ta2 untouched even when Tab follows immediately"
+    );
+
+    // 4b. Option / AltGr character entry delivers text on keyDown.
+    assert_evaluate(
+        &mut state,
+        "focus-ta",
+        "(() => { const t = document.getElementById('ta'); t.focus(); t.value = ''; return true; })()",
+        json!(true),
+    )
+    .await;
+    for (key, code, vk, modifiers) in [("å", "KeyA", 65, 1), ("@", "KeyQ", 81, 3)] {
+        ws.send(Message::Text(
+            json!({
+                "type": "input_keyboard",
+                "eventType": "keyDown",
+                "key": key,
+                "code": code,
+                "text": key,
+                "windowsVirtualKeyCode": vk,
+                "modifiers": modifiers
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "input_keyboard",
+                "eventType": "keyUp",
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": vk,
+                "modifiers": modifiers
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    }
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    let mut alt_typed = false;
+    while tokio::time::Instant::now() < deadline {
+        let r = execute_command(
+            &json!({ "id": "6b", "action": "evaluate", "script": "document.getElementById('ta').value" }),
+            &mut state,
+        )
+        .await;
+        if get_data(&r)["result"] == json!("å@") {
+            alt_typed = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        alt_typed,
+        "Option/AltGr keyDown events with text should type å@"
     );
 
     // 5. Password inputs must never leak their value via input_read_clipboard.

@@ -174,6 +174,30 @@ function macKeyCommands(e: KeyboardEvent): string[] | undefined {
   }
 }
 
+function matchesPlainCodeChar(e: KeyboardEvent): boolean {
+  if (/^Key[A-Z]$/.test(e.code)) {
+    return e.key.length === 1 && e.key.toUpperCase() === e.code[3];
+  }
+  if (/^Digit[0-9]$/.test(e.code)) {
+    return e.key === e.code[5];
+  }
+  return false;
+}
+
+function shouldSuppressKeyText(e: KeyboardEvent): boolean {
+  if (e.metaKey) return true;
+  if (e.ctrlKey && !e.altKey) return true;
+  if (e.altKey) {
+    // Allow Option/AltGr character entry (e.g. Option+A -> "å", AltGr+Q -> "@").
+    if (e.getModifierState?.("AltGraph")) return false;
+    if (e.ctrlKey) {
+      return matchesPlainCodeChar(e);
+    }
+    return matchesPlainCodeChar(e);
+  }
+  return false;
+}
+
 function keyModifiers(e: KeyboardEvent): number {
   let m = 0;
   if (e.altKey) m |= 1;
@@ -473,10 +497,10 @@ export function Viewport() {
   const dispatchKey = useCallback(
     (e: KeyboardEvent, eventType: string) => {
       const info = KEY_INFO[e.key];
-      const hasShortcutModifier = e.ctrlKey || e.metaKey || e.altKey;
+      const suppressText = shouldSuppressKeyText(e);
       const isDown = eventType === "keyDown" || eventType === "rawKeyDown";
       const text =
-        isDown && !hasShortcutModifier
+        isDown && !suppressText
           ? (info?.text ?? (Array.from(e.key).length === 1 ? e.key : undefined))
           : undefined;
       const resolvedEventType =

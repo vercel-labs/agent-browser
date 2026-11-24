@@ -96,6 +96,51 @@ const READ_SELECTION_SCRIPT: &str = r#"(() => {
     return (win.getSelection && win.getSelection().toString()) || '';
 })()"#;
 
+/// Atomically reads and cuts the current text selection in one synchronous JS
+/// turn so later focus or selection changes cannot overtake the cut.
+const READ_AND_CUT_SELECTION_SCRIPT: &str = r#"(() => {
+    let doc = document;
+    let el = doc.activeElement;
+    while (el) {
+        if (el.shadowRoot && el.shadowRoot.activeElement) {
+            el = el.shadowRoot.activeElement;
+            continue;
+        }
+        if (el.tagName === 'IFRAME') {
+            try {
+                if (el.contentDocument && el.contentDocument.activeElement) {
+                    doc = el.contentDocument;
+                    el = doc.activeElement;
+                    continue;
+                }
+            } catch {}
+        }
+        break;
+    }
+    if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) {
+        if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'password') {
+            return '';
+        }
+        const start = el.selectionStart;
+        const end = el.selectionEnd;
+        if (typeof start === 'number' && typeof end === 'number' && end > start) {
+            const text = el.value.slice(start, end);
+            if (!doc.execCommand || !doc.execCommand('cut')) {
+                el.setRangeText('', start, end, 'start');
+                el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteByCut' }));
+            }
+            return text;
+        }
+        return '';
+    }
+    const win = doc.defaultView || window;
+    const text = (win.getSelection && win.getSelection().toString()) || '';
+    if (text && doc.execCommand) {
+        doc.execCommand('cut');
+    }
+    return text;
+})()"#;
+
 /// Per-connection delivery settings, set by the client's `config` message.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct ClientConfig {
@@ -795,74 +840,22 @@ async fn dispatch_input(
             }
         }
         "input_read_clipboard" => {
-            let client = Arc::clone(client);
-            let sid = session_id.map(str::to_string);
-            let reply_tx = reply_tx.clone();
             let cut = parsed.get("cut").and_then(|v| v.as_bool()).unwrap_or(false);
-            let modifiers = parsed
-                .get("modifiers")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0)
-                & 0x0F;
-            tokio::spawn(async move {
-                let eval = tokio::time::timeout(
-                    CLIPBOARD_READ_TIMEOUT,
-                    client.send_command(
-                        "Runtime.evaluate",
-                        Some(json!({
-                            "expression": READ_SELECTION_SCRIPT,
-                            "returnByValue": true,
-                            "awaitPromise": false,
-                        })),
-                        sid.as_deref(),
-                    ),
-                )
-                .await;
-
-                let reply = match eval {
-                    Ok(Ok(val)) => {
-                        let text = val
-                            .pointer("/result/value")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        json!({ "type": "clipboard", "text": text })
-                    }
-                    Ok(Err(err)) => json!({ "type": "clipboard", "error": err }),
-                    Err(_) => json!({ "type": "clipboard", "error": "Clipboard read timed out" }),
-                };
-
-                if cut {
-                    let _ = client
-                        .send_command_no_wait(
-                            "Input.dispatchKeyEvent",
-                            Some(json!({
-                                "type": "rawKeyDown",
-                                "key": "x",
-                                "code": "KeyX",
-                                "windowsVirtualKeyCode": 88,
-                                "modifiers": modifiers,
-                                "commands": ["cut"],
-                            })),
-                            sid.as_deref(),
-                        )
-                        .await;
-                    let _ = client
-                        .send_command_no_wait(
-                            "Input.dispatchKeyEvent",
-                            Some(json!({
-                                "type": "keyUp",
-                                "key": "x",
-                                "code": "KeyX",
-                                "windowsVirtualKeyCode": 88,
-                                "modifiers": modifiers,
-                            })),
-                            sid.as_deref(),
-                        )
-                        .await;
-                }
-
+            if cut {
+                // Run cut inline and atomically so subsequent focus/selection
+                // input events cannot overtake it; frame delivery runs on its
+                // own task and stays unblocked.
+                let reply = eval_clipboard_selection(client, session_id, true).await;
                 let _ = reply_tx.try_send(reply.to_string());
-            });
+            } else {
+                let client = Arc::clone(client);
+                let sid = session_id.map(str::to_string);
+                let reply_tx = reply_tx.clone();
+                tokio::spawn(async move {
+                    let reply = eval_clipboard_selection(&client, sid.as_deref(), false).await;
+                    let _ = reply_tx.try_send(reply.to_string());
+                });
+            }
         }
         "input_touch" => {
             let _ = client
@@ -879,6 +872,43 @@ async fn dispatch_input(
         }
         "status" => {}
         _ => {}
+    }
+}
+
+async fn eval_clipboard_selection(
+    client: &CdpClient,
+    session_id: Option<&str>,
+    cut: bool,
+) -> Value {
+    let script = if cut {
+        READ_AND_CUT_SELECTION_SCRIPT
+    } else {
+        READ_SELECTION_SCRIPT
+    };
+    let eval = tokio::time::timeout(
+        CLIPBOARD_READ_TIMEOUT,
+        client.send_command(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": script,
+                "returnByValue": true,
+                "awaitPromise": false,
+            })),
+            session_id,
+        ),
+    )
+    .await;
+
+    match eval {
+        Ok(Ok(val)) => {
+            let text = val
+                .pointer("/result/value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            json!({ "type": "clipboard", "text": text })
+        }
+        Ok(Err(err)) => json!({ "type": "clipboard", "error": err }),
+        Err(_) => json!({ "type": "clipboard", "error": "Clipboard read timed out" }),
     }
 }
 
@@ -1254,6 +1284,84 @@ mod tests {
 
         let oversized = "x".repeat(MAX_INSERT_TEXT_BYTES + 1);
         assert_eq!(validated_insert_text(&json!({ "text": oversized })), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_cut_completes_before_following_input_event() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{addr}");
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = seen.clone();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+            while let Some(Ok(Message::Text(text))) = rx.next().await {
+                if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                    let method = v
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let key = v
+                        .pointer("/params/key")
+                        .and_then(|k| k.as_str())
+                        .unwrap_or("");
+                    let label = if key.is_empty() {
+                        method.clone()
+                    } else {
+                        format!("{method}:{key}")
+                    };
+                    recorded.lock().await.push(label);
+                    if method == "Runtime.evaluate" {
+                        if let Some(id) = v.get("id").and_then(|i| i.as_i64()) {
+                            tokio::time::sleep(Duration::from_millis(40)).await;
+                            let reply = json!({
+                                "id": id,
+                                "result": { "result": { "type": "string", "value": "cut-text" } }
+                            });
+                            let _ = tx.send(Message::Text(reply.to_string())).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.expect("mock cdp connect"));
+        let (reply_tx, mut reply_rx) = mpsc::channel(4);
+
+        dispatch_input(
+            "input_read_clipboard",
+            &json!({ "cut": true, "modifiers": 4 }),
+            &client,
+            None,
+            &reply_tx,
+        )
+        .await;
+        dispatch_input(
+            "input_keyboard",
+            &json!({ "eventType": "rawKeyDown", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9 }),
+            &client,
+            None,
+            &reply_tx,
+        )
+        .await;
+
+        let reply = tokio::time::timeout(Duration::from_secs(2), reply_rx.recv())
+            .await
+            .expect("clipboard reply should arrive")
+            .expect("reply channel open");
+        let parsed: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(parsed["text"], "cut-text");
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            *seen.lock().await,
+            vec!["Runtime.evaluate", "Input.dispatchKeyEvent:Tab"],
+            "cut must finish atomically before any subsequent input event reaches CDP"
+        );
     }
 
     /// A cap bounds the gap between deliveries and never postpones the first.
