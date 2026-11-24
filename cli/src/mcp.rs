@@ -11,6 +11,10 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 
+use crate::mcp_skills::{
+    get_skill, list_resource_templates, list_resources, list_skills, read_resource,
+    read_resource_directory, skills_extension_capability, SKILLS_EXTENSION_ID,
+};
 use crate::mcp_transport::{
     current_tool_control, error_response_from, result_response, server_info_value,
     wrap_response_result, McpServerState, ProtocolEra, ProtocolError, RequestContext, StdioWriter,
@@ -815,6 +819,12 @@ fn handle_inline_request(
         "server/discover" => Ok(discover_result(config)),
         "ping" => Ok(json!({})),
         "tools/list" => list_tools_for_era(params, config, ctx.era),
+        "skills/list" => list_skills(params),
+        "skills/get" => get_skill(params),
+        "resources/list" => list_resources(params, ctx.era),
+        "resources/templates/list" => Ok(list_resource_templates(ctx.era)),
+        "resources/read" => read_resource(params, ctx.era),
+        "resources/directory/read" => read_resource_directory(params),
         "shutdown" => {
             *exit_after_response = true;
             Ok(json!({}))
@@ -933,7 +943,11 @@ fn discover_result(config: &McpConfig) -> Value {
         "resultType": "complete",
         "supportedVersions": SUPPORTED_ALL_PROTOCOL_VERSIONS,
         "capabilities": {
-            "tools": {}
+            "tools": {},
+            "resources": {},
+            "extensions": {
+                SKILLS_EXTENSION_ID: skills_extension_capability()
+            }
         },
         "instructions": server_instructions(config),
         "ttlMs": DISCOVER_TTL_MS,
@@ -955,11 +969,19 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
         PROTOCOL_VERSION
     };
 
+    let mut capabilities = json!({
+        "tools": {},
+        "resources": {}
+    });
+    if protocol_version == "2025-11-25" {
+        capabilities["extensions"] = json!({
+            SKILLS_EXTENSION_ID: skills_extension_capability()
+        });
+    }
+
     json!({
         "protocolVersion": protocol_version,
-        "capabilities": {
-            "tools": {}
-        },
+        "capabilities": capabilities,
         "serverInfo": server_info_value(),
         "instructions": server_instructions(config)
     })
