@@ -135,14 +135,14 @@ pub async fn take_screenshot(
         false
     };
 
-    let base64 =
+    let capture =
         capture_screenshot_base64(client, session_id, ref_map, options, iframe_sessions).await;
 
     if overlay_injected {
         let _ = remove_annotation_overlay(client, session_id).await;
     }
 
-    let mut base64 = base64?;
+    let (mut base64, capture_clip) = capture?;
     let annotations = if options.annotate {
         let scroll = if options.full_page {
             Some(get_scroll_offsets(client, session_id).await?)
@@ -162,11 +162,11 @@ pub async fn take_screenshot(
             .map(|(_, projected)| projected)
             .collect();
         if !iframe_boxes.is_empty() {
-            let dpr = get_device_scale_factor(client, session_id).await;
+            let image_space = get_image_coordinate_space(client, session_id, capture_clip).await;
             base64 = compose_annotations_on_image(
                 &base64,
                 &iframe_boxes,
-                dpr,
+                image_space,
                 &options.format,
                 options.quality,
             )?;
@@ -185,7 +185,7 @@ async fn capture_screenshot_base64(
     ref_map: &RefMap,
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<String, String> {
+) -> Result<(String, Option<(f64, f64, f64)>), String> {
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
         quality: if options.format == "jpeg" {
@@ -227,11 +227,12 @@ async fn capture_screenshot_base64(
         }
     }
 
+    let clip = params.clip.as_ref().map(|c| (c.width, c.height, c.scale));
     let result: CaptureScreenshotResult = client
         .send_command_typed("Page.captureScreenshot", &params, Some(session_id))
         .await?;
 
-    Ok(result.data)
+    Ok((result.data, clip))
 }
 
 fn capture_beyond_viewport(options: &ScreenshotOptions) -> Option<bool> {
@@ -570,7 +571,7 @@ async fn session_viewport_transform(
             .find(|(_, session)| **session == current)
             .map(|(frame, _)| frame)
             .ok_or("Cannot locate OOPIF frame")?;
-        let (local_w, local_h) = session_layout_viewport_size(client, &current).await;
+        let (local_w, local_h) = session_content_viewport_size(client, &current).await;
         let mut owner = None;
         for candidate in
             std::iter::once(page_session).chain(iframe_sessions.values().map(String::as_str))
@@ -610,7 +611,30 @@ async fn session_viewport_transform(
     Err("Cyclic OOPIF frame ownership".to_string())
 }
 
-async fn session_layout_viewport_size(client: &CdpClient, session_id: &str) -> (f64, f64) {
+/// Size of the OOPIF's content viewport in its own CSS pixels, including any
+/// visible scrollbars so it matches the host iframe's `model.content` quad.
+async fn session_content_viewport_size(client: &CdpClient, session_id: &str) -> (f64, f64) {
+    let eval: Result<EvaluateResult, _> = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression: "({ w: window.innerWidth || 0, h: window.innerHeight || 0 })"
+                    .to_string(),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await;
+    if let Ok(result) = eval {
+        if let Some(val) = result.result.value {
+            let w = val.get("w").and_then(Value::as_f64).unwrap_or(0.0);
+            let h = val.get("h").and_then(Value::as_f64).unwrap_or(0.0);
+            if w > 0.0 && h > 0.0 {
+                return (w, h);
+            }
+        }
+    }
     let Ok(metrics): Result<Value, _> = client
         .send_command_no_params("Page.getLayoutMetrics", Some(session_id))
         .await
@@ -838,24 +862,101 @@ async fn get_scroll_offsets(client: &CdpClient, session_id: &str) -> Result<(f64
     Ok((x, y))
 }
 
-async fn get_device_scale_factor(client: &CdpClient, session_id: &str) -> f64 {
-    let result: Result<EvaluateResult, _> = client
+#[derive(Debug, Clone, Copy)]
+struct ImageCoordinateSpace {
+    offset_x: f64,
+    offset_y: f64,
+    css_width: f64,
+    css_height: f64,
+    fallback_scale: f64,
+}
+
+impl ImageCoordinateSpace {
+    fn resolve(&self, img_width: u32, img_height: u32) -> (f64, f64, f64, f64) {
+        let scale_x = if self.css_width > 0.0 {
+            img_width as f64 / self.css_width
+        } else {
+            self.fallback_scale
+        };
+        let scale_y = if self.css_height > 0.0 {
+            img_height as f64 / self.css_height
+        } else {
+            self.fallback_scale
+        };
+        (self.offset_x, self.offset_y, scale_x, scale_y)
+    }
+}
+
+async fn get_image_coordinate_space(
+    client: &CdpClient,
+    session_id: &str,
+    capture_clip: Option<(f64, f64, f64)>,
+) -> ImageCoordinateSpace {
+    let eval: Result<EvaluateResult, _> = client
         .send_command_typed(
             "Runtime.evaluate",
             &EvaluateParams {
-                expression: "window.devicePixelRatio || 1".to_string(),
+                expression: "(() => { const vv = window.visualViewport; const dpr = window.devicePixelRatio || 1; return { dpr, offsetLeft: vv ? vv.offsetLeft : 0, offsetTop: vv ? vv.offsetTop : 0, width: vv ? vv.width : (window.innerWidth || 0), height: vv ? vv.height : (window.innerHeight || 0), scale: vv ? vv.scale : 1 }; })()"
+                    .to_string(),
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
             Some(session_id),
         )
         .await;
-    result
+    let val = eval
         .ok()
         .and_then(|r| r.result.value)
-        .and_then(|v| v.as_f64())
+        .unwrap_or(Value::Null);
+    let dpr = val
+        .get("dpr")
+        .and_then(Value::as_f64)
         .filter(|&d| d.is_finite() && d > 0.0)
-        .unwrap_or(1.0)
+        .unwrap_or(1.0);
+
+    if let Some((clip_width, clip_height, clip_scale)) = capture_clip {
+        return ImageCoordinateSpace {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            css_width: clip_width,
+            css_height: clip_height,
+            fallback_scale: dpr * clip_scale,
+        };
+    }
+
+    let vv_scale = val
+        .get("scale")
+        .and_then(Value::as_f64)
+        .filter(|&s| s.is_finite() && s > 0.0)
+        .unwrap_or(1.0);
+    let offset_x = val
+        .get("offsetLeft")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
+        .unwrap_or(0.0);
+    let offset_y = val
+        .get("offsetTop")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
+        .unwrap_or(0.0);
+    let css_width = val
+        .get("width")
+        .and_then(Value::as_f64)
+        .filter(|&w| w.is_finite() && w > 0.0)
+        .unwrap_or(0.0);
+    let css_height = val
+        .get("height")
+        .and_then(Value::as_f64)
+        .filter(|&h| h.is_finite() && h > 0.0)
+        .unwrap_or(0.0);
+
+    ImageCoordinateSpace {
+        offset_x,
+        offset_y,
+        css_width,
+        css_height,
+        fallback_scale: dpr * vv_scale,
+    }
 }
 
 /// 5x7 pixel glyphs for digits 0-9 used to draw annotation badges onto captured
@@ -905,16 +1006,24 @@ fn fill_rect(img: &mut image::RgbaImage, x: i64, y: i64, w: i64, h: i64, color: 
     }
 }
 
-fn draw_annotation_box(img: &mut image::RgbaImage, ann: &ScreenshotAnnotation, dpr: f64) {
-    let x = (ann.box_.x as f64 * dpr).round() as i64;
-    let y = (ann.box_.y as f64 * dpr).round() as i64;
-    let w = (ann.box_.width as f64 * dpr).round() as i64;
-    let h = (ann.box_.height as f64 * dpr).round() as i64;
+fn draw_annotation_box(
+    img: &mut image::RgbaImage,
+    ann: &ScreenshotAnnotation,
+    offset_x: f64,
+    offset_y: f64,
+    scale_x: f64,
+    scale_y: f64,
+) {
+    let x = ((ann.box_.x as f64 - offset_x) * scale_x).round() as i64;
+    let y = ((ann.box_.y as f64 - offset_y) * scale_y).round() as i64;
+    let w = (ann.box_.width as f64 * scale_x).round() as i64;
+    let h = (ann.box_.height as f64 * scale_y).round() as i64;
     if w <= 0 || h <= 0 {
         return;
     }
 
-    let border = (2.0 * dpr).round().max(1.0) as i64;
+    let stroke_scale = ((scale_x + scale_y) * 0.5).max(0.5);
+    let border = (2.0 * stroke_scale).round().max(1.0) as i64;
     let border_color = [255, 0, 0, 204];
     fill_rect(img, x, y, w, border.min(h), border_color);
     fill_rect(
@@ -943,9 +1052,9 @@ fn draw_annotation_box(img: &mut image::RgbaImage, ann: &ScreenshotAnnotation, d
     );
 
     let text = ann.number.to_string();
-    let glyph_scale = dpr.round().max(1.0) as i64;
-    let pad_x = (4.0 * dpr).round().max(2.0) as i64;
-    let pad_y = (3.0 * dpr).round().max(2.0) as i64;
+    let glyph_scale = stroke_scale.round().max(1.0) as i64;
+    let pad_x = (4.0 * stroke_scale).round().max(2.0) as i64;
+    let pad_y = (3.0 * stroke_scale).round().max(2.0) as i64;
     let char_w = 5 * glyph_scale;
     let char_gap = glyph_scale;
     let text_w = (text.len() as i64) * char_w + ((text.len().saturating_sub(1)) as i64) * char_gap;
@@ -953,7 +1062,7 @@ fn draw_annotation_box(img: &mut image::RgbaImage, ann: &ScreenshotAnnotation, d
     let badge_h = 7 * glyph_scale + 2 * pad_y;
     let badge_x = x;
     let badge_y = if y < badge_h {
-        y + (2.0 * dpr).round() as i64
+        y + (2.0 * stroke_scale).round().max(1.0) as i64
     } else {
         y - badge_h
     };
@@ -987,7 +1096,7 @@ fn draw_annotation_box(img: &mut image::RgbaImage, ann: &ScreenshotAnnotation, d
 fn compose_annotations_on_image(
     base64_data: &str,
     annotations: &[&ScreenshotAnnotation],
-    dpr: f64,
+    space: ImageCoordinateSpace,
     format: &str,
     quality: Option<i32>,
 ) -> Result<String, String> {
@@ -1001,8 +1110,9 @@ fn compose_annotations_on_image(
         .map_err(|e| format!("Failed to parse screenshot for annotation overlay: {}", e))?
         .to_rgba8();
 
+    let (offset_x, offset_y, scale_x, scale_y) = space.resolve(img.width(), img.height());
     for ann in annotations {
-        draw_annotation_box(&mut img, ann, dpr);
+        draw_annotation_box(&mut img, ann, offset_x, offset_y, scale_x, scale_y);
     }
 
     let mut out = Vec::new();
@@ -1354,7 +1464,14 @@ mod tests {
             },
         };
 
-        let out_b64 = compose_annotations_on_image(&b64, &[&ann], 1.0, "png", None).unwrap();
+        let space = ImageCoordinateSpace {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            css_width: 200.0,
+            css_height: 120.0,
+            fallback_scale: 1.0,
+        };
+        let out_b64 = compose_annotations_on_image(&b64, &[&ann], space, "png", None).unwrap();
         let out_bytes = base64::engine::general_purpose::STANDARD
             .decode(out_b64)
             .unwrap();
@@ -1368,5 +1485,26 @@ mod tests {
         // Interior stays white.
         let center = img.get_pixel(70, 42);
         assert_eq!(*center, image::Rgba([255, 255, 255, 255]));
+
+        // Scaled mobile visual viewport (css 400x240 rendered into 200x120 image -> scale 0.5)
+        // with visual viewport offset (20, 10).
+        let mobile_space = ImageCoordinateSpace {
+            offset_x: 20.0,
+            offset_y: 10.0,
+            css_width: 400.0,
+            css_height: 240.0,
+            fallback_scale: 0.5,
+        };
+        let mobile_b64 =
+            compose_annotations_on_image(&b64, &[&ann], mobile_space, "png", None).unwrap();
+        let mobile_bytes = base64::engine::general_purpose::STANDARD
+            .decode(mobile_b64)
+            .unwrap();
+        let mobile_img = image::load_from_memory(&mobile_bytes).unwrap().to_rgba8();
+        // (40 - 20) * 0.5 = 10, (30 - 10) * 0.5 = 10; width 60 * 0.5 = 30, height 24 * 0.5 = 12
+        let mtl = mobile_img.get_pixel(10, 10);
+        let mbr = mobile_img.get_pixel(39, 21);
+        assert!(mtl[0] > 200 && mtl[1] < 80 && mtl[2] < 80, "mtl={mtl:?}");
+        assert!(mbr[0] > 200 && mbr[1] < 80 && mbr[2] < 80, "mbr={mbr:?}");
     }
 }

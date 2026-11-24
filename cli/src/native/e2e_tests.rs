@@ -10617,6 +10617,264 @@ async fn e2e_screenshot_annotate_iframe_coordinates() {
     server_b.abort();
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_annotate_oopif_with_visible_scrollbars_and_scale() {
+    let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port_a = listener_a.local_addr().unwrap().port();
+    let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port_b = listener_b.local_addr().unwrap().port();
+
+    let server_a = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener_a.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let body = format!(
+                    "<!doctype html><body style='margin:0;background:#fff'>\
+                    <iframe id='oopif' style='position:absolute;left:100px;top:80px;width:200px;height:100px;border:0;transform:scale(2);transform-origin:0 0' src='http://localhost:{port_b}/'></iframe>\
+                    </body>"
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let server_b = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener_b.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let body = "<!doctype html>\
+                    <style>\
+                    html{overflow:scroll}\
+                    ::-webkit-scrollbar{width:16px;height:16px;background:#ccc}\
+                    body{margin:0;width:400px;height:300px;background:#fff}\
+                    </style>\
+                    <body>\
+                    <button style='display:block;margin:10px 0 0 20px;width:60px;height:25px;border:0;background:#c00;color:#c00'>ScrollBtn</button>\
+                    </body>";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true, "hideScrollbars": false }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "viewport", "width": 1000, "height": 700 }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": format!("http://127.0.0.1:{port_a}/") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let shot = execute_command(
+        &json!({ "id": "4", "action": "screenshot", "annotate": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&shot);
+    let annotations = get_data(&shot)["annotations"].as_array().unwrap().clone();
+    let btn = annotations
+        .iter()
+        .find(|a| a["name"] == "ScrollBtn")
+        .unwrap_or_else(|| panic!("missing ScrollBtn annotation: {annotations:?}"));
+    // OOPIF at (100, 80) scaled by 2 -> child (20, 10) of 60x25 maps to (140, 100, 120, 50)
+    // without stretching from the 16px visible scrollbars.
+    assert_eq!(
+        (
+            btn["box"]["x"].as_i64().unwrap(),
+            btn["box"]["y"].as_i64().unwrap(),
+            btn["box"]["width"].as_i64().unwrap(),
+            btn["box"]["height"].as_i64().unwrap(),
+        ),
+        (140, 100, 120, 50)
+    );
+
+    let btn_ref = format!("@{}", btn["ref"].as_str().unwrap());
+    let clip_file = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .expect("temp clip png");
+    let clip_path = clip_file.path().to_string_lossy().to_string();
+    let clip_resp = execute_command(
+        &json!({ "id": "5", "action": "screenshot", "selector": btn_ref, "path": clip_path }),
+        &mut state,
+    )
+    .await;
+    assert_success(&clip_resp);
+    let (w, h, red) = red_fraction(&clip_path);
+    assert_eq!((w, h), (120, 50));
+    assert!(
+        red > 0.95,
+        "expected selector clip to match scaled OOPIF button, got {:.0}% red",
+        red * 100.0
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+    server_a.abort();
+    server_b.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_annotate_mobile_scaled_viewport_iframe() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = if path == "/frame.html" {
+                    "<!doctype html><body style='margin:0;background:#fff'>\
+                    <button style='display:block;margin:20px 0 0 40px;width:160px;height:60px;border:0;background:#eee'>MobileFrameBtn</button>\
+                    </body>"
+                } else {
+                    // Wide page without meta viewport: iPhone 14 (390px) scales visualViewport to fit.
+                    "<!doctype html><body style='margin:0;width:980px;background:#fff'>\
+                    <div style='width:980px;height:40px'></div>\
+                    <button style='position:absolute;left:40px;top:40px;width:120px;height:40px;border:0;background:#eee'>MobileMainBtn</button>\
+                    <iframe style='position:absolute;left:200px;top:200px;width:400px;height:200px;border:0' src='/frame.html'></iframe>\
+                    </body>"
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "device", "name": "iPhone 14" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": format!("http://127.0.0.1:{port}/") }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_evaluate(
+        &mut state,
+        "wait",
+        "new Promise(resolve => { const ready = () => { const b = document.querySelector('iframe')?.contentDocument?.querySelector('button'); if (b) resolve(true); else requestAnimationFrame(ready); }; ready(); })",
+        json!(true),
+    )
+    .await;
+
+    let metrics_resp = execute_command(
+        &json!({
+            "id": "3b",
+            "action": "evaluate",
+            "script": "({ scale: window.visualViewport.scale, offsetLeft: window.visualViewport.offsetLeft, offsetTop: window.visualViewport.offsetTop, dpr: window.devicePixelRatio })"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&metrics_resp);
+    let m = &get_data(&metrics_resp)["result"];
+    let vv_scale = m["scale"].as_f64().unwrap();
+    let dpr = m["dpr"].as_f64().unwrap();
+    let offset_left = m["offsetLeft"].as_f64().unwrap();
+    let offset_top = m["offsetTop"].as_f64().unwrap();
+    assert!(
+        (vv_scale - 1.0).abs() > 0.1,
+        "expected mobile scale-to-fit (visualViewport.scale != 1), got {vv_scale}"
+    );
+
+    let shot_file = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .expect("temp mobile png");
+    let shot_path = shot_file.path().to_string_lossy().to_string();
+    let shot = execute_command(
+        &json!({ "id": "4", "action": "screenshot", "annotate": true, "path": shot_path }),
+        &mut state,
+    )
+    .await;
+    assert_success(&shot);
+
+    let annotations = get_data(&shot)["annotations"].as_array().unwrap();
+    let frame_btn = annotations
+        .iter()
+        .find(|a| a["name"] == "MobileFrameBtn")
+        .unwrap_or_else(|| panic!("missing MobileFrameBtn: {annotations:?}"));
+    let bx = frame_btn["box"]["x"].as_f64().unwrap();
+    let by = frame_btn["box"]["y"].as_f64().unwrap();
+    let bw = frame_btn["box"]["width"].as_f64().unwrap();
+    let bh = frame_btn["box"]["height"].as_f64().unwrap();
+    assert_eq!(
+        (bx as i64, by as i64, bw as i64, bh as i64),
+        (240, 220, 160, 60)
+    );
+
+    let img = image::open(shot_file.path())
+        .expect("decode mobile screenshot")
+        .to_rgba8();
+    let eff = dpr * vv_scale;
+    let exp_x = ((bx - offset_left) * eff).round() as u32;
+    let exp_y = ((by - offset_top) * eff).round() as u32;
+    let exp_x2 = ((bx + bw - offset_left) * eff).round() as u32 - 1;
+    let exp_y2 = ((by + bh - offset_top) * eff).round() as u32 - 1;
+    for (px, py) in [(exp_x, exp_y), (exp_x2, exp_y2)] {
+        let p = img.get_pixel(px, py);
+        assert!(
+            p[0] > 180 && p[1] < 100 && p[2] < 100,
+            "expected red border at scaled pixel ({px},{py}) (scale={vv_scale}, dpr={dpr}), got {p:?}"
+        );
+    }
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+    server.abort();
+}
+
 /// Verifies that `screenshot --annotate` completes in bounded time even with
 /// many interactive elements. Guards against the sequential CDP round-trip
 /// regression that caused hangs over high-latency WSS (Issue #841).
