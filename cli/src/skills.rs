@@ -127,6 +127,13 @@ fn parse_frontmatter(content: &str) -> Option<(String, String, bool)> {
 }
 
 /// Discover all skills across the given directories.
+fn skill_not_found(name: &str) -> String {
+    format!(
+        "Skill not found: {}. Run `agent-browser skills list` to see available skills.",
+        name
+    )
+}
+
 fn discover_skills(dirs: &[PathBuf]) -> Vec<SkillInfo> {
     let mut skills = Vec::new();
 
@@ -358,6 +365,45 @@ fn run_list(skills_dirs: &[PathBuf], json_mode: bool) {
     }
 }
 
+#[derive(Debug, Default, PartialEq)]
+struct GetArgs {
+    names: Vec<String>,
+    refs: Vec<String>,
+    ignored: Vec<String>,
+    full: bool,
+    all: bool,
+}
+
+/// Parses `skills get` operands. Everything after `--` is a skill name.
+fn parse_get_args(operands: &[String]) -> Result<GetArgs, &'static str> {
+    let mut parsed = GetArgs::default();
+    let mut rest = operands.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--" => {
+                parsed.names.extend(rest.by_ref().cloned());
+                break;
+            }
+            "--full" => parsed.full = true,
+            "--all" => parsed.all = true,
+            "--ref" => {
+                match rest.next() {
+                    Some(value) => parsed.refs.push(value.clone()),
+                    None => return Err(
+                        "--ref needs a value. Usage: agent-browser skills get <name> --ref <ref>",
+                    ),
+                }
+            }
+            other => match other.strip_prefix("--ref=") {
+                Some(value) => parsed.refs.push(value.to_string()),
+                None if other.starts_with('-') => parsed.ignored.push(arg.clone()),
+                None => parsed.names.push(arg.clone()),
+            },
+        }
+    }
+    Ok(parsed)
+}
+
 fn run_get(
     skills_dirs: &[PathBuf],
     names: &[String],
@@ -373,14 +419,6 @@ fn run_get(
     } else {
         let mut targets = Vec::new();
         for name in names {
-            if name.starts_with('-') {
-                eprintln!(
-                    "{} Unknown flag ignored: {}",
-                    color::warning_indicator(),
-                    name
-                );
-                continue;
-            }
             match all_skills.iter().find(|s| s.name == *name) {
                 Some(s) => targets.push(s),
                 None => {
@@ -389,12 +427,12 @@ fn run_get(
                             "{}",
                             serde_json::to_string(&json!({
                                 "success": false,
-                                "error": format!("Skill not found: {}", name),
+                                "error": skill_not_found(name),
                             }))
                             .unwrap_or_default()
                         );
                     } else {
-                        eprintln!("{} Skill not found: {}", color::error_indicator(), name);
+                        eprintln!("{} {}", color::error_indicator(), skill_not_found(name));
                     }
                     exit(1);
                 }
@@ -513,12 +551,12 @@ fn run_path(skills_dirs: &[PathBuf], name: Option<&str>, json_mode: bool) {
                             "{}",
                             serde_json::to_string(&json!({
                                 "success": false,
-                                "error": format!("Skill not found: {}", name),
+                                "error": skill_not_found(name),
                             }))
                             .unwrap_or_default()
                         );
                     } else {
-                        eprintln!("{} Skill not found: {}", color::error_indicator(), name);
+                        eprintln!("{} {}", color::error_indicator(), skill_not_found(name));
                     }
                     exit(1);
                 }
@@ -573,35 +611,35 @@ pub fn run_skills(args: &[String], json_mode: bool) {
     match subcommand {
         None | Some("list") => run_list(&skills_dirs, json_mode),
         Some("get") => {
-            let mut names = Vec::new();
-            let mut refs = Vec::new();
-            let mut full = false;
-            let mut get_all = false;
-            let mut rest = args[2..].iter();
-            while let Some(arg) = rest.next() {
-                match arg.as_str() {
-                    "--full" => full = true,
-                    "--all" => get_all = true,
-                    "--ref" => match rest.next() {
-                        Some(value) => refs.push(value.clone()),
-                        None => {
-                            print_error(
-                                json_mode,
-                                "--ref needs a value. Usage: agent-browser skills get <name> --ref <ref>",
-                            );
-                            exit(1);
-                        }
-                    },
-                    other => match other.strip_prefix("--ref=") {
-                        Some(value) => refs.push(value.to_string()),
-                        None => names.push(arg.clone()),
-                    },
+            let parsed = match parse_get_args(&args[2..]) {
+                Ok(parsed) => parsed,
+                Err(message) => {
+                    print_error(json_mode, message);
+                    exit(1);
                 }
+            };
+            for flag in &parsed.ignored {
+                eprintln!(
+                    "{} Unknown flag ignored: {}",
+                    color::warning_indicator(),
+                    flag
+                );
             }
-            run_get(&skills_dirs, &names, get_all, full, &refs, json_mode);
+            run_get(
+                &skills_dirs,
+                &parsed.names,
+                parsed.all,
+                parsed.full,
+                &parsed.refs,
+                json_mode,
+            );
         }
         Some("path") => {
-            let name = args.get(2).map(|s| s.as_str());
+            let mut operands = args[2..].iter().map(|s| s.as_str());
+            let mut name = operands.next();
+            if name == Some("--") {
+                name = operands.next().or(name);
+            }
             run_path(&skills_dirs, name, json_mode);
         }
         Some(unknown) => {
@@ -642,6 +680,17 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn get_operands_after_the_marker_are_names() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let parsed = parse_get_args(&args(&["--full", "--", "--all", "-x"])).unwrap();
+        assert_eq!(parsed.names, ["--all", "-x"]);
+        assert!(parsed.full && !parsed.all && parsed.ignored.is_empty());
+        let parsed = parse_get_args(&args(&["--foo", "core"])).unwrap();
+        assert_eq!(parsed.ignored, ["--foo"]);
+        assert_eq!(parsed.names, ["core"]);
     }
 
     #[test]

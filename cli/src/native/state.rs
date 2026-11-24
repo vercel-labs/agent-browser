@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
@@ -14,6 +15,45 @@ use super::cdp::types::{
 };
 use super::cookies::{self, Cookie};
 use crate::validation::{is_valid_session_name, sanitize_session_component, session_name_error};
+
+/// Writes a state file with owner-only permissions on Unix.
+pub(crate) fn write_private(path: impl AsRef<std::path::Path>, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.set_len(0)?;
+        file.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes)
+    }
+}
+
+/// Creates a state directory that only the owner can enter on Unix, tightening it if it already exists.
+pub(crate) fn create_private_dir(path: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,7 +97,7 @@ fn collect_frame_origins(tree: &Value, origins: &mut HashSet<String>) {
 }
 
 /// Parse the JS-evaluated origin storage data into an OriginStorage struct.
-fn parse_origin_storage(data: &Value) -> Option<OriginStorage> {
+pub(crate) fn parse_origin_storage(data: &Value) -> Option<OriginStorage> {
     if !data.is_object() {
         return None;
     }
@@ -245,6 +285,24 @@ async fn collect_storage_in_target(
     Ok(results)
 }
 
+/// Page function that collects the current origin's localStorage and sessionStorage.
+pub(crate) const ORIGIN_STORAGE_JS: &str = r#"() => {
+    const result = { origin: location.origin, localStorage: [], sessionStorage: [] };
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            result.localStorage.push({ name: key, value: localStorage.getItem(key) });
+        }
+    } catch(e) {}
+    try {
+        for (let i = 0; i < sessionStorage.length; i++) {
+            const key = sessionStorage.key(i);
+            result.sessionStorage.push({ name: key, value: sessionStorage.getItem(key) });
+        }
+    } catch(e) {}
+    return result;
+}"#;
+
 pub async fn save_state(
     client: &CdpClient,
     session_id: &str,
@@ -255,22 +313,7 @@ pub async fn save_state(
 ) -> Result<String, String> {
     let cookies = cookies::get_all_cookies(client, session_id).await?;
 
-    let origin_js = r#"(() => {
-        const result = { origin: location.origin, localStorage: [], sessionStorage: [] };
-        try {
-            for (let i = 0; i < localStorage.length; i++) {
-                const key = localStorage.key(i);
-                result.localStorage.push({ name: key, value: localStorage.getItem(key) });
-            }
-        } catch(e) {}
-        try {
-            for (let i = 0; i < sessionStorage.length; i++) {
-                const key = sessionStorage.key(i);
-                result.sessionStorage.push({ name: key, value: sessionStorage.getItem(key) });
-            }
-        } catch(e) {}
-        return result;
-    })()"#;
+    let origin_js = format!("({ORIGIN_STORAGE_JS})()");
 
     // Merge visited origins with current frame tree origins
     let mut all_origins = visited_origins.clone();
@@ -287,7 +330,7 @@ pub async fn save_state(
     let mut origins = Vec::new();
     let mut current_origin = String::new();
 
-    if let Some(storage) = eval_origin_storage(client, session_id, origin_js).await {
+    if let Some(storage) = eval_origin_storage(client, session_id, &origin_js).await {
         current_origin = storage.origin.clone();
         if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
             origins.push(storage);
@@ -299,7 +342,7 @@ pub async fn save_state(
     if !all_origins.is_empty() {
         let remaining: Vec<String> = all_origins.into_iter().collect();
         if let Ok(temp_origins) =
-            collect_storage_via_temp_target(client, &remaining, origin_js).await
+            collect_storage_via_temp_target(client, &remaining, &origin_js).await
         {
             origins.extend(temp_origins);
         }
@@ -309,11 +352,11 @@ pub async fn save_state(
     let json_str = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("Failed to serialize state: {}", e))?;
 
-    let mut save_path = match path {
+    let save_path = match path {
         Some(p) => p.to_string(),
         None => {
             let dir = get_sessions_dir();
-            let _ = fs::create_dir_all(&dir);
+            let _ = create_private_dir(&dir);
             let name = session_name.unwrap_or("default");
             if !is_valid_session_name(name) {
                 return Err(session_name_error(name));
@@ -324,36 +367,37 @@ pub async fn save_state(
         }
     };
 
+    write_state_json(&save_path, &json_str)
+}
+
+pub(crate) fn write_state_json(path: &str, json_str: &str) -> Result<String, String> {
+    let mut save_path = path.to_string();
     if let Ok(key) = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
         let encrypted = encrypt_data(json_str.as_bytes(), &key)?;
         save_path.push_str(".enc");
-        fs::write(&save_path, &encrypted)
+        write_private(&save_path, &encrypted)
             .map_err(|e| format!("Failed to write state to {}: {}", save_path, e))?;
     } else {
-        fs::write(&save_path, &json_str)
+        write_private(&save_path, json_str.as_bytes())
             .map_err(|e| format!("Failed to write state to {}: {}", save_path, e))?;
     }
-
     Ok(save_path)
 }
 
-pub async fn save_auto_state_transactional(
-    client: &CdpClient,
-    session_id: &str,
+pub(crate) fn auto_state_paths(
     session_name: &str,
-    session_id_str: &str,
-    visited_origins: &HashSet<String>,
-) -> Result<String, String> {
+    session_id: &str,
+) -> Result<(PathBuf, PathBuf), String> {
     if !is_valid_session_name(session_name) {
         return Err(session_name_error(session_name));
     }
 
     let dir = get_sessions_dir();
-    fs::create_dir_all(&dir)
+    create_private_dir(&dir)
         .map_err(|e| format!("Failed to create state directory {}: {}", dir.display(), e))?;
 
     let tmp_dir = dir.join(".tmp");
-    fs::create_dir_all(&tmp_dir).map_err(|e| {
+    create_private_dir(&tmp_dir).map_err(|e| {
         format!(
             "Failed to create temporary state directory {}: {}",
             tmp_dir.display(),
@@ -361,39 +405,36 @@ pub async fn save_auto_state_transactional(
         )
     })?;
 
-    let base_name = format!("{}-{}", session_name, session_id_str);
+    let base_name = format!("{}-{}", session_name, session_id);
     let final_json_path = dir.join(format!("{}.json", base_name));
     let final_path = if std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").is_ok() {
         PathBuf::from(format!("{}.enc", final_json_path.to_string_lossy()))
     } else {
         final_json_path
     };
-    let candidate_json_path = tmp_dir.join(format!(
+    let candidate_path = tmp_dir.join(format!(
         "{}-candidate-{}.json",
         base_name,
         std::process::id()
     ));
-    let candidate_arg = candidate_json_path.to_string_lossy().to_string();
 
-    let candidate_path = save_state(
-        client,
-        session_id,
-        Some(&candidate_arg),
-        Some(session_name),
-        session_id_str,
-        visited_origins,
-    )
-    .await?;
+    Ok((candidate_path, final_path))
+}
 
-    if let Err(err) = validate_state_file(&candidate_path) {
-        let _ = fs::remove_file(&candidate_path);
+/// Validates a fully written candidate state file, then swaps it in for the last good file, rolling back on failure.
+pub(crate) fn promote_auto_state_candidate(
+    candidate_path: &str,
+    final_path: &Path,
+) -> Result<String, String> {
+    if let Err(err) = validate_state_file(candidate_path) {
+        let _ = fs::remove_file(candidate_path);
         return Err(err);
     }
 
     let previous_path = PathBuf::from(format!("{}.previous", final_path.to_string_lossy()));
     if final_path.exists() {
         let _ = fs::remove_file(&previous_path);
-        fs::rename(&final_path, &previous_path).map_err(|e| {
+        fs::rename(final_path, &previous_path).map_err(|e| {
             format!(
                 "Failed to rotate previous state {} to {}: {}",
                 final_path.display(),
@@ -403,10 +444,10 @@ pub async fn save_auto_state_transactional(
         })?;
     }
 
-    let candidate = PathBuf::from(&candidate_path);
-    if let Err(err) = fs::rename(&candidate, &final_path) {
+    let candidate = PathBuf::from(candidate_path);
+    if let Err(err) = fs::rename(&candidate, final_path) {
         if previous_path.exists() && !final_path.exists() {
-            let _ = fs::rename(&previous_path, &final_path);
+            let _ = fs::rename(&previous_path, final_path);
         }
         return Err(format!(
             "Failed to promote state {} to {}: {}",
@@ -422,7 +463,30 @@ pub async fn save_auto_state_transactional(
     Ok(final_path.to_string_lossy().to_string())
 }
 
-fn read_state_json(path: &str) -> Result<String, String> {
+pub async fn save_auto_state_transactional(
+    client: &CdpClient,
+    session_id: &str,
+    session_name: &str,
+    session_id_str: &str,
+    visited_origins: &HashSet<String>,
+) -> Result<String, String> {
+    let (candidate_json_path, final_path) = auto_state_paths(session_name, session_id_str)?;
+    let candidate_arg = candidate_json_path.to_string_lossy().to_string();
+
+    let candidate_path = save_state(
+        client,
+        session_id,
+        Some(&candidate_arg),
+        Some(session_name),
+        session_id_str,
+        visited_origins,
+    )
+    .await?;
+
+    promote_auto_state_candidate(&candidate_path, &final_path)
+}
+
+pub(crate) fn read_state_json(path: &str) -> Result<String, String> {
     if is_encrypted_state(std::path::Path::new(path)) {
         let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
             "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
@@ -498,16 +562,21 @@ pub async fn load_state(
     Ok(skipped)
 }
 
+/// Returns the serialized tuple origin for a saved origin, or `None` when it has none.
+pub(crate) fn canonical_origin(origin: &str) -> Option<String> {
+    url::Url::parse(origin)
+        .ok()
+        .map(|u| u.origin())
+        .filter(|o| o.is_tuple())
+        .map(|o| o.ascii_serialization())
+}
+
 async fn restore_origin_storage(
     client: &CdpClient,
     session_id: &str,
     origin: &OriginStorage,
 ) -> Result<(), String> {
-    let security_origin = url::Url::parse(&origin.origin)
-        .ok()
-        .map(|u| u.origin())
-        .filter(|o| o.is_tuple())
-        .map(|o| o.ascii_serialization())
+    let security_origin = canonical_origin(&origin.origin)
         .unwrap_or_else(|| origin.origin.trim_end_matches('/').to_string());
     client
         .send_command(
@@ -645,13 +714,16 @@ pub fn state_clear(path: Option<&str>) -> Result<Value, String> {
         return Ok(json!({ "deleted": p }));
     }
 
-    let dir = get_sessions_dir();
+    clear_state_files(&get_sessions_dir())
+}
+
+fn clear_state_files(dir: &Path) -> Result<Value, String> {
     if !dir.exists() {
         return Ok(json!({ "deleted": 0 }));
     }
 
     let mut count = 0;
-    if let Ok(entries) = fs::read_dir(&dir) {
+    if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if is_state_file(&path) {
@@ -719,7 +791,7 @@ pub fn state_rename(old_path: &str, new_name: &str) -> Result<Value, String> {
     }))
 }
 
-fn encrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn encrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
     let mut hasher = Sha256::new();
     hasher.update(key_str.as_bytes());
     let key_bytes = hasher.finalize();
@@ -925,20 +997,40 @@ mod tests {
         )));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn write_private_overwrites_and_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing.json");
+        fs::write(&existing, "old").unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&existing, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "new");
+        assert_eq!(
+            fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let fresh = dir.path().join("fresh.json");
+        write_private(&fresh, b"fresh").unwrap();
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "fresh");
+        assert_eq!(
+            fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
     #[test]
     fn test_state_clear_removes_transactional_backups() {
-        let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
         let dir = tempfile::tempdir().unwrap();
-        guard.set("HOME", dir.path().to_str().unwrap());
-        guard.remove("AGENT_BROWSER_NAMESPACE");
-
-        let sessions = get_sessions_dir();
+        let sessions = dir.path().join("sessions");
         fs::create_dir_all(&sessions).unwrap();
         fs::write(sessions.join("auth-test.json"), "{}").unwrap();
         fs::write(sessions.join("auth-test.json.previous"), "{}").unwrap();
         fs::write(sessions.join("auth-test.json.enc.previous"), "encrypted").unwrap();
 
-        let result = state_clear(None).unwrap();
+        let result = clear_state_files(&sessions).unwrap();
 
         assert_eq!(result["deleted"], 3);
         assert!(!sessions.join("auth-test.json").exists());
@@ -1035,6 +1127,29 @@ mod tests {
     fn test_dispatch_state_command_returns_none_for_unknown() {
         let cmd = serde_json::json!({ "action": "navigate" });
         assert!(dispatch_state_command(&cmd).is_none());
+    }
+
+    #[test]
+    fn canonical_origin_normalizes_saved_origins() {
+        assert_eq!(
+            canonical_origin("https://Example.COM:443/app/").as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            canonical_origin("http://example.com:80").as_deref(),
+            Some("http://example.com")
+        );
+        assert_eq!(
+            canonical_origin("https://example.com/").as_deref(),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn canonical_origin_rejects_non_tuple_origins() {
+        assert_eq!(canonical_origin("null"), None);
+        assert_eq!(canonical_origin("file:///tmp/page/"), None);
+        assert_eq!(canonical_origin("not a url/"), None);
     }
 
     #[test]
