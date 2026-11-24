@@ -231,6 +231,7 @@ pub struct MouseState {
     pub x: f64,
     pub y: f64,
     pub buttons: i32,
+    pub modifiers: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -2935,11 +2936,23 @@ async fn record_flow_step(action: &str, cmd: &Value, state: &mut DaemonState) {
             None => None,
         };
         let traits = flow_field_traits(action, cmd, state).await;
-        state
-            .flow
-            .begin(action, cmd, &state.ref_map, from_url, traits.as_ref());
+        state.flow.begin(
+            action,
+            cmd,
+            &state.ref_map,
+            from_url,
+            traits.as_ref(),
+            state.mouse_state.modifiers,
+        );
     } else {
-        state.flow.begin(action, cmd, &state.ref_map, None, None);
+        state.flow.begin(
+            action,
+            cmd,
+            &state.ref_map,
+            None,
+            None,
+            state.mouse_state.modifiers,
+        );
     }
 }
 
@@ -7813,7 +7826,14 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     // Parse modifier+key chords like "Control+a", "Shift+Enter", "Control+Shift+a"
     let (actual_key, modifiers) = parse_key_chord(key);
 
-    interaction::press_key_with_modifiers(&mgr.client, &session_id, &actual_key, modifiers).await?;
+    interaction::press_key_with_chord_and_held(
+        &mgr.client,
+        &session_id,
+        &actual_key,
+        modifiers.unwrap_or(0),
+        state.mouse_state.modifiers,
+    )
+    .await?;
     Ok(json!({ "pressed": key }))
 }
 
@@ -15930,7 +15950,7 @@ fn build_mouse_event_params(
         click_count,
         delta_x,
         delta_y,
-        modifiers,
+        modifiers: modifiers.or((mouse_state.modifiers != 0).then_some(mouse_state.modifiers)),
     }
 }
 
@@ -16013,7 +16033,7 @@ async fn handle_input_touch(cmd: &Value, state: &DaemonState) -> Result<Value, S
     Ok(json!({ "dispatched": event_type }))
 }
 
-async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let key = cmd
@@ -16021,17 +16041,13 @@ async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
-    mgr.client
-        .send_command(
-            "Input.dispatchKeyEvent",
-            Some(json!({ "type": "keyDown", "key": key })),
-            Some(&session_id),
-        )
-        .await?;
+    let next_modifiers =
+        interaction::key_down(&mgr.client, &session_id, key, state.mouse_state.modifiers).await?;
+    state.mouse_state.modifiers = next_modifiers;
     Ok(json!({ "keydown": key }))
 }
 
-async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_keyup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let key = cmd
@@ -16039,13 +16055,9 @@ async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String>
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
-    mgr.client
-        .send_command(
-            "Input.dispatchKeyEvent",
-            Some(json!({ "type": "keyUp", "key": key })),
-            Some(&session_id),
-        )
-        .await?;
+    let next_modifiers =
+        interaction::key_up(&mgr.client, &session_id, key, state.mouse_state.modifiers).await?;
+    state.mouse_state.modifiers = next_modifiers;
     Ok(json!({ "keyup": key }))
 }
 
@@ -17305,6 +17317,7 @@ mod tests {
             x: 50.0,
             y: 60.0,
             buttons: 1,
+            modifiers: 0,
         };
         let mgr = state.browser.as_ref().unwrap();
         mgr.client
@@ -22095,12 +22108,89 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         state.mouse_state.x = 12.0;
         state.mouse_state.y = 34.0;
         state.mouse_state.buttons = 1;
+        state.mouse_state.modifiers = 8;
 
         state.reset_input_state();
 
         assert_eq!(state.mouse_state.x, 0.0);
         assert_eq!(state.mouse_state.y, 0.0);
         assert_eq!(state.mouse_state.buttons, 0);
+        assert_eq!(state.mouse_state.modifiers, 0);
+    }
+
+    #[test]
+    fn test_mouse_event_params_carry_held_modifiers() {
+        let mut mouse_state = MouseState {
+            modifiers: 1 | 8,
+            ..MouseState::default()
+        };
+        let held = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseMoved",
+            Some(1.0),
+            Some(1.0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(held.modifiers, Some(9));
+
+        let explicit = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseMoved",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(2),
+        );
+        assert_eq!(explicit.modifiers, Some(2));
+
+        mouse_state.modifiers = 0;
+        let none = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseMoved",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(none.modifiers, None);
+    }
+
+    #[test]
+    fn a_relaunch_releases_shift_for_keys_recorded_into_a_secret_field() {
+        let secret = crate::native::flow::FieldTraits::from_value(&json!({ "type": "password" }));
+        let press = |state: &mut DaemonState, key: &str| {
+            let held = state.mouse_state.modifiers;
+            state.flow.begin(
+                "press",
+                &json!({ "action": "press", "key": key }),
+                &RefMap::new(),
+                None,
+                Some(&secret),
+                held,
+            );
+        };
+        let mut state = DaemonState::new();
+        state.flow.begin_capture(None);
+        state.mouse_state.modifiers = 8;
+        press(&mut state, "a");
+        assert_eq!(state.flow.key_buffer(), "A");
+        state.reset_input_state();
+        assert_eq!(state.mouse_state.modifiers, 0);
+        press(&mut state, "b");
+        assert_eq!(state.flow.key_buffer(), "Ab");
     }
 
     #[test]
@@ -23651,6 +23741,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             &RefMap::new(),
             None,
             None,
+            0,
         );
         let resp =
             execute_command(&json!({ "id": "s", "action": "session_info" }), &mut state).await;
@@ -24278,6 +24369,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 &RefMap::new(),
                 None,
                 None,
+                0,
             )
             .unwrap();
         state.flow.tag(

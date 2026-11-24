@@ -5229,6 +5229,33 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_typed_with_shift_is_gathered_as_the_shifted_characters() {
+        let mut r = recorded(&[]);
+        let refs = crate::native::element::RefMap::new();
+        let secret = traits("password", "", "pw");
+        let step = |r: &mut FlowRecorder, action: &str, key: &str, held: i32| {
+            r.begin(
+                action,
+                &json!({ "action": action, "key": key }),
+                &refs,
+                None,
+                Some(&secret),
+                held,
+            );
+        };
+        step(&mut r, "press", "Shift+h", 0);
+        step(&mut r, "press", "Shift+1", 0);
+        step(&mut r, "keydown", "Shift", 0);
+        step(&mut r, "press", "a", 8);
+        step(&mut r, "keyup", "Shift", 8);
+        step(&mut r, "press", "b", 0);
+        assert_eq!(r.key_buffer(), "H!Ab");
+        assert_withheld(&mut r, "H!Ab");
+        step(&mut r, "press", "Alt+x", 0);
+        assert_eq!(r.key_buffer(), "");
+    }
+
+    #[test]
     fn short_secrets_are_redacted_and_short_plain_values_are_not_templated() {
         for kind in ["fill", "inserttext"] {
             let mut r = recorded(&[]);
