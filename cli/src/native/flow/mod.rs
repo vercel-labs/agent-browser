@@ -8771,6 +8771,135 @@ mod tests {
             );
         }
 
+        /// A browser that reports each command's request only after a couple
+        /// of polls, the way Chrome delivers it a moment after the click
+        /// returns.
+        struct LateBrowser {
+            due: Option<(HarEntry, u32)>,
+            entries: Vec<HarEntry>,
+            order: Vec<String>,
+        }
+
+        #[async_trait::async_trait]
+        impl Browser for LateBrowser {
+            async fn cookie_header(&mut self, _: &str) -> Option<String> {
+                None
+            }
+            async fn routed_response(&mut self, _: &str) -> Option<RoutedResponse> {
+                None
+            }
+            async fn tab_url(&mut self) -> Option<String> {
+                Some("https://a.test/".to_string())
+            }
+            async fn eval(&mut self, _: &str) -> Result<Value, String> {
+                Err("no page".to_string())
+            }
+            async fn ensure_browser(&mut self) -> Result<(), String> {
+                Ok(())
+            }
+            async fn begin_capture(&mut self) -> Result<usize, String> {
+                Ok(0)
+            }
+            async fn run(&mut self, cmd: &Value) -> Value {
+                let selector = cmd["selector"].as_str().unwrap_or("").to_string();
+                self.order.push(format!("run {selector}"));
+                let url = match selector.as_str() {
+                    "#session" => Some("https://a.test/api/session"),
+                    "#items" => Some("https://a.test/api/items?u=ana"),
+                    _ => None,
+                };
+                // The request reaches the capture only after the next poll, so
+                // a caller that checks once and moves on misses it.
+                self.due = url.map(|u| {
+                    (
+                        finished(entry("p", u, "Fetch", "application/json", "{}")),
+                        2,
+                    )
+                });
+                json!({ "success": true })
+            }
+            async fn captured_since(&mut self, _: usize) -> Vec<HarEntry> {
+                if let Some((e, polls)) = self.due.take() {
+                    if polls == 0 {
+                        self.order.push(format!("saw {}", e.url));
+                        self.entries.push(e);
+                    } else {
+                        self.due = Some((e, polls - 1));
+                    }
+                }
+                self.entries.clone()
+            }
+            async fn end_capture(&mut self) {}
+            fn write_approved(&self, _: &Write) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        fn two_clicks() -> Flow {
+            flow_of(json!({ "steps": [
+                { "command": { "action": "navigate", "url": "https://a.test/" } },
+                { "command": { "action": "click", "selector": "#session" }, "requests": [
+                    { "id": "s1r1", "method": "GET", "url": "https://a.test/api/session" }] },
+                { "command": { "action": "click", "selector": "#items" }, "requests": [
+                    { "id": "s2r1", "method": "GET", "url": "https://a.test/api/items?u=ana" }] }
+            ]}))
+        }
+
+        #[test]
+        fn the_next_command_waits_for_the_requests_the_last_one_sent() {
+            let flow = two_clicks();
+            let mut browser = LateBrowser {
+                due: None,
+                entries: Vec::new(),
+                order: Vec::new(),
+            };
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(5),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            let order = browser.order;
+            let session_seen = order
+                .iter()
+                .position(|e| e == "saw https://a.test/api/session");
+            let items_run = order.iter().position(|e| e == "run #items");
+            assert!(
+                matches!((session_seen, items_run), (Some(seen), Some(ran)) if seen < ran),
+                "{order:#?}"
+            );
+        }
+
+        #[test]
+        fn a_recorded_request_the_page_no_longer_sends_does_not_hold_the_replay() {
+            let flow = two_clicks();
+            // The page sends none of the recorded requests this time.
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new());
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_millis(300),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            assert_eq!(browser.ran.len(), 3);
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+
         #[test]
         fn wait_globs_on_the_site_pass_the_replay_host_check() {
             let flow = flow_of(
