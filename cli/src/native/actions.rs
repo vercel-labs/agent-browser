@@ -1435,44 +1435,17 @@ impl DaemonState {
         self.apply_drained_events(drained).await
     }
 
-    /// Discard `Runtime.consoleAPICalled` and `Runtime.exceptionThrown` events
-    /// replayed for `session_id` by a `Runtime.disable` -> `Runtime.enable`
-    /// cycle, while keeping `frame_contexts` updated from the replayed
-    /// `Runtime.executionContextCreated` burst.
-    fn discard_replayed_runtime_events(&mut self, session_id: &str) {
-        let Some(ref mut rx) = self.event_rx else {
-            return;
-        };
-        loop {
-            match rx.try_recv() {
-                Ok(event) => {
-                    let sid = event.session_id.as_deref().unwrap_or_default();
-                    if event.method == "Runtime.executionContextCreated" {
-                        if let Some((frame_id, id)) =
-                            super::browser::parse_default_execution_context(&event.params)
-                        {
-                            self.frame_contexts.insert((sid.to_string(), frame_id), id);
-                        }
-                    } else if sid == session_id
-                        && matches!(
-                            event.method.as_str(),
-                            "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
-                        )
-                    {
-                        continue;
-                    }
-                }
-                Err(broadcast::error::TryRecvError::Empty) => break,
-                Err(broadcast::error::TryRecvError::Lagged(_)) => {
-                    self.frame_contexts.clear();
-                    continue;
-                }
-                Err(broadcast::error::TryRecvError::Closed) => {
-                    self.event_rx = None;
-                    break;
-                }
-            }
-        }
+    /// Drain pending CDP events while discarding `Runtime.consoleAPICalled` and
+    /// `Runtime.exceptionThrown` events replayed for `session_id` by a
+    /// `Runtime.disable` -> `Runtime.enable` cycle. All other events (targets,
+    /// network, page lifecycle, execution contexts, and console events from
+    /// other sessions) are dispatched normally in order.
+    async fn drain_discarding_replayed_runtime_events(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let drained = self.drain_cdp_events_filtered(Some(session_id));
+        self.apply_drained_events(drained).await
     }
 
     fn record_runtime_console_or_exception(&mut self, method: &str, params: &Value) {
@@ -1981,6 +1954,13 @@ impl DaemonState {
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
+        self.drain_cdp_events_filtered(None)
+    }
+
+    fn drain_cdp_events_filtered(
+        &mut self,
+        suppress_runtime_console_session: Option<&str>,
+    ) -> DrainedEvents {
         let rx = match self.event_rx.as_mut() {
             Some(rx) => rx,
             None => return DrainedEvents::default(),
@@ -2161,6 +2141,17 @@ impl DaemonState {
                             continue;
                         }
                         _ => {}
+                    }
+
+                    if let Some(suppressed_sid) = suppress_runtime_console_session {
+                        if event.session_id.as_deref().unwrap_or_default() == suppressed_sid
+                            && matches!(
+                                event.method.as_str(),
+                                "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+                            )
+                        {
+                            continue;
+                        }
                     }
 
                     let session_matches = session_matches(
@@ -7242,7 +7233,9 @@ async fn handle_evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                             mgr.frame_execution_context(&host.session_id, &frame_id)
                                 .await?
                         };
-                        state.discard_replayed_runtime_events(&host.session_id);
+                        let _ = state
+                            .drain_discarding_replayed_runtime_events(&host.session_id)
+                            .await;
                         state
                             .frame_contexts
                             .insert((host.session_id.clone(), frame_id.clone()), fresh_id);
@@ -27399,6 +27392,110 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(
             drained.early_iframe_console_events[0].1,
             "Runtime.consoleAPICalled"
+        );
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn test_drain_cdp_events_filtered_preserves_unrelated_events_while_suppressing_replay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ws = tokio_tungstenite::accept_async(stream).await;
+                std::future::pending::<()>().await;
+            }
+        });
+        let ws_url = format!("ws://{addr}/devtools/browser/test");
+        let client = crate::native::cdp::client::CdpClient::connect(&ws_url)
+            .await
+            .unwrap();
+        let mut mgr = crate::native::browser::BrowserManager::for_test(client, ws_url);
+        mgr.add_page(crate::native::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "t1".to_string(),
+            session_id: "s1".to_string(),
+            url: "https://example.com/".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let mut state = DaemonState::new();
+        state.browser = Some(mgr);
+        state.request_tracking = true;
+        state.active_iframe_sessions.insert("oopif-s1".to_string());
+        let (tx, rx) = broadcast::channel::<crate::native::cdp::types::CdpEvent>(64);
+        state.event_rx = Some(rx);
+
+        let send = |session_id: Option<&str>, method: &str, params: Value| {
+            let _ = tx.send(crate::native::cdp::types::CdpEvent {
+                method: method.to_string(),
+                params,
+                session_id: session_id.map(ToString::to_string),
+            });
+        };
+
+        // Interleave replayed console/exception events for `s1` with unrelated events:
+        // Target.attachedToTarget, Network.requestWillBeSent, Runtime.executionContextCreated,
+        // and console output from another active OOPIF session.
+        send(
+            Some("s1"),
+            "Runtime.consoleAPICalled",
+            json!({ "type": "log", "args": [{ "type": "string", "value": "replayed-s1-log" }] }),
+        );
+        send(
+            Some("s1"),
+            "Runtime.exceptionThrown",
+            json!({ "exceptionDetails": { "text": "replayed-s1-err", "lineNumber": 0, "columnNumber": 0 } }),
+        );
+        send(
+            None,
+            "Target.attachedToTarget",
+            json!({
+                "sessionId": "oopif-s2",
+                "targetInfo": { "targetId": "oopif-f2", "type": "iframe", "title": "", "url": "https://other.test/", "attached": true }
+            }),
+        );
+        send(
+            Some("s1"),
+            "Network.requestWillBeSent",
+            json!({ "requestId": "r1", "request": { "method": "GET", "url": "https://example.com/api" } }),
+        );
+        send(
+            Some("s1"),
+            "Runtime.executionContextCreated",
+            json!({ "context": { "id": 55, "auxData": { "frameId": "f-same", "isDefault": true } } }),
+        );
+        send(
+            Some("oopif-s1"),
+            "Runtime.consoleAPICalled",
+            json!({ "type": "log", "args": [{ "type": "string", "value": "other-oopif-log" }] }),
+        );
+
+        let drained = state.drain_cdp_events_filtered(Some("s1"));
+
+        // Replayed s1 console/exception were suppressed; other-oopif console was kept.
+        let console = state.event_tracker.get_console_json();
+        let logs: Vec<String> = console["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["text"].as_str().map(ToString::to_string))
+            .collect();
+        assert_eq!(logs, vec!["other-oopif-log"]);
+        let errors = state.event_tracker.get_errors_json();
+        assert!(errors["errors"].as_array().unwrap().is_empty());
+
+        // Target attach, network request, and execution context were all preserved.
+        assert_eq!(
+            drained.attached_iframe_sessions,
+            vec![("oopif-f2".to_string(), "oopif-s2".to_string())]
+        );
+        assert_eq!(state.tracked_requests.len(), 1);
+        assert_eq!(state.tracked_requests[0].url, "https://example.com/api");
+        assert_eq!(
+            state.frame_contexts.get(&("s1".into(), "f-same".into())),
+            Some(&55)
         );
         srv.abort();
     }
