@@ -315,10 +315,21 @@ impl FirefoxSession {
         }
     }
 
+    /// The live tab whose cookie jar and origin storage belong to this session, failing with
+    /// `tab_gone` when the pinned tab has closed so storage never falls back to the default jar.
+    pub fn storage_tab(&self) -> Result<&str, String> {
+        if let Some((context, last_url)) = self.contexts.pinned_gone() {
+            return Err(super::super::browser::tab_gone_error(context, last_url));
+        }
+        self.contexts
+            .storage_tab()
+            .ok_or_else(|| "No active Firefox tab".to_string())
+    }
+
     /// The BiDi storage partition of the active context's tab, so a storage command only touches
     /// that tab's cookie jar.
-    pub fn active_partition(&self) -> Value {
-        self.contexts.partition(self.contexts.active())
+    pub fn active_partition(&self) -> Result<Value, String> {
+        Ok(self.contexts.partition(self.storage_tab()?))
     }
 
     /// Removes the user contexts this session created once their last tab is gone.

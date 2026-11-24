@@ -2558,7 +2558,7 @@ read_only, disabled or not_editable. A label stands for its control.
 A value longer than maxlength is cut by the browser and reported as a value_truncated
 warning. If the page does not hold the value afterwards (it applies it late or rewrites
 it, or the page navigated before it could be read), the command still succeeds and
-prints a warning. These checks apply to the Chrome backend; the WebDriver backend fills
+prints a warning. These checks apply to Chrome and Firefox; the WebDriver backend fills
 without them.
 Put flags before --. Text after -- is literal, including values that look like flags.
 

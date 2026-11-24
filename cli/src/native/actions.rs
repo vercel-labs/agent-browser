@@ -32,7 +32,6 @@ use super::cookies;
 use super::diff;
 use super::downloads::{DownloadLedger, DownloadState};
 use super::element::RefMap;
-use super::firefox;
 use super::forms;
 use super::inspect_server::InspectServer;
 use super::interaction;
@@ -1422,6 +1421,29 @@ impl DaemonState {
         }
     }
 
+    /// Re-points the dashboard stream when the active Firefox session or tab differs from what
+    /// the stream server and frame poller currently serve.
+    pub(crate) async fn sync_firefox_live(&mut self) {
+        let Some(server) = self.stream_server.as_ref() else {
+            return;
+        };
+        let in_sync = match self.firefox.as_ref() {
+            Some(ff) => {
+                server
+                    .firefox_live_serves(&ff.bidi, ff.contexts.active_tab())
+                    .await
+                    && self
+                        .firefox_poller
+                        .as_ref()
+                        .is_some_and(|poller| poller.serves(&ff.bidi))
+            }
+            None => server.firefox_live_context().await.is_none(),
+        };
+        if !in_sync {
+            self.update_stream_client().await;
+        }
+    }
+
     /// Attach the recorder's own CDP session to the page behind `session_id`
     /// and spawn the task that screencasts into ffmpeg. The caller verifies
     /// ffmpeg before any navigation or restart teardown. Failures here roll the
@@ -1566,8 +1588,11 @@ impl DaemonState {
         {
             bidi::daemon::reset_page(self);
             self.update_stream_client().await;
-        } else if firefox_tabs_changed {
-            self.notify_firefox_tabs();
+        } else {
+            self.sync_firefox_live().await;
+            if firefox_tabs_changed {
+                self.notify_firefox_tabs();
+            }
         }
         if let Some(button) = held.filter(|_| self.pending_pointer_release.is_none()) {
             self.mouse_state.buttons &= !button.mask();
@@ -3447,6 +3472,7 @@ async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
     if !skip_launch_action(action) {
         warn_if_browser_outdated(state, &mut resp).await;
     }
+    state.sync_firefox_live().await;
     resp
 }
 
@@ -28420,6 +28446,19 @@ mod firefox_routing_tests {
     async fn pin_tab_propagates_to_firefox_and_reports_structured_tab_gone() {
         let _guard = clean_env();
         let (mut state, calls) = firefox_state().await;
+        let activity = Arc::new(IdleActivity::new());
+        let (server, slot) =
+            StreamServer::start_without_client(0, "firefox-pin-test".into(), true, activity)
+                .await
+                .unwrap();
+        let server = Arc::new(server);
+        state.stream_server = Some(Arc::clone(&server));
+        state.stream_client = Some(slot);
+        state.update_stream_client().await;
+        assert_eq!(
+            server.firefox_live_context().await.as_deref(),
+            Some("ctx-active")
+        );
 
         let resp = execute_command(
             &json!({"id": "1", "action": "url", "settings": {"pin-tab": true}}),
@@ -28442,6 +28481,8 @@ mod firefox_routing_tests {
             assert_eq!(ff.contexts.active(), "ctx-active");
             ff.contexts.remove("ctx-active");
         }
+        state.update_stream_client().await;
+        assert_eq!(server.firefox_live_context().await.as_deref(), Some(""));
 
         let before_calls = calls.lock().unwrap().len();
         let resp = execute_command(
@@ -28473,6 +28514,10 @@ mod firefox_routing_tests {
         assert_eq!(
             state.firefox.as_ref().unwrap().contexts.active(),
             "ctx-popup"
+        );
+        assert_eq!(
+            server.firefox_live_context().await.as_deref(),
+            Some("ctx-popup")
         );
     }
 }
