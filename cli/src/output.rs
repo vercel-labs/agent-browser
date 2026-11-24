@@ -2463,6 +2463,10 @@ Click and dblclick fail, instead of reporting success, when the element
 is hidden, disabled, or outside the viewport. With --new-tab, click opens
 the link's URL directly, so these checks do not apply.
 
+The exception is a hidden checkbox or radio input, the usual markup of a
+styled control. Click activates its visible label, or the input itself when
+it has none, and prints a note that says which. A disabled one still fails.
+
 Options:
   --button <button>    Mouse button to press: left (default), right, middle,
                        back, forward. A right click fires contextmenu, a middle
