@@ -424,6 +424,19 @@ impl BidiClient {
         .await
     }
 
+    /// Runs a function in `context` with `this` set to a remote object
+    /// reference, telling a script that threw apart from a failed command.
+    pub(crate) async fn run_function(
+        &self,
+        context: &str,
+        js: &str,
+        this: Value,
+        args: Vec<Value>,
+    ) -> Result<Script, BidiError> {
+        self.script_call(json!({"context": context}), js, Some(this), args)
+            .await
+    }
+
     async fn call_function_target(
         &self,
         target: Value,
@@ -431,6 +444,23 @@ impl BidiClient {
         this: Option<Value>,
         args: Vec<Value>,
     ) -> Result<Value, String> {
+        match self
+            .script_call(target, js, this, args)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Script::Returned(value) => Ok(value),
+            Script::Threw(text) => Err(text),
+        }
+    }
+
+    async fn script_call(
+        &self,
+        target: Value,
+        js: &str,
+        this: Option<Value>,
+        args: Vec<Value>,
+    ) -> Result<Script, BidiError> {
         let mut params = json!({
             "functionDeclaration": js,
             "target": target,
@@ -441,15 +471,24 @@ impl BidiClient {
         if let Some(t) = this {
             params["this"] = t;
         }
-        let r = self.send("script.callFunction", params).await?;
+        let r = self.send_raw("script.callFunction", params).await?;
         if r["type"] == "exception" {
-            return Err(r["exceptionDetails"]["text"]
-                .as_str()
-                .unwrap_or("script exception")
-                .to_string());
+            return Ok(Script::Threw(
+                r["exceptionDetails"]["text"]
+                    .as_str()
+                    .unwrap_or("script exception")
+                    .to_string(),
+            ));
         }
-        Ok(remote_to_json(&r["result"]))
+        Ok(Script::Returned(remote_to_json(&r["result"])))
     }
+}
+
+/// What a function the browser ran ended with.
+pub(crate) enum Script {
+    Returned(Value),
+    /// The script threw; the text is the page's.
+    Threw(String),
 }
 
 /// Wraps plain JSON as a BiDi LocalValue; values that already carry `type` or `sharedId` pass through.
