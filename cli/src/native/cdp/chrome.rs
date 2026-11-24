@@ -1368,7 +1368,7 @@ async fn resolve_cdp_from_active_port_within(
 /// permission prompt, so this must leave time to approve it (#1365). It stays
 /// below the client's 30s read timeout (`connection::read_timeout_for`) so the
 /// daemon answers before the client gives up and retries.
-const AUTO_CONNECT_WS_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const AUTO_CONNECT_WS_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 
 enum WsVerify {
     Live,
