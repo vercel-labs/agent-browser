@@ -549,7 +549,12 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
         if cfg!(windows) {
-            seed_blank_password_probe_cache(&dir);
+            if let Err(error) = seed_blank_password_probe_cache(&dir) {
+                let _ = std::fs::remove_dir(&dir);
+                return Err(format!(
+                    "Failed to initialize temporary Windows Chrome profile: {error}"
+                ));
+            }
         }
         args.push(format!("--user-data-dir={}", dir.display()));
         (dir.clone(), Some(dir))
@@ -870,7 +875,8 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
 
     let effective_options = resolved_options.as_ref().unwrap_or(options);
 
-    let max_attempts = 3;
+    // A failed startup can still have attempted Windows authentication.
+    let max_attempts = if cfg!(windows) { 1 } else { 3 };
     let mut last_err = String::new();
 
     for attempt in 1..=max_attempts {
@@ -915,6 +921,11 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         user_data_dir,
         temp_user_data_dir,
     } = build_chrome_args(options)?;
+
+    if cfg!(windows) && temp_user_data_dir.is_none() {
+        initialize_empty_chrome_profile(&user_data_dir)
+            .map_err(|e| format!("Failed to initialize Windows Chrome profile: {e}"))?;
+    }
 
     // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
     // Puppeteer does similar cleanup before spawning.
@@ -1612,9 +1623,8 @@ const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
 /// a failed logon (Security event 4625), so a new temp profile per session
 /// counts toward the account lockout threshold. Chrome reads
 /// `os_password_last_changed` as an int64 pref, which `Local State` stores as a
-/// JSON string; `i64::MAX` keeps the cache valid after password changes.
-/// Best effort: a write failure only means the probe runs as before.
-fn seed_blank_password_probe_cache(user_data_dir: &Path) {
+/// JSON string. A future timestamp makes the first startup use the cached result.
+fn seed_blank_password_probe_cache(user_data_dir: &Path) -> std::io::Result<()> {
     let local_state = serde_json::json!({
         "password_manager": {
             "os_password_blank": false,
@@ -1622,14 +1632,27 @@ fn seed_blank_password_probe_cache(user_data_dir: &Path) {
         }
     });
     let path = user_data_dir.join("Local State");
-    if let Err(e) = std::fs::write(&path, local_state.to_string()) {
-        let _ = writeln!(
-            std::io::stderr(),
-            "Warning: could not write {}: {}",
-            path.display(),
-            e
-        );
+    let mut file = std::fs::File::create_new(&path)?;
+    let result = file.write_all(local_state.to_string().as_bytes());
+    drop(file);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&path);
     }
+    result
+}
+
+/// Prepare the first run for an empty explicit profile. An established profile
+/// can contain device authentication settings Chrome already manages.
+fn initialize_empty_chrome_profile(user_data_dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(user_data_dir)?;
+    if std::fs::read_dir(user_data_dir)?
+        .next()
+        .transpose()?
+        .is_none()
+    {
+        seed_blank_password_probe_cache(user_data_dir)?;
+    }
+    Ok(())
 }
 
 /// Copies a Chrome profile subdirectory and `Local State` to a temp directory
@@ -2368,7 +2391,7 @@ exec sleep 60
         let dir =
             std::env::temp_dir().join(format!("agent-browser-seed-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        seed_blank_password_probe_cache(&dir);
+        seed_blank_password_probe_cache(&dir).unwrap();
         let text = std::fs::read_to_string(dir.join("Local State")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         let pm = &json["password_manager"];
@@ -2379,6 +2402,51 @@ exec sleep 60
             serde_json::Value::String(i64::MAX.to_string())
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_seed_blank_password_probe_cache_preserves_existing_local_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_state = dir.path().join("Local State");
+        let original = br#"{"browser":{"existing":true}}"#;
+        std::fs::write(&local_state, original).unwrap();
+
+        let error = seed_blank_password_probe_cache(dir.path()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        initialize_empty_chrome_profile(dir.path()).unwrap();
+        assert_eq!(std::fs::read(local_state).unwrap(), original);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_chrome_launch_prepares_empty_explicit_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("new-profile");
+        let options = LaunchOptions {
+            profile: Some(profile.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let result = try_launch_chrome(&dir.path().join("unavailable-browser.exe"), &options);
+        assert!(result.is_err());
+        let state = std::fs::read_to_string(profile.join("Local State")).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+        assert_eq!(state["password_manager"]["os_password_blank"], false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_chrome_launch_stops_when_profile_preparation_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"file where a directory must be created").unwrap();
+        let options = LaunchOptions {
+            profile: Some(blocked.join("profile").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let error = try_launch_chrome(&dir.path().join("unavailable-browser.exe"), &options)
+            .err()
+            .expect("profile initialization should fail before spawning");
+        assert!(error.contains("Failed to initialize Windows Chrome profile"));
     }
 
     #[test]
