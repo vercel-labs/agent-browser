@@ -128,6 +128,41 @@ fn poppy_join_guard_script(release_token: &str) -> String {
             BlockedWT.prototype = OrigWT.prototype;
             _global.WebTransport = BlockedWT;
         }}
+        if (typeof _global.fetch === 'function') {{
+            const OrigFetch = _global.fetch;
+            _remember('fetch', OrigFetch);
+            _global.fetch = function(input, init) {{
+                const keepalive = Boolean(
+                    (init && typeof init === 'object' && init.keepalive) ||
+                    (input && typeof input === 'object' && input.keepalive)
+                );
+                if (keepalive) {{
+                    const rawUrl = typeof input === 'string'
+                        ? input
+                        : (input && typeof input.url === 'string' ? input.url : String(input));
+                    _notify('Fetch', _resolveUrl(rawUrl, false));
+                    return Promise.reject(_securityError('keepalive fetch blocked during join'));
+                }}
+                return OrigFetch.apply(this, arguments);
+            }};
+        }}
+        if (_global.navigator && typeof _global.navigator.sendBeacon === 'function') {{
+            const nav = _global.navigator;
+            const beaconDesc = Object.getOwnPropertyDescriptor(nav, 'sendBeacon');
+            if (!_isWorker) {{
+                _restorers.push(() => {{
+                    if (beaconDesc) {{
+                        Object.defineProperty(nav, 'sendBeacon', beaconDesc);
+                    }} else {{
+                        delete nav.sendBeacon;
+                    }}
+                }});
+            }}
+            nav.sendBeacon = function(url) {{
+                _notify('Beacon', _resolveUrl(url, false));
+                return false;
+            }};
+        }}
         function _blockCtor(name, api) {{
             if (typeof _global[name] !== 'function') return;
             const orig = _global[name];
@@ -757,15 +792,20 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
     };
     let result = result.map_err(|e| guard.redact(e));
     let join_succeeded = result.is_ok();
+    let adopted = guard.adopted();
+    if !join_succeeded {
+        let _ = timeout(
+            CLEANUP_TIMEOUT,
+            leave_join_page(state, &session_id, &adopted),
+        )
+        .await;
+    }
     *state.poppy_guard.write().await = None;
     let _ = timeout(CLEANUP_TIMEOUT, async {
-        if !join_succeeded {
-            leave_join_page(state, &session_id).await;
-        }
         guard.remove_session_guards(&client, join_succeeded).await;
         let _ = super::actions::sync_fetch_interception(state, &session_id).await;
-        for adopted in guard.adopted() {
-            let _ = super::actions::sync_fetch_interception(state, &adopted).await;
+        for sid in &adopted {
+            let _ = super::actions::sync_fetch_interception(state, sid).await;
         }
     })
     .await;
@@ -890,8 +930,10 @@ async fn run_join(
     Ok(json!({ "experimental": true, "joined": true, "signed_in": signed_in, "url": url }))
 }
 
-/// Returns the tab to `about:blank` after a failed join.
-async fn leave_join_page(state: &mut DaemonState, session_id: &str) {
+/// Returns the join tab (and any adopted page sessions) to `about:blank` after
+/// a failed join, waiting for the navigation and unload to settle while the
+/// join guard is still active.
+async fn leave_join_page(state: &mut DaemonState, session_id: &str, adopted: &[String]) {
     let Some(mgr) = state
         .browser
         .as_ref()
@@ -899,14 +941,46 @@ async fn leave_join_page(state: &mut DaemonState, session_id: &str) {
     else {
         return;
     };
-    let _ = mgr
-        .client
+    let client = mgr.client.clone();
+    let mut nav_events = client.subscribe_methods_bounded(
+        &["Page.frameNavigated", "Page.loadEventFired"],
+        GUARD_EVENT_CAPACITY,
+    );
+    for sid in adopted {
+        let _ = client
+            .send_command(
+                "Page.navigate",
+                Some(json!({ "url": "about:blank" })),
+                Some(sid),
+            )
+            .await;
+    }
+    let navigated = client
         .send_command(
             "Page.navigate",
             Some(json!({ "url": "about:blank" })),
             Some(session_id),
         )
         .await;
+    if navigated.is_ok() {
+        let mut saw_blank = false;
+        while let Some(event) = nav_events.recv().await {
+            if event.session_id.as_deref() != Some(session_id) {
+                continue;
+            }
+            match event.method.as_str() {
+                "Page.frameNavigated"
+                    if event.params.pointer("/frame/parentId").is_none()
+                        && event.params.pointer("/frame/url").and_then(Value::as_str)
+                            == Some("about:blank") =>
+                {
+                    saw_blank = true;
+                }
+                "Page.loadEventFired" if saw_blank => break,
+                _ => {}
+            }
+        }
+    }
     state.ref_map.invalidate_page(session_id);
 }
 
