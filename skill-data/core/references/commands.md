@@ -136,7 +136,7 @@ agent-browser get box @e1         # Get bounding box
 agent-browser get styles @e1      # Get computed styles (font, color, bg, etc.)
 ```
 
-A batch containing only `get cdp-url` commands also skips browser launch. A mixed batch can launch a browser for its other commands.
+On a session with no browser, `--cdp` or `--auto-connect` makes `get cdp-url` attach to the browser that flag names first, as `connect` does. A session that already has a browser keeps it. A batch containing only `get cdp-url` commands also skips browser launch. A mixed batch can launch a browser for its other commands.
 
 ## Check State
 

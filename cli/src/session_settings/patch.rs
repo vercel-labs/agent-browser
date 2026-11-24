@@ -266,6 +266,36 @@ impl Patch {
         live
     }
 
+    /// The external browser this patch attaches to: a `--cdp` endpoint or
+    /// `--auto-connect`. A provider is not one, because connecting to it
+    /// starts a remote browser.
+    pub fn names_attach_target(&self) -> bool {
+        self.value(Key::Cdp)
+            .and_then(Value::as_str)
+            .is_some_and(|cdp| !cdp.trim().is_empty())
+            || self.value(Key::AutoConnect) == Some(&Value::Bool(true))
+    }
+
+    /// What a command that never launches a browser but may attach to one
+    /// can apply: the live settings plus, when the patch names an attach
+    /// target, that target, its CDP headers, and the allowed domains, so
+    /// the attach is refused where `connect` would refuse it.
+    pub fn attach_settings_only(&self) -> Patch {
+        let attaches = self.names_attach_target();
+        let mut patch = self.clone();
+        patch.relaunch = false;
+        patch.entries.retain(|key, _| {
+            spec(*key).effect == Effect::Live
+                || (attaches
+                    && matches!(
+                        key,
+                        Key::Cdp | Key::AutoConnect | Key::CdpHeaders | Key::AllowedDomains
+                    ))
+        });
+        patch.retain_ambient();
+        patch
+    }
+
     /// The patch without the security settings that apply at once (action
     /// policy, confirm actions): what a confirmation replay may apply, so it
     /// cannot put back a policy that changed after the command was parked.
