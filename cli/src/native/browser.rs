@@ -1799,7 +1799,14 @@ impl BrowserManager {
         script: &str,
     ) -> Result<RemoteObject, String> {
         let session_id = self.active_session_id()?.to_string();
+        self.evaluate_remote_object_in(script, &session_id).await
+    }
 
+    pub(crate) async fn evaluate_remote_object_in(
+        &self,
+        script: &str,
+        session_id: &str,
+    ) -> Result<RemoteObject, String> {
         let result: EvaluateResult = self
             .client
             .send_command_typed(
@@ -1809,7 +1816,7 @@ impl BrowserManager {
                     return_by_value: Some(true),
                     await_promise: Some(true),
                 },
-                Some(&session_id),
+                Some(session_id),
             )
             .await?;
 
@@ -1823,6 +1830,101 @@ impl BrowserManager {
         }
 
         Ok(result.result)
+    }
+
+    pub(crate) async fn evaluate_in_same_process_frame(
+        &self,
+        script: &str,
+        session_id: &str,
+        frame_id: &str,
+        known_context_id: Option<i64>,
+    ) -> Result<RemoteObject, String> {
+        let evaluate = |context_id: Option<i64>| async move {
+            let context_id = match context_id {
+                Some(id) => id,
+                None => self.frame_execution_context(session_id, frame_id).await?,
+            };
+            self.client
+                .send_command_typed::<_, EvaluateResult>(
+                    "Runtime.evaluate",
+                    &json!({
+                        "expression": script,
+                        "returnByValue": true,
+                        "awaitPromise": true,
+                        "contextId": context_id,
+                    }),
+                    Some(session_id),
+                )
+                .await
+        };
+        let result = match evaluate(known_context_id).await {
+            Ok(result) => result,
+            Err(error) if error.contains("Cannot find context") => evaluate(None)
+                .await
+                .map_err(|error| format!("Evaluation error: {}", error))?,
+            Err(error) => return Err(error),
+        };
+        if let Some(ref details) = result.exception_details {
+            let msg = details
+                .exception
+                .as_ref()
+                .and_then(|e| e.description.as_deref())
+                .unwrap_or(&details.text);
+            return Err(format!("Evaluation error: {}", msg));
+        }
+        Ok(result.result)
+    }
+
+    async fn frame_execution_context(
+        &self,
+        session_id: &str,
+        frame_id: &str,
+    ) -> Result<i64, String> {
+        let mut rx = self.client.subscribe();
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.disable", Some(session_id))
+            .await;
+        if self
+            .client
+            .send_command_no_params("Runtime.enable", Some(session_id))
+            .await
+            .is_err()
+        {
+            self.client
+                .send_command_no_params("Runtime.enable", Some(session_id))
+                .await?;
+        }
+        let lookup = async {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if event.method != "Runtime.executionContextCreated"
+                            || event.session_id.as_deref().unwrap_or_default() != session_id
+                        {
+                            continue;
+                        }
+                        let context = &event.params["context"];
+                        let aux = &context["auxData"];
+                        let is_default = aux["isDefault"].as_bool().unwrap_or(false);
+                        if is_default && aux["frameId"].as_str() == Some(frame_id) {
+                            if let Some(id) = context["id"].as_i64() {
+                                return Ok(id);
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(
+                            "Lost the browser connection while resolving the frame".to_string()
+                        )
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), lookup)
+            .await
+            .map_err(|_| "Could not resolve the selected frame's execution context".to_string())?
     }
 
     async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {

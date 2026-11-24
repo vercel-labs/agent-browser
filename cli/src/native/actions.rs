@@ -287,6 +287,17 @@ fn is_active_iframe_network_event(
         && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
 }
 
+pub(super) fn is_active_iframe_console_event(
+    method: &str,
+    session_id: Option<&str>,
+    active_iframe_sessions: &HashSet<String>,
+) -> bool {
+    matches!(
+        method,
+        "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+    ) && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
+}
+
 fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
     !drained.attached_iframe_sessions.is_empty()
         || !drained.detached_iframe_sessions.is_empty()
@@ -728,6 +739,9 @@ pub struct DaemonState {
     /// second attachment event when returning to an already-attached tab.
     /// Target.detachedFromTarget events remove stale sessions.
     pub iframe_sessions: HashMap<String, String>,
+    /// (session_id, frame_id) -> default execution context id from
+    /// `Runtime.executionContextCreated`.
+    pub frame_contexts: HashMap<(String, String), i64>,
     /// Dedicated iframe sessions reachable from the currently active page.
     /// Network tracking uses this subset so background-tab iframe traffic is
     /// not mixed into the active tab's request list or HAR capture.
@@ -967,6 +981,7 @@ impl DaemonState {
             request_tracking: false,
             active_frame_id: None,
             iframe_sessions: HashMap::new(),
+            frame_contexts: HashMap::new(),
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             blocked_documents: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -1439,6 +1454,11 @@ impl DaemonState {
     }
 
     async fn apply_drained_events(&mut self, drained: DrainedEvents) -> Result<(), String> {
+        let previous_active_session = self
+            .browser
+            .as_ref()
+            .and_then(|browser| browser.active_session_id().ok())
+            .map(ToString::to_string);
         // Popups and externally closed pages can change the active top-level
         // target without changing iframe topology. Refresh after either kind
         // of event so network capture stays scoped to the active page.
@@ -1503,6 +1523,7 @@ impl DaemonState {
                     log_detached_during_setup("iframe", &error);
                     self.iframe_sessions.retain(|_, sid| sid != iframe_sid);
                     self.active_iframe_sessions.remove(iframe_sid);
+                    self.frame_contexts.retain(|(s, _), _| s != iframe_sid);
                 }
                 Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
@@ -1660,6 +1681,7 @@ impl DaemonState {
         for sid in &drained.detached_iframe_sessions {
             self.iframe_sessions.retain(|_, v| v != sid);
             self.active_iframe_sessions.remove(sid);
+            self.frame_contexts.retain(|(s, _), _| s != sid);
         }
 
         // Attach and register new targets
@@ -1741,6 +1763,16 @@ impl DaemonState {
                     eprintln!("Warning: failed to prepare new page session: {}", error);
                 }
             }
+        }
+
+        let current_active_session = self
+            .browser
+            .as_ref()
+            .and_then(|browser| browser.active_session_id().ok())
+            .map(ToString::to_string);
+        if current_active_session != previous_active_session {
+            self.active_frame_id = None;
+            self.active_iframe_sessions.clear();
         }
 
         // Update changed targets
@@ -2053,6 +2085,13 @@ impl DaemonState {
                             &self.active_iframe_sessions,
                         );
 
+                    let iframe_console_event = !session_matches
+                        && is_active_iframe_console_event(
+                            &event.method,
+                            event.session_id.as_deref(),
+                            &self.active_iframe_sessions,
+                        );
+
                     let webmcp_event = event.session_id.as_deref().is_some_and(|sid| {
                         (matches!(
                             event.method.as_str(),
@@ -2070,7 +2109,41 @@ impl DaemonState {
                                     || self.iframe_sessions.values().any(|known| known == sid)))
                     });
 
-                    if !session_matches && !iframe_network_event && !webmcp_event {
+                    match event.method.as_str() {
+                        "Runtime.executionContextCreated" => {
+                            let sid = event.session_id.as_deref().unwrap_or_default();
+                            let context = &event.params["context"];
+                            let aux = &context["auxData"];
+                            if aux["isDefault"].as_bool() == Some(true) {
+                                if let (Some(frame_id), Some(id)) =
+                                    (aux["frameId"].as_str(), context["id"].as_i64())
+                                {
+                                    self.frame_contexts
+                                        .insert((sid.to_string(), frame_id.to_string()), id);
+                                }
+                            }
+                        }
+                        "Runtime.executionContextsCleared" => {
+                            let sid = event.session_id.as_deref().unwrap_or_default();
+                            self.frame_contexts.retain(|(s, _), _| s != sid);
+                        }
+                        "Page.frameDetached" => {
+                            if let Some(frame_id) =
+                                event.params.get("frameId").and_then(Value::as_str)
+                            {
+                                let sid = event.session_id.as_deref().unwrap_or_default();
+                                self.frame_contexts
+                                    .remove(&(sid.to_string(), frame_id.to_string()));
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    if !session_matches
+                        && !iframe_network_event
+                        && !iframe_console_event
+                        && !webmcp_event
+                    {
                         continue;
                     }
 
@@ -2092,6 +2165,7 @@ impl DaemonState {
                                 let session_id = event.session_id.as_deref().unwrap_or_default();
                                 if frame.get("parentId").is_none() {
                                     if session_matches {
+                                        self.active_frame_id = None;
                                         self.webmcp.clear_page_scope(session_id);
                                     } else {
                                         self.webmcp.clear_page_tools(session_id);
@@ -2719,8 +2793,10 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.launch_identity = None;
     state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
+    state.active_frame_id = None;
     state.iframe_sessions.clear();
     state.active_iframe_sessions.clear();
+    state.frame_contexts.clear();
     state.webmcp.clear_all();
     state.screencasting = false;
     state.pending_dialog = None;
@@ -6992,12 +7068,48 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let result = mgr.evaluate_remote_object(script).await?;
+    let frame_id = state
+        .active_frame_id
+        .as_deref()
+        .filter(|_| state.engine == "chrome");
+    let (result, url) = match frame_id {
+        Some(frame_id) => {
+            let session_id = mgr.active_session_id()?.to_string();
+            let host = super::a11y::frame_host_info(
+                &mgr.client,
+                &session_id,
+                &state.iframe_sessions,
+                frame_id,
+            )
+            .await
+            .ok_or_else(|| "Could not locate the selected frame".to_string())?;
+            let result = if host.is_dedicated_session {
+                mgr.evaluate_remote_object_in(script, &host.session_id)
+                    .await?
+            } else {
+                let known = state
+                    .frame_contexts
+                    .get(&(host.session_id.clone(), frame_id.to_string()))
+                    .copied();
+                mgr.evaluate_in_same_process_frame(script, &host.session_id, frame_id, known)
+                    .await?
+            };
+            let origin = if host.url.is_empty() {
+                mgr.get_url().await.unwrap_or_default()
+            } else {
+                host.url
+            };
+            (result, origin)
+        }
+        None => (
+            mgr.evaluate_remote_object(script).await?,
+            mgr.get_url().await.unwrap_or_default(),
+        ),
+    };
     let unserializable = result
         .unserializable_value
         .clone()
         .or_else(|| (result.object_type == "undefined").then(|| "undefined".to_string()));
-    let url = mgr.get_url().await.unwrap_or_default();
     let mut data = json!({ "result": result.value.unwrap_or(Value::Null), "origin": url });
     if let Some(token) = unserializable {
         data["unserializable"] = json!(token);
@@ -26942,5 +27054,49 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
         assert!(elsewhere.domain_filter.read().await.is_none());
         assert!(sibling.domain_filter.read().await.is_none());
+    }
+
+    #[test]
+    fn test_is_active_iframe_console_event_filters_methods_and_sessions() {
+        let active = HashSet::from(["iframe-active".to_string()]);
+        assert!(is_active_iframe_console_event(
+            "Runtime.consoleAPICalled",
+            Some("iframe-active"),
+            &active,
+        ));
+        assert!(is_active_iframe_console_event(
+            "Runtime.exceptionThrown",
+            Some("iframe-active"),
+            &active,
+        ));
+        assert!(!is_active_iframe_console_event(
+            "Runtime.consoleAPICalled",
+            Some("iframe-background"),
+            &active,
+        ));
+        assert!(!is_active_iframe_console_event(
+            "Runtime.consoleAPICalled",
+            None,
+            &active,
+        ));
+        assert!(!is_active_iframe_console_event(
+            "Network.requestWillBeSent",
+            Some("iframe-active"),
+            &active,
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_close_current_browser_clears_active_frame_and_contexts() {
+        let mut state = DaemonState::new();
+        state.active_frame_id = Some("frame-1".to_string());
+        state
+            .frame_contexts
+            .insert(("session-1".to_string(), "frame-1".to_string()), 42);
+
+        close_current_browser(&mut state).await.unwrap();
+
+        assert!(state.active_frame_id.is_none());
+        assert!(state.frame_contexts.is_empty());
     }
 }

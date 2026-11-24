@@ -3115,6 +3115,7 @@ agent-browser eval - Execute JavaScript
 Usage: agent-browser eval [options] <script>
 
 Executes JavaScript code in the browser context and returns the result.
+After `frame <sel>`, the script runs in the selected iframe instead of the main frame.
 For a top-level Chrome result JSON cannot represent, plain output prints its JavaScript token and JSON output includes data.unserializable.
 
 Options:

@@ -3325,9 +3325,7 @@ async fn e2e_form_actions_clear_editable_in_same_origin_iframe() {
         let resp = execute_command(&cmd, &mut state).await;
         let got = evaluate_value(
             &mut state,
-            &format!(
-                "document.getElementById('f').contentDocument.getElementById('{id}').innerText"
-            ),
+            &format!("document.getElementById('{id}').innerText"),
         )
         .await;
         if resp["success"] != true || got != json!("new") {
@@ -21724,4 +21722,389 @@ async fn e2e_select_with_no_values_changes_nothing() {
 
     let _ = execute_command(&json!({ "id": "z", "action": "close" }), &mut state).await;
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+async fn start_iframe_eval_console_servers() -> (u16, u16, Vec<tokio::task::JoinHandle<()>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let primary = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let secondary = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p1 = primary.local_addr().unwrap().port();
+    let p2 = secondary.local_addr().unwrap().port();
+
+    let h1 = tokio::spawn(async move {
+        for _ in 0..200 {
+            let Ok((mut stream, _)) = primary.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let (ct, extra_hdr, body) = match path {
+                    "/" => (
+                        "text/html",
+                        "",
+                        format!(
+                            "<!doctype html><html><body>\
+                             <div id='top-marker'>top-page</div>\
+                             <iframe id='same' name='same' src='http://127.0.0.1:{p1}/same.html'></iframe>\
+                             <iframe id='cross-port' name='cross-port' src='http://127.0.0.1:{p2}/cross-port.html'></iframe>\
+                             <iframe id='oopif' name='oopif' src='http://localhost:{p1}/oopif.html'></iframe>\
+                             <button id='open-popup' onclick=\"window.open('http://127.0.0.1:{p1}/popup.html','_blank')\">Popup</button>\
+                             </body></html>"
+                        ),
+                    ),
+                    "/same.html" => (
+                        "text/html",
+                        "Content-Security-Policy: script-src 'self'\r\n",
+                        "<!doctype html><html><body><p id='p'>inside-same-csp</p><script src='/same.js'></script></body></html>".to_string(),
+                    ),
+                    "/same.js" => (
+                        "application/javascript",
+                        "",
+                        "window.__frameTag = 'same-csp';".to_string(),
+                    ),
+                    "/oopif.html" => (
+                        "text/html",
+                        "",
+                        "<!doctype html><html><body><p id='p'>inside-oopif</p><button id='oopif-btn'>OOPIF Button</button><script>\
+                         window.__frameTag = 'oopif';\
+                         console.log('[OOPIF-LOG] hello from cross-origin');\
+                         setTimeout(() => { throw new Error('OOPIF-BOOM'); }, 15);\
+                         </script></body></html>".to_string(),
+                    ),
+                    "/popup.html" => (
+                        "text/html",
+                        "",
+                        "<!doctype html><html><body><p id='p'>inside-popup</p><script>window.__frameTag = 'popup';</script></body></html>".to_string(),
+                    ),
+                    _ => ("text/plain", "", "not found".to_string()),
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\n{extra_hdr}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let h2 = tokio::spawn(async move {
+        for _ in 0..200 {
+            let Ok((mut stream, _)) = secondary.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = if path == "/cross-port.html" {
+                    "<!doctype html><html><body><p id='p'>inside-cross-port</p><button id='cp-btn'>CrossPort Button</button><script>window.__frameTag = 'cross-port';</script></body></html>"
+                } else {
+                    "not found"
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    (p1, p2, vec![h1, h2])
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_eval_in_same_origin_csp_cross_origin_and_oopif_frames() {
+    let (p1, p2, servers) = start_iframe_eval_console_servers().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let top_url = format!("http://127.0.0.1:{p1}/");
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": &top_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Main frame eval reports top-level origin.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "document.querySelector('#top-marker')?.textContent ?? null" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!("top-page"));
+    assert_eq!(get_data(&resp)["origin"], json!(top_url));
+
+    // Same-origin iframe with strict CSP (script-src 'self', no unsafe-eval).
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "frame", "selector": "#same" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "({ text: document.querySelector('#p')?.textContent, tag: window.__frameTag })" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!({ "text": "inside-same-csp", "tag": "same-csp" })
+    );
+    assert_eq!(
+        get_data(&resp)["origin"],
+        json!(format!("http://127.0.0.1:{p1}/same.html"))
+    );
+
+    // Cross-origin iframe on another port (same-site cross-origin, same-process):
+    // `contentWindow.eval` fails here, while `contextId` evaluation succeeds.
+    let resp = execute_command(&json!({ "id": "6", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "frame", "selector": "#cross-port" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "evaluate", "script": "({ text: document.querySelector('#p')?.textContent, tag: window.__frameTag })" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!({ "text": "inside-cross-port", "tag": "cross-port" })
+    );
+    assert_eq!(
+        get_data(&resp)["origin"],
+        json!(format!("http://127.0.0.1:{p2}/cross-port.html"))
+    );
+
+    // Cross-origin OOPIF on localhost (dedicated CDP session).
+    let active_sid = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_session_id()
+        .unwrap()
+        .to_string();
+    let mut oopif_frame = None;
+    for fid in state.iframe_sessions.keys() {
+        if let Some(host) = super::a11y::frame_host_info(
+            &state.browser.as_ref().unwrap().client,
+            &active_sid,
+            &state.iframe_sessions,
+            fid,
+        )
+        .await
+        {
+            if host.url.contains("/oopif.html") {
+                oopif_frame = Some(fid.clone());
+            }
+        }
+    }
+    let oopif_fid = oopif_frame.expect("oopif iframe should be attached");
+
+    state.active_frame_id = Some(oopif_fid);
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "({ text: document.querySelector('#p')?.textContent, tag: window.__frameTag })" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!({ "text": "inside-oopif", "tag": "oopif" })
+    );
+    assert_eq!(
+        get_data(&resp)["origin"],
+        json!(format!("http://localhost:{p1}/oopif.html"))
+    );
+
+    // Back to main frame.
+    let resp = execute_command(&json!({ "id": "10", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "evaluate", "script": "document.querySelector('#top-marker')?.textContent ?? null" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!("top-page"));
+    assert_eq!(get_data(&resp)["origin"], json!(top_url));
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    for h in servers {
+        h.abort();
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_eval_popup_clears_active_frame_and_rejects_foreign_frame() {
+    let (p1, _p2, servers) = start_iframe_eval_console_servers().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let top_url = format!("http://127.0.0.1:{p1}/");
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": &top_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let tab1_sid = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_session_id()
+        .unwrap()
+        .to_string();
+    let mut oopif_fid = None;
+    for fid in state.iframe_sessions.keys() {
+        if let Some(host) = super::a11y::frame_host_info(
+            &state.browser.as_ref().unwrap().client,
+            &tab1_sid,
+            &state.iframe_sessions,
+            fid,
+        )
+        .await
+        {
+            if host.url.contains("/oopif.html") {
+                oopif_fid = Some(fid.clone());
+            }
+        }
+    }
+    let oopif_fid = oopif_fid.expect("oopif iframe should be attached");
+
+    state.active_frame_id = Some(oopif_fid.clone());
+    let mgr = state.browser.as_ref().unwrap();
+    let _ = mgr
+        .evaluate_remote_object_in(
+            &format!("window.open('http://127.0.0.1:{p1}/popup.html', '_blank')"),
+            &tab1_sid,
+        )
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "window.__frameTag" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        state.active_frame_id.is_none(),
+        "popup tab switch must clear active_frame_id"
+    );
+    assert_eq!(get_data(&resp)["result"], json!("popup"));
+    assert_eq!(
+        get_data(&resp)["origin"],
+        json!(format!("http://127.0.0.1:{p1}/popup.html"))
+    );
+
+    // Even if active_frame_id points to a background tab's OOPIF, eval must refuse it.
+    state.active_frame_id = Some(oopif_fid);
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "window.__frameTag" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "foreign OOPIF eval must fail: {resp}"
+    );
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Could not locate the selected frame"),
+        "unexpected error: {resp}"
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    for h in servers {
+        h.abort();
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_console_captures_cross_origin_oopif_logs_and_errors() {
+    let (p1, _p2, servers) = start_iframe_eval_console_servers().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let top_url = format!("http://127.0.0.1:{p1}/");
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": &top_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+    let resp = execute_command(&json!({ "id": "3", "action": "console" }), &mut state).await;
+    assert_success(&resp);
+    let messages = get_data(&resp)["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["text"].as_str().unwrap_or("").contains("[OOPIF-LOG]")),
+        "expected cross-origin OOPIF console log, got: {messages:?}"
+    );
+
+    let resp = execute_command(&json!({ "id": "4", "action": "errors" }), &mut state).await;
+    assert_success(&resp);
+    let errors = get_data(&resp)["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["text"].as_str().unwrap_or("").contains("OOPIF-BOOM")),
+        "expected cross-origin OOPIF uncaught error, got: {errors:?}"
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    for h in servers {
+        h.abort();
+    }
 }

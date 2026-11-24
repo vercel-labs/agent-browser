@@ -382,6 +382,14 @@ struct FrameTarget {
     frame_id: String,
     session_id: String,
     parent_id: Option<String>,
+    url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameHost {
+    pub session_id: String,
+    pub url: String,
+    pub is_dedicated_session: bool,
 }
 
 fn collect_frame_targets(
@@ -408,6 +416,11 @@ fn collect_frame_targets(
                 .get("parentId")
                 .and_then(|id| id.as_str())
                 .map(ToString::to_string),
+            url: frame
+                .get("url")
+                .and_then(|u| u.as_str())
+                .unwrap_or_default()
+                .to_string(),
         };
         targets
             .entry(frame_id.to_string())
@@ -418,6 +431,9 @@ fn collect_frame_targets(
                     let mut authoritative = target.clone();
                     if authoritative.parent_id.is_none() {
                         authoritative.parent_id.clone_from(&existing.parent_id);
+                    }
+                    if authoritative.url.is_empty() {
+                        authoritative.url.clone_from(&existing.url);
                     }
                     *existing = authoritative;
                 }
@@ -516,7 +532,31 @@ fn frame_target(frame_id: &str, session_id: &str, parent_id: Option<&str>) -> Fr
         frame_id: frame_id.to_string(),
         session_id: session_id.to_string(),
         parent_id: parent_id.map(ToString::to_string),
+        url: String::new(),
     }
+}
+
+/// Resolve the CDP session and URL for `frame_id` within `top_session_id`'s
+/// active frame tree. Returns `None` if `frame_id` does not belong to the
+/// active page.
+pub async fn frame_host_info(
+    client: &CdpClient,
+    top_session_id: &str,
+    iframe_sessions: &HashMap<String, String>,
+    frame_id: &str,
+) -> Option<FrameHost> {
+    let (_, targets) = collect_frame_sessions(client, top_session_id, iframe_sessions)
+        .await
+        .ok()?;
+    let target = targets.into_iter().find(|t| t.frame_id == frame_id)?;
+    let is_dedicated_session = iframe_sessions
+        .get(frame_id)
+        .is_some_and(|sid| sid == &target.session_id);
+    Some(FrameHost {
+        session_id: target.session_id,
+        url: target.url,
+        is_dedicated_session,
+    })
 }
 
 /// Return the dedicated target sessions that belong to the active page's
@@ -900,6 +940,38 @@ mod tests {
 
         assert!(frame_reaches_top("active-child", "top", &targets));
         assert!(!frame_reaches_top("background-child", "top", &targets));
+    }
+
+    #[test]
+    fn test_collect_frame_targets_preserves_frame_url() {
+        let top_tree = json!({
+            "frame": { "id": "top", "url": "https://top.example/" },
+            "childFrames": [
+                {
+                    "frame": { "id": "child-same", "parentId": "top", "url": "https://top.example/same" }
+                },
+                {
+                    "frame": { "id": "child-oopif", "parentId": "top", "url": "https://other.example/embed" }
+                }
+            ]
+        });
+        let oopif_tree = json!({
+            "frame": { "id": "child-oopif", "url": "https://other.example/embed/live" }
+        });
+        let iframe_sessions =
+            HashMap::from([("child-oopif".to_string(), "oopif-session".to_string())]);
+        let mut targets = HashMap::new();
+        collect_frame_targets(&top_tree, "top-session", &iframe_sessions, &mut targets);
+        collect_frame_targets(&oopif_tree, "oopif-session", &iframe_sessions, &mut targets);
+
+        assert_eq!(targets["child-same"].session_id, "top-session");
+        assert_eq!(targets["child-same"].url, "https://top.example/same");
+        assert_eq!(targets["child-oopif"].session_id, "oopif-session");
+        assert_eq!(targets["child-oopif"].parent_id.as_deref(), Some("top"));
+        assert_eq!(
+            targets["child-oopif"].url,
+            "https://other.example/embed/live"
+        );
     }
 
     #[test]

@@ -1102,7 +1102,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_EVAL,
             "Evaluate JavaScript",
-            "Run JavaScript in the page using stdin to avoid shell escaping. When the top-level result is a value JSON cannot represent, the structured response includes `response.data.unserializable` and the text content prints the JavaScript token.",
+            "Run JavaScript in the page using stdin to avoid shell escaping. After a `frame` command selects an iframe, the script runs in that frame's context. When the top-level result is a value JSON cannot represent, the structured response includes `response.data.unserializable` and the text content prints the JavaScript token.",
             json!({
                 "script": { "type": "string", "description": "JavaScript expression or script to evaluate." }
             }),
