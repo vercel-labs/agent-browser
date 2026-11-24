@@ -10354,6 +10354,7 @@ async fn e2e_screenshot_annotate_iframe_coordinates() {
                         <iframe id='same' style='position:absolute;left:100px;top:250px;width:300px;height:100px;border:3px solid black' src='/same.html'></iframe>\
                         <iframe id='cross' style='position:absolute;left:450px;top:250px;width:300px;height:100px;border:4px solid black' src='http://127.0.0.1:{port_b}/cross.html'></iframe>\
                         <iframe id='scaled' style='position:absolute;left:100px;top:400px;width:200px;height:80px;border:0;transform:translate(50px,30px) scale(2);transform-origin:0 0' src='/scaled.html'></iframe>\
+                        <iframe id='oopif_scaled' style='position:absolute;left:500px;top:400px;width:200px;height:80px;border:0;transform:translate(20px,10px) scale(2);transform-origin:0 0' src='http://localhost:{port_b}/oopif.html'></iframe>\
                         <iframe id='outer' style='position:absolute;left:100px;top:650px;width:320px;height:140px;border:5px solid black' src='/outer.html'></iframe>\
                         </body>"
                     ),
@@ -10372,10 +10373,22 @@ async fn e2e_screenshot_annotate_iframe_coordinates() {
         while let Ok((mut stream, _)) = listener_b.accept().await {
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf).await;
-                let body = "<!doctype html><body style='margin:0'>\
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = if path == "/oopif.html" {
+                    "<!doctype html><body style='margin:0'>\
+                    <button style='display:block;width:50px;height:20px;margin:10px 0 0 15px;border:0'>OopifScaledBtn</button>\
+                    </body>"
+                } else {
+                    "<!doctype html><body style='margin:0'>\
                     <button style='display:block;width:110px;height:28px;margin:15px 0 0 25px;border:0'>CrossBtn</button>\
-                    </body>";
+                    </body>"
+                };
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -10446,6 +10459,10 @@ async fn e2e_screenshot_annotate_iframe_coordinates() {
     // transformed iframe: origin (100, 400) + translate(50, 30) = (150, 430),
     // child (15, 10) * scale(2) = (30, 20), size (50, 20) * scale(2) = (100, 40)
     assert_eq!(box_of(&annotations, "ScaledBtn"), (180, 450, 100, 40));
+    // cross-site OOPIF (127.0.0.1 -> localhost) with translate(20, 10) scale(2):
+    // origin (500, 400) + translate(20, 10) = (520, 410),
+    // child (15, 10) * scale(2) = (30, 20), size (50, 20) * scale(2) = (100, 40)
+    assert_eq!(box_of(&annotations, "OopifScaledBtn"), (550, 430, 100, 40));
 
     // Parent scroll: viewport-relative annotations shift by -120, fullPage stays in document coords.
     assert_evaluate(
@@ -10466,6 +10483,10 @@ async fn e2e_screenshot_annotate_iframe_coordinates() {
     assert_eq!(box_of(scrolled_ann, "SameBtn"), (143, 263 - 120, 100, 30));
     assert_eq!(box_of(scrolled_ann, "CrossBtn"), (479, 269 - 120, 110, 28));
     assert_eq!(box_of(scrolled_ann, "ScaledBtn"), (180, 450 - 120, 100, 40));
+    assert_eq!(
+        box_of(scrolled_ann, "OopifScaledBtn"),
+        (550, 430 - 120, 100, 40)
+    );
 
     let full_shot = execute_command(
         &json!({ "id": "6", "action": "screenshot", "annotate": true, "fullPage": true }),
@@ -10476,6 +10497,7 @@ async fn e2e_screenshot_annotate_iframe_coordinates() {
     let full_ann = get_data(&full_shot)["annotations"].as_array().unwrap();
     assert_eq!(box_of(full_ann, "SameBtn"), (143, 263, 100, 30));
     assert_eq!(box_of(full_ann, "CrossBtn"), (479, 269, 110, 28));
+    assert_eq!(box_of(full_ann, "OopifScaledBtn"), (550, 430, 100, 40));
 
     // Reset scroll and verify nested iframe (outer -> inner -> NestedBtn).
     assert_evaluate(

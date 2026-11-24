@@ -306,18 +306,20 @@ async fn collect_annotations(
     }
 
     if !iframe_entries.is_empty() {
-        let mut session_offsets: HashMap<String, (f64, f64)> = HashMap::new();
+        let mut session_transforms: HashMap<String, Affine2D> = HashMap::new();
         for (_, _, _, effective_session) in &iframe_entries {
-            if effective_session != session_id && !session_offsets.contains_key(effective_session) {
-                let offset = super::element::session_viewport_offset(
+            if effective_session != session_id
+                && !session_transforms.contains_key(effective_session)
+            {
+                let transform = session_viewport_transform(
                     client,
                     session_id,
                     effective_session,
                     iframe_sessions,
                 )
                 .await
-                .unwrap_or((0.0, 0.0));
-                session_offsets.insert(effective_session.clone(), offset);
+                .unwrap_or_else(|_| Affine2D::identity());
+                session_transforms.insert(effective_session.clone(), transform);
             }
         }
 
@@ -338,8 +340,8 @@ async fn collect_annotations(
                 continue;
             }
             let (ref_id, entry, _, effective_session) = &iframe_entries[i];
-            if let Some(&offset) = session_offsets.get(effective_session) {
-                rect = offset_rect(rect, offset);
+            if let Some(transform) = session_transforms.get(effective_session) {
+                rect = transform.map_rect(&rect);
             }
             annotations.push(make_raw_annotation(ref_id, entry, rect));
         }
@@ -389,15 +391,15 @@ async fn get_rect_for_selector(
         };
     if effective_session_id != session_id {
         if let Some(r) = rect.take() {
-            let offset = super::element::session_viewport_offset(
+            let transform = session_viewport_transform(
                 client,
                 session_id,
                 &effective_session_id,
                 iframe_sessions,
             )
             .await
-            .unwrap_or((0.0, 0.0));
-            rect = Some(offset_rect(r, offset));
+            .unwrap_or_else(|_| Affine2D::identity());
+            rect = Some(transform.map_rect(&r));
         }
     }
     Ok(rect)
@@ -449,8 +451,161 @@ async fn get_box_model_rect_for_object(
     Ok(parse_box_model_border(&value))
 }
 
-fn parse_box_model_border(value: &Value) -> Option<Rect> {
-    let quad = value.pointer("/model/border")?.as_array()?;
+#[derive(Debug, Clone, Copy)]
+struct Affine2D {
+    ox: f64,
+    oy: f64,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+}
+
+impl Affine2D {
+    fn identity() -> Self {
+        Self {
+            ox: 0.0,
+            oy: 0.0,
+            ax: 1.0,
+            ay: 0.0,
+            bx: 0.0,
+            by: 1.0,
+        }
+    }
+
+    fn translation(dx: f64, dy: f64) -> Self {
+        Self {
+            ox: dx,
+            oy: dy,
+            ..Self::identity()
+        }
+    }
+
+    fn from_content_quad(quad: &[f64; 8], local_w: f64, local_h: f64) -> Self {
+        if local_w <= 0.0 || local_h <= 0.0 {
+            return Self::translation(quad[0], quad[1]);
+        }
+        Self {
+            ox: quad[0],
+            oy: quad[1],
+            ax: (quad[2] - quad[0]) / local_w,
+            ay: (quad[3] - quad[1]) / local_w,
+            bx: (quad[6] - quad[0]) / local_h,
+            by: (quad[7] - quad[1]) / local_h,
+        }
+    }
+
+    fn then(self, outer: Self) -> Self {
+        Self {
+            ox: outer.ox + outer.ax * self.ox + outer.bx * self.oy,
+            oy: outer.oy + outer.ay * self.ox + outer.by * self.oy,
+            ax: outer.ax * self.ax + outer.bx * self.ay,
+            ay: outer.ay * self.ax + outer.by * self.ay,
+            bx: outer.ax * self.bx + outer.bx * self.by,
+            by: outer.ay * self.bx + outer.by * self.by,
+        }
+    }
+
+    fn map_point(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.ox + self.ax * x + self.bx * y,
+            self.oy + self.ay * x + self.by * y,
+        )
+    }
+
+    fn map_rect(&self, rect: &Rect) -> Rect {
+        let (x0, y0) = self.map_point(rect.x, rect.y);
+        let (x1, y1) = self.map_point(rect.x + rect.width, rect.y);
+        let (x2, y2) = self.map_point(rect.x + rect.width, rect.y + rect.height);
+        let (x3, y3) = self.map_point(rect.x, rect.y + rect.height);
+        quad_bounding_rect(&[x0, y0, x1, y1, x2, y2, x3, y3])
+    }
+}
+
+/// Affine map from an OOPIF session's local viewport to the top-level page
+/// viewport, preserving translation, CSS scale, and rotation across nested
+/// OOPIF boundaries.
+async fn session_viewport_transform(
+    client: &CdpClient,
+    page_session: &str,
+    target_session: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Affine2D, String> {
+    let mut current = target_session.to_string();
+    let mut transform = Affine2D::identity();
+    for _ in 0..=iframe_sessions.len() {
+        if current == page_session {
+            return Ok(transform);
+        }
+        let frame = iframe_sessions
+            .iter()
+            .find(|(_, session)| **session == current)
+            .map(|(frame, _)| frame)
+            .ok_or("Cannot locate OOPIF frame")?;
+        let (local_w, local_h) = session_layout_viewport_size(client, &current).await;
+        let mut owner = None;
+        for candidate in
+            std::iter::once(page_session).chain(iframe_sessions.values().map(String::as_str))
+        {
+            if candidate == current {
+                continue;
+            }
+            let Ok(node) = client
+                .send_command(
+                    "DOM.getFrameOwner",
+                    Some(serde_json::json!({ "frameId": frame })),
+                    Some(candidate),
+                )
+                .await
+            else {
+                continue;
+            };
+            let Some(backend_id) = node["backendNodeId"].as_i64() else {
+                continue;
+            };
+            let model: Value = client
+                .send_command(
+                    "DOM.getBoxModel",
+                    Some(serde_json::json!({ "backendNodeId": backend_id })),
+                    Some(candidate),
+                )
+                .await?;
+            let quad = parse_quad(model.pointer("/model/content"))
+                .ok_or("Missing OOPIF host content quad")?;
+            let step = Affine2D::from_content_quad(&quad, local_w, local_h);
+            transform = transform.then(step);
+            owner = Some(candidate.to_string());
+            break;
+        }
+        current = owner.ok_or("Cannot locate OOPIF owner session")?;
+    }
+    Err("Cyclic OOPIF frame ownership".to_string())
+}
+
+async fn session_layout_viewport_size(client: &CdpClient, session_id: &str) -> (f64, f64) {
+    let Ok(metrics): Result<Value, _> = client
+        .send_command_no_params("Page.getLayoutMetrics", Some(session_id))
+        .await
+    else {
+        return (0.0, 0.0);
+    };
+    let viewport = metrics
+        .get("cssLayoutViewport")
+        .or_else(|| metrics.get("layoutViewport"))
+        .or_else(|| metrics.get("cssVisualViewport"));
+    let w = viewport
+        .and_then(|v| v.get("clientWidth"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let h = viewport
+        .and_then(|v| v.get("clientHeight"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    (w, h)
+}
+
+fn parse_quad(value: Option<&Value>) -> Option<[f64; 8]> {
+    let quad = value?.as_array()?;
     if quad.len() != 8 {
         return None;
     }
@@ -458,6 +613,11 @@ fn parse_box_model_border(value: &Value) -> Option<Rect> {
     for (slot, number) in coords.iter_mut().zip(quad) {
         *slot = number.as_f64()?;
     }
+    Some(coords)
+}
+
+fn parse_box_model_border(value: &Value) -> Option<Rect> {
+    let coords = parse_quad(value.pointer("/model/border"))?;
     Some(quad_bounding_rect(&coords))
 }
 
@@ -916,5 +1076,40 @@ mod tests {
                 .is_none()
         );
         assert!(parse_box_model_border(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn affine_transform_projects_scaled_and_nested_oopif_rects() {
+        // 200x80 OOPIF rendered at (520, 410) with scale(2) -> 400x160 content quad.
+        let quad = [520.0, 410.0, 920.0, 410.0, 920.0, 570.0, 520.0, 570.0];
+        let t = Affine2D::from_content_quad(&quad, 200.0, 80.0);
+        let mapped = t.map_rect(&Rect {
+            x: 15.0,
+            y: 10.0,
+            width: 50.0,
+            height: 20.0,
+        });
+        assert_eq!(
+            (mapped.x, mapped.y, mapped.width, mapped.height),
+            (550.0, 430.0, 100.0, 40.0)
+        );
+
+        // Composed with an outer translation of (10, -20).
+        let nested = t.then(Affine2D::translation(10.0, -20.0));
+        let mapped_nested = nested.map_rect(&Rect {
+            x: 15.0,
+            y: 10.0,
+            width: 50.0,
+            height: 20.0,
+        });
+        assert_eq!(
+            (
+                mapped_nested.x,
+                mapped_nested.y,
+                mapped_nested.width,
+                mapped_nested.height
+            ),
+            (560.0, 410.0, 100.0, 40.0)
+        );
     }
 }
