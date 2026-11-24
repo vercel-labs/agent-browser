@@ -6133,6 +6133,7 @@ async fn launch_firefox(
     write_engine_file(&state.session_id, &state.engine);
     state.launch_identity = Some(state.settings.launch_identity());
     state.firefox = Some(session);
+    set_session_pin(state, state.pin_tab);
     state.start_dialog_handler();
     try_auto_restore_state(state).await;
     load_storage_state_for_launch(state, &storage_state, strict_state).await?;
@@ -6661,10 +6662,7 @@ async fn apply_settings_patch(
     }
     if was(Key::PinTab) {
         let pin = next.pin_tab();
-        state.pin_tab = pin;
-        if let Some(ref mut mgr) = state.browser {
-            mgr.set_pin_tab(pin);
-        }
+        set_session_pin(state, pin);
         // Force a re-persist from the snapshot next time.
         state.last_persisted_binding = None;
     }
@@ -16713,6 +16711,17 @@ fn error_response(id: &str, error: &str) -> Value {
     resp
 }
 
+/// Applies the session's `--pin-tab` setting to state and whichever backend is running.
+fn set_session_pin(state: &mut DaemonState, pin: bool) {
+    state.pin_tab = pin;
+    if let Some(ref mut mgr) = state.browser {
+        mgr.set_pin_tab(pin);
+    }
+    if let Some(ref mut ff) = state.firefox {
+        ff.set_pin(pin);
+    }
+}
+
 fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
     if resp.get("code").and_then(Value::as_str) != Some("tab_gone") {
         return;
@@ -16721,6 +16730,12 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
         .browser
         .as_ref()
         .and_then(BrowserManager::bound_target_gone_details)
+        .or_else(|| {
+            state
+                .firefox
+                .as_ref()
+                .and_then(|ff| ff.contexts.pinned_gone())
+        })
     else {
         return;
     };
@@ -27219,6 +27234,7 @@ mod firefox_routing_tests {
         "AGENT_BROWSER_EXECUTABLE_PATH",
         "AGENT_BROWSER_ACTION_POLICY",
         "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_PIN_TAB",
     ];
 
     fn clean_env() -> EnvGuard<'static> {
@@ -27530,5 +27546,65 @@ mod firefox_routing_tests {
         let resp = execute_command(&json!({"id":"3","action":"deny"}), &mut state).await;
         assert_eq!(resp["data"]["denied"], true);
         assert_eq!(navigations(&calls), 1);
+    }
+
+    #[tokio::test]
+    async fn pin_tab_propagates_to_firefox_and_reports_structured_tab_gone() {
+        let _guard = clean_env();
+        let (mut state, calls) = firefox_state().await;
+
+        let resp = execute_command(
+            &json!({"id": "1", "action": "url", "settings": {"pin-tab": true}}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(state.pin_tab);
+        assert!(state.firefox.as_ref().unwrap().contexts.pinned());
+
+        {
+            let ff = state.firefox.as_mut().unwrap();
+            ff.contexts
+                .set_url("ctx-active", "https://u:p@app.test/timeout?secret=1");
+            assert!(!ff.contexts.record(&json!({
+                "context": "ctx-popup",
+                "parent": null,
+                "originalOpener": "ctx-active",
+            })));
+            assert_eq!(ff.contexts.active(), "ctx-active");
+            ff.contexts.remove("ctx-active");
+        }
+
+        let before_calls = calls.lock().unwrap().len();
+        let resp = execute_command(
+            &json!({"id": "2", "action": "evaluate", "script": "document.cookie"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(resp["code"], "tab_gone", "{resp}");
+        assert_eq!(resp["data"]["targetId"], "ctx-active", "{resp}");
+        assert_eq!(
+            resp["data"]["lastUrl"], "https://app.test/timeout",
+            "{resp}"
+        );
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .starts_with(super::super::browser::TAB_GONE_PREFIX));
+        assert_eq!(calls.lock().unwrap().len(), before_calls);
+
+        let resp = execute_command(
+            &json!({"id": "3", "action": "url", "settings": {"pin-tab": false}}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert!(!state.pin_tab);
+        assert!(!state.firefox.as_ref().unwrap().contexts.pinned());
+        assert_eq!(
+            state.firefox.as_ref().unwrap().contexts.active(),
+            "ctx-popup"
+        );
     }
 }

@@ -85,9 +85,24 @@ pub fn unsupported_error(action: &str) -> Option<String> {
     }
 }
 
+/// The `tab_gone` error for a page command once the pinned tab is gone, or `None` when the action
+/// may run. Recovery actions mirror Chrome so the caller can list tabs or rebind explicitly.
+fn pin_gone_error(action: &str, cmd: &Value, state: &DaemonState) -> Option<String> {
+    let (context, last_url) = state.firefox.as_ref()?.contexts.pinned_gone()?;
+    let recovery = matches!(
+        action,
+        "tab_list" | "tab_new" | "tab_switch" | "window_new" | "close" | "deny"
+    ) || (action == "tab_close" && cmd.get("tabId").is_some())
+        || (action == "dialog" && cmd.get("response").and_then(Value::as_str) == Some("status"));
+    (!recovery).then(|| super::super::browser::tab_gone_error(context, last_url))
+}
+
 /// Runs one command on the Firefox session.
 pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if let Some(error) = unsupported_error(action) {
+        return Err(error);
+    }
+    if let Some(error) = pin_gone_error(action, cmd, state) {
         return Err(error);
     }
     if let Some(error) = chrome::dialog_block_error(action, cmd, state) {
@@ -325,5 +340,46 @@ mod tests {
             .unwrap()
             .iter()
             .any(|method| method == "browsingContext.handleUserPrompt"));
+    }
+
+    #[tokio::test]
+    async fn pin_gone_blocks_page_commands_and_allows_recovery_actions() {
+        let mut state = DaemonState::new();
+        let (mut ff, _tx, calls) = fake_session().await;
+        ff.contexts
+            .set_url("ctx-active", "https://example.com/timeout");
+        ff.set_pin(true);
+        ff.contexts.remove("ctx-active");
+        state.firefox = Some(ff);
+
+        for (action, cmd) in [
+            ("url", json!({})),
+            ("evaluate", json!({"script": "1"})),
+            ("navigate", json!({"url": "https://example.com"})),
+            ("tab_close", json!({})),
+            ("dialog", json!({"response": "accept"})),
+        ] {
+            let err = execute(action, &cmd, &mut state).await.unwrap_err();
+            assert!(
+                err.starts_with(crate::native::browser::TAB_GONE_PREFIX),
+                "{action}: {err}"
+            );
+        }
+        assert!(calls.lock().unwrap().is_empty());
+
+        for (action, cmd) in [
+            ("tab_list", json!({})),
+            ("tab_new", json!({})),
+            ("tab_switch", json!({"tabId": "t1"})),
+            ("tab_close", json!({"tabId": "t2"})),
+            ("window_new", json!({})),
+            ("close", json!({})),
+            ("dialog", json!({"response": "status"})),
+        ] {
+            assert!(
+                pin_gone_error(action, &cmd, &state).is_none(),
+                "{action} should be allowed while tab_gone"
+            );
+        }
     }
 }

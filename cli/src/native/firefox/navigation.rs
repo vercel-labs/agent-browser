@@ -117,6 +117,7 @@ pub async fn load(state: &mut DaemonState, load: Load<'_>) -> Result<Landing, St
         Some(url) => (url, false),
         None => (current_url(ff, &context, requested).await, true),
     };
+    ff.contexts.set_url(&context, &url);
     ff.note_visit(&url);
     Ok(Landing {
         context,
