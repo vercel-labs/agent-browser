@@ -721,11 +721,6 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
-                // `close` ends pending waits instead of queueing behind them.
-                if matches!(action.as_str(), "close" | INTERNAL_DAEMON_SHUTDOWN_ACTION) {
-                    waits.cancel_all(pending_wait::SESSION_CLOSED);
-                }
-
                 let cancel = Cancel::new();
                 let response = {
                     let run = run_command(&cmd, &state, &waits, &idle_activity, &cancel);
@@ -749,7 +744,7 @@ async fn handle_connection<S>(
                 let closing = close_completed_response(&action, &response);
                 if closing {
                     // Also covers a `close` approved through `confirm`.
-                    waits.cancel_all(pending_wait::SESSION_CLOSED);
+                    cancel_waits_after_close(&waits, &action, &response);
                     close.requested.notify_one();
                     close.listener_closed.notified().await;
                 }
@@ -863,6 +858,15 @@ fn close_completed_response(action: &str, response: &Value) -> bool {
         result.get("success").and_then(|v| v.as_bool()) == Some(true)
             && result.get("data").is_some_and(data_closed)
     })
+}
+
+/// Cancels the session's pending waits once a `close` has actually closed the
+/// session. A close denied by policy, or one parked for confirmation, returns
+/// without closing and must leave other clients' waits running.
+fn cancel_waits_after_close(waits: &PendingWaits, action: &str, response: &Value) {
+    if close_completed_response(action, response) {
+        waits.cancel_all(pending_wait::SESSION_CLOSED);
+    }
 }
 
 async fn shutdown_signal() {
@@ -1169,6 +1173,40 @@ mod tests {
             &direct
         ));
         assert!(close_completed_response("confirm", &confirmed));
+    }
+
+    #[test]
+    fn a_denied_or_parked_close_leaves_pending_waits_running() {
+        let waits = Arc::new(PendingWaits::new());
+        let cancel = Cancel::new();
+        let _registration = waits.register(&cancel);
+
+        let denied = serde_json::json!({ "success": false, "error": "denied by policy" });
+        cancel_waits_after_close(&waits, "close", &denied);
+        assert_eq!(
+            cancel.reason(),
+            None,
+            "a denied close must not cancel waits"
+        );
+
+        let parked = serde_json::json!({
+            "success": true,
+            "data": {
+                "confirmation_required": true,
+                "confirmation_id": "close-1",
+                "action": "close"
+            }
+        });
+        cancel_waits_after_close(&waits, "close", &parked);
+        assert_eq!(
+            cancel.reason(),
+            None,
+            "a close parked for confirmation must not cancel waits"
+        );
+
+        let closed = serde_json::json!({ "success": true, "data": { "closed": true } });
+        cancel_waits_after_close(&waits, "close", &closed);
+        assert_eq!(cancel.reason(), Some(pending_wait::SESSION_CLOSED));
     }
 
     #[tokio::test]

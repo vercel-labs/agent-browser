@@ -8274,8 +8274,11 @@ struct WaitPlan {
 
 enum WaitFinish {
     Data(Value),
-    /// `waitforurl` reports the URL it matched.
-    Url,
+    /// `waitforurl` reports the URL it matched, read from the tab it polled so
+    /// another tab becoming active does not change the answer.
+    Url {
+        session_id: String,
+    },
     /// `waitforfunction` reports the expression's value.
     Function {
         expression: String,
@@ -8328,9 +8331,27 @@ async fn finish_wait(
 ) -> Result<Value, String> {
     match finish {
         WaitFinish::Data(data) => Ok(data),
-        WaitFinish::Url => {
+        WaitFinish::Url { session_id } => {
             let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-            let url = mgr.get_url().await.unwrap_or_default();
+            let result: super::cdp::types::EvaluateResult = mgr
+                .client
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &super::cdp::types::EvaluateParams {
+                        expression: "location.href".to_string(),
+                        return_by_value: Some(true),
+                        await_promise: Some(true),
+                    },
+                    Some(&session_id),
+                )
+                .await?;
+            let url = result
+                .result
+                .value
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
             Ok(json!({ "url": url }))
         }
         WaitFinish::Function {
@@ -11985,8 +12006,11 @@ fn plan_waitforurl(cmd: &Value, state: &DaemonState) -> Result<WaitPlan, String>
     let client = mgr.client.clone();
     let session_id = mgr.active_session_id()?.to_string();
 
+    let finish = WaitFinish::Url {
+        session_id: session_id.clone(),
+    };
     let poll = async move { wait_for_url(&client, &session_id, &url_pattern, timeout_ms).await };
-    Ok(WaitPlan::new(poll, WaitFinish::Url))
+    Ok(WaitPlan::new(poll, finish))
 }
 
 /// Wait for a page lifecycle state and return an error when its timeout expires.
@@ -17466,6 +17490,58 @@ mod tests {
             &mut state,
         )
         .await;
+    }
+
+    /// `waitforurl` reports the URL of the tab it polled. Another tab becoming
+    /// active between the poll and the finish must not change the answer.
+    #[tokio::test]
+    async fn waitforurl_reports_the_url_of_the_tab_it_polled() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_by_server = seen.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let session = command["sessionId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let result = if command["method"] == "Runtime.evaluate" {
+                    seen_by_server.lock().unwrap().push(session);
+                    json!({ "result": { "type": "string", "value": "https://polled.example/" } })
+                } else {
+                    json!({})
+                };
+                let reply = json!({ "id": command["id"], "result": result });
+                if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let client = crate::native::cdp::client::CdpClient::connect(&ws_url)
+            .await
+            .unwrap();
+        let mut state = DaemonState::new();
+        state.browser = Some(super::BrowserManager::for_test(client, ws_url));
+
+        let result = super::finish_wait(
+            &json!({ "action": "waitforurl" }),
+            super::WaitFinish::Url {
+                session_id: "TAB-POLLED".to_string(),
+            },
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["url"], "https://polled.example/");
+        assert_eq!(seen.lock().unwrap().as_slice(), ["TAB-POLLED"]);
     }
 
     #[tokio::test]
