@@ -474,7 +474,7 @@ Clients connect to `ws://127.0.0.1:<port>` and receive `frame`, `status`, `tabs`
 
 ## WebMCP page tools
 
-Experimental. Browser responses announce a tool list (names, frame IDs, and descriptions) on first discovery and when the catalog changes. Catalogs of up to four tools show full descriptions; larger ones show up to 16 tools with descriptions shortened to 160 bytes, and the announcement says how many are listed. Choose a relevant tool, fetch its schema when the description does not show the arguments, then invoke it within the user's task. Schemas and annotations are never included proactively. Omission means no update; an empty or unavailable update invalidates earlier tools. Support is enabled by default in managed Chrome; `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP` opts out. See [trust-boundaries.md](trust-boundaries.md#webmcp-tools-are-page-content) for how to treat tool metadata and results.
+Experimental. Browser responses announce a tool list (origins, names, frame IDs, and descriptions) on first discovery and when the catalog changes. The announcement names the top-level page's origin, starts each tool with `[origin <origin>]` when it shares that origin or `[cross-origin <origin>]` when it comes from an embedded frame on another origin, and shows direct `webmcp invoke` examples only for tools from the page's own origin. Before invoking a cross-origin tool, confirm that its origin matches the user's task; its inputs go to that origin. Catalogs of up to four tools show full descriptions; larger ones show up to 16 tools with descriptions shortened to 160 bytes, and the announcement says how many are listed. Choose a relevant tool, fetch its schema when the description does not show the arguments, then invoke it within the user's task. Schemas and annotations are never included proactively. Omission means no update; an empty or unavailable update invalidates earlier tools. Support is enabled by default in managed Chrome; `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP` opts out. See [trust-boundaries.md](trust-boundaries.md#webmcp-tools-are-page-content) for how to treat tool metadata and results.
 
 ```bash
 agent-browser webmcp list <tool> --frame <frame-id> --json   # One tool's schema
@@ -593,6 +593,7 @@ agent-browser --cdp <url> --cdp-headers '{"Authorization":"Bearer <token>"}' ...
 agent-browser --pin-tab ...           # Pin the session to its bound tab (strict tab binding)
 agent-browser --no-pin-tab ...        # Disable a sticky pin previously enabled with --pin-tab
 agent-browser -p <provider> ...       # Browser provider or configured provider plugin
+agent-browser -p ladybird ...         # Ladybird over WebDriver: CSS selectors, no snapshot refs
 agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
@@ -661,7 +662,7 @@ agent-browser pushstate <url>                       # SPA client-side nav (auto-
 
 ## Accessibility audit
 
-Runs an embedded axe-core audit with no CDN fetch. The vendored engine runs private partial audits through CDP across the page's frame tree and merges serialized results without page messaging, so page CSP does not block it, page-provided `window.axe` values remain intact, and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions. Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
+Runs an embedded axe-core audit with no CDN fetch. The vendored engine runs private partial audits through CDP across the page's frame tree and merges serialized results without page messaging, so page CSP does not block it, page-provided `window.axe` values remain intact, and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari, iOS, or Ladybird WebDriver sessions. Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
 
 ```bash
 agent-browser a11y                                  # Audit the current page

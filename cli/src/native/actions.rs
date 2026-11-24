@@ -13,9 +13,8 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
 use crate::session_files::SessionFile;
 use crate::session_settings::{
-    named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running, Store,
+    named, spec, Connection, Effect, Key, Patch, Persist, Requested, Running, Store, RESTORE_UNIT,
 };
-use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
 use super::auth;
@@ -49,8 +48,8 @@ use super::tab_binding;
 use super::tracing::{self as native_tracing, TracingState};
 use super::webdriver::appium::AppiumManager;
 use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSUPPORTED_ACTIONS};
+use super::webdriver::driver::{DriverProcess, LocalDriver};
 use super::webdriver::ios;
-use super::webdriver::safari;
 use super::webmcp;
 
 /// Wait strategy used by `auth_login` when navigating to the login page.
@@ -349,11 +348,11 @@ impl AttachedTarget {
         Some(Self::Provider(provider.to_ascii_lowercase()))
     }
 
-    /// The target a successful launch leaves the session attached to. The iOS and
-    /// Safari providers are WebDriver-backed and have no CDP attach to resume.
+    /// The target a successful launch leaves the session attached to. The iOS,
+    /// Safari, and Ladybird providers are WebDriver-backed and have no CDP attach to resume.
     fn from_launch_command(cmd: &Value) -> Option<Self> {
         Self::named_by(cmd)
-            .filter(|target| !matches!(target, Self::Provider(p) if p == "ios" || p == "safari"))
+            .filter(|target| !matches!(target, Self::Provider(p) if is_webdriver_provider(p)))
     }
 
     /// Whether the browser runs on another machine than the daemon, so it
@@ -649,7 +648,7 @@ impl SessionSetup {
 pub struct DaemonState {
     pub browser: Option<BrowserManager>,
     pub appium: Option<AppiumManager>,
-    pub safari_driver: Option<safari::SafariDriverProcess>,
+    pub local_driver: Option<DriverProcess>,
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
@@ -677,6 +676,7 @@ pub struct DaemonState {
     pub restore_validation_pending: bool,
     pub restore_save_status: String,
     pub restore_saved_path: Option<String>,
+    pub restore_identity_unresolved: bool,
     /// When the most recent browser-touching command finished. Periodic
     /// autosaves wait for a quiet period after this so a multi-second save
     /// never lands in the middle of an active command burst.
@@ -821,11 +821,11 @@ pub struct DaemonState {
 }
 
 fn default_idle_shutdown_is_blocked(
-    is_webdriver: bool,
+    headed_webdriver: bool,
     provider_owned: bool,
     browser_blocks_shutdown: bool,
 ) -> bool {
-    is_webdriver || (!provider_owned && browser_blocks_shutdown)
+    headed_webdriver || (!provider_owned && browser_blocks_shutdown)
 }
 
 impl DaemonState {
@@ -895,6 +895,7 @@ impl DaemonState {
             env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
         let security = settings.security();
         let restore = settings.restore();
+        let restore_key_set = restore.key.is_some();
         // A corrupt binding file is surfaced later, on attach; it does not
         // enable pinning here because its pinned state is unknowable.
         let pin_tab = settings.pin_tab()
@@ -908,7 +909,7 @@ impl DaemonState {
         Self {
             browser: None,
             appium: None,
-            safari_driver: None,
+            local_driver: None,
             webdriver_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
@@ -931,7 +932,11 @@ impl DaemonState {
             restore_check_url: restore.check_url,
             restore_check_text: restore.check_text,
             restore_check_fn: restore.check_fn,
-            restore_status: "not_configured".to_string(),
+            restore_status: if restore_key_set {
+                "pending".to_string()
+            } else {
+                "not_configured".to_string()
+            },
             restore_status_detail: None,
             restore_skipped_origins: Vec::new(),
             restore_loaded_path: None,
@@ -939,6 +944,7 @@ impl DaemonState {
             restore_validation_pending: false,
             restore_save_status: "not_attempted".to_string(),
             restore_saved_path: None,
+            restore_identity_unresolved: false,
             last_command_finished: None,
             last_autosave_attempt: None,
             session_id,
@@ -1014,12 +1020,14 @@ impl DaemonState {
     }
 
     /// True when the default idle timeout must not shut down this session.
-    /// WebDriver-backed Safari and iOS sessions are always headed, while CDP
-    /// sessions delegate the decision to BrowserManager. Provider-owned CDP
+    /// WebDriver-backed sessions block it unless they run headless Ladybird
+    /// (Safari and iOS are always headed), while CDP sessions delegate the
+    /// decision to BrowserManager. Provider-owned CDP
     /// connections remain eligible because the daemon owns their lifecycle.
     pub(crate) fn blocks_default_idle_shutdown(&self) -> bool {
         default_idle_shutdown_is_blocked(
-            matches!(self.backend_type, BackendType::WebDriver),
+            matches!(self.backend_type, BackendType::WebDriver)
+                && !self.local_driver.as_ref().is_some_and(|d| d.headless),
             self.active_provider_connection,
             self.browser
                 .as_ref()
@@ -2173,6 +2181,9 @@ impl DaemonState {
                                     frame.get("id").and_then(Value::as_str),
                                     webmcp::frame_origin(frame),
                                 ) {
+                                    if frame.get("parentId").is_none() {
+                                        self.webmcp.update_page_origin(session_id, &origin);
+                                    }
                                     self.webmcp
                                         .update_frame_origin(session_id, frame_id, &origin);
                                 }
@@ -2601,29 +2612,6 @@ fn reset_restore_runtime_state(state: &mut DaemonState) {
     state.restore_saved_path = None;
 }
 
-fn command_restore_check_fields(
-    cmd: &Value,
-) -> Option<(Option<String>, Option<String>, Option<String>)> {
-    let has_check_field = cmd.get("restoreCheckUrl").is_some()
-        || cmd.get("restoreCheckText").is_some()
-        || cmd.get("restoreCheckFn").is_some();
-    if !has_check_field {
-        return None;
-    }
-
-    Some((
-        cmd.get("restoreCheckUrl")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
-        cmd.get("restoreCheckText")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
-        cmd.get("restoreCheckFn")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
-    ))
-}
-
 fn restore_checks_are_configured(
     checks: &(Option<String>, Option<String>, Option<String>),
 ) -> bool {
@@ -2654,68 +2642,56 @@ fn reconcile_restore_check_change(
     }
 }
 
-fn apply_restore_config_from_command(cmd: &Value, state: &mut DaemonState) -> Result<(), String> {
-    validate_restore_config_from_command(cmd)?;
-
-    let restore_key = cmd.get("restoreKey").and_then(|v| v.as_str());
-    let old_checks = (
-        state.restore_check_url.clone(),
-        state.restore_check_text.clone(),
-        state.restore_check_fn.clone(),
-    );
-
-    if let Some(restore_key) = restore_key {
-        if !restore_key.is_empty() {
-            if state.session_name.as_deref() != Some(restore_key) {
-                reset_restore_runtime_state(state);
-            }
-            state.session_name = Some(restore_key.to_string());
-            if state.restore_status == "not_configured" {
-                state.restore_status = "pending".to_string();
-            }
-        }
-    }
-    if let Some(policy) = cmd.get("restoreSave").map(|v| v.as_str().unwrap_or("auto")) {
-        state.restore_save = policy.to_string();
-    }
-    if let Some(new_checks) = command_restore_check_fields(cmd) {
-        state.restore_check_url = new_checks.0.clone();
-        state.restore_check_text = new_checks.1.clone();
-        state.restore_check_fn = new_checks.2.clone();
-        if old_checks != new_checks {
-            reconcile_restore_check_change(state, &new_checks);
-        }
-    }
-
-    Ok(())
+fn is_restore_key(key: Key) -> bool {
+    key == Key::RestoreKey || RESTORE_LIVE_KEYS.contains(&key)
 }
 
-fn validate_restore_config_from_command(cmd: &Value) -> Result<(), String> {
-    let restore_key = cmd.get("restoreKey").and_then(|v| v.as_str());
-    if let Some(restore_key) = restore_key {
-        if !restore_key.is_empty() && !is_valid_session_name(restore_key) {
-            return Err(session_name_error(restore_key));
-        }
-    }
+/// The restore rows that apply to the running session in place.
+const RESTORE_LIVE_KEYS: [Key; 4] = [
+    Key::RestoreSave,
+    Key::RestoreCheckUrl,
+    Key::RestoreCheckText,
+    Key::RestoreCheckFn,
+];
 
-    let restore_save = cmd.get("restoreSave").map(|v| v.as_str().unwrap_or("auto"));
-    if let Some(policy) = restore_save {
-        if !matches!(policy, "auto" | "always" | "never") {
-            return Err(format!(
-                "Invalid restore save policy '{}'. Use auto, always, or never.",
-                policy
-            ));
-        }
+/// Writes the restore rows `rows` of the current settings into the daemon's
+/// restore state. A new key starts a fresh restore cycle; a changed check
+/// re-arms validation of what was loaded.
+/// The restore status follows whether a key is set.
+fn sync_restore_status_with_key(state: &mut DaemonState) {
+    if state.session_name.is_none() {
+        state.restore_status = "not_configured".to_string();
+    } else if state.restore_status == "not_configured" {
+        state.restore_status = "pending".to_string();
     }
-
-    Ok(())
 }
 
-fn command_changes_restore_key(cmd: &Value, state: &DaemonState) -> bool {
-    cmd.get("restoreKey")
-        .and_then(|v| v.as_str())
-        .filter(|key| !key.is_empty())
-        .is_some_and(|key| state.session_name.as_deref() != Some(key))
+fn apply_restore_settings(state: &mut DaemonState, rows: &[Key]) {
+    let restore = state.settings.restore();
+    if rows.contains(&Key::RestoreKey) {
+        if state.session_name != restore.key {
+            reset_restore_runtime_state(state);
+        }
+        state.session_name = restore.key.clone();
+        sync_restore_status_with_key(state);
+    }
+    if rows.contains(&Key::RestoreSave) {
+        state.restore_save = restore.save;
+    }
+    if rows.iter().any(|key| RESTORE_LIVE_KEYS[1..].contains(key)) {
+        let old = (
+            state.restore_check_url.clone(),
+            state.restore_check_text.clone(),
+            state.restore_check_fn.clone(),
+        );
+        let new = (restore.check_url, restore.check_text, restore.check_fn);
+        state.restore_check_url = new.0.clone();
+        state.restore_check_text = new.1.clone();
+        state.restore_check_fn = new.2.clone();
+        if old != new {
+            reconcile_restore_check_change(state, &new);
+        }
+    }
 }
 
 /// Whether the session holds a browser of any backend: CDP, a provider
@@ -2725,7 +2701,7 @@ fn has_active_browser_session(state: &DaemonState) -> bool {
         || state.active_provider_session.is_some()
         || state.webdriver_backend.is_some()
         || state.appium.is_some()
-        || state.safari_driver.is_some()
+        || state.local_driver.is_some()
 }
 
 async fn close_before_implicit_relaunch(state: &mut DaemonState) -> Result<(), String> {
@@ -2739,22 +2715,6 @@ async fn close_before_implicit_relaunch(state: &mut DaemonState) -> Result<(), S
     } else {
         Ok(())
     }
-}
-
-async fn apply_restore_config_after_confirmation(
-    cmd: &Value,
-    state: &mut DaemonState,
-) -> Result<bool, String> {
-    let restore_key_changed = command_changes_restore_key(cmd, state);
-    let had_browser = has_active_browser_session(state);
-
-    if restore_key_changed && had_browser {
-        let _ = auto_save_restore_state(state).await;
-        close_before_implicit_relaunch(state).await?;
-    }
-
-    apply_restore_config_from_command(cmd, state)?;
-    Ok(restore_key_changed && had_browser)
 }
 
 const BROWSER_USE_ATTACH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
@@ -2864,6 +2824,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     if let Some(err) = close_error {
         return Err(err);
     }
+    state.restore_identity_unresolved = false;
     Ok(())
 }
 
@@ -2882,10 +2843,10 @@ pub(crate) async fn close_all_browser_backends(state: &mut DaemonState) -> Resul
         let _ = tokio::time::timeout(std::time::Duration::from_secs(3), appium.close()).await;
     }
     state.appium = None;
-    if let Some(ref mut driver) = state.safari_driver {
+    if let Some(ref mut driver) = state.local_driver {
         driver.kill();
     }
-    state.safari_driver = None;
+    state.local_driver = None;
     state.backend_type = BackendType::Cdp;
 
     close_result
@@ -3138,7 +3099,7 @@ fn policy_actions_for_command(
         let provider_launch = settings
             .provider()
             .map(|provider| provider.to_lowercase())
-            .filter(|provider| !provider.is_empty() && provider != "ios" && provider != "safari");
+            .filter(|provider| !provider.is_empty() && !is_webdriver_provider(provider));
         if let Some(provider) = provider_launch {
             append_browser_provider_policy_action_for(&mut actions, &provider, &plugins);
         } else {
@@ -3148,12 +3109,17 @@ fn policy_actions_for_command(
     actions
 }
 
+/// Whether a lowercase provider name is driven over WebDriver instead of CDP.
+fn is_webdriver_provider(provider: &str) -> bool {
+    provider == "ios" || LocalDriver::from_provider(provider).is_some()
+}
+
 /// The external browser the session's settings connect to, as the launch field
 /// that names it. Local sessions and the WebDriver providers name none.
 fn settings_launch_target(settings: &Running) -> Option<(&'static str, Value)> {
     match settings.connection() {
         Connection::Provider(provider)
-            if !matches!(provider.to_lowercase().as_str(), "" | "ios" | "safari") =>
+            if !provider.is_empty() && !is_webdriver_provider(&provider.to_lowercase()) =>
         {
             Some(("provider", json!(provider.to_lowercase())))
         }
@@ -3296,10 +3262,6 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return resp;
     }
 
-    if let Err(err) = validate_restore_config_from_command(cmd) {
-        return error_response(&id, &err);
-    }
-
     // Invalid inputs are rejected before expensive setup: an unsupported
     // `find` action must fail here, not after a browser launch and a locator
     // resolution that can mask it with "element not found".
@@ -3345,17 +3307,20 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // The settings this invocation set ride on the command. Live settings
     // apply now, before the policy checks, so a changed policy governs this
-    // command too. Launch settings wait until the launch itself: a command that
-    // is denied or needs confirmation leaves the browser and its settings alone.
+    // command too. Launch settings wait until the launch itself, and the
+    // restore unit (key, save policy, checks) waits until the command has
+    // passed every gate: a command that is denied or needs confirmation leaves
+    // the browser and these settings alone.
     let launches = command_launches_browser(cmd);
     let mut launch_patch: Option<Patch> = None;
+    let wire_patch = match Patch::from_wire(cmd.get("settings")) {
+        Ok(patch) => patch,
+        Err(e) => return error_response(&id, &e.to_string()),
+    };
+    let (patch, restore_patch) = wire_patch.split_restore_unit();
     let mut settings_outcome = if action == "close" {
         SettingsOutcome::default()
     } else {
-        let patch = match Patch::from_wire(cmd.get("settings")) {
-            Ok(patch) => patch,
-            Err(e) => return error_response(&id, &e.to_string()),
-        };
         if let Err(e) = check_capture_setting(&patch) {
             return error_response(&id, &e);
         }
@@ -3372,6 +3337,11 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
         outcome
     };
+    // A new restore key replaces the running browser.
+    let restore_plan = state.settings.plan(&restore_patch);
+    let restore_replaces_browser = restore_plan.relaunch && has_active_browser_session(state);
+    // Read from the patch: a no-navigate command never plans the launch.
+    let no_navigate_key_switch = auth_login_no_navigate && restore_plan.relaunch;
     // The settings the browser will be launched with, when the patch changes them.
     let launch_plan = launch_patch
         .as_ref()
@@ -3379,14 +3349,11 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .filter(|plan| plan.relaunch);
 
     let skip_launch = skip_launch_action(action);
-    let restore_key_change_needs_launch = !skip_launch
-        && command_changes_restore_key(cmd, state)
-        && has_active_browser_session(state);
     let needs_launch = if !skip_launch && !auth_login_no_navigate {
         // Check if existing connection is stale and needs re-launch.
         // This must happen before policy evaluation so plugin capability
         // actions are gated when recovery relaunches would invoke plugins.
-        if restore_key_change_needs_launch || launch_plan.is_some() {
+        if launch_plan.is_some() || restore_replaces_browser {
             true
         } else if let Some(ref mut mgr) = state.browser {
             mgr.has_process_exited() || !mgr.is_connection_alive().await
@@ -3510,42 +3477,51 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         return resp;
     }
 
-    let restore_transition_closed_browser = match async {
-        if auth_login_no_navigate && command_changes_restore_key(cmd, state) {
-            return Err(
-                "auth login --no-navigate cannot switch restore sessions; select the session containing the active login page"
-                    .to_string(),
-            );
-        }
-        apply_restore_config_after_confirmation(cmd, state).await
+    if no_navigate_key_switch {
+        let mut resp = error_response(
+            &id,
+            "auth login --no-navigate cannot switch restore sessions; select the session containing the active login page",
+        );
+        attach_settings_outcome(&mut resp, &settings_outcome);
+        return resp;
     }
-    .await
-    {
-        Ok(closed_browser) => closed_browser,
-        Err(err) => {
-            let mut resp = error_response(&id, &err);
+
+    // Past every gate: the restore unit takes effect for any command, whether
+    // or not it launches.
+    let restore_applied = match apply_restore_unit(state, &restore_patch).await {
+        Ok(applied) => applied,
+        Err(e) => {
+            let mut resp = error_response(&id, &e);
             attach_settings_outcome(&mut resp, &settings_outcome);
             return resp;
         }
     };
-
+    settings_outcome
+        .changes
+        .extend(restore_applied.changes.iter().cloned());
     if !skip_launch {
         if needs_launch {
-            // Past the policy gates: the launch settings take effect now.
+            lifecycle_relaunched_browser |= restore_applied.relaunched_browser;
+            // The launch settings take effect now.
             if let (Some(patch), Some(_)) = (launch_patch.as_ref(), launch_plan.as_ref()) {
                 match apply_settings_patch(state, patch, true).await {
                     Ok(outcome) => settings_outcome.absorb(outcome),
                     Err(e) => {
-                        let mut resp = error_response(&id, &e);
+                        let cleanup = Box::pin(rollback_restore_unit(
+                            state,
+                            &restore_applied,
+                            &mut settings_outcome,
+                        ))
+                        .await;
+                        let mut resp = error_response(&id, &with_rollback_error(&e, cleanup));
                         attach_settings_outcome(&mut resp, &settings_outcome);
                         return resp;
                     }
                 }
             }
             lifecycle_relaunched_browser |= settings_outcome.relaunched_browser;
-            lifecycle_relaunched_browser |= restore_transition_closed_browser
-                || state.browser.is_some()
-                || state.active_provider_session.is_some();
+            lifecycle_relaunched_browser |=
+                state.browser.is_some() || state.active_provider_session.is_some();
             if state.browser.is_some() || state.active_provider_session.is_some() {
                 let _ = auto_save_restore_state(state).await;
             }
@@ -3568,8 +3544,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     state.settings.connection(),
                     Connection::Cdp(_)
                 ));
-                let rollback = rollback_launch_settings(state, &mut settings_outcome, &e).await;
-                let e = with_rollback_error(&e, rollback);
+                let e = Box::pin(rollback_launch(
+                    state,
+                    &restore_applied,
+                    &mut settings_outcome,
+                    &e,
+                ))
+                .await;
                 let mut resp = error_response(&id, &format!("{}: {}", context, e));
                 attach_settings_outcome(&mut resp, &settings_outcome);
                 return resp;
@@ -3672,7 +3653,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     .map(|outcome| settings_outcome.absorb(outcome)),
                 None => Ok(()),
             };
-            lifecycle_relaunched_browser |= settings_outcome.relaunched_browser;
+            lifecycle_relaunched_browser |=
+                restore_applied.relaunched_browser || settings_outcome.relaunched_browser;
             let result = match applied {
                 Ok(()) => handle_launch(cmd, state).await,
                 Err(e) => Err(e),
@@ -3682,10 +3664,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     state.webmcp_enabled = state.settings.webmcp();
                     Ok(data)
                 }
-                Err(e) => {
-                    let rollback = rollback_launch_settings(state, &mut settings_outcome, &e).await;
-                    Err(with_rollback_error(&e, rollback))
-                }
+                Err(e) => Err(Box::pin(rollback_launch(
+                    state,
+                    &restore_applied,
+                    &mut settings_outcome,
+                    &e,
+                ))
+                .await),
             }
         }
         "navigate" => handle_navigate(cmd, state).await,
@@ -3973,6 +3958,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         lifecycle_relaunched_browser,
     );
     attach_settings_outcome(&mut resp, &settings_outcome);
+    attach_failed_lifecycle(&mut resp, lifecycle_launched, lifecycle_relaunched_browser);
 
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
@@ -3987,6 +3973,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_relaunched_browser,
         );
         attach_settings_outcome(&mut resp, &settings_outcome);
+        attach_failed_lifecycle(&mut resp, lifecycle_launched, lifecycle_relaunched_browser);
     }
     attach_webmcp_availability(&mut resp, action, state).await;
     attach_flow_availability(&mut resp, action, state).await;
@@ -4342,13 +4329,14 @@ fn ensure_allowed_domains_supported_for_launch(
                         .to_string(),
                 );
             }
-            "safari" => {
-                return Err(
-                    "--allowed-domains is not supported with the Safari provider because WebRTC containment cannot be enforced"
-                        .to_string(),
-                );
+            p => {
+                if let Some(local) = LocalDriver::from_provider(p) {
+                    return Err(format!(
+                        "--allowed-domains is not supported with the {} provider because WebRTC containment cannot be enforced",
+                        local.label()
+                    ));
+                }
             }
-            _ => {}
         }
     }
 
@@ -5285,7 +5273,7 @@ async fn launch_browser_from_settings(
             restore_key: restore_key.as_deref(),
             storage_state,
         })?;
-        // ios and safari are WebDriver-backed device providers.
+        // ios, safari, and ladybird are WebDriver-backed providers.
         if p == "ios" {
             // A relaunch keeps the device the session was set up with.
             let mut ios_cmd = if cmd.is_object() {
@@ -5304,8 +5292,8 @@ async fn launch_browser_from_settings(
             }
             return result;
         }
-        if p == "safari" {
-            let result = launch_safari(cmd, state).await;
+        if let Some(local) = LocalDriver::from_provider(&p) {
+            let result = launch_local_driver(cmd, state, local, options.headless).await;
             if result.is_ok() {
                 state.effective_ca_cert = effective_ca_cert;
             }
@@ -5808,6 +5796,12 @@ pub(crate) async fn auto_save_restore_state(
         }
     }
 
+    if state.restore_identity_unresolved {
+        state.restore_save_status = "skipped_identity_unresolved".to_string();
+        state.restore_saved_path = None;
+        return Ok(None);
+    }
+
     let Some(ref mgr) = state.browser else {
         state.restore_save_status = "no_browser".to_string();
         state.restore_saved_path = None;
@@ -6196,7 +6190,13 @@ impl SettingsOutcome {
     /// was applied. The launch changes were reported as pending; they are
     /// replaced by what the launch actually did.
     fn absorb(&mut self, launch: SettingsOutcome) {
-        self.changes.retain(|change| change["effect"] == "live");
+        // The restore unit applied before the launch and is reported as it was.
+        self.changes.retain(|change| {
+            change["effect"] == "live" && change["applied"] == true
+                || RESTORE_UNIT
+                    .iter()
+                    .any(|key| change["option"] == spec(*key).name)
+        });
         self.changes.extend(launch.changes);
         self.forced = launch.forced;
         self.relaunched_browser = launch.relaunched_browser;
@@ -6208,10 +6208,9 @@ impl SettingsOutcome {
         self.relaunched_browser = false;
         let names: Vec<&str> = keys.iter().map(|key| spec(*key).name).collect();
         for change in &mut self.changes {
-            if change["effect"] == "relaunch"
-                && change["option"]
-                    .as_str()
-                    .is_some_and(|o| names.contains(&o))
+            if change["option"]
+                .as_str()
+                .is_some_and(|o| names.contains(&o))
             {
                 change["applied"] = json!(false);
             }
@@ -6267,6 +6266,75 @@ async fn rollback_launch_settings(
             .map(|e| format!("the stored security settings could not be restored: {}", e));
     }
     None
+}
+
+/// What applying the restore unit changed, kept to put it back if the launch
+/// that follows fails.
+struct RestoreUnitApplied {
+    before: Running,
+    attached: Option<AttachedTarget>,
+    changes: Vec<Value>,
+    relaunched_browser: bool,
+}
+
+/// Applies the restore key, save policy and checks together. A new key saves
+/// and closes the running browser first, under the key and policy it ran with.
+async fn apply_restore_unit(
+    state: &mut DaemonState,
+    unit: &Patch,
+) -> Result<RestoreUnitApplied, String> {
+    let before = state.settings.clone();
+    let attached = state.attached_target.clone();
+    let outcome = apply_settings_patch(state, unit, true).await?;
+    Ok(RestoreUnitApplied {
+        before,
+        attached,
+        changes: outcome.changes,
+        relaunched_browser: outcome.relaunched_browser,
+    })
+}
+
+/// Puts the whole restore unit back and re-derives the restore state from it.
+async fn rollback_restore_unit(
+    state: &mut DaemonState,
+    applied: &RestoreUnitApplied,
+    outcome: &mut SettingsOutcome,
+) -> Option<String> {
+    let cleanup = if state.session_name != applied.before.restore().key
+        && has_active_browser_session(state)
+    {
+        let closed = Box::pin(close_all_browser_backends(state)).await;
+        state.ref_map.invalidate_all_documents();
+        state.attached_target = applied.attached.clone();
+        closed.err().map(|e| {
+            state.restore_identity_unresolved = true;
+            format!(
+                "the browser attached under the new restore key could not be closed, so saving is blocked until a close succeeds: {}",
+                e
+            )
+        })
+    } else {
+        None
+    };
+    for key in RESTORE_UNIT {
+        state
+            .settings
+            .put_back(key, applied.before.get(key).cloned());
+    }
+    apply_restore_settings(state, &RESTORE_UNIT);
+    outcome.mark_rolled_back(&RESTORE_UNIT);
+    cleanup
+}
+
+async fn rollback_launch(
+    state: &mut DaemonState,
+    applied: &RestoreUnitApplied,
+    outcome: &mut SettingsOutcome,
+    error: &str,
+) -> String {
+    let rollback = rollback_launch_settings(state, outcome, error).await;
+    let cleanup = rollback_restore_unit(state, applied, outcome).await;
+    with_rollback_error(&with_rollback_error(error, rollback), cleanup)
 }
 
 /// The launch error with the rollback problem, if any, appended.
@@ -6364,10 +6432,8 @@ async fn apply_settings_patch(
             .filter(|change| change.effect() == Effect::Launch)
             .map(|change| change.to_json(false))
             .collect();
-        (
-            state.settings.plan(&patch.without_launch_settings()),
-            deferred,
-        )
+        let live = patch.without_launch_settings_for(state.session_name.as_deref());
+        (state.settings.plan(&live), deferred)
     };
     let changed = |key: Key| plan.changes.iter().any(|change| change.key == key);
 
@@ -6521,9 +6587,26 @@ async fn apply_settings_patch(
 
     if relaunch && had_browser {
         let _ = auto_save_restore_state(state).await;
-        close_all_browser_backends(state).await?;
+        if let Err(e) = close_all_browser_backends(state).await {
+            // The old browser may still run under its key: the restore rows
+            // keep their old values.
+            if let Some(pending) = pending.as_ref() {
+                for key in touched.iter().filter(|key| is_restore_key(**key)) {
+                    state
+                        .settings
+                        .put_back(*key, pending.before.get(*key).cloned());
+                }
+            }
+            return Err(e);
+        }
         state.ref_map.invalidate_all_documents();
     }
+    let restore_rows: Vec<Key> = touched
+        .iter()
+        .copied()
+        .filter(|key| is_restore_key(*key))
+        .collect();
+    apply_restore_settings(state, &restore_rows);
 
     Ok(SettingsOutcome {
         changes,
@@ -6677,7 +6760,12 @@ async fn launch_ios(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     }))
 }
 
-async fn launch_safari(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn launch_local_driver(
+    cmd: &Value,
+    state: &mut DaemonState,
+    local: LocalDriver,
+    headless: bool,
+) -> Result<Value, String> {
     let port: u16 = cmd
         .get("port")
         .and_then(|v| v.as_u64())
@@ -6698,27 +6786,27 @@ async fn launch_safari(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .port()
     };
 
-    let driver = safari::launch_safaridriver(actual_port)?;
+    let driver = local.launch(actual_port, headless)?;
     let mut client = super::webdriver::client::WebDriverClient::new(actual_port);
 
     client
         .create_session(serde_json::json!({
-            "browserName": "safari",
+            "browserName": local.name(),
         }))
         .await?;
 
-    state.safari_driver = Some(driver);
+    state.local_driver = Some(driver);
     state.webdriver_backend = Some(WebDriverBackend::new(client));
     state.backend_type = BackendType::WebDriver;
-    state.engine = "safari".to_string();
+    state.engine = local.name().to_string();
     write_engine_file(&state.session_id, &state.engine);
-    write_provider_file(&state.session_id, "safari");
+    write_provider_file(&state.session_id, local.name());
     write_extensions_file(&state.session_id, &state.settings);
     state.reset_input_state();
 
     Ok(json!({
         "launched": true,
-        "provider": "safari",
+        "provider": local.name(),
         "port": actual_port,
         "backend": "webdriver",
     }))
@@ -11274,6 +11362,9 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
         .unwrap_or_else(|_| json!({}));
     if let Some(tree) = frame_tree.get("frameTree") {
         collect_origins(tree, &mut frame_origins);
+        if let Some(origin) = webmcp::frame_origin(&tree["frame"]) {
+            state.webmcp.update_page_origin(&session_id, &origin);
+        }
     }
     for (frame_id, frame_origin) in &frame_origins {
         state
@@ -11360,6 +11451,9 @@ async fn enable_webmcp_events(state: &mut DaemonState) -> Result<(), String> {
             }
         }
         update_origins(&mut state.webmcp, &session_id, &tree["frameTree"]);
+        if let Some(origin) = webmcp::frame_origin(&tree["frameTree"]["frame"]) {
+            state.webmcp.update_page_origin(&session_id, &origin);
+        }
         Ok::<(), String>(())
     })
     .await
@@ -16491,6 +16585,20 @@ fn poppy_error_response(id: &str, error: &str) -> Value {
     resp
 }
 
+fn attach_failed_lifecycle(resp: &mut Value, launched: bool, relaunched_browser: bool) {
+    if resp.get("success").and_then(Value::as_bool) != Some(false) {
+        return;
+    }
+    if let Some(lifecycle) = resp
+        .get_mut("data")
+        .and_then(|data| data.get_mut("lifecycle"))
+        .and_then(Value::as_object_mut)
+    {
+        lifecycle.insert("launched".to_string(), json!(launched));
+        lifecycle.insert("relaunchedBrowser".to_string(), json!(relaunched_browser));
+    }
+}
+
 fn error_response(id: &str, error: &str) -> Value {
     let mut resp = json!({
         "id": id,
@@ -19428,10 +19536,34 @@ mod tests {
         assert_eq!(state.restore_save_status, "not_attempted");
     }
 
-    #[test]
-    fn test_restore_key_change_resets_runtime_restore_state() {
-        let mut state = DaemonState::new();
-        state.session_name = Some("old-key".to_string());
+    /// A daemon built without a restore key or policy from the environment,
+    /// and the guard that keeps it so.
+    fn unconfigured_restore_session() -> (EnvGuard<'static>, DaemonState) {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SESSION_NAME", "AGENT_BROWSER_RESTORE_SAVE"]);
+        guard.remove("AGENT_BROWSER_SESSION_NAME");
+        guard.remove("AGENT_BROWSER_RESTORE_SAVE");
+        (guard, DaemonState::new())
+    }
+
+    fn restore_session(key: &str) -> (EnvGuard<'static>, DaemonState) {
+        let (guard, mut state) = unconfigured_restore_session();
+        state.settings.set(Key::RestoreKey, json!(key));
+        state.session_name = Some(key.to_string());
+        (guard, state)
+    }
+
+    async fn apply_wire(
+        state: &mut DaemonState,
+        settings: Value,
+        launches: bool,
+    ) -> Result<SettingsOutcome, String> {
+        let patch = Patch::from_wire(Some(&settings)).map_err(|e| e.to_string())?;
+        apply_settings_patch(state, &patch, launches).await
+    }
+
+    #[tokio::test]
+    async fn test_restore_key_change_resets_runtime_restore_state() {
+        let (_env, mut state) = restore_session("old-key");
         state.restore_status = "loaded_but_invalid".to_string();
         state.restore_status_detail = Some("missing text".to_string());
         state.restore_loaded_path = Some("/tmp/old-key.json".to_string());
@@ -19440,7 +19572,9 @@ mod tests {
         state.restore_save_status = "skipped_restore_failed".to_string();
         state.restore_saved_path = Some("/tmp/old-key.json".to_string());
 
-        apply_restore_config_from_command(&json!({ "restoreKey": "new-key" }), &mut state).unwrap();
+        apply_wire(&mut state, json!({ "restore-key": "new-key" }), true)
+            .await
+            .unwrap();
 
         assert_eq!(state.session_name.as_deref(), Some("new-key"));
         assert_eq!(state.restore_status, "pending");
@@ -19452,43 +19586,49 @@ mod tests {
         assert!(state.restore_saved_path.is_none());
     }
 
-    #[test]
-    fn test_restore_key_same_value_preserves_failure_state() {
-        let mut state = DaemonState::new();
-        state.session_name = Some("same-key".to_string());
+    #[tokio::test]
+    async fn test_restore_key_same_value_preserves_failure_state() {
+        let (_env, mut state) = restore_session("same-key");
         state.restore_status = "loaded_but_invalid".to_string();
         state.restore_load_failed = true;
         state.restore_save_status = "skipped_restore_failed".to_string();
 
-        apply_restore_config_from_command(&json!({ "restoreKey": "same-key" }), &mut state)
+        let outcome = apply_wire(&mut state, json!({ "restore-key": "same-key" }), true)
+            .await
             .unwrap();
 
+        assert!(outcome.changes.is_empty());
         assert_eq!(state.session_name.as_deref(), Some("same-key"));
         assert_eq!(state.restore_status, "loaded_but_invalid");
         assert!(state.restore_load_failed);
         assert_eq!(state.restore_save_status, "skipped_restore_failed");
     }
 
-    #[test]
-    fn test_restore_config_command_clears_sticky_checks_and_policy() {
-        let mut state = DaemonState::new();
-        state.session_name = Some("same-key".to_string());
+    #[tokio::test]
+    async fn test_restore_settings_clear_sticky_checks_and_policy() {
+        let (_env, mut state) = restore_session("same-key");
+        state.settings.set(Key::RestoreSave, json!("never"));
+        state
+            .settings
+            .set(Key::RestoreCheckText, json!("Dashboard"));
         state.restore_save = "never".to_string();
         state.restore_check_text = Some("Dashboard".to_string());
         state.restore_status = "loaded_but_invalid".to_string();
         state.restore_status_detail = Some("missing text".to_string());
         state.restore_load_failed = true;
 
-        apply_restore_config_from_command(
-            &json!({
-                "restoreKey": "same-key",
-                "restoreSave": "auto",
-                "restoreCheckUrl": null,
-                "restoreCheckText": null,
-                "restoreCheckFn": null
-            }),
+        apply_wire(
             &mut state,
+            json!({
+                "restore-key": "same-key",
+                "restore-save": "auto",
+                "restore-check-url": null,
+                "restore-check-text": null,
+                "restore-check-fn": null
+            }),
+            false,
         )
+        .await
         .unwrap();
 
         assert_eq!(state.restore_save, "auto");
@@ -19501,21 +19641,34 @@ mod tests {
         assert!(!state.restore_validation_pending);
     }
 
-    #[test]
-    fn test_restore_config_check_change_marks_loaded_state_for_validation() {
-        let mut state = DaemonState::new();
-        state.session_name = Some("same-key".to_string());
-        state.restore_status = "loaded".to_string();
-        state.restore_load_failed = false;
-        state.restore_validation_pending = false;
+    #[tokio::test]
+    async fn test_non_launch_patch_with_another_key_leaves_running_policy_alone() {
+        let (_env, mut state) = restore_session("old-key");
+        assert_eq!(state.restore_save, "auto");
 
-        apply_restore_config_from_command(
-            &json!({
-                "restoreKey": "same-key",
-                "restoreCheckText": "Dashboard"
-            }),
+        apply_wire(
             &mut state,
+            json!({ "restore-key": "new-key", "restore-save": "never" }),
+            false,
         )
+        .await
+        .unwrap();
+
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
+        assert_eq!(state.restore_save, "auto");
+    }
+
+    #[tokio::test]
+    async fn test_restore_check_change_marks_loaded_state_for_validation() {
+        let (_env, mut state) = restore_session("same-key");
+        state.restore_status = "loaded".to_string();
+
+        apply_wire(
+            &mut state,
+            json!({ "restore-key": "same-key", "restore-check-text": "Dashboard" }),
+            false,
+        )
+        .await
         .unwrap();
 
         assert_eq!(state.restore_check_text.as_deref(), Some("Dashboard"));
@@ -19524,34 +19677,595 @@ mod tests {
         assert!(state.restore_validation_pending);
     }
 
-    #[test]
-    fn test_restore_config_rejects_invalid_restore_key() {
-        let mut state = DaemonState::new();
+    #[tokio::test]
+    async fn test_invalid_restore_settings_are_rejected_before_anything_changes() {
+        for (wire, reason) in [
+            (json!({ "restore-key": "../bad" }), "Invalid session name"),
+            (
+                json!({ "restore-key": "same-key", "restore-save": "sometimes" }),
+                "Invalid restore save policy",
+            ),
+            // A value that is not a string used to become `auto`.
+            (
+                json!({ "restore-key": "same-key", "restore-save": 7 }),
+                "restore-save",
+            ),
+        ] {
+            let (_env, mut state) = unconfigured_restore_session();
+            let err = apply_wire(&mut state, wire, true).await.err().unwrap();
+            assert!(err.contains(reason), "{err}");
+            assert!(state.session_name.is_none());
+            assert_eq!(state.restore_status, "not_configured");
+            assert_eq!(state.restore_save, "auto");
+        }
+    }
 
-        let err = apply_restore_config_from_command(&json!({ "restoreKey": "../bad" }), &mut state)
-            .unwrap_err();
+    #[tokio::test]
+    async fn test_restore_key_change_waits_for_a_command_that_launches() {
+        let (_env, mut state) = restore_session("old-key");
+        state.restore_status = "loaded".to_string();
 
-        assert!(err.contains("Invalid session name"));
+        let outcome = apply_wire(&mut state, json!({ "restore-key": "new-key" }), false)
+            .await
+            .unwrap();
+
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
+        assert_eq!(state.restore_status, "loaded");
+        assert_eq!(outcome.changes.len(), 1);
+        assert_eq!(outcome.changes[0]["option"], "restore-key");
+        assert_eq!(outcome.changes[0]["effect"], "relaunch");
+        assert_eq!(outcome.changes[0]["applied"], false);
+        assert!(outcome.pending.is_none());
+    }
+
+    async fn apply_unit(
+        state: &mut DaemonState,
+        settings: Value,
+    ) -> (RestoreUnitApplied, SettingsOutcome) {
+        let patch = Patch::from_wire(Some(&settings)).unwrap();
+        let (_, unit) = patch.split_restore_unit();
+        let applied = apply_restore_unit(state, &unit).await.unwrap();
+        (applied, SettingsOutcome::default())
+    }
+
+    #[tokio::test]
+    async fn test_failed_launch_puts_the_whole_restore_unit_back() {
+        let (_env, mut state) = restore_session("old-key");
+        state.restore_status = "loaded".to_string();
+        let (applied, mut outcome) = apply_unit(
+            &mut state,
+            json!({
+                "restore-key": "new-key",
+                "restore-save": "never",
+                "restore-check-text": "Dashboard"
+            }),
+        )
+        .await;
+        assert_eq!(state.session_name.as_deref(), Some("new-key"));
+        assert_eq!(state.restore_save, "never");
+
+        assert!(rollback_restore_unit(&mut state, &applied, &mut outcome)
+            .await
+            .is_none());
+
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
+        assert_eq!(state.settings.restore().key.as_deref(), Some("old-key"));
+        assert_eq!(state.restore_save, "auto");
+        assert!(state.restore_check_text.is_none());
+        assert!(state.settings.restore().check_text.is_none());
+        assert_ne!(state.restore_status, "not_configured");
+        assert!(!state.restore_validation_pending);
+    }
+
+    #[tokio::test]
+    async fn test_failed_launch_without_a_previous_key_returns_to_not_configured() {
+        let (_env, mut state) = unconfigured_restore_session();
         assert!(state.session_name.is_none());
+        assert_eq!(state.restore_status, "not_configured");
+        let (applied, mut outcome) = apply_unit(
+            &mut state,
+            json!({ "restore-key": "new-key", "restore-save": "never" }),
+        )
+        .await;
+        assert_eq!(state.restore_status, "pending");
+
+        assert!(rollback_restore_unit(&mut state, &applied, &mut outcome)
+            .await
+            .is_none());
+
+        assert!(state.session_name.is_none());
+        assert_eq!(state.restore_save, "auto");
         assert_eq!(state.restore_status, "not_configured");
     }
 
-    #[test]
-    fn test_restore_config_rejects_invalid_save_policy() {
-        let mut state = DaemonState::new();
-
-        let err = apply_restore_config_from_command(
+    #[tokio::test]
+    async fn test_auth_login_no_navigate_rejects_a_restore_key_change() {
+        let (_env, mut state) = restore_session("old-key");
+        let resp = execute_command(
             &json!({
-                "restoreKey": "same-key",
-                "restoreSave": "sometimes"
+                "id": "login",
+                "action": "auth_login",
+                "name": "site",
+                "noNavigate": true,
+                "settings": { "restore-key": "new-key" }
             }),
             &mut state,
         )
-        .unwrap_err();
+        .await;
 
-        assert!(err.contains("Invalid restore save policy"));
-        assert!(state.session_name.is_none());
+        assert_eq!(resp["success"], false);
+        assert!(
+            resp["error"]
+                .as_str()
+                .unwrap()
+                .contains("cannot switch restore sessions"),
+            "{resp}"
+        );
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
+    }
+
+    /// A command that never launches closes the old browser for a new restore
+    /// key but relaunches nothing, so no relaunch is reported.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_close_with_a_new_restore_key_reports_no_relaunch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env, mut state) = restore_session("old-key");
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        std::fs::write(
+            &plugin_path,
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s' '{\"protocol\":\"agent-browser.plugin.v1\",\"success\":true,\"data\":{}}'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+        state.active_provider_connection = true;
+        state.active_provider_session = Some(ActiveProviderSession {
+            session: providers::ProviderSession {
+                provider: "plugin:cloud-browser".to_string(),
+                session_id: r#"{"sessionId":"s1"}"#.to_string(),
+            },
+            plugins: vec![crate::plugins::PluginConfig {
+                name: "cloud-browser".to_string(),
+                command: plugin_path.to_string_lossy().to_string(),
+                capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
+                ..crate::plugins::PluginConfig::default()
+            }],
+        });
+
+        let resp = execute_command(
+            &json!({
+                "id": "close-new-key",
+                "action": "close",
+                "settings": { "restore-key": "new-key" }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(state.session_name.as_deref(), Some("new-key"), "{resp}");
+        let lifecycle = &resp["data"]["lifecycle"];
+        assert_eq!(lifecycle["relaunchedBrowser"], false, "{resp}");
+        assert_eq!(lifecycle["launched"], false, "{resp}");
+        let notices = crate::output::settings_notices(&resp["data"]);
+        assert!(
+            notices.iter().any(
+                |line| line.contains("restore-key: old-key \u{2192} new-key")
+                    && line.ends_with("closed browser")
+            ),
+            "{notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .all(|line| !line.contains("relaunched browser")),
+            "{notices:?}"
+        );
+    }
+
+    /// `read` of the active tab after a new restore key fails once the old
+    /// browser is closed, and its report still says the browser was closed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_failed_read_with_a_new_restore_key_reports_a_closed_browser() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env, mut state) = restore_session("old-key");
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        std::fs::write(
+            &plugin_path,
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s' '{\"protocol\":\"agent-browser.plugin.v1\",\"success\":true,\"data\":{}}'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+        state.active_provider_connection = true;
+        state.active_provider_session = Some(ActiveProviderSession {
+            session: providers::ProviderSession {
+                provider: "plugin:cloud-browser".to_string(),
+                session_id: r#"{"sessionId":"s1"}"#.to_string(),
+            },
+            plugins: vec![crate::plugins::PluginConfig {
+                name: "cloud-browser".to_string(),
+                command: plugin_path.to_string_lossy().to_string(),
+                capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
+                ..crate::plugins::PluginConfig::default()
+            }],
+        });
+
+        let resp = execute_command(
+            &json!({
+                "id": "read-new-key",
+                "action": "read",
+                "settings": { "restore-key": "new-key" }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(state.session_name.as_deref(), Some("new-key"), "{resp}");
+        let lifecycle = &resp["data"]["lifecycle"];
+        assert_eq!(lifecycle["relaunchedBrowser"], false, "{resp}");
+        assert_eq!(lifecycle["launched"], false, "{resp}");
+        let notices = crate::output::settings_notices(&resp["data"]);
+        assert!(
+            notices.iter().any(
+                |line| line.contains("restore-key: old-key \u{2192} new-key")
+                    && line.ends_with("closed browser")
+            ),
+            "{notices:?}"
+        );
+    }
+
+    /// A command that never launches still applies the restore unit as a
+    /// whole: key, save policy and checks switch together.
+    #[tokio::test]
+    async fn test_a_non_launching_command_applies_the_whole_restore_unit() {
+        let (_env, mut state) = restore_session("old-key");
+        assert!(!command_launches_browser(&json!({ "action": "read" })));
+
+        execute_command(
+            &json!({
+                "id": "read-new-key",
+                "action": "read",
+                "settings": {
+                    "restore-key": "new-key",
+                    "restore-save": "never",
+                    "restore-check-text": "Dashboard"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(state.session_name.as_deref(), Some("new-key"));
+        assert_eq!(state.settings.restore().key.as_deref(), Some("new-key"));
+        assert_eq!(state.restore_save, "never");
+        assert_eq!(state.restore_check_text.as_deref(), Some("Dashboard"));
+    }
+
+    /// The same key with a new save policy and checks changes them in place on
+    /// a non-launching command.
+    #[tokio::test]
+    async fn test_a_non_launching_command_updates_policy_for_the_same_key() {
+        let (_env, mut state) = restore_session("old-key");
+
+        execute_command(
+            &json!({
+                "id": "read-same-key",
+                "action": "read",
+                "settings": {
+                    "restore-key": "old-key",
+                    "restore-save": "never",
+                    "restore-check-url": "**/home"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
+        assert_eq!(state.restore_save, "never");
+        assert_eq!(state.restore_check_url.as_deref(), Some("**/home"));
+    }
+
+    fn policy_file(dir: &tempfile::TempDir, body: &str) -> ActionPolicy {
+        let path = dir.path().join("policy.json");
+        std::fs::write(&path, body).unwrap();
+        ActionPolicy::load(path.to_str().unwrap()).unwrap()
+    }
+
+    /// A command the policy denies or parks for confirmation changes nothing:
+    /// no restore check is installed for a later autosave to run.
+    #[tokio::test]
+    async fn test_gated_command_leaves_the_restore_unit_untouched() {
+        for (policy, parked) in [
+            (r#"{"default":"deny"}"#, false),
+            (r#"{"default":"allow","confirm":["navigate"]}"#, true),
+        ] {
+            let (_env, mut state) = restore_session("same-key");
+            state.restore_status = "loaded".to_string();
+            let dir = tempfile::tempdir().unwrap();
+            state.policy = Some(policy_file(&dir, policy));
+
+            let resp = execute_command(
+                &json!({
+                    "id": "1",
+                    "action": "navigate",
+                    "url": "https://example.com",
+                    "settings": {
+                        "restore-key": "same-key",
+                        "restore-save": "never",
+                        "restore-check-fn": "window.armed"
+                    }
+                }),
+                &mut state,
+            )
+            .await;
+
+            if parked {
+                assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
+            } else {
+                assert_eq!(resp["success"], false, "{resp}");
+            }
+            assert!(state.restore_check_fn.is_none(), "{policy}");
+            assert!(state.settings.restore().check_fn.is_none(), "{policy}");
+            assert_eq!(state.restore_save, "auto", "{policy}");
+            assert!(!state.restore_validation_pending, "{policy}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_daemon_seeded_with_a_restore_key_reports_it_configured() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_SESSION_NAME", "AGENT_BROWSER_RESTORE_SAVE"]);
+        env.set("AGENT_BROWSER_SESSION_NAME", "seeded-key");
+        env.remove("AGENT_BROWSER_RESTORE_SAVE");
+        let mut state = DaemonState::new();
+
+        let resp =
+            execute_command(&json!({ "id": "1", "action": "session_info" }), &mut state).await;
+
+        assert_eq!(resp["data"]["restoreKey"], "seeded-key", "{resp}");
+        assert_eq!(resp["data"]["restoreStatus"], "pending", "{resp}");
+    }
+
+    /// A command that does not launch applies the restore key together with
+    /// its save policy and checks, never the policy alone.
+    #[tokio::test]
+    async fn test_a_command_that_does_not_launch_applies_the_whole_restore_unit() {
+        let (_env, mut state) = restore_session("old-key");
+
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "cdp_url",
+                "settings": {
+                    "restore-key": "new-key",
+                    "restore-save": "never",
+                    "restore-check-text": "Dashboard"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert!(resp.get("id").is_some(), "{resp}");
+        assert_eq!(state.session_name.as_deref(), Some("new-key"));
+        assert_eq!(state.settings.restore().key.as_deref(), Some("new-key"));
+        assert_eq!(state.restore_save, "never");
+        assert_eq!(state.restore_check_text.as_deref(), Some("Dashboard"));
+    }
+
+    /// A launch that fails puts the key, the save policy and the checks back
+    /// together, so the restored key is not judged by the other key's checks.
+    #[tokio::test]
+    async fn test_failed_launch_rolls_back_the_restore_unit_together() {
+        let (_env, mut state) = isolated_state();
+        state.settings.set(Key::RestoreKey, json!("old-key"));
+        state.session_name = Some("old-key".to_string());
+        state.restore_status = "loaded".to_string();
+
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "navigate",
+                "url": "https://example.com",
+                "settings": {
+                    "cdp": "http://127.0.0.1:1",
+                    "restore-key": "new-key",
+                    "restore-save": "never",
+                    "restore-check-text": "Dashboard"
+                }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(state.session_name.as_deref(), Some("old-key"));
+        assert_eq!(state.settings.restore().key.as_deref(), Some("old-key"));
         assert_eq!(state.restore_save, "auto");
+        assert!(state.restore_check_text.is_none());
+        assert_ne!(state.restore_status, "not_configured");
+    }
+
+    async fn spawn_capture_rejecting_cdp_server() -> String {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let command: Value = serde_json::from_str(&text).unwrap();
+                        let method = command["method"].as_str().unwrap_or_default();
+                        let reply = match method {
+                            "Network.enable"
+                                if command["params"]["maxTotalBufferSize"].is_number() =>
+                            {
+                                json!({
+                                    "id": command["id"],
+                                    "error": { "code": -32000, "message": "rejected" }
+                                })
+                            }
+                            "Target.getTargets" => {
+                                json!({ "id": command["id"], "result": { "targetInfos": [] } })
+                            }
+                            "Target.createTarget" => {
+                                json!({ "id": command["id"], "result": { "targetId": "T-EVIL" } })
+                            }
+                            "Target.attachToTarget" => {
+                                json!({ "id": command["id"], "result": { "sessionId": "S-EVIL" } })
+                            }
+                            "Network.getAllCookies" => json!({
+                                "id": command["id"],
+                                "result": { "cookies": [{
+                                    "name": "sid",
+                                    "value": "attacker",
+                                    "domain": "example.com",
+                                    "path": "/",
+                                    "expires": -1,
+                                    "size": 11,
+                                    "httpOnly": false,
+                                    "secure": false,
+                                    "session": true
+                                }] }
+                            }),
+                            _ => json!({ "id": command["id"], "result": {} }),
+                        };
+                        if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    fn isolated_home_restore_session(key: &str) -> (IsolatedEnv, DaemonState, PathBuf, Vec<u8>) {
+        let mut names: Vec<String> = std::env::vars()
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("AGENT_BROWSER_"))
+            .collect();
+        for name in [
+            "AGENT_BROWSER_SOCKET_DIR",
+            "HOME",
+            "USERPROFILE",
+            "BROWSER_USE_API_KEY",
+        ] {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let guard = EnvGuard::new(&refs);
+        for name in &refs {
+            guard.remove(name);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.set("HOME", dir.path().to_str().unwrap());
+        guard.set("USERPROFILE", dir.path().to_str().unwrap());
+        let mut state = DaemonState::new();
+        state.settings.set(Key::RestoreKey, json!(key));
+        state.session_name = Some(key.to_string());
+        let sessions = state::get_sessions_dir();
+        fs::create_dir_all(&sessions).unwrap();
+        let saved = sessions.join(format!("{}-{}.json", key, state.session_id));
+        let original = br#"{"cookies":[{"name":"sid","value":"victim","domain":"example.com","path":"/","expires":-1,"size":9,"httpOnly":true,"secure":true,"session":true}],"origins":[]}"#.to_vec();
+        fs::write(&saved, &original).unwrap();
+        (
+            IsolatedEnv {
+                _guard: guard,
+                _dir: dir,
+            },
+            state,
+            saved,
+            original,
+        )
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_failed_capture_after_attach_drops_the_browser_before_restoring_the_key() {
+        for action in ["navigate", "launch"] {
+            let (_env, mut state, saved, original) = isolated_home_restore_session("key-a");
+            let url = spawn_capture_rejecting_cdp_server().await;
+
+            let resp = execute_command(
+                &json!({
+                    "id": "1",
+                    "action": action,
+                    "url": "https://example.com",
+                    "settings": {
+                        "cdp": url,
+                        "restore-key": "key-b",
+                        "capture": ["flow"]
+                    }
+                }),
+                &mut state,
+            )
+            .await;
+
+            assert_eq!(resp["success"], false, "{action}: {resp}");
+            assert_eq!(state.session_name.as_deref(), Some("key-a"), "{action}");
+            assert_eq!(
+                state.settings.restore().key.as_deref(),
+                Some("key-a"),
+                "{action}"
+            );
+            assert!(state.browser.is_none(), "{action}: browser kept: {resp}");
+            assert!(state.attached_target.is_none(), "{action}");
+
+            state.last_autosave_attempt = None;
+            maybe_autosave_restore_state(&mut state, 0).await;
+            let _ = auto_save_restore_state(&mut state).await;
+            let _ = handle_close(&mut state).await;
+            assert_eq!(fs::read(&saved).unwrap(), original, "{action}");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_failed_cleanup_after_a_restore_key_rollback_blocks_autosave() {
+        let (_env, mut state, saved, original) = isolated_home_restore_session("key-a");
+        let (applied, mut outcome) =
+            apply_unit(&mut state, json!({ "restore-key": "key-b" })).await;
+        assert_eq!(state.session_name.as_deref(), Some("key-b"));
+        let url = spawn_capture_rejecting_cdp_server().await;
+        state.browser = Some(BrowserManager::connect_cdp(&url).await.unwrap());
+        state.active_provider_connection = true;
+        state.active_provider_session = Some(pending_browser_use_session());
+
+        let cleanup = rollback_restore_unit(&mut state, &applied, &mut outcome).await;
+
+        assert!(cleanup.is_some());
+        assert_eq!(state.session_name.as_deref(), Some("key-a"));
+        assert!(state.restore_identity_unresolved);
+        state.browser = Some(BrowserManager::connect_cdp(&url).await.unwrap());
+        assert_eq!(auto_save_restore_state(&mut state).await, Ok(None));
+        assert_eq!(state.restore_save_status, "skipped_identity_unresolved");
+        state.last_autosave_attempt = None;
+        maybe_autosave_restore_state(&mut state, 0).await;
+        assert_eq!(fs::read(&saved).unwrap(), original);
+
+        state.active_provider_session = None;
+        state.active_provider_connection = false;
+        close_current_browser(&mut state).await.unwrap();
+        assert!(!state.restore_identity_unresolved);
     }
 
     #[test]
@@ -19582,7 +20296,7 @@ mod tests {
 
     #[test]
     fn test_explicit_state_load_without_restore_keeps_restore_unconfigured() {
-        let mut state = DaemonState::new();
+        let (_env, mut state) = unconfigured_restore_session();
 
         mark_explicit_storage_state_loaded(&mut state, "/tmp/my-auth.json");
 
@@ -19889,7 +20603,7 @@ mod tests {
             "action": "navigate",
             "id": "restore-confirm",
             "url": "https://example.com",
-            "restoreKey": "new-key"
+            "settings": { "restore-key": "new-key" }
         });
 
         let resp = execute_command(&cmd, &mut state).await;
@@ -21950,7 +22664,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
         guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
 
-        for provider in ["ios", "safari"] {
+        for provider in ["ios", "safari", "ladybird"] {
             let mut state = DaemonState::new();
             let error = handle_launch(
                 &json!({
@@ -22091,12 +22805,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
 
         let mut state = DaemonState::new();
-        // `execute_command` applies the restore config before the launch handler.
+        // The settings patch has already set the key by the time the launch handler runs.
         state.session_name = Some("saved-session".to_string());
         let error = handle_launch(
             &json!({
                 "action": "launch",
-                "restoreKey": "saved-session",
                 "allowedDomains": ["example.com"]
             }),
             &mut state,

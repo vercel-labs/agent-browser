@@ -30,6 +30,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "init-scripts": "Init Scripts",
   proxy: "Proxy",
   ios: "iOS Simulator",
+  ladybird: "Ladybird",
   security: "Security",
   "engines/chrome": "Chrome",
   "engines/lightpanda": "Lightpanda",
