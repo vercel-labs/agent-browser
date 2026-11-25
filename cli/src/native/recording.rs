@@ -1497,14 +1497,33 @@ struct CapturedVideoFrame {
     device_height: f64,
 }
 
+#[derive(Clone, Default)]
+struct WatchFrames {
+    /// First frame sent on the channel; preserved so the encoder anchors the
+    /// timeline at the seed even when newer frames arrive during ffmpeg startup.
+    seed: Option<CapturedVideoFrame>,
+    /// Most recent frame sent on the channel.
+    latest: Option<CapturedVideoFrame>,
+}
+
+impl WatchFrames {
+    fn push(&mut self, frame: CapturedVideoFrame) {
+        if self.seed.is_none() {
+            self.seed = Some(frame.clone());
+        }
+        self.latest = Some(frame);
+    }
+}
+
 async fn seed_recording_outputs(
-    frame_tx: &watch::Sender<Option<CapturedVideoFrame>>,
+    frame_tx: &watch::Sender<WatchFrames>,
     contact_tx: Option<&std::sync::mpsc::SyncSender<CapturedVideoFrame>>,
     frame: CapturedVideoFrame,
 ) -> Result<(), String> {
-    frame_tx
-        .send(Some(frame.clone()))
-        .map_err(|_| "Recording encoder stopped unexpectedly".to_string())?;
+    if frame_tx.is_closed() {
+        return Err("Recording encoder stopped unexpectedly".to_string());
+    }
+    frame_tx.send_modify(|slot| slot.push(frame.clone()));
     if let Some(contact_tx) = contact_tx {
         contact_tx.try_send(frame).map_err(|error| match error {
             std::sync::mpsc::TrySendError::Full(_) => format!(
@@ -1569,7 +1588,7 @@ pub fn spawn_recording_task(
             height: initial_frame.device_height,
             scale: initial_frame.device_scale,
         };
-        let (frame_tx, frame_rx) = watch::channel(None);
+        let (frame_tx, frame_rx) = watch::channel(WatchFrames::default());
         let (contact_tx, mut contact_worker) = if let Some(path) = contact_sheet_path.as_ref() {
             let (tx, rx) = std::sync::mpsc::sync_channel(ENCODER_FRAME_BUFFER);
             let contact_cursor = shared_cursor.clone();
@@ -1799,7 +1818,7 @@ struct PageSize {
 /// Where captured frames go: the encoder, the contact sheet, and the counters
 /// `record stop` reports.
 struct FrameOutputs<'a> {
-    frames: &'a watch::Sender<Option<CapturedVideoFrame>>,
+    frames: &'a watch::Sender<WatchFrames>,
     contact: Option<&'a std::sync::mpsc::SyncSender<CapturedVideoFrame>>,
     captured: &'a AtomicU64,
 }
@@ -1807,9 +1826,10 @@ struct FrameOutputs<'a> {
 impl FrameOutputs<'_> {
     fn send(&self, frame: CapturedVideoFrame) -> Result<(), String> {
         self.captured.fetch_add(1, Ordering::Relaxed);
-        self.frames
-            .send(Some(frame.clone()))
-            .map_err(|_| "Recording encoder stopped unexpectedly".to_string())?;
+        if self.frames.is_closed() {
+            return Err("Recording encoder stopped unexpectedly".to_string());
+        }
+        self.frames.send_modify(|slot| slot.push(frame.clone()));
         if let Some(contact) = self.contact {
             contact.try_send(frame).map_err(|error| match error {
                 std::sync::mpsc::TrySendError::Full(_) => format!(
@@ -2110,12 +2130,40 @@ struct EncodedVideo {
     late_frames: u64,
 }
 
+fn apply_watch_frames(
+    slot: &WatchFrames,
+    written: u64,
+    latest: &mut Option<CapturedVideoFrame>,
+    pending_next: &mut Option<CapturedVideoFrame>,
+    interval: &mut tokio::time::Interval,
+) {
+    if latest.is_none() {
+        if let Some(seed) = slot.seed.as_ref() {
+            interval.reset_at(seed.captured_at);
+            *latest = Some(seed.clone());
+            if let Some(newest) = slot.latest.as_ref() {
+                if newest.sequence != seed.sequence {
+                    *pending_next = Some(newest.clone());
+                }
+            }
+        }
+        return;
+    }
+    if let Some(newest) = slot.latest.as_ref() {
+        if written == 0 || pending_next.is_some() {
+            *pending_next = Some(newest.clone());
+        } else {
+            *latest = Some(newest.clone());
+        }
+    }
+}
+
 async fn encode_stream(
     output_path: String,
     fps: u32,
     cursor: bool,
     shared_cursor: SharedRecordingCursor,
-    frames: watch::Receiver<Option<CapturedVideoFrame>>,
+    frames: watch::Receiver<WatchFrames>,
 ) -> Result<EncodedVideo, String> {
     let vfr_option = vfr_option(ffmpeg_version_output().await.as_deref());
     let command = build_ffmpeg_command(&output_path, fps, cursor, vfr_option);
@@ -2127,7 +2175,7 @@ async fn encode_stream_with_command(
     fps: u32,
     cursor: bool,
     shared_cursor: SharedRecordingCursor,
-    mut frames: watch::Receiver<Option<CapturedVideoFrame>>,
+    mut frames: watch::Receiver<WatchFrames>,
 ) -> Result<EncodedVideo, String> {
     let mut ffmpeg = spawn_ffmpeg_command(&mut command)?;
     let mut stdin = ffmpeg
@@ -2138,6 +2186,7 @@ async fn encode_stream_with_command(
     // Catch up after short pipe stalls instead of shortening the video.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
     let mut latest: Option<CapturedVideoFrame> = None;
+    let mut pending_next: Option<CapturedVideoFrame> = None;
     let mut decoded = None;
     let mut written = 0u64;
     let mut late = 0u64;
@@ -2145,22 +2194,20 @@ async fn encode_stream_with_command(
     loop {
         tokio::select! {
             changed = frames.changed() => {
+                let slot = frames.borrow_and_update().clone();
+                apply_watch_frames(&slot, written, &mut latest, &mut pending_next, &mut interval);
                 if changed.is_err() {
-                    if let Some(frame) = frames.borrow_and_update().clone() {
-                        if latest.is_none() {
-                            interval.reset_at(frame.captured_at);
-                        }
-                        latest = Some(frame);
-                    }
                     break;
                 }
-                let Some(frame) = frames.borrow_and_update().clone() else { continue };
-                if latest.is_none() {
-                    interval.reset_at(frame.captured_at);
-                }
-                latest = Some(frame);
             }
             tick = interval.tick() => {
+                if written > 0
+                    && pending_next
+                        .as_ref()
+                        .is_some_and(|next| tick >= next.captured_at)
+                {
+                    latest = pending_next.take();
+                }
                 let Some(frame) = latest.as_ref() else { continue };
                 let output_timestamp = cursor_timestamp();
                 let history = shared_cursor
@@ -2183,6 +2230,28 @@ async fn encode_stream_with_command(
                 }
             }
         }
+    }
+
+    if written == 0 && pending_next.is_some() {
+        if let Some(seed) = latest.as_ref() {
+            let output_timestamp = cursor_timestamp();
+            let seed_image = if cursor {
+                let history = shared_cursor
+                    .lock()
+                    .map(|history| history.clone())
+                    .unwrap_or_default();
+                render_cursor_frame(seed, &history, output_timestamp, &mut decoded)?
+            } else {
+                seed.image_data.as_ref().clone()
+            };
+            if let Err(error) = write_encoder_bytes(&mut stdin, &seed_image).await {
+                return Err(finish_ffmpeg_after_write_error(ffmpeg, stdin, error).await);
+            }
+            written += 1;
+        }
+    }
+    if let Some(next) = pending_next.take() {
+        latest = Some(next);
     }
 
     let Some(frame) = latest.as_ref() else {
@@ -2620,7 +2689,7 @@ mod tests {
         let mut png = std::io::Cursor::new(Vec::new());
         image.write_to(&mut png, image::ImageFormat::Png).unwrap();
         let image_data = Arc::new(png.into_inner());
-        let (frame_tx, mut frame_rx) = watch::channel(None);
+        let (frame_tx, mut frame_rx) = watch::channel(WatchFrames::default());
         let (contact_tx, contact_rx) = std::sync::mpsc::sync_channel(1);
 
         seed_recording_outputs(
@@ -2641,7 +2710,12 @@ mod tests {
 
         frame_rx.changed().await.unwrap();
         assert_eq!(
-            frame_rx.borrow_and_update().as_ref().unwrap().image_data,
+            frame_rx
+                .borrow_and_update()
+                .latest
+                .as_ref()
+                .unwrap()
+                .image_data,
             image_data
         );
         drop(contact_tx);
@@ -2669,7 +2743,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join(format!("sparse.{extension}"));
-            let (tx, rx) = watch::channel(None);
+            let (tx, rx) = watch::channel(WatchFrames::default());
             let encoder = tokio::spawn(encode_stream(
                 path.to_string_lossy().into_owned(),
                 30,
@@ -2681,16 +2755,17 @@ mod tests {
                 let image = image::RgbImage::from_pixel(64, 64, image::Rgb(color));
                 let mut png = std::io::Cursor::new(Vec::new());
                 image.write_to(&mut png, image::ImageFormat::Png).unwrap();
-                tx.send(Some(CapturedVideoFrame {
-                    sequence: sequence as u64,
-                    image_data: Arc::new(png.into_inner()),
-                    elapsed: Duration::ZERO,
-                    captured_at: tokio::time::Instant::now(),
-                    timestamp: cursor_timestamp(),
-                    device_width: 64.0,
-                    device_height: 64.0,
-                }))
-                .unwrap();
+                tx.send_modify(|slot| {
+                    slot.push(CapturedVideoFrame {
+                        sequence: sequence as u64,
+                        image_data: Arc::new(png.into_inner()),
+                        elapsed: Duration::ZERO,
+                        captured_at: tokio::time::Instant::now(),
+                        timestamp: cursor_timestamp(),
+                        device_width: 64.0,
+                        device_height: 64.0,
+                    });
+                });
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
             drop(tx);
@@ -3548,7 +3623,7 @@ mod tests {
 
     #[tokio::test]
     async fn busy_encoder_holds_latest_frame_instead_of_failing() {
-        let (frame_tx, frame_rx) = watch::channel(None);
+        let (frame_tx, frame_rx) = watch::channel(WatchFrames::default());
         let captured = AtomicU64::new(0);
         let outputs = FrameOutputs {
             frames: &frame_tx,
@@ -3569,7 +3644,8 @@ mod tests {
                 })
                 .expect("busy encoder must not fail the recording");
         }
-        assert_eq!(frame_rx.borrow().as_ref().unwrap().sequence, 19);
+        assert_eq!(frame_rx.borrow().seed.as_ref().unwrap().sequence, 0);
+        assert_eq!(frame_rx.borrow().latest.as_ref().unwrap().sequence, 19);
         assert_eq!(captured.load(Ordering::Relaxed), 20);
     }
 
@@ -3584,7 +3660,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let (tx, rx) = watch::channel(None);
+        let (tx, rx) = watch::channel(WatchFrames::default());
         let encoder = tokio::spawn(encode_stream_with_command(
             cmd,
             10,
@@ -3592,16 +3668,17 @@ mod tests {
             Arc::new(Mutex::new(RecordingCursorHistory::default())),
             rx,
         ));
-        tx.send(Some(CapturedVideoFrame {
-            sequence: 0,
-            image_data: Arc::new(b"\x89PNG".repeat(32)),
-            elapsed: Duration::ZERO,
-            captured_at: tokio::time::Instant::now() - Duration::from_secs(1),
-            timestamp: cursor_timestamp(),
-            device_width: 64.0,
-            device_height: 64.0,
-        }))
-        .unwrap();
+        tx.send_modify(|slot| {
+            slot.push(CapturedVideoFrame {
+                sequence: 0,
+                image_data: Arc::new(b"\x89PNG".repeat(32)),
+                elapsed: Duration::ZERO,
+                captured_at: tokio::time::Instant::now() - Duration::from_secs(1),
+                timestamp: cursor_timestamp(),
+                device_width: 64.0,
+                device_height: 64.0,
+            });
+        });
         tokio::time::sleep(Duration::from_millis(250)).await;
         drop(tx);
         let encoded = encoder
@@ -3625,7 +3702,7 @@ mod tests {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-        let (tx, rx) = watch::channel(None);
+        let (tx, rx) = watch::channel(WatchFrames::default());
         let encoder = tokio::spawn(encode_stream_with_command(
             cmd,
             30,
@@ -3634,16 +3711,17 @@ mod tests {
             rx,
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
-        tx.send(Some(CapturedVideoFrame {
-            sequence: 0,
-            image_data: Arc::new(vec![b'x'; 256 * 1024]),
-            elapsed: Duration::ZERO,
-            captured_at: tokio::time::Instant::now(),
-            timestamp: cursor_timestamp(),
-            device_width: 64.0,
-            device_height: 64.0,
-        }))
-        .unwrap();
+        tx.send_modify(|slot| {
+            slot.push(CapturedVideoFrame {
+                sequence: 0,
+                image_data: Arc::new(vec![b'x'; 256 * 1024]),
+                elapsed: Duration::ZERO,
+                captured_at: tokio::time::Instant::now(),
+                timestamp: cursor_timestamp(),
+                device_width: 64.0,
+                device_height: 64.0,
+            });
+        });
         drop(tx);
         let err = encoder.await.unwrap().unwrap_err();
         assert!(
@@ -3662,7 +3740,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let (tx, rx) = watch::channel(None);
+        let (tx, rx) = watch::channel(WatchFrames::default());
         let encoder = tokio::spawn(encode_stream_with_command(
             cmd,
             30,
@@ -3671,21 +3749,87 @@ mod tests {
             rx,
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
-        tx.send(Some(CapturedVideoFrame {
-            sequence: 0,
-            image_data: Arc::new(vec![b'x'; 256 * 1024]),
-            elapsed: Duration::ZERO,
-            captured_at: tokio::time::Instant::now(),
-            timestamp: cursor_timestamp(),
-            device_width: 64.0,
-            device_height: 64.0,
-        }))
-        .unwrap();
+        tx.send_modify(|slot| {
+            slot.push(CapturedVideoFrame {
+                sequence: 0,
+                image_data: Arc::new(vec![b'x'; 256 * 1024]),
+                elapsed: Duration::ZERO,
+                captured_at: tokio::time::Instant::now(),
+                timestamp: cursor_timestamp(),
+                device_width: 64.0,
+                device_height: 64.0,
+            });
+        });
         drop(tx);
         let err = encoder.await.unwrap().unwrap_err();
         assert!(
             err.contains("ffmpeg write failed:") && err.contains("(ffmpeg ") && err.contains("9"),
             "expected write error with SIGKILL status, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn captures_during_ffmpeg_startup_keep_seed_frame_and_timeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup.webm");
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "cat > \"$1\"", "sh", path.to_str().unwrap()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let (tx, rx) = watch::channel(WatchFrames::default());
+        let seed_at = tokio::time::Instant::now();
+        tx.send_modify(|slot| {
+            slot.push(CapturedVideoFrame {
+                sequence: 0,
+                image_data: Arc::new(b"SEED_FRAME\n".to_vec()),
+                elapsed: Duration::ZERO,
+                captured_at: seed_at,
+                timestamp: cursor_timestamp(),
+                device_width: 64.0,
+                device_height: 64.0,
+            });
+        });
+        // Simulate a newer capture overwriting the watch channel before ffmpeg
+        // finishes starting and the encoder reads its first frame.
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        tx.send_modify(|slot| {
+            slot.push(CapturedVideoFrame {
+                sequence: 1,
+                image_data: Arc::new(b"NEXT_FRAME\n".to_vec()),
+                elapsed: seed_at.elapsed(),
+                captured_at: tokio::time::Instant::now(),
+                timestamp: cursor_timestamp(),
+                device_width: 64.0,
+                device_height: 64.0,
+            });
+        });
+
+        let encoder = tokio::spawn(encode_stream_with_command(
+            cmd,
+            10,
+            false,
+            Arc::new(Mutex::new(RecordingCursorHistory::default())),
+            rx,
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(tx);
+        let encoded = encoder.await.unwrap().unwrap();
+        let output = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            output.starts_with("SEED_FRAME\n"),
+            "expected seed frame first, got: {output:?}"
+        );
+        assert!(
+            output.contains("NEXT_FRAME\n"),
+            "expected newer frame after seed, got: {output:?}"
+        );
+        assert!(
+            encoded.frames >= 5,
+            "timeline was shortened across startup: got {} frames",
+            encoded.frames
         );
     }
 
