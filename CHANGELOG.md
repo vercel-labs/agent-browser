@@ -14,6 +14,13 @@
 - Fixed **keyboard `keydown`, `keyup`, and `press` modifier handling**: `keydown` and `keyup` now send `code`, `keyCode`, `location`, and printable text and carry held modifiers across subsequent keyboard, mouse, and flow-recorder commands. `press` applies US-layout Shift mapping, suppresses printable text for Alt, Control, and Meta chords, and dispatches modifier key events for chords not already held (#2734)
 - Fixed **saved flow host rules, write consent, deadlines, and result shaping**: saved host rules now match hostnames regardless of case or a trailing DNS root dot, non-`POST` requests carrying GraphQL queries require write declarations and consent, HTTP preflight cookie and route lookups and in-page fetches stop at the run deadline, empty result lists no longer fail `--fields` or `--where`, and `--limit` shapes only retained rows (#2735)
 - Fixed **saved flow replay** finishing before late-reported first-party Chrome requests settle (#2711)
+- Fixed **iframe targeting**: `frame` resolves cross-origin, unnamed, and nested iframes by CSS selector or `@ref`, and selector commands, `find` locators, `wait`, `check`, and `uncheck` act inside the selected frame, including same-site cross-origin iframes, without reaching tabs pinned by other sessions (#2737)
+- Fixed **`eval` and `console` in iframes**: `eval` runs in the frame selected with `frame` and reports that frame's origin, and `console` and `errors` capture messages from cross-origin iframes on the active tab (#2738)
+- Fixed **iframe snapshots and annotated screenshots**: snapshots label iframes by their `title` or `name`, and `screenshot --annotate` places boxes for elements inside iframes in page coordinates, including cross-origin, scrolled, and scaled frames (#2739)
+- Fixed **dashboard live view pointer and tabs**: clicks map to the real page size, drags send held buttons, touchpad two-finger taps open the context menu, and a tab that closes itself resyncs the tab bar (#2744)
+- Fixed **dashboard live view keyboard and clipboard**: editing shortcuts such as select all, undo, and line navigation reach the page, Option and AltGr characters type, and copy, cut, and paste work through the live view without granting the browser clipboard permissions (#2745)
+- Fixed **`state save` collection**: it no longer stalls under `--allowed-domains`, sends requests to previously visited origins, runs their service workers, or brings a temporary tab to the front. It includes origins from attached sessions but not tabs pinned by other sessions, and keeps the previous autosave when collection fails (#2746)
+- Fixed **`state list`, `state show`, and bulk storage reads**: `state list` shows modified dates, `state show` reports cookie and origin counts (`cookieCount` and `originCount` in JSON, with `summary` unchanged), and `storage local` and `storage session` keep keys such as `__proto__` (#2747)
 
 ### Documentation
 
@@ -22,14 +29,31 @@
 ### Contributors
 
 - @Afloat16
+- @Bella-rab
+- @Ehsan-hash
+- @MrCoder
+- @OBOneProtocol
 - @Railly
+- @adity982
 - @cavalcanticampos
 - @ctate
+- @devxoul
+- @fitchmultz
+- @funnyjacy
 - @hanneslipusch
+- @hyunjinee
 - @kevingatera
 - @lahfir
+- @leejaew
+- @lurenjia534
 - @osrjv
+- @patrickballard
 - @pei711
+- @pqminh27
+- @shtefcs
+- @sx4im
+- @thecodeartificerX
+- @yusufgngor
 
 <!-- release:end -->
 
