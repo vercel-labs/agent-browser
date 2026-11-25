@@ -1881,6 +1881,10 @@ async fn collect_screenshots(
     cancel_rx: &mut oneshot::Receiver<()>,
 ) -> Result<(), String> {
     use futures_util::stream::{FuturesOrdered, StreamExt};
+    // Serialize captures against input and emulation updates only while this
+    // screenshot-mode take is running; dropping the lease on any exit path
+    // disables the gate.
+    let _screenshot_gate = client.enable_screenshot_gate();
     // Each frame is timed when it was asked for, which is when Chrome renders
     // it, not when its bytes arrive: the cursor drawn at that time then stays on
     // the page through a drag instead of running ahead by the round trip.
@@ -3479,11 +3483,75 @@ mod tests {
 
         drop(frame_tx);
         drain.await.unwrap();
+        assert!(!client.is_screenshot_gate_active());
         assert!(total.load(Ordering::SeqCst) >= 3);
         assert_eq!(
             max_in_flight.load(Ordering::SeqCst),
             1,
             "at most one Page.captureScreenshot may be in flight at a time"
+        );
+
+        drop(client);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn collect_screenshots_releases_gate_on_error() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let parsed: Value = serde_json::from_str(&text).unwrap();
+                let id = parsed["id"].as_u64().unwrap();
+                let resp = json!({ "id": id, "result": { "data": "AAAA" } });
+                let _ = ws.send(Message::Text(resp.to_string())).await;
+            }
+        });
+
+        let client = CdpClient::connect(&format!("ws://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let (_event_tx, mut events) = mpsc::channel(8);
+        let (frame_tx, frame_rx) = mpsc::channel(16);
+        drop(frame_rx);
+        let captured = AtomicU64::new(0);
+        let outputs = FrameOutputs {
+            frames: &frame_tx,
+            contact: None,
+            captured: &captured,
+        };
+        let (_cancel_tx, mut cancel_rx) = oneshot::channel();
+        let mut sequence = 0u64;
+
+        let err = collect_screenshots(
+            &client,
+            "S-1",
+            &mut events,
+            &outputs,
+            PageSize {
+                width: 390.0,
+                height: 844.0,
+                scale: 2.0,
+            },
+            60,
+            &mut sequence,
+            tokio::time::Instant::now(),
+            &mut cancel_rx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("Recording encoder stopped unexpectedly"),
+            "{err}"
+        );
+        assert!(
+            !client.is_screenshot_gate_active(),
+            "screenshot gate must be released when collect_screenshots exits with an error"
         );
 
         drop(client);
