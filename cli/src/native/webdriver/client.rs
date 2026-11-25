@@ -268,28 +268,43 @@ async fn http_request(method: Method, url: &str, body: Option<&Value>) -> Result
         request = request.json(body);
     }
 
-    let json_body = request
+    let resp = request
         .send()
         .await
-        .map_err(|e| format!("Connection failed: {}", e))?
+        .map_err(|e| format!("Connection failed: {}", e))?;
+    let status = resp.status();
+    let json_body = resp
         .text()
         .await
         .map_err(|e| format!("Read failed: {}", e))?;
 
     if json_body.trim().is_empty() {
+        if !status.is_success() {
+            return Err(format!("WebDriver request failed with HTTP {}", status));
+        }
         return Ok(json!({}));
     }
 
     let response: Value = serde_json::from_str(&json_body).map_err(|e| {
+        if !status.is_success() {
+            return format!(
+                "WebDriver request failed with HTTP {}: {}",
+                status,
+                json_body.chars().take(100).collect::<String>()
+            );
+        }
         format!(
             "Invalid JSON response: {} (body: {})",
             e,
             json_body.chars().take(100).collect::<String>()
         )
     })?;
-    if let Some(error) = response["value"]["error"].as_str() {
-        let message = response["value"]["message"].as_str().unwrap_or_default();
-        return Err(format!("{}: {}", error, message));
+    if !status.is_success() {
+        if let Some(error) = response["value"]["error"].as_str() {
+            let message = response["value"]["message"].as_str().unwrap_or_default();
+            return Err(format!("{}: {}", error, message));
+        }
+        return Err(format!("WebDriver request failed with HTTP {}", status));
     }
     Ok(response)
 }
@@ -347,5 +362,48 @@ mod tests {
         let payload = json!({ "unexpected": true });
         let err = element_id_from_value(&payload).expect_err("no id is malformed");
         assert_eq!(err, "No element ID in response");
+    }
+
+    /// A 200 OK evaluation returning `{error: ...}` is a JS value, while a non-2xx
+    /// WebDriver error payload is an error.
+    #[tokio::test]
+    async fn test_http_200_error_property_is_value_while_non_2xx_is_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for (status, body) in [
+                ("200 OK", r#"{"value":{"error":"boom"}}"#),
+                (
+                    "404 Not Found",
+                    r#"{"value":{"error":"no such element","message":"Missing"}}"#,
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(resp.as_bytes()).await.unwrap();
+            }
+        });
+
+        let client = WebDriverClient::new_with_session(port, "s1".to_string());
+        let val = client
+            .execute_script("return ({error: 'boom'})", vec![])
+            .await
+            .expect("200 OK with error field should return the JS object");
+        assert_eq!(val, json!({ "error": "boom" }));
+
+        let err = client
+            .find_element("css selector", ".missing")
+            .await
+            .expect_err("404 WebDriver error should fail");
+        assert_eq!(err, "No element found by css selector '.missing'");
+        server.await.unwrap();
     }
 }

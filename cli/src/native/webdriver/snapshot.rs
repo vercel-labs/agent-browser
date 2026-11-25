@@ -10,8 +10,11 @@ use crate::native::cdp::types::{AXNode, AXProperty, AXValue};
 use crate::native::element::RefMap;
 use crate::native::snapshot::{
     cursor_info_from_value, snapshot_from_ax_nodes, SnapshotOptions, SnapshotRefContext,
-    CONTENT_ROLES, HINT_FUNCTION, INTERACTIVE_ROLES, MAX_IFRAME_SNAPSHOT_DEPTH, TABLE_CELL_ROLES,
+    CONTENT_ROLES, HINT_FUNCTION, INTERACTIVE_ROLES, MAX_IFRAME_SNAPSHOT_DEPTH,
+    MAX_SNAPSHOT_TREE_DEPTH, TABLE_CELL_ROLES,
 };
+
+const MAX_WALKED_NODES: usize = 100_000;
 
 /// Walks the composed tree of the current frame, including open shadow roots, and returns
 /// `{nodes, doc}`. Each node is `[parent, role, name, element, properties, value, cursor, href]`
@@ -36,7 +39,8 @@ const kids = (n) => {
   return [...n.childNodes];
 };
 const hidden = (el) => el.hidden || el.getAttribute('aria-hidden') === 'true' || style(el).display === 'none';
-const text = (n, skip) => {
+const text = (n, skip, depth = 0) => {
+  if (depth > 512) return '';
   let out = '';
   for (const c of kids(n)) {
     if (c === skip) continue;
@@ -49,7 +53,7 @@ const text = (n, skip) => {
     if (label && label.trim()) { out += ' ' + label + ' '; continue; }
     if (t === 'img' || t === 'input') { out += c.getAttribute('alt') || ''; continue; }
     if (t === 'br') { out += ' '; continue; }
-    const inner = text(c, skip);
+    const inner = text(c, skip, depth + 1);
     out += /^inline/.test(style(c).display) ? inner : ' ' + inner + ' ';
   }
   return out;
@@ -183,40 +187,51 @@ const cursor = (el, s) => {
   }
   return { text: (el.textContent || '').trim().slice(0, 100), tagName: el.localName, hasOnClick, hasCursorPointer, hasTabIndex, isEditable, hiddenInputType, hiddenInputChecked };
 };
+const MAX_NODES = 100000, MAX_DEPTH = 512;
 const nodes = [];
-const push = (...node) => {
-  if (node[4] && !Object.keys(node[4]).length) node[4] = null;
-  while (node[node.length - 1] == null) node.pop();
-  nodes.push(node);
-  return nodes.length - 1;
+const push = (parent, r, n, el, props, val, c, href) => {
+  if (nodes.length >= MAX_NODES) return -1;
+  if (props && !Object.keys(props).length) props = null;
+  const raw = [parent, r, n, el, props, val, c, href];
+  let end = raw.length;
+  while (end > 0 && raw[end - 1] == null) end--;
+  const node = [];
+  for (let i = 0; i < end; i++) node[i] = raw[i];
+  const idx = nodes.length;
+  nodes[idx] = node;
+  return idx;
 };
 const inline = (n) => !!n && (n.nodeType === 3 ? /\S/.test(n.data) : n.nodeType === 1 && !SKIP.has(n.localName) && /^inline/.test(style(n).display));
-const walk = (n, parent, depth) => {
+const walk = (n, parent, depth, domDepth) => {
+  if (nodes.length >= MAX_NODES || domDepth > MAX_DEPTH) return;
   const list = kids(n);
   const shown = n.nodeType !== 1 || !/^(hidden|collapse)$/.test(style(n).visibility);
-  list.forEach((c, i) => {
-    if (c.nodeType === 1 && !SKIP.has(c.localName)) return visit(c, parent, depth);
-    if (c.nodeType !== 3 || !shown) return;
+  for (let i = 0; i < list.length; i++) {
+    if (nodes.length >= MAX_NODES) return;
+    const c = list[i];
+    if (c.nodeType === 1 && !SKIP.has(c.localName)) { visit(c, parent, depth, domDepth + 1); continue; }
+    if (c.nodeType !== 3 || !shown) continue;
     let t = c.data.replace(/\s+/g, ' ');
     if (!inline(list[i - 1])) t = t.replace(/^ /, '');
     if (!inline(list[i + 1])) t = t.replace(/ $/, '');
     if (t) push(parent, 'StaticText', t, null, null, null, null, null);
-  });
+  }
 };
-const visit = (el, parent, depth) => {
+const visit = (el, parent, depth, domDepth) => {
+  if (nodes.length >= MAX_NODES || domDepth > MAX_DEPTH) return;
   const s = style(el);
   if (el.hidden || el.getAttribute('aria-hidden') === 'true' || s.display === 'none') return;
   let r = role(el);
   if (r === 'hidden') return;
-  if (r === 'LabelText' && el.control && el.contains(el.control) && ['checkbox', 'radio'].includes(el.control.type)) { visit(el.control, parent, depth); return; }
   const visible = s.visibility !== 'hidden' && s.visibility !== 'collapse';
   const c = visible ? cursor(el, s) : null;
   const n = r && visible ? name(el, r) : '';
   if (!visible || (r === 'generic' && !n && !c && /^(inline|contents)$/.test(s.display))) r = null;
-  if (!r) { if (!LEAF.has(el.localName)) walk(el, parent, depth); return; }
+  if (!r) { if (!LEAF.has(el.localName)) walk(el, parent, depth, domDepth); return; }
   const wantsRef = REF.has(r) || !!c || (CONTENT.has(r) && !!n);
   const href = withUrls && r === 'link' ? el.href || null : null;
   const idx = push(parent, r, n, wantsRef ? el : null, properties(el, r, depth), value(el, r), c, href);
+  if (idx < 0) return;
   if (r === 'listitem') {
     const type = s.listStyleType;
     const marker = MARKERS[type] || (type === 'decimal' ? ([...el.parentElement.children].filter((k) => k.localName === 'li').indexOf(el) + (el.parentElement.start || 1)) + '. ' : null);
@@ -224,25 +239,28 @@ const visit = (el, parent, depth) => {
   }
   if (el.localName === 'select') {
     const holder = r === 'combobox' ? push(idx, 'MenuListPopup', '', null, null, null, null, null) : idx;
-    for (const o of el.options) push(holder, 'option', ws(o.label || o.text), o, { selected: o.selected, ...(o.disabled ? { disabled: true } : {}) }, null, null, null);
+    if (holder < 0) return;
+    for (const o of el.options) {
+      if (push(holder, 'option', ws(o.label || o.text), o, { selected: o.selected, ...(o.disabled ? { disabled: true } : {}) }, null, null, null) < 0) break;
+    }
     return;
   }
   if (LEAF.has(el.localName)) return;
   if (el.localName === 'details' && !el.open) {
     const summary = el.querySelector(':scope > summary');
-    if (summary) visit(summary, idx, depth);
+    if (summary) visit(summary, idx, depth, domDepth + 1);
     return;
   }
-  walk(el, idx, r === 'list' ? depth + 1 : depth);
+  walk(el, idx, r === 'list' ? depth + 1 : depth, domDepth);
 };
 const root = push(-1, 'RootWebArea', ws(document.title), document.documentElement, null, null, null, null);
 if (selector) {
   const all = [...document.querySelectorAll(selector)];
   const outer = all.filter((m) => !all.some((o) => o !== m && o.contains(m)));
   if (!outer.length) return null;
-  for (const m of outer) visit(m, root, 0);
+  for (const m of outer) visit(m, root, 0, 1);
 } else {
-  walk(document.body || document.documentElement, root, 0);
+  walk(document.body || document.documentElement, root, 0, 1);
 }
 return { nodes, doc: document.documentElement };
 "#;
@@ -276,6 +294,7 @@ impl WebDriverBackend {
             let _ = self.client.switch_to_frame(None).await;
         }
         result?;
+        validate_walked_graph(&walked)?;
 
         let session = self.session_key()?;
         let mut urls = HashMap::new();
@@ -387,24 +406,10 @@ impl WebDriverBackend {
         }
         let element_id = |v: &Value| v[ELEMENT_KEY].as_str().map(String::from);
         let document = element_id(&result["doc"]).ok_or("The snapshot returned no document")?;
-        let nodes = result["nodes"]
+        let raw_nodes = result["nodes"]
             .as_array()
-            .ok_or("The snapshot returned no nodes")?
-            .iter()
-            .map(|n| WalkedNode {
-                parent: n[0].as_u64().map(|p| p as usize),
-                role: n[1].as_str().unwrap_or_default().to_string(),
-                name: n[2].as_str().unwrap_or_default().to_string(),
-                element: element_id(&n[3]).map(|id| ElementHandle {
-                    frames: frames.to_vec(),
-                    id,
-                }),
-                properties: n[4].clone(),
-                value: n[5].as_str().map(String::from),
-                cursor: n[6].clone(),
-                href: n[7].as_str().map(String::from),
-            })
-            .collect();
+            .ok_or("The snapshot returned no nodes")?;
+        let nodes = parse_walked_nodes(raw_nodes, frames)?;
         Ok((nodes, document))
     }
 
@@ -438,18 +443,117 @@ impl WebDriverBackend {
             let mut path = frame.frames.clone();
             path.push(frame.id.clone());
             if let Ok((child, _)) = self.walk_frame(&path, options).await {
-                let offset = walked.len();
-                walked.extend(child.into_iter().map(|mut node| {
-                    node.parent = Some(node.parent.map_or(idx, |p| p + offset));
-                    node
-                }));
-                Box::pin(self.walk_child_frames(walked, offset, depth + 1, frames, options))
-                    .await?;
+                if walked.len() + child.len() <= MAX_WALKED_NODES {
+                    let offset = walked.len();
+                    walked.extend(child.into_iter().map(|mut node| {
+                        node.parent = Some(node.parent.map_or(idx, |p| p + offset));
+                        node
+                    }));
+                    Box::pin(self.walk_child_frames(walked, offset, depth + 1, frames, options))
+                        .await?;
+                }
             }
             self.client.switch_to_parent_frame().await?;
         }
         Ok(())
     }
+}
+
+/// Parses raw walked node arrays from the page script and validates the resulting frame graph.
+fn parse_walked_nodes(raw_nodes: &[Value], frames: &[String]) -> Result<Vec<WalkedNode>, String> {
+    if raw_nodes.len() > MAX_WALKED_NODES {
+        return Err(format!(
+            "The snapshot exceeded the maximum of {MAX_WALKED_NODES} nodes"
+        ));
+    }
+    let element_id = |v: &Value| v[ELEMENT_KEY].as_str().map(String::from);
+    let mut nodes = Vec::with_capacity(raw_nodes.len());
+    for n in raw_nodes {
+        let arr = n
+            .as_array()
+            .ok_or("The snapshot returned an invalid node")?;
+        let parent = match arr.first() {
+            Some(v) if v.as_i64() == Some(-1) => None,
+            Some(v) => {
+                let p = v
+                    .as_u64()
+                    .and_then(|p| usize::try_from(p).ok())
+                    .ok_or("The snapshot returned an invalid parent index")?;
+                Some(p)
+            }
+            None => return Err("The snapshot returned a node without a parent".to_string()),
+        };
+        let get = |i: usize| arr.get(i).unwrap_or(&Value::Null);
+        nodes.push(WalkedNode {
+            parent,
+            role: get(1).as_str().unwrap_or_default().to_string(),
+            name: get(2).as_str().unwrap_or_default().to_string(),
+            element: element_id(get(3)).map(|id| ElementHandle {
+                frames: frames.to_vec(),
+                id,
+            }),
+            properties: get(4).clone(),
+            value: get(5).as_str().map(String::from),
+            cursor: get(6).clone(),
+            href: get(7).as_str().map(String::from),
+        });
+    }
+    validate_walked_graph(&nodes)?;
+    Ok(nodes)
+}
+
+/// Validates graph size, parent bounds, acyclicity, and maximum depth before AX conversion.
+fn validate_walked_graph(walked: &[WalkedNode]) -> Result<(), String> {
+    if walked.len() > MAX_WALKED_NODES {
+        return Err(format!(
+            "The snapshot exceeded the maximum of {MAX_WALKED_NODES} nodes"
+        ));
+    }
+    for (idx, node) in walked.iter().enumerate() {
+        if let Some(parent) = node.parent {
+            if parent >= walked.len() || parent == idx {
+                return Err("The snapshot returned an invalid parent index".to_string());
+            }
+        }
+    }
+    let mut depths = vec![0usize; walked.len()];
+    let mut state = vec![0u8; walked.len()];
+    let mut chain = Vec::new();
+    for start in 0..walked.len() {
+        if state[start] == 2 {
+            continue;
+        }
+        chain.clear();
+        let mut cur = Some(start);
+        while let Some(u) = cur {
+            if state[u] == 2 {
+                break;
+            }
+            if state[u] == 1 {
+                return Err("The snapshot graph contains a cycle".to_string());
+            }
+            state[u] = 1;
+            chain.push(u);
+            if chain.len() > MAX_SNAPSHOT_TREE_DEPTH + 1 {
+                return Err(format!(
+                    "The snapshot depth exceeds the maximum of {MAX_SNAPSHOT_TREE_DEPTH}"
+                ));
+            }
+            cur = walked[u].parent;
+        }
+        let mut depth = cur.map_or(0, |u| depths[u] + 1);
+        while let Some(u) = chain.pop() {
+            if depth > MAX_SNAPSHOT_TREE_DEPTH {
+                return Err(format!(
+                    "The snapshot depth exceeds the maximum of {MAX_SNAPSHOT_TREE_DEPTH}"
+                ));
+            }
+            depths[u] = depth;
+            state[u] = 2;
+            depth += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Converts walked nodes to accessibility nodes for the shared snapshot pipeline.
@@ -496,4 +600,46 @@ fn ax_nodes(walked: &[WalkedNode], ids: &[Option<i64>]) -> Vec<AXNode> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_walked_nodes_rejects_out_of_bounds_parent() {
+        let raw = vec![json!([-1, "RootWebArea", ""]), json!([99, "button", "Ok"])];
+        let err = parse_walked_nodes(&raw, &[]).err().unwrap();
+        assert!(err.contains("invalid parent index"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_walked_nodes_rejects_cycles_and_self_loops() {
+        let self_loop = vec![json!([0, "button", "Ok"])];
+        assert!(parse_walked_nodes(&self_loop, &[]).is_err());
+
+        let cycle = vec![json!([1, "generic", ""]), json!([0, "generic", ""])];
+        let err = parse_walked_nodes(&cycle, &[]).err().unwrap();
+        assert!(err.contains("cycle"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_walked_nodes_rejects_excessive_depth() {
+        let mut raw = Vec::with_capacity(MAX_SNAPSHOT_TREE_DEPTH + 3);
+        raw.push(json!([-1, "RootWebArea", ""]));
+        for i in 1..=(MAX_SNAPSHOT_TREE_DEPTH + 1) {
+            raw.push(json!([i - 1, "generic", ""]));
+        }
+        let err = parse_walked_nodes(&raw, &[]).err().unwrap();
+        assert!(err.contains("depth exceeds"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_walked_nodes_rejects_non_integer_parent() {
+        let raw = vec![
+            json!([-1, "RootWebArea", ""]),
+            json!(["bad", "button", "Ok"]),
+        ];
+        assert!(parse_walked_nodes(&raw, &[]).is_err());
+    }
 }
