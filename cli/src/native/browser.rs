@@ -1196,6 +1196,7 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        ..Default::default()
                     },
                     None,
                 )
@@ -1479,6 +1480,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    ..Default::default()
                 },
                 None,
             )
@@ -2104,6 +2106,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    ..Default::default()
                 },
                 None,
             )
@@ -2449,6 +2452,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    ..Default::default()
                 },
                 None,
             )
@@ -3071,6 +3075,29 @@ impl BrowserManager {
 
     pub fn visited_origins(&self) -> &HashSet<String> {
         &self.visited_origins
+    }
+
+    pub fn owns_browser(&self) -> bool {
+        self.browser_process.is_some()
+    }
+
+    pub fn is_pin_tab(&self) -> bool {
+        self.pin_tab
+    }
+
+    pub fn tracked_target_ids(&self) -> HashSet<String> {
+        self.pages.iter().map(|p| p.target_id.clone()).collect()
+    }
+
+    pub fn record_visited_origins(&mut self, origins: impl IntoIterator<Item = String>) {
+        for origin in origins {
+            if let Ok(parsed) = url::Url::parse(&origin) {
+                let o = parsed.origin().ascii_serialization();
+                if o != "null" && !o.is_empty() {
+                    self.visited_origins.insert(o);
+                }
+            }
+        }
     }
 
     /// Keep the configured download location and turn on `Browser.download*`

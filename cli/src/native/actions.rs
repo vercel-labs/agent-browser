@@ -1240,6 +1240,12 @@ impl DaemonState {
                             .get("waitingForDebugger")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
+                        let is_storage_session = target_info.as_ref().is_some_and(|target| {
+                            state::owns_storage_attachment(&target.target_id, waiting_for_debugger)
+                        });
+                        if is_storage_session {
+                            continue;
+                        }
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
@@ -1286,6 +1292,9 @@ impl DaemonState {
                             .unwrap_or("")
                             .to_string();
                         let sid = event.session_id.clone().unwrap_or_default();
+                        if state::owns_storage_session(&sid) {
+                            continue;
+                        }
 
                         let paused = FetchPausedRequest {
                             request_id,
@@ -1875,15 +1884,31 @@ impl DaemonState {
                     // never activates a discovered target (that would steal
                     // the active tab and overwrite its binding); a legacy
                     // session follows it.
-                    mgr.register_discovered_page(
-                        &target_info.target_id,
-                        page_sid,
-                        page_url,
-                        target_info.title.clone(),
-                        target_info.target_type.clone(),
-                    );
+                    let pinned_by_other =
+                        tab_binding::pinned_owner(&target_info.target_id, &self.session_id)
+                            .is_some();
+                    if !pinned_by_other {
+                        mgr.register_discovered_page(
+                            &target_info.target_id,
+                            page_sid,
+                            page_url,
+                            target_info.title.clone(),
+                            target_info.target_type.clone(),
+                        );
+                    }
 
-                    mgr.resume_if_waiting_pub(page_sid).await
+                    let resumed = mgr.resume_if_waiting_pub(page_sid).await;
+                    if pinned_by_other && !controls_active {
+                        let _ = mgr
+                            .client
+                            .send_command(
+                                "Target.detachFromTarget",
+                                Some(json!({ "sessionId": page_sid })),
+                                None,
+                            )
+                            .await;
+                    }
+                    resumed
                 })
                 .await
             } else {
@@ -1969,6 +1994,9 @@ impl DaemonState {
 
         // Attach and register new targets
         for te in &drained.new_targets {
+            if tab_binding::pinned_owner(&te.target_info.target_id, &self.session_id).is_some() {
+                continue;
+            }
             let filter = self.domain_filter.read().await.clone();
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
@@ -6096,9 +6124,17 @@ async fn load_state_path_for_engine(
     if state.firefox.is_some() {
         return Some(bidi::storage::load_state_path(state, path).await);
     }
-    if let Some(mgr) = state.browser.as_ref() {
-        if let Ok(session_id) = mgr.active_session_id() {
-            return Some(state::load_state(&mgr.client, session_id, path).await);
+    if let Some(mgr) = state.browser.as_mut() {
+        if let Ok(session_id) = mgr.active_session_id().map(ToString::to_string) {
+            return Some(
+                match state::load_state_with_origins(&mgr.client, &session_id, path).await {
+                    Ok((skipped, restored)) => {
+                        mgr.record_visited_origins(restored);
+                        Ok(skipped)
+                    }
+                    Err(err) => Err(err),
+                },
+            );
         }
     }
     None
@@ -6349,12 +6385,18 @@ pub(crate) async fn auto_save_restore_state(
     };
     let active_session_id = mgr.active_session_id()?.to_string();
 
+    let target_scope = state::TargetOriginScope {
+        tracked_target_ids: mgr.tracked_target_ids(),
+        include_unpinned_browser_targets: mgr.owns_browser() && !mgr.is_pin_tab(),
+    };
+
     match state::save_auto_state_transactional(
         &mgr.client,
         &active_session_id,
         &session_name,
         &state.session_id,
         mgr.visited_origins(),
+        &target_scope,
     )
     .await
     {
@@ -9827,6 +9869,11 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
     let session_id = mgr.active_session_id()?.to_string();
     let path = cmd.get("path").and_then(|v| v.as_str());
 
+    let target_scope = state::TargetOriginScope {
+        tracked_target_ids: mgr.tracked_target_ids(),
+        include_unpinned_browser_targets: mgr.owns_browser() && !mgr.is_pin_tab(),
+    };
+
     let saved_path = state::save_state(
         &mgr.client,
         &session_id,
@@ -9834,6 +9881,7 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
         state.session_name.as_deref(),
         &state.session_id,
         mgr.visited_origins(),
+        &target_scope,
     )
     .await?;
 
@@ -9841,15 +9889,20 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
 }
 
 async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let path = cmd
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' parameter")?;
 
     ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    let skipped = state::load_state(&mgr.client, &session_id, path).await?;
+    let skipped = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let session_id = mgr.active_session_id()?.to_string();
+        let (skipped, restored) =
+            state::load_state_with_origins(&mgr.client, &session_id, path).await?;
+        mgr.record_visited_origins(restored);
+        skipped
+    };
     mark_explicit_storage_state_loaded(state, path);
     Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
 }
@@ -20617,6 +20670,81 @@ mod tests {
                 "{name}: a detached session is not resumed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pinned_tab_owned_by_another_session_is_not_reattached_on_info_change() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let sock_dir = tempfile::tempdir().unwrap();
+        let env = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR"]);
+        env.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            sock_dir.path().to_str().unwrap(),
+        );
+        std::fs::write(
+            sock_dir.path().join("other-pinned.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        super::super::tab_binding::save(
+            "other-pinned",
+            &super::super::tab_binding::TabBinding {
+                target_id: "T-PINNED".to_string(),
+                url: "https://pinned.test/".to_string(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let methods = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let methods_srv = std::sync::Arc::clone(&methods);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let method = cmd["method"].as_str().unwrap_or("").to_string();
+                methods_srv.lock().unwrap().push(method.clone());
+                let reply = if method == "Target.attachToTarget" {
+                    json!({ "id": cmd["id"], "result": { "sessionId": "S-LEAK" } })
+                } else {
+                    json!({ "id": cmd["id"], "result": {} })
+                };
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
+            }
+        });
+
+        let mut state = DaemonState::new();
+        state.session_id = "host-a".to_string();
+        let client = CdpClient::connect(&url).await.unwrap();
+        state.browser = Some(BrowserManager::for_test(client, url.clone()));
+
+        let drained = DrainedEvents {
+            new_targets: vec![TargetCreatedEvent {
+                target_info: setup_test_target("T-PINNED", "page"),
+            }],
+            attached_page_sessions: vec![(
+                setup_test_target("T-PINNED", "page"),
+                "S-AUTO".to_string(),
+            )],
+            ..DrainedEvents::default()
+        };
+        assert_eq!(state.apply_drained_events(drained).await, Ok(()));
+        let recorded = methods.lock().unwrap().clone();
+        assert!(
+            !recorded.iter().any(|m| m == "Target.attachToTarget"),
+            "must not attach to another session's pinned tab: {recorded:?}"
+        );
+        assert!(
+            recorded.iter().any(|m| m == "Target.detachFromTarget"),
+            "auto-attached session on another session's pinned tab should detach: {recorded:?}"
+        );
+        assert!(state.browser.as_ref().unwrap().pages_list().is_empty());
+        server.abort();
     }
 
     /// Every child session the drain prepares is bounded, so one that never
