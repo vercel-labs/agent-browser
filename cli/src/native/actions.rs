@@ -7285,7 +7285,6 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Result<Patch, Str
             }
         }
     }
-    drop(set);
     // Obscura takes its proxy bypass from every launch, so an explicit null
     // clears it.
     if engine == Some("obscura") {
