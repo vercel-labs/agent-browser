@@ -266,6 +266,8 @@ Firefox does not support mobile viewport mode, `set device`, or `reduced-motion`
 
 Viewport scales and geolocation coordinates must be finite numbers.
 
+`set offline` defaults to `on` when you omit the value. It accepts `true` and `false` as aliases for `on` and `off` and rejects other values.
+
 ## Cookies and Storage
 
 ```bash
