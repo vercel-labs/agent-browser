@@ -1,0 +1,70 @@
+/* Shared layout and control styles for the current homepage. */
+@theme {
+  --container-md: 601px;
+  --container-lg: 961px;
+}
+
+.landing-container {
+  max-width: 1448px;
+  margin-inline: auto;
+  padding-inline: 24px;
+}
+
+.landing-heading {
+  font-family: var(--font-geist-sans), sans-serif;
+  font-size: 32px;
+  font-weight: 450;
+  line-height: 40px;
+  letter-spacing: -1.28px;
+  text-wrap: balance;
+}
+
+@container (max-width: 600px) {
+  /* Balance splits this heading into three short lines on phones. */
+  [data-element='AgentTweetWall'] .landing-heading {
+    text-wrap: pretty;
+  }
+
+  /* Fits "Your agent can write code," on one line from 390px. */
+  .landing-heading[data-size='64'] {
+    font-size: 30px;
+    letter-spacing: -1.2px;
+  }
+}
+
+@container (min-width: 961px) {
+  .landing-heading[data-size='56'] {
+    font-size: 56px;
+    line-height: 56px;
+    letter-spacing: -3.36px;
+  }
+
+  .landing-heading[data-size='64'] {
+    font-size: 64px;
+    line-height: 64px;
+    letter-spacing: -3.84px;
+  }
+}
+
+/* Keep the homepage action sizing and pill shape stable. */
+.landing-action {
+  height: 40px;
+  padding-inline: 12px;
+  border-radius: 9999px;
+  font-family: var(--font-geist-sans), sans-serif;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+}
+
+.landing-action[data-landing-action='default']:hover:not(:disabled) {
+  background-color: hsl(0 0% 22%);
+}
+
+.dark-theme .landing-action[data-landing-action='default']:hover:not(:disabled) {
+  background-color: hsl(0 0% 80%);
+}
+
+.landing-action[data-landing-action='secondary']:hover:not(:disabled) {
+  background-color: var(--ds-gray-alpha-200);
+}

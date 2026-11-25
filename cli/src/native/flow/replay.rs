@@ -82,16 +82,82 @@ pub fn replay_commands(flow: &Flow, cmd_params: &[(String, String)]) -> Result<V
                 .to_string(),
         );
     }
-    Ok(start
+    Ok(replayed_steps(flow)
         .into_iter()
-        .chain(
-            flow.steps
-                .iter()
-                .filter(|s| s.ok)
-                .map(|s| s.command.clone()),
-        )
-        .map(|cmd| render_command(&cmd, None, &swaps, &values))
+        .map(|step| match step {
+            Some(step) => step.command.clone(),
+            // A flow recorded on an already open page starts with the URL it
+            // was recorded on.
+            None => json!({ "action": "navigate", "url": flow.start_url }),
+        })
+        .map(|cmd| render_command(&interaction_only(cmd), None, &swaps, &values))
         .collect())
+}
+
+/// The recorded step behind each command a replay sends, in order. The
+/// navigation a replay adds for a flow recorded on an already open page has
+/// no step.
+fn replayed_steps(flow: &Flow) -> Vec<Option<&Step>> {
+    let opens_page = flow.steps.iter().any(|s| s.command["action"] == "navigate");
+    let mut steps: Vec<Option<&Step>> = if opens_page { Vec::new() } else { vec![None] };
+    steps.extend(flow.steps.iter().filter(|s| s.ok).map(Some));
+    steps
+}
+
+/// The fields of a command a replay sends. Session settings, plugins, restore
+/// options and connection targets recorded with a command or written into a
+/// flow file are dropped, so a replay runs under the session it was started in.
+const INTERACTION_KEYS: &[&str] = &[
+    "action",
+    "selector",
+    "url",
+    "waitUntil",
+    "headers",
+    "value",
+    "values",
+    "text",
+    "key",
+    "clear",
+    "delay",
+    "timeout",
+    "amount",
+    "direction",
+    "x",
+    "y",
+    "loadState",
+    "state",
+    "compact",
+    "delta",
+    "full",
+    "interactive",
+    "maxDepth",
+    "urls",
+    "exact",
+    "name",
+    "role",
+    "subaction",
+    "label",
+    "placeholder",
+    "testId",
+    "eventType",
+    "tabId",
+    "button",
+    "clickCount",
+    "modifiers",
+    "newTab",
+    "inputMode",
+    "seed",
+];
+
+/// A recorded command with only its interaction fields. Script fields stay so
+/// the replay check still refuses the command instead of running it without them.
+fn interaction_only(mut cmd: Value) -> Value {
+    if let Some(obj) = cmd.as_object_mut() {
+        obj.retain(|k, _| {
+            INTERACTION_KEYS.contains(&k.as_str()) || SCRIPT_KEYS.contains(&k.as_str())
+        });
+    }
+    cmd
 }
 
 /// One command with the run's values in place: every string is read once,
@@ -292,29 +358,18 @@ pub fn check_replay_commands(flow: &Flow, commands: &[Value]) -> Result<(), Stri
     Ok(())
 }
 
-/// The entry captured during a replay that stands for a recorded request:
-/// same method, host and path, the same recorded query, and for requests with
-/// a body the same body or GraphQL operation (one endpoint serves every
-/// query). Query parameters the replay added and the recording never had,
-/// such as cache-busters, are ignored. An exact URL wins; otherwise exactly
-/// one entry must match, so an ambiguous or missing match is an error. A
-/// reference still unfilled in the path or query matches any value.
-pub fn replay_lookup<'a>(
-    entries: &'a [HarEntry],
-    req: &PreparedRequest,
-) -> Result<&'a HarEntry, String> {
-    let key = |u: &str| {
-        url::Url::parse(u)
-            .ok()
-            .map(|u| (u.host_str().unwrap_or("").to_string(), u.path().to_string()))
-    };
-    let operation = |b: Option<&str>| {
-        b.and_then(|b| serde_json::from_str::<Value>(b).ok())
-            .and_then(|v| v["operationName"].as_str().map(String::from))
-    };
-    let want = key(&req.url);
-    // A path segment that still has a reference to fill matches any segment.
-    let same_place = |got: Option<(String, String)>| match (&want, got) {
+/// The host and path of a URL, which a replayed request shares with the
+/// recording whatever the query or body holds.
+fn place(u: &str) -> Option<(String, String)> {
+    url::Url::parse(u)
+        .ok()
+        .map(|u| (u.host_str().unwrap_or("").to_string(), u.path().to_string()))
+}
+
+/// Whether two places are the same. A path segment that still has a
+/// reference to fill matches any segment.
+fn same_place(want: &Option<(String, String)>, got: Option<(String, String)>) -> bool {
+    match (want, got) {
         (Some((wh, wp)), Some((gh, gp))) => {
             let (ws, gs): (Vec<&str>, Vec<&str>) =
                 (wp.split('/').collect(), gp.split('/').collect());
@@ -326,7 +381,35 @@ pub fn replay_lookup<'a>(
                     .all(|(w, g)| w == g || (w.contains("%7B%7B") && !g.is_empty()))
         }
         (w, g) => *w == g,
+    }
+}
+
+/// Whether the capture holds the request a recorded command sent again: the
+/// same method, host and path. Its query and body may hold the run's values,
+/// so neither is compared.
+fn sent_again(entries: &[HarEntry], recorded: &Request) -> bool {
+    let want = place(&recorded.url);
+    entries.iter().any(|e| {
+        e.method.eq_ignore_ascii_case(&recorded.method) && same_place(&want, place(&e.url))
+    })
+}
+
+/// The entry captured during a replay that stands for a recorded request:
+/// same method, host and path, the same recorded query, and for requests with
+/// a body the same body or GraphQL operation (one endpoint serves every
+/// query). Query parameters the replay added and the recording never had,
+/// such as cache-busters, are ignored. An exact URL wins; otherwise exactly
+/// one entry must match, so an ambiguous or missing match is an error. A
+/// reference still unfilled in the path or query matches any value.
+pub fn replay_lookup<'a>(
+    entries: &'a [HarEntry],
+    req: &PreparedRequest,
+) -> Result<&'a HarEntry, String> {
+    let operation = |b: Option<&str>| {
+        b.and_then(|b| serde_json::from_str::<Value>(b).ok())
+            .and_then(|v| v["operationName"].as_str().map(String::from))
     };
+    let want = place(&req.url);
     let want_op = operation(req.body.as_deref());
     let same_body = |e: &HarEntry| match &req.body {
         None => true,
@@ -348,7 +431,7 @@ pub fn replay_lookup<'a>(
     let candidates: Vec<&HarEntry> = entries
         .iter()
         .rev()
-        .filter(|e| e.method == req.method && same_place(key(&e.url)) && same_body(e))
+        .filter(|e| e.method == req.method && same_place(&want, place(&e.url)) && same_body(e))
         .collect();
     if let Some(exact) = candidates.iter().find(|e| e.url == req.url) {
         return Ok(exact);
@@ -456,6 +539,13 @@ const TIME_UP: &str = "the run's time is up";
 /// How long one replayed command, and the final wait for bodies, may wait
 /// for the page: the request timeout. The run's own deadline caps the sum.
 const REPLAY_WAIT: Duration = Duration::from_secs(20);
+
+/// How long a replay waits, after a command, for the requests that command
+/// was recorded sending to show up. Chrome reports a request a moment after
+/// the click returns, and the next command may use what it returned (a token
+/// or a cookie the page keeps). A page that no longer sends one ends its wait
+/// here instead of holding every later command.
+const REPLAY_REQUEST_APPEAR: Duration = Duration::from_secs(2);
 
 /// The replay tier over a browser. The recording runs at most once per run;
 /// every request that falls back to it reads from that capture.
@@ -570,6 +660,7 @@ pub(super) async fn capture(
 ) -> Result<ReplayRun, Result<String, String>> {
     browser.ensure_browser().await.map_err(Err)?;
     let mark = browser.begin_capture().await.map_err(Err)?;
+    let steps = replayed_steps(flow);
     let commands = match replay_commands(flow, params) {
         Ok(c) => c,
         Err(e) => {
@@ -621,17 +712,36 @@ pub(super) async fn capture(
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         };
-        // The next command may depend on what this one fetched (a token the
-        // page keeps), so let its first-party requests finish first.
+        // The next command may depend on what this one fetched (a token or a
+        // cookie the page keeps), so wait for the requests the recording says
+        // this command sent to show up, then for every first-party request it
+        // started to finish.
+        let recorded = steps
+            .get(i)
+            .and_then(|step| *step)
+            .map(|step| step.requests.as_slice())
+            .unwrap_or_default();
+        let expected: Vec<&Request> = recorded
+            .iter()
+            .filter(|r| policy.allows_url(&r.url) && !is_telemetry(&r.url))
+            .collect();
+        let appear_by = (Instant::now() + REPLAY_REQUEST_APPEAR).min(deadline);
+        let mut quiet = 0u32;
         loop {
             let seen = browser.captured_since(mark).await;
-            if seen
+            let own = &seen[first_own.min(seen.len())..];
+            let appeared = expected.iter().all(|r| sent_again(own, r));
+            let settled = own
                 .iter()
-                .skip(first_own)
                 .filter(|e| may_settle(e, &policy))
-                .all(|e| e.loading_finished_timestamp.is_some())
-                || Instant::now() >= deadline
-            {
+                .all(|e| e.loading_finished_timestamp.is_some());
+            // A request that has not shown up yet still might: hold the next
+            // command for it, but not past the appear window.
+            let waiting = !appeared && Instant::now() < appear_by;
+            quiet = if !waiting && settled { quiet + 1 } else { 0 };
+            // The second poll gives the page's handler time to run with the
+            // answers before the next command touches it.
+            if quiet >= 2 || Instant::now() >= deadline {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;

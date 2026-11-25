@@ -1553,6 +1553,9 @@ pub fn unknown_fields(body: &Value, shape: &Shape) -> Vec<String> {
     let Some((_, items)) = main_list(body) else {
         return Vec::new();
     };
+    if items.is_empty() {
+        return Vec::new();
+    }
     shape
         .filters
         .iter()
@@ -1571,31 +1574,30 @@ pub fn apply_shape(body: Value, shape: &Shape) -> Value {
         return body;
     };
     let total = items.len();
-    let mut kept: Vec<Value> = items
-        .iter()
-        .filter(|item| {
-            shape.filters.iter().all(|(path, needle)| {
-                lookup(item, path)
-                    .map(|v| as_text(v).to_lowercase().contains(needle.as_str()))
-                    .unwrap_or(false)
-            })
+    let mut matched = 0usize;
+    let mut kept = Vec::new();
+    for item in items.iter().filter(|item| {
+        shape.filters.iter().all(|(path, needle)| {
+            lookup(item, path)
+                .map(|v| as_text(v).to_lowercase().contains(needle.as_str()))
+                .unwrap_or(false)
         })
-        .map(|item| {
-            if shape.fields.is_empty() {
-                return item.clone();
-            }
+    }) {
+        matched += 1;
+        if shape.limit.is_some_and(|limit| kept.len() >= limit) {
+            continue;
+        }
+        if shape.fields.is_empty() {
+            kept.push(item.clone());
+        } else {
             let mut out = Map::new();
             for f in &shape.fields {
                 if let Some(v) = lookup(item, f) {
                     out.insert(f.clone(), v.clone());
                 }
             }
-            Value::Object(out)
-        })
-        .collect();
-    let matched = kept.len();
-    if let Some(limit) = shape.limit {
-        kept.truncate(limit);
+            kept.push(Value::Object(out));
+        }
     }
     json!({ "list": key, "total": total, "matched": matched, "items": kept })
 }
@@ -2385,7 +2387,7 @@ impl AllowWrite {
 }
 
 pub fn is_write(method: &str, body: Option<&str>) -> bool {
-    !matches!(method, "GET" | "HEAD" | "OPTIONS") && !is_graphql_query(body)
+    !matches!(method, "GET" | "HEAD" | "OPTIONS") && !(method == "POST" && is_graphql_query(body))
 }
 
 /// A GraphQL POST that only runs queries reads data; mutations still count
@@ -2430,6 +2432,47 @@ pub(crate) fn flow_of(mut v: Value) -> Flow {
 mod tests {
     use super::page::*;
     use super::*;
+
+    #[test]
+    fn non_post_graphql_query_requests_remain_writes() {
+        for body in [
+            r#"{"query":"query Items { items { id } }"}"#,
+            r#"[{"query":"{ items { id } }"}]"#,
+        ] {
+            assert!(!is_write("POST", Some(body)));
+            for method in ["PUT", "PATCH", "DELETE", "CONNECT", "TRACE"] {
+                assert!(is_write(method, Some(body)), "{method} must remain a write");
+            }
+        }
+    }
+
+    #[test]
+    fn non_post_graphql_query_cannot_bypass_write_declaration() {
+        for method in ["PUT", "PATCH", "DELETE"] {
+            let mut flow = flow_of(json!({
+                "output": "s1r1",
+                "steps": [{ "requests": [{
+                    "id": "s1r1", "method": method,
+                    "url": "https://a.test/items",
+                    "body": "{\"query\":\"query Items { items { id } }\"}"
+                }] }]
+            }));
+            assert!(
+                prepare(&flow, &[]).is_err(),
+                "{method} needs a write declaration"
+            );
+            flow.writes.push(Write {
+                id: "s1r1".to_string(),
+                method: method.to_string(),
+                url: "https://a.test/items".to_string(),
+                kind: WriteKind::Explicit,
+                step: 1,
+            });
+            let requests = prepare(&flow, &[]).unwrap();
+            assert!(requests[0].write);
+            assert!(!AllowWrite::parse(None).unwrap().covers("s1r1"));
+        }
+    }
 
     #[test]
     fn the_start_host_addresses_come_from_the_saved_range_only() {
@@ -2523,6 +2566,8 @@ mod tests {
             response_body_size: body.len() as i64,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_started_timestamp: None,
+            response_completed_timestamp: None,
             response_body: Some(body.to_string()),
             response_body_base64: false,
             remote_addr: None,
@@ -3003,7 +3048,7 @@ mod tests {
 
     #[test]
     fn page_fetch_leaves_browser_headers_to_the_browser() {
-        let script = page_fetch_script(&prepared("s1r1"));
+        let script = page_fetch_script(&prepared("s1r1"), Duration::from_secs(20));
         assert!(script.contains("country"));
         assert!(!script.contains("User-Agent"));
         assert!(!script.contains("sec-ch-ua"));
@@ -3744,6 +3789,57 @@ mod tests {
     }
 
     #[test]
+    fn unknown_fields_accepts_empty_results() {
+        let shape = Shape {
+            filters: vec![("name".to_string(), "query".to_string())],
+            fields: vec!["id".to_string(), "owner.name".to_string()],
+            limit: Some(10),
+        };
+        assert!(unknown_fields(&json!([]), &shape).is_empty());
+        assert_eq!(
+            apply_shape(json!([]), &shape),
+            json!({ "list": null, "total": 0, "matched": 0, "items": [] })
+        );
+        assert_eq!(
+            unknown_fields(&json!([{ "name": "query", "id": 1 }]), &shape),
+            vec!["owner.name".to_string()]
+        );
+    }
+
+    #[test]
+    fn apply_shape_keeps_match_count_with_limit_and_projection() {
+        let body = json!([
+            { "id": 1, "owner": { "name": "first" }, "state": "ready" },
+            { "id": 2, "owner": { "name": "skip" }, "state": "pending" },
+            { "id": 3, "owner": { "name": "last" }, "state": "ready" }
+        ]);
+        for fields in [vec![], vec!["owner.name".to_string()]] {
+            for limit in [Some(0), Some(1), Some(10), None] {
+                let shape = Shape {
+                    filters: vec![("state".to_string(), "ready".to_string())],
+                    fields: fields.clone(),
+                    limit,
+                };
+                let result = apply_shape(body.clone(), &shape);
+                assert_eq!(result["total"], 3);
+                assert_eq!(result["matched"], 2);
+                let count = limit.unwrap_or(2).min(2);
+                assert_eq!(result["items"].as_array().unwrap().len(), count);
+                if count > 0 {
+                    assert_eq!(
+                        result["items"][0],
+                        if fields.is_empty() {
+                            body[0].clone()
+                        } else {
+                            json!({ "owner.name": "first" })
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn shape_finds_a_list_nested_under_graphql_data() {
         let body = json!({ "data": { "items": { "results": [
             { "item": { "title": "A" }, "price": 1 },
@@ -4454,7 +4550,7 @@ mod tests {
         }));
         let req = prepare_all(&flow, &[]).unwrap().remove(0);
         // The browser stops at the 3xx, so no hop is sent before a check.
-        assert!(page_fetch_script(&req).contains(r#""redirect":"manual""#));
+        assert!(page_fetch_script(&req, Duration::from_secs(20)).contains(r#""redirect":"manual""#));
         let r = page::page_result(
             &HostPolicy::of(&flow),
             &req,
@@ -4468,7 +4564,9 @@ mod tests {
             method: "POST".to_string(),
             ..req
         };
-        assert!(page_fetch_script(&write).contains(r#""redirect":"manual""#));
+        assert!(
+            page_fetch_script(&write, Duration::from_secs(20)).contains(r#""redirect":"manual""#)
+        );
     }
 
     #[test]
@@ -5120,6 +5218,49 @@ mod tests {
     }
 
     #[test]
+    fn replay_sends_only_interaction_fields_and_recordings_drop_the_envelope() {
+        let envelope = json!({
+            "plugins": [{ "name": "p", "command": "/bin/sh", "capabilities": ["launch.mutate"] }],
+            "settings": { "action-policy": "/tmp/allow-all.json", "relaunch": true },
+            "pinTab": false,
+            "restoreKey": "other",
+            "restoreCheckFn": "fetch('https://evil.test')",
+        });
+        let mut step = json!({ "action": "click", "selector": "#buy", "button": "right" });
+        step.as_object_mut()
+            .unwrap()
+            .extend(envelope.as_object().unwrap().clone());
+        let mut unlisted = step.clone();
+        for key in ["cdpUrl", "credentialProvider", "defaultInputMode", "caCert"] {
+            unlisted[key] = json!("x");
+        }
+        let flow = flow_of(json!({
+            "steps": [
+                { "command": { "action": "navigate", "url": "https://a.test/" } },
+                { "command": unlisted },
+            ],
+        }));
+        let cmds = replay_commands(&flow, &[]).unwrap();
+        assert_eq!(
+            cmds[1],
+            json!({ "action": "click", "selector": "#buy", "button": "right" })
+        );
+        let script = flow_of(json!({
+            "steps": [{ "command": { "action": "wait", "function": "fetch('/x')" } }],
+        }));
+        let cmds = replay_commands(&script, &[]).unwrap();
+        assert!(check_replay_commands(&script, &cmds).is_err());
+
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command("click", &step, None, None);
+        assert_eq!(
+            r.commands[0].1,
+            json!({ "action": "click", "selector": "#buy", "button": "right" })
+        );
+    }
+
+    #[test]
     fn replay_runs_only_plain_interactions_on_the_flows_site() {
         let flow =
             flow_of(json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com"] }));
@@ -5183,6 +5324,33 @@ mod tests {
         r.mark_saved(1);
         assert_eq!(r.last_save_seq, 3);
         assert_eq!(r.unsaved_steps(), 0);
+    }
+
+    #[test]
+    fn a_secret_typed_with_shift_is_gathered_as_the_shifted_characters() {
+        let mut r = recorded(&[]);
+        let refs = crate::native::element::RefMap::new();
+        let secret = traits("password", "", "pw");
+        let step = |r: &mut FlowRecorder, action: &str, key: &str, held: i32| {
+            r.begin(
+                action,
+                &json!({ "action": action, "key": key }),
+                &refs,
+                None,
+                Some(&secret),
+                held,
+            );
+        };
+        step(&mut r, "press", "Shift+h", 0);
+        step(&mut r, "press", "Shift+1", 0);
+        step(&mut r, "keydown", "Shift", 0);
+        step(&mut r, "press", "a", 8);
+        step(&mut r, "keyup", "Shift", 8);
+        step(&mut r, "press", "b", 0);
+        assert_eq!(r.key_buffer(), "H!Ab");
+        assert_withheld(&mut r, "H!Ab");
+        step(&mut r, "press", "Alt+x", 0);
+        assert_eq!(r.key_buffer(), "");
     }
 
     #[test]
@@ -5317,11 +5485,13 @@ mod tests {
             write: true,
             ..prepared("s1r1")
         };
-        let script = page_fetch_script(&write);
+        let script = page_fetch_script(&write, Duration::from_secs(20));
         assert!(!script.contains("catch"), "{script}");
         assert_eq!(script.matches("fetch(").count(), 1, "{script}");
-        let read = page_fetch_script(&prepared("s1r1"));
+        let read = page_fetch_script(&prepared("s1r1"), Duration::from_secs(20));
         assert!(read.contains("catch"));
+        let clamped = page_fetch_script(&prepared("s1r1"), Duration::from_secs(u64::MAX / 1000));
+        assert!(clamped.contains(&i32::MAX.to_string()), "{clamped}");
     }
 
     #[test]
@@ -5459,6 +5629,86 @@ mod tests {
             "the login request is dropped"
         );
         assert_eq!(flow["steps"][1]["command"]["key"], REDACTED);
+    }
+
+    #[test]
+    fn a_secret_typed_with_key_code_aliases_is_redacted_and_withheld() {
+        let secret = traits("password", "", "");
+        let refs = crate::native::element::RefMap::new();
+        let mut r = recorded(&[]);
+        r.begin(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/login" }),
+            &refs,
+            None,
+            None,
+            0,
+        );
+        let step = |r: &mut FlowRecorder, action: &str, key: &str, held: i32| {
+            r.begin(
+                action,
+                &json!({ "action": action, "key": key }),
+                &refs,
+                None,
+                Some(&secret),
+                held,
+            );
+        };
+        step(&mut r, "press", "KeyH", 0);
+        step(&mut r, "keydown", "Digit2", 0);
+        step(&mut r, "keyup", "Digit2", 0);
+        step(&mut r, "keydown", "ShiftRight", 0);
+        step(&mut r, "press", "KeyA", 8);
+        step(&mut r, "keyup", "ShiftRight", 8);
+        step(&mut r, "press", "ShiftLeft+Digit1", 0);
+        step(&mut r, "press", "Enter", 0);
+        step(&mut r, "press", "UnknownKey", 0);
+        r.tag_now("login");
+        r.tag_now("me");
+        let mut login = entry(
+            "login",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            r#"{"ok":true}"#,
+        );
+        login.method = "POST".to_string();
+        login.post_data = Some(r#"{"password":"h2A!"}"#.to_string());
+        let me = entry(
+            "me",
+            "https://api.example.com.ar/me",
+            "Fetch",
+            "application/json",
+            r#"{"name":"a"}"#,
+        );
+        let (flow, _) = build_flow_value(SaveInput {
+            name: "aliases",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[login, me],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+            local_names: &[],
+        })
+        .unwrap();
+        let text = serde_json::to_string(&flow).unwrap();
+        for forbidden in ["h2A!", "KeyH", "Digit2", "KeyA", "Digit1", "UnknownKey"] {
+            assert!(!text.contains(forbidden), "leaked {forbidden} in {text}");
+        }
+        assert!(
+            !text.contains("api.example.com.ar/login"),
+            "login request should be dropped: {text}"
+        );
+        assert_eq!(flow["steps"][1]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][2]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][3]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][5]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][7]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][8]["command"]["key"], "Enter");
+        assert_eq!(flow["steps"][9]["command"]["key"], REDACTED);
     }
 
     fn secret_fill_recording() -> (FlowRecorder, HarEntry) {
@@ -7966,6 +8216,10 @@ mod tests {
         delay: Duration,
         /// Whether reading the tab's URL never returns in time.
         tab_hangs: bool,
+        /// Stalled HTTP preflight lookup (`"cookies"` or `"routes"`).
+        preflight_hangs: Option<&'static str>,
+        /// Last script passed to `eval`.
+        last_eval: Option<String>,
         /// Why the browser cannot start, if it cannot.
         launch_error: Option<String>,
     }
@@ -7981,6 +8235,8 @@ mod tests {
                 poll_each_run: None,
                 delay: Duration::ZERO,
                 tab_hangs: false,
+                preflight_hangs: None,
+                last_eval: None,
                 launch_error: None,
             }
         }
@@ -8014,9 +8270,15 @@ mod tests {
     #[async_trait::async_trait]
     impl Browser for ScriptBrowser {
         async fn cookie_header(&mut self, _: &str) -> Option<String> {
+            if self.preflight_hangs == Some("cookies") {
+                std::future::pending::<()>().await;
+            }
             None
         }
         async fn routed_response(&mut self, _: &str) -> Option<RoutedResponse> {
+            if self.preflight_hangs == Some("routes") {
+                std::future::pending::<()>().await;
+            }
             None
         }
         async fn tab_url(&mut self) -> Option<String> {
@@ -8025,7 +8287,8 @@ mod tests {
             }
             self.tab.clone()
         }
-        async fn eval(&mut self, _: &str) -> Result<Value, String> {
+        async fn eval(&mut self, script: &str) -> Result<Value, String> {
+            self.last_eval = Some(script.to_string());
             tokio::time::sleep(self.delay).await;
             self.page.clone()
         }
@@ -8510,6 +8773,135 @@ mod tests {
             );
         }
 
+        /// A browser that reports each command's request only after a couple
+        /// of polls, the way Chrome delivers it a moment after the click
+        /// returns.
+        struct LateBrowser {
+            due: Option<(HarEntry, u32)>,
+            entries: Vec<HarEntry>,
+            order: Vec<String>,
+        }
+
+        #[async_trait::async_trait]
+        impl Browser for LateBrowser {
+            async fn cookie_header(&mut self, _: &str) -> Option<String> {
+                None
+            }
+            async fn routed_response(&mut self, _: &str) -> Option<RoutedResponse> {
+                None
+            }
+            async fn tab_url(&mut self) -> Option<String> {
+                Some("https://a.test/".to_string())
+            }
+            async fn eval(&mut self, _: &str) -> Result<Value, String> {
+                Err("no page".to_string())
+            }
+            async fn ensure_browser(&mut self) -> Result<(), String> {
+                Ok(())
+            }
+            async fn begin_capture(&mut self) -> Result<usize, String> {
+                Ok(0)
+            }
+            async fn run(&mut self, cmd: &Value) -> Value {
+                let selector = cmd["selector"].as_str().unwrap_or("").to_string();
+                self.order.push(format!("run {selector}"));
+                let url = match selector.as_str() {
+                    "#session" => Some("https://a.test/api/session"),
+                    "#items" => Some("https://a.test/api/items?u=ana"),
+                    _ => None,
+                };
+                // The request reaches the capture only after the next poll, so
+                // a caller that checks once and moves on misses it.
+                self.due = url.map(|u| {
+                    (
+                        finished(entry("p", u, "Fetch", "application/json", "{}")),
+                        2,
+                    )
+                });
+                json!({ "success": true })
+            }
+            async fn captured_since(&mut self, _: usize) -> Vec<HarEntry> {
+                if let Some((e, polls)) = self.due.take() {
+                    if polls == 0 {
+                        self.order.push(format!("saw {}", e.url));
+                        self.entries.push(e);
+                    } else {
+                        self.due = Some((e, polls - 1));
+                    }
+                }
+                self.entries.clone()
+            }
+            async fn end_capture(&mut self) {}
+            fn write_approved(&self, _: &Write) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        fn two_clicks() -> Flow {
+            flow_of(json!({ "steps": [
+                { "command": { "action": "navigate", "url": "https://a.test/" } },
+                { "command": { "action": "click", "selector": "#session" }, "requests": [
+                    { "id": "s1r1", "method": "GET", "url": "https://a.test/api/session" }] },
+                { "command": { "action": "click", "selector": "#items" }, "requests": [
+                    { "id": "s2r1", "method": "GET", "url": "https://a.test/api/items?u=ana" }] }
+            ]}))
+        }
+
+        #[test]
+        fn the_next_command_waits_for_the_requests_the_last_one_sent() {
+            let flow = two_clicks();
+            let mut browser = LateBrowser {
+                due: None,
+                entries: Vec::new(),
+                order: Vec::new(),
+            };
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_secs(5),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            let order = browser.order;
+            let session_seen = order
+                .iter()
+                .position(|e| e == "saw https://a.test/api/session");
+            let items_run = order.iter().position(|e| e == "run #items");
+            assert!(
+                matches!((session_seen, items_run), (Some(seen), Some(ran)) if seen < ran),
+                "{order:#?}"
+            );
+        }
+
+        #[test]
+        fn a_recorded_request_the_page_no_longer_sends_does_not_hold_the_replay() {
+            let flow = two_clicks();
+            // The page sends none of the recorded requests this time.
+            let mut browser = ScriptBrowser::new(Vec::new(), Vec::new());
+            let started = Instant::now();
+            let run = block_on(replay::capture(
+                &flow,
+                &[],
+                &mut browser,
+                &[],
+                Duration::from_millis(300),
+                far(),
+            ))
+            .ok()
+            .unwrap();
+            assert!(run.failure.is_none(), "{:?}", run.failure);
+            assert_eq!(browser.ran.len(), 3);
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+
         #[test]
         fn wait_globs_on_the_site_pass_the_replay_host_check() {
             let flow = flow_of(
@@ -8687,6 +9079,61 @@ mod tests {
                 r.reason
             );
             drop(listener);
+        }
+
+        #[test]
+        fn http_preflight_obeys_the_run_deadline_before_sending() {
+            block_on(async {
+                let flow = flow_of(json!({}));
+                let client = http_client(None, &flow).await.unwrap();
+                for lookup in ["cookies", "routes"] {
+                    for write in [false, true] {
+                        let mut browser = ScriptBrowser::new(Vec::new(), Vec::new());
+                        browser.preflight_hangs = Some(lookup);
+                        let req = PreparedRequest {
+                            write,
+                            method: if write { "POST" } else { "GET" }.to_string(),
+                            ..prepared("s1r1")
+                        };
+                        let result = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            http::send(&client, &mut browser, &req, soon(20)),
+                        )
+                        .await
+                        .expect("HTTP preflight must stop at the run deadline");
+                        assert!(!result.ok && !result.drift && !result.transport);
+                        assert_eq!(result.status, None);
+                        assert_eq!(result.stop, None, "write was never sent");
+                        assert!(result.reason.unwrap().contains("time is up"));
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn page_send_aborts_in_page_fetch_at_run_budget() {
+            block_on(async {
+                let flow = flow_of(json!({}));
+                for write in [false, true] {
+                    let mut browser = ScriptBrowser::new(Vec::new(), Vec::new()).answering_in_page(
+                        json!({ "status": 200, "redirected": false, "url": "https://a.test/", "text": "{}" }),
+                    );
+                    let req = PreparedRequest {
+                        write,
+                        method: if write { "POST" } else { "GET" }.to_string(),
+                        ..prepared("s1r1")
+                    };
+                    let _ = page::send(&flow, &mut browser, &req, soon(500)).await;
+                    let script = browser.last_eval.expect("page::send must evaluate fetch");
+                    assert!(script.contains("AbortController"), "{script}");
+                    assert!(script.contains("controller.abort"), "{script}");
+                    assert!(script.contains("clearTimeout"), "{script}");
+                    assert!(script.contains("signal: controller.signal"), "{script}");
+                    if !write {
+                        assert!(script.contains("controller.signal.aborted"), "{script}");
+                    }
+                }
+            });
         }
 
         #[test]

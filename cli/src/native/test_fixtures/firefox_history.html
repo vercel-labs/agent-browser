@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Firefox history fixture</title></head>
+<script>
+window.__historyPageshow = null;
+addEventListener('pageshow', function (event) { window.__historyPageshow = event.persisted; });
+if (location.pathname === '/slow') addEventListener('unload', () => {});
+</script>
+</html>
