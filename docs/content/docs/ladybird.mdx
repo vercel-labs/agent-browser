@@ -26,23 +26,24 @@ Use `-p ladybird` (or `AGENT_BROWSER_PROVIDER=ladybird`). Ladybird runs headless
 
 ```bash
 agent-browser -p ladybird open https://example.com
-agent-browser -p ladybird get title
-agent-browser -p ladybird fill "#email" "user@example.com"
-agent-browser -p ladybird click "#submit"
-agent-browser -p ladybird eval "return document.title"
+agent-browser -p ladybird snapshot -i
+agent-browser -p ladybird fill @e2 "user@example.com"
+agent-browser -p ladybird click @e3
+agent-browser -p ladybird eval "document.title"
 agent-browser -p ladybird screenshot page.png
 agent-browser -p ladybird close
 ```
 
 ## Supported commands
 
-Ladybird uses the WebDriver backend, the same one Safari and iOS use. These commands work: `open`, `get url`, `get title`, `click` and `fill` with CSS selectors, `eval`, `screenshot`, `back`, `forward`, `reload`, `cookies`, and `close`.
+Ladybird uses the WebDriver backend, the same one Safari and iOS use. These commands work: `open`, `snapshot` (including `-i`, `-c`, `-d`, `-s`, and `--urls`), `click`, `hover`, and `fill` with `@eN` refs or CSS selectors, `get url`, `get title`, `eval`, `screenshot`, `back`, `forward`, `reload`, `cookies`, and `close`.
 
-`eval` runs the script as a WebDriver function body, so use `return` to get a value back.
+`snapshot` walks each frame's DOM, including open shadow roots and iframes, and computes roles and names in the page, so its output follows the Chrome format. Each `@eN` ref is the browser's own element reference, kept with its iframe path, and stays the same across snapshots of the same page. `click` and `hover` scroll the element into view and use a pointer action, which also reaches elements inside open shadow roots. When the page has changed since the snapshot, a ref reports that it is stale; run `snapshot` again.
 
 ## Limitations
 
-- Commands that need the Chrome DevTools Protocol are not available, including `snapshot` and `@ref` targeting, `a11y`, network routing and HAR, tracing, profiling, screencast, and init scripts.
+- Commands that need the Chrome DevTools Protocol are not available, including `a11y`, network routing and HAR, tracing, profiling, screencast, and init scripts. `get text`, `find`, and `tab` commands are not available yet.
+- Roles and names are computed by agent-browser rather than read from the browser's accessibility tree, so a few elements can differ from Chrome. Closed shadow roots are not included.
 - `click` supports a plain left click only.
 - `--allowed-domains` is rejected because WebRTC containment cannot be enforced.
 - A headless Ladybird session follows the default idle timeout. A headed session is exempt, like other headed browsers.

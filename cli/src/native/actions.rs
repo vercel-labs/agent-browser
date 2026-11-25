@@ -8641,6 +8641,16 @@ pub(crate) fn snapshot_options(cmd: &Value) -> SnapshotOptions {
 }
 
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if let (None, Some(wb)) = (state.browser.as_ref(), state.webdriver_backend.as_mut()) {
+        let options = snapshot_options(cmd);
+        let previous_refs = state.ref_map.ref_ids();
+        let mut staged = state.ref_map.for_snapshot();
+        let tree = wb.snapshot(&options, &mut staged).await?;
+        let session_id = wb.session_key()?;
+        let url = wb.get_url().await.unwrap_or_default();
+        state.ref_map = staged;
+        return snapshot_response(cmd, state, session_id, &options, previous_refs, tree, url);
+    }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -9076,7 +9086,7 @@ async fn handle_click(
         if state.browser.is_none() {
             match plan {
                 ClickPlan::Pointer(spec) if spec.is_plain() => {
-                    wb.click(selector).await?;
+                    wb.click(&state.ref_map, selector).await?;
                     return Ok(json!({ "clicked": selector }));
                 }
                 ClickPlan::Pointer(_) => {
@@ -9243,7 +9253,7 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
-            wb.fill(selector, value).await?;
+            wb.fill(&state.ref_map, selector, value).await?;
             return Ok(json!({ "filled": selector }));
         }
     }
@@ -9336,12 +9346,16 @@ fn parse_key_chord(input: &str) -> (String, Option<i32>) {
 }
 
 async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    if let (None, Some(wb)) = (state.browser.as_ref(), state.webdriver_backend.as_ref()) {
+        wb.hover(&state.ref_map, selector).await?;
+        return Ok(json!({ "hovered": selector }));
+    }
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
     let position = interaction::hover(
         &mgr.client,

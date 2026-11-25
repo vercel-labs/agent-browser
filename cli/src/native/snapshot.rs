@@ -102,7 +102,7 @@ mod document_identity_regressions {
     }
 }
 
-const INTERACTIVE_ROLES: &[&str] = &[
+pub(crate) const INTERACTIVE_ROLES: &[&str] = &[
     "button",
     "link",
     "textbox",
@@ -125,9 +125,9 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "Iframe",
 ];
 
-const TABLE_CELL_ROLES: &[&str] = &["cell", "gridcell", "columnheader", "rowheader"];
+pub(crate) const TABLE_CELL_ROLES: &[&str] = &["cell", "gridcell", "columnheader", "rowheader"];
 
-const CONTENT_ROLES: &[&str] = &[
+pub(crate) const CONTENT_ROLES: &[&str] = &[
     "heading",
     "listitem",
     "article",
@@ -366,7 +366,7 @@ pub async fn stage_snapshot(
     Ok((tree, staged))
 }
 
-const MAX_IFRAME_SNAPSHOT_DEPTH: usize = 4;
+pub(crate) const MAX_IFRAME_SNAPSHOT_DEPTH: usize = 4;
 
 pub async fn take_snapshot(
     client: &CdpClient,
