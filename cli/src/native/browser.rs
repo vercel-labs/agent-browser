@@ -2060,6 +2060,12 @@ impl BrowserManager {
             .map(|page| page.session_id.as_str())
     }
 
+    /// Returns true if this session launched and owns the browser process
+    /// (not an external `--cdp`, `--auto-connect`, provider, or direct-page connection).
+    pub fn owns_browser(&self) -> bool {
+        self.browser_process.is_some() && !self.direct_page
+    }
+
     /// Returns true if this manager was connected via CDP (as opposed to local launch).
     pub fn is_cdp_connection(&self) -> bool {
         self.browser_process.is_none()

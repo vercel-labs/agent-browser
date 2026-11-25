@@ -836,7 +836,23 @@ impl DaemonState {
             || self.settings.connection() == Connection::AutoConnect
         {
             return Err(
-                "This session is attached through --auto-connect; use a dedicated or --cdp browser"
+                "This session is attached through --auto-connect; start a dedicated session without --cdp or --auto-connect"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Fails unless this session launched and owns its browser process.
+    /// External `--cdp`, `--auto-connect`, provider, and direct-page
+    /// connections cannot be terminated cleanly if a join page fails to unload.
+    pub(super) fn require_owned_browser(&self) -> Result<(), String> {
+        if self.attached_target.is_some()
+            || !matches!(self.settings.connection(), Connection::Local)
+            || self.browser.as_ref().is_some_and(|mgr| !mgr.owns_browser())
+        {
+            return Err(
+                "poppy join requires a browser launched by this session; start a dedicated session without --cdp or --auto-connect"
                     .to_string(),
             );
         }
@@ -17628,6 +17644,24 @@ mod tests {
         let mut state = DaemonState::new();
         state.attached_target = Some(AttachedTarget::CdpPort(9222));
         assert!(state.refuse_auto_connect().is_ok());
+    }
+
+    #[test]
+    fn external_browsers_are_refused_for_a_poppy_join() {
+        let state = DaemonState::new();
+        assert!(state.require_owned_browser().is_ok());
+
+        let mut state = DaemonState::new();
+        state.attached_target = Some(AttachedTarget::CdpPort(9222));
+        assert!(state.require_owned_browser().is_err());
+
+        let mut state = DaemonState::new();
+        state.settings.set(Key::Cdp, json!("http://127.0.0.1:9222"));
+        assert!(state.require_owned_browser().is_err());
+
+        let mut state = DaemonState::new();
+        state.settings.set(Key::Provider, json!("browser-use"));
+        assert!(state.require_owned_browser().is_err());
     }
 
     #[test]

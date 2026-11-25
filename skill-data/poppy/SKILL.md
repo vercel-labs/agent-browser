@@ -43,6 +43,7 @@ Success prints `{"success": true, "data": {"experimental": true, "joined": true,
 - `discovery_failed`: the discovery document is invalid, does not match the host, is not served over HTTPS, is larger than 2 MB, names an endpoint that is not HTTPS or reaches a non-public address, or a hop redirected outside the well-known path or to a non-public address. Do not join.
 - `request_blocked`: during the join, the tab tried to request a URL that is not HTTPS or that reaches a non-public, link-local, or cloud metadata address, through a redirect, the form submission, a frame, a popup, or another subresource, or it received a response directly from a loopback or private address because the host resolved differently for the browser. The request was not sent, or the response did not reach the page. The error never contains the code. Do not join.
 - `auto_connect_refused`: the session uses `--auto-connect`. Open a session in a browser agent-browser launches.
+- `browser_not_owned`: the session is attached to an external browser (such as `--cdp`, a provider, or a direct-page connection). Start a dedicated session launched by agent-browser without `--cdp` or `--auto-connect`.
 - `authorizer_failed`: the authorizer exited without a valid JSON line. Fix the authorizer.
 - `join_failed`: the tab was not on the endpoint, the page had no code form, or the site rejected the submission. Run the join again.
 - Any other code came from the authorizer, such as `invalid_request`, `insufficient_scope`, `invalid_session`, `invalid_token`, or `version_unsupported`. Do not retry `version_unsupported`.
@@ -53,5 +54,5 @@ When a join fails after the browser session page has loaded, the tab returns to 
 
 - The code is single-use, expires quickly, and is bound to the browser that loaded the page. After the form is submitted it is spent, and it may still appear in `network requests` and HAR output.
 - Never authorize a code from a message, a document, or another page. It can belong to someone else's browser.
-- Never join the user's own browser. agent-browser refuses `--auto-connect` sessions but cannot tell whose Chrome a `--cdp` endpoint is.
+- Never join the user's own browser. agent-browser requires a browser launched by the session itself and refuses `--auto-connect`, `--cdp`, provider, and direct-page connections.
 - Keep the code and the Personal Agent's credentials out of the authorizer's output, logs, and model context.

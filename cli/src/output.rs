@@ -4920,7 +4920,8 @@ Personal Agent Protocol (experimental):
                              resolves hosts again, so a response it receives directly
                              from a loopback or private address is also refused before
                              the page sees it. Errors show only the scheme and host of a
-                             refused URL, never the code
+                             refused URL, never the code. Requires a browser launched by
+                             this session (no --cdp or --auto-connect)
 
 Saved flows (experimental, open the session with --capture flow):
   flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed

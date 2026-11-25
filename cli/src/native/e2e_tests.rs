@@ -22152,6 +22152,76 @@ async fn e2e_poppy_join_unconfirmed_cleanup_closes_browser_and_clears_guard() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_refuses_external_cdp_browser() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    let site = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            seen.fetch_add(1, Ordering::SeqCst);
+            let _ = read_http_request(&mut stream).await;
+            let response = http_response("404 Not Found", "", "");
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    // Launch a separate Chrome instance to simulate an external --cdp browser.
+    let mut external = DaemonState::new();
+    let ext_launch = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut external,
+    )
+    .await;
+    assert_success(&ext_launch);
+    let port: u16 = external
+        .browser
+        .as_ref()
+        .unwrap()
+        .chrome_host_port()
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let mut state = DaemonState::new();
+    let attach = execute_command(
+        &json!({ "id": "2", "action": "launch", "cdpPort": port }),
+        &mut state,
+    )
+    .await;
+    assert_success(&attach);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "poppy_join",
+            "url": origin,
+            "authorizer": "echo '{\"signed_in\":true}'",
+        }),
+        &mut state,
+    )
+    .await;
+
+    let _ = execute_command(&json!({ "id": "98", "action": "close" }), &mut state).await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut external).await;
+    site.abort();
+
+    assert_error_code(&resp, "browser_not_owned");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "poppy join must not touch the Company server on an external browser: {resp}"
+    );
+}
+
 /// A local page for restore tests: cookies need an http origin.
 async fn restore_fixture_page() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

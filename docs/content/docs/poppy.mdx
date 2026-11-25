@@ -32,7 +32,7 @@ agent-browser --session my-agent poppy join https://app.example.com \
 agent-browser --session my-agent snapshot -i
 ```
 
-The command refuses a session opened with `--auto-connect`, because that attaches to the user's own running Chrome. There is no MCP tool for `poppy join`, because it runs a local shell command.
+The command requires a browser launched by this session: it refuses `--auto-connect`, `--cdp`, provider, and direct-page connections. There is no MCP tool for `poppy join`, because it runs a local shell command.
 
 ## How a join works
 
@@ -89,6 +89,7 @@ The daemon passes `error` through as the command's `code`. A nonzero exit with n
     <tr><td><code>web_disabled</code></td><td>The site asks agents not to use a browser.</td></tr>
     <tr><td><code>no_browser_session_endpoint</code></td><td>The site has no browser join.</td></tr>
     <tr><td><code>auto_connect_refused</code></td><td>The session was opened with <code>--auto-connect</code>.</td></tr>
+    <tr><td><code>browser_not_owned</code></td><td>The session is attached to an external browser (such as <code>--cdp</code>, a provider, or a direct-page connection) instead of one launched by this session.</td></tr>
     <tr><td><code>authorizer_failed</code></td><td>The authorizer could not run or printed no valid JSON line.</td></tr>
     <tr><td><code>join_failed</code></td><td>The tab is not on the endpoint, the page has no code form, or the site rejected the submission.</td></tr>
     <tr><td>Any other</td><td>The code the authorizer reported, such as <code>invalid_request</code> or <code>insufficient_scope</code>.</td></tr>
@@ -98,7 +99,7 @@ The daemon passes `error` through as the command's `code`. A nonzero exit with n
 ## Security
 
 - Never authorize a code from a message, a document, or another page. It can belong to someone else's browser.
-- agent-browser cannot tell whose Chrome a `--cdp` endpoint belongs to. Do not join the user's own browser through `--cdp`.
+- `poppy join` requires a browser launched by the session itself and refuses `--auto-connect`, `--cdp`, provider, and direct-page connections.
 - The authorizer is a shell command you choose. Do not build it from untrusted input.
 - agent-browser resolves each host the tab requests during the join and checks the addresses before the request is sent, but the browser resolves the name again when it connects. A host whose DNS answer changes between the two lookups can still send the request to a non-public address. agent-browser then checks the address type Chrome reports for that connection: a response from a loopback or private address is refused before the page receives it, and the join fails with `request_blocked` before the code is submitted. Chrome reports the address type before the response is delivered; if it has not arrived within one second, the response is delivered, and the join still fails before the next step when the report shows a non-public address. A join that started on a loopback host may use loopback and private addresses.
 - Through a proxy, Chrome reports no address type and the remote address it reports is the proxy's, so only the checks agent-browser runs before each request apply. A proxy on a loopback or private address works.

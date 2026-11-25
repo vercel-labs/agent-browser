@@ -688,6 +688,9 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
     state
         .refuse_auto_connect()
         .map_err(|e| fail("auto_connect_refused", e))?;
+    state
+        .require_owned_browser()
+        .map_err(|e| fail("browser_not_owned", e))?;
     // One deadline covers discovery, navigation, the authorizer and the submit.
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let discovery = discover(cmd, state, deadline).await?;
