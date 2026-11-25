@@ -1284,10 +1284,11 @@ impl DaemonState {
                                     .as_ref()
                                     .map(|t| t.target_id.clone())
                                     .unwrap_or_default();
-                                let is_page = target_info
+                                let target_type = target_info
                                     .as_ref()
-                                    .is_some_and(|t| t.target_type == "page");
-                                guard.adopt(&sid, target_id, is_page);
+                                    .map(|t| t.target_type.clone())
+                                    .unwrap_or_default();
+                                guard.adopt(&sid, target_id, target_type);
                                 Some(guard.clone())
                             }
                             _ => None,

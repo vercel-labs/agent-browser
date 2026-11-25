@@ -163,6 +163,21 @@ fn poppy_join_guard_script(release_token: &str) -> String {
                 return false;
             }};
         }}
+        if (_global.ServiceWorkerContainer && _global.ServiceWorkerContainer.prototype && typeof _global.ServiceWorkerContainer.prototype.register === 'function') {{
+            const swProto = _global.ServiceWorkerContainer.prototype;
+            const swDesc = Object.getOwnPropertyDescriptor(swProto, 'register');
+            if (!_isWorker) {{
+                _restorers.push(() => {{
+                    if (swDesc) {{
+                        Object.defineProperty(swProto, 'register', swDesc);
+                    }}
+                }});
+            }}
+            swProto.register = function(scriptURL) {{
+                _notify('ServiceWorker', _resolveUrl(scriptURL, false));
+                return Promise.reject(_securityError('ServiceWorker registration blocked during join'));
+            }};
+        }}
         function _blockCtor(name, api) {{
             if (typeof _global[name] !== 'function') return;
             const orig = _global[name];
@@ -262,7 +277,7 @@ fn fail(code: &str, message: impl std::fmt::Display) -> String {
 #[derive(Clone)]
 pub struct JoinGuard {
     sessions: Arc<Mutex<HashSet<String>>>,
-    targets: Arc<Mutex<HashMap<String, (String, bool)>>>,
+    targets: Arc<Mutex<HashMap<String, (String, String)>>>,
     guard_scripts: Arc<Mutex<Vec<(String, String)>>>,
     release_token: String,
     binding_events: Arc<AtomicUsize>,
@@ -277,7 +292,10 @@ pub struct JoinGuard {
 impl JoinGuard {
     fn new(session_id: &str, target_id: &str, local: bool, deadline: Instant) -> Self {
         let mut targets = HashMap::new();
-        targets.insert(session_id.to_string(), (target_id.to_string(), true));
+        targets.insert(
+            session_id.to_string(),
+            (target_id.to_string(), "page".to_string()),
+        );
         Self {
             sessions: Arc::new(Mutex::new(HashSet::from([session_id.to_string()]))),
             targets: Arc::new(Mutex::new(targets)),
@@ -308,6 +326,13 @@ impl JoinGuard {
             .await;
         if !worker_like {
             block_ws?;
+            let _ = client
+                .send_command(
+                    "Network.setBypassServiceWorker",
+                    Some(json!({ "bypass": true })),
+                    Some(session_id),
+                )
+                .await;
             client
                 .send_command(
                     "Runtime.addBinding",
@@ -370,6 +395,13 @@ impl JoinGuard {
                 .await;
             let _ = client
                 .send_command(
+                    "Network.setBypassServiceWorker",
+                    Some(json!({ "bypass": false })),
+                    Some(&sid),
+                )
+                .await;
+            let _ = client
+                .send_command(
                     "Runtime.removeBinding",
                     Some(json!({ "name": POPPY_NET_BINDING })),
                     Some(&sid),
@@ -394,12 +426,23 @@ impl JoinGuard {
             .clone()
     }
 
-    fn target_info(&self, session_id: &str) -> Option<(String, bool)> {
+    fn target_info(&self, session_id: &str) -> Option<(String, String)> {
         self.targets
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(session_id)
             .cloned()
+    }
+
+    fn background_worker_targets(&self) -> Vec<String> {
+        self.targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|(_, ty)| matches!(ty.as_str(), "service_worker" | "shared_worker"))
+            .map(|(tid, _)| tid.clone())
+            .filter(|tid| !tid.is_empty())
+            .collect()
     }
 
     fn redact(&self, message: String) -> String {
@@ -476,7 +519,7 @@ impl JoinGuard {
             .contains(session_id)
     }
 
-    pub(super) fn adopt(&self, session_id: &str, target_id: String, is_page: bool) {
+    pub(super) fn adopt(&self, session_id: &str, target_id: String, target_type: String) {
         self.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -485,7 +528,7 @@ impl JoinGuard {
             self.targets
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(session_id.to_string(), (target_id, is_page));
+                .insert(session_id.to_string(), (target_id, target_type));
         }
     }
 
@@ -818,7 +861,14 @@ pub(super) async fn handle_join(cmd: &Value, state: &mut DaemonState) -> Result<
         .await;
         result
     } else {
-        let outcome = leave_join_page(state, &guard, &session_id).await;
+        let mut origins = HashSet::from([discovery.origin.clone()]);
+        if let Ok(parsed) = Url::parse(&discovery.endpoint) {
+            let endpoint_origin = parsed.origin().ascii_serialization();
+            if endpoint_origin != "null" {
+                origins.insert(endpoint_origin);
+            }
+        }
+        let outcome = leave_join_page(state, &guard, &session_id, &origins).await;
         if outcome.all_cleared {
             *state.poppy_guard.write().await = None;
             if outcome.replaced_main {
@@ -993,6 +1043,7 @@ async fn leave_join_page(
     state: &mut DaemonState,
     guard: &JoinGuard,
     session_id: &str,
+    join_origins: &HashSet<String>,
 ) -> LeaveOutcome {
     let all_sessions = guard.all_sessions();
     let Some(client) = state
@@ -1011,11 +1062,11 @@ async fn leave_join_page(
     let mut pending_pages: HashSet<String> = HashSet::new();
     let mut target_to_session: HashMap<String, String> = HashMap::new();
     for sid in &all_sessions {
-        if let Some((tid, is_page)) = guard.target_info(sid) {
+        if let Some((tid, ty)) = guard.target_info(sid) {
             if !tid.is_empty() {
                 target_to_session.insert(tid, sid.clone());
             }
-            if is_page || sid == session_id {
+            if ty == "page" || sid == session_id {
                 pending_pages.insert(sid.clone());
             }
         } else if sid == session_id {
@@ -1172,10 +1223,133 @@ async fn leave_join_page(
 
     state.ref_map.invalidate_page(session_id);
 
+    let workers_cleared = if unconfirmed.is_empty() {
+        cleanup_background_workers(&client, guard, session_id, join_origins).await
+    } else {
+        false
+    };
+
     LeaveOutcome {
-        all_cleared: unconfirmed.is_empty(),
+        all_cleared: unconfirmed.is_empty() && workers_cleared,
         replaced_main,
     }
+}
+
+fn target_matches_join_worker(
+    info: &Value,
+    adopted_workers: &HashSet<String>,
+    join_origins: &HashSet<String>,
+) -> Option<(String, Option<String>)> {
+    let ty = info.get("type").and_then(Value::as_str)?;
+    if !matches!(ty, "service_worker" | "shared_worker") {
+        return None;
+    }
+    let tid = info.get("targetId").and_then(Value::as_str)?.to_string();
+    let url = info.get("url").and_then(Value::as_str).unwrap_or_default();
+    let origin = Url::parse(url)
+        .ok()
+        .map(|u| u.origin().ascii_serialization())
+        .filter(|o| o != "null");
+    let matches_origin = origin.as_deref().is_some_and(|o| join_origins.contains(o));
+    if adopted_workers.contains(&tid) || matches_origin {
+        Some((tid, origin))
+    } else {
+        None
+    }
+}
+
+/// Unregisters and terminates any `service_worker` or `shared_worker` adopted
+/// during the join or belonging to the join's origins, confirming that no such
+/// target remains alive within `CLEANUP_TIMEOUT`.
+async fn cleanup_background_workers(
+    client: &super::cdp::client::CdpClient,
+    guard: &JoinGuard,
+    session_id: &str,
+    join_origins: &HashSet<String>,
+) -> bool {
+    let adopted_workers: HashSet<String> = guard.background_worker_targets().into_iter().collect();
+    let probe_timeout = if adopted_workers.is_empty() {
+        Duration::from_millis(400)
+    } else {
+        CLEANUP_TIMEOUT
+    };
+    let targets = match timeout(
+        probe_timeout,
+        client.send_command_no_params("Target.getTargets", None),
+    )
+    .await
+    {
+        Ok(Ok(targets)) => targets,
+        _ => return adopted_workers.is_empty(),
+    };
+    let list = targets
+        .get("targetInfos")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut to_close: HashSet<String> = adopted_workers.clone();
+    let mut origins_to_clear: HashSet<String> = HashSet::new();
+    for info in &list {
+        if let Some((tid, origin)) =
+            target_matches_join_worker(info, &adopted_workers, join_origins)
+        {
+            to_close.insert(tid);
+            if let Some(o) = origin {
+                origins_to_clear.insert(o);
+            }
+        }
+    }
+    if to_close.is_empty() {
+        return true;
+    }
+    let result = timeout(CLEANUP_TIMEOUT, async {
+        origins_to_clear.extend(join_origins.iter().cloned());
+        for origin in &origins_to_clear {
+            let _ = client
+                .send_command(
+                    "Storage.clearDataForOrigin",
+                    Some(json!({
+                        "origin": origin,
+                        "storageTypes": "service_workers",
+                    })),
+                    None,
+                )
+                .await;
+        }
+        let _ = client
+            .send_command_no_params("ServiceWorker.enable", Some(session_id))
+            .await;
+        let _ = client
+            .send_command_no_params("ServiceWorker.stopAllWorkers", Some(session_id))
+            .await;
+        for tid in &to_close {
+            let _ = client
+                .send_command("Target.closeTarget", Some(json!({ "targetId": tid })), None)
+                .await;
+        }
+        loop {
+            let Ok(targets) = client
+                .send_command_no_params("Target.getTargets", None)
+                .await
+            else {
+                return false;
+            };
+            let still_alive = targets
+                .get("targetInfos")
+                .and_then(Value::as_array)
+                .is_some_and(|infos| {
+                    infos.iter().any(|info| {
+                        target_matches_join_worker(info, &to_close, join_origins).is_some()
+                    })
+                });
+            if !still_alive {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    result.unwrap_or(false)
 }
 
 fn shell_command(command: &str) -> Command {

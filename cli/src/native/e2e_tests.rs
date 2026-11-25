@@ -29134,6 +29134,113 @@ async fn e2e_poppy_join_refuses_external_cdp_browser() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_poppy_join_blocks_and_cleans_service_worker_on_failed_join() {
+    let _public = PublicAddressForTest::set("::1".parse().unwrap());
+    let target = poppy_forbidden_target().await;
+
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let origin = format!("http://{host}");
+    let discovery = json!({
+        "protocol_version": "1.0",
+        "organization": { "domain": host },
+        "web": { "browser_session_endpoint": format!("{origin}/join") },
+    })
+    .to_string();
+    let join_html = format!(
+        "{POPPY_FORM}<script>navigator.serviceWorker.register('/sw.js').catch(() => {{}});</script>"
+    );
+    let sw_js = format!(
+        r#"
+        self.addEventListener('install', () => self.skipWaiting());
+        self.addEventListener('activate', (e) => {{
+            e.waitUntil(self.clients.claim());
+            setInterval(() => {{ fetch('{0}/from-sw').catch(() => {{}}); }}, 80);
+        }});
+        setInterval(() => {{ fetch('{0}/from-sw-top').catch(() => {{}}); }}, 80);
+        "#,
+        target.origin
+    );
+    let site = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let request = read_http_request(&mut stream).await;
+            let response = if request.starts_with("GET /.well-known/poppy.json ") {
+                http_response("200 OK", "Content-Type: application/json\r\n", &discovery)
+            } else if request.starts_with("GET /join ") {
+                http_response("200 OK", "Content-Type: text/html\r\n", &join_html)
+            } else if request.starts_with("GET /sw.js ") {
+                http_response("200 OK", "Content-Type: application/javascript\r\n", &sw_js)
+            } else {
+                http_response("200 OK", "Content-Type: text/html\r\n", "<p>ok</p>")
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let mut state = DaemonState::new();
+    let launch = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "poppy_join",
+            "url": origin,
+            "authorizer": r#"sleep 0.6; echo '{"error":"user_denied"}'; exit 1"#,
+        }),
+        &mut state,
+    )
+    .await;
+
+    // Wait so any surviving unguarded service worker can fire background fetches.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Check that no service worker registration survived for the origin.
+    let nav = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": format!("{origin}/check") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&nav);
+    let sw_count = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "navigator.serviceWorker.getRegistrations().then(r => r.length)",
+        }),
+        &mut state,
+    )
+    .await;
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    site.abort();
+    target.server.abort();
+
+    assert_error_code(&resp, "user_denied");
+    assert_eq!(
+        target.connections.load(Ordering::SeqCst),
+        0,
+        "surviving service worker reached local target after failed join: {resp}"
+    );
+    assert_eq!(target.requests.load(Ordering::SeqCst), 0, "{resp}");
+    assert_success(&sw_count);
+    assert_eq!(
+        get_data(&sw_count)["result"],
+        0,
+        "service worker registration survived failed join: {sw_count}"
+    );
+}
+
 /// A local page for restore tests: cookies need an http origin.
 async fn restore_fixture_page() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
