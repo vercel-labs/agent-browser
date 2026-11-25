@@ -46,6 +46,7 @@ use install::run_install;
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
 };
+#[cfg(test)]
 use session_settings::parse_proxy;
 use upgrade::run_upgrade;
 
@@ -339,19 +340,6 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
         );
     }
 
-    if cdp && !flags.extensions.is_empty() {
-        return Some("Cannot use --extension with --cdp (extensions require local browser)");
-    }
-
-    // The WebGPU preset is Chrome launch flags; it cannot be applied to a
-    // browser agent-browser did not launch. Rejecting (rather than silently
-    // ignoring) matches the --extension handling above. `--webgpu false`
-    // overrides an env/config-enabled preset for these modes.
-    if flags.webgpu && cdp {
-        return Some(
-            "Cannot use --webgpu with --cdp (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
-        );
-    }
     if flags.webgpu && provider {
         return Some(
             "Cannot use --webgpu with -p/--provider (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
@@ -1950,13 +1938,6 @@ fn main() {
 
     let restore_key = restore_key_from_flags(&flags);
 
-    // Parse proxy URL to separate server from credentials for the daemon.
-    let (proxy_server, proxy_username, proxy_password) = if let Some(ref proxy_str) = flags.proxy {
-        let parsed = parse_proxy(proxy_str);
-        (Some(parsed.server), parsed.username, parsed.password)
-    } else {
-        (None, None, None)
-    };
     let plugin_registry_json =
         serde_json::to_string(&flags.plugins).unwrap_or_else(|_| "[]".to_string());
     let daemon_opts = DaemonOptions {
@@ -1968,10 +1949,10 @@ fn main() {
         enable: &flags.enable,
         args: flags.args.as_deref(),
         user_agent: flags.user_agent.as_deref(),
-        proxy: proxy_server.as_deref(),
+        proxy: flags.proxy.as_ref().map(|p| p.server.as_str()),
         proxy_bypass: flags.proxy_bypass.as_deref(),
-        proxy_username: proxy_username.as_deref(),
-        proxy_password: proxy_password.as_deref(),
+        proxy_username: flags.proxy.as_ref().and_then(|p| p.username.as_deref()),
+        proxy_password: flags.proxy.as_ref().and_then(|p| p.password.as_deref()),
         ignore_https_errors: flags.ignore_https_errors,
         allow_file_access: flags.allow_file_access,
         hide_scrollbars: flags.hide_scrollbars,
@@ -2570,6 +2551,27 @@ mod tests {
         assert_eq!(wire["profile"], "/tmp/profile");
         assert_eq!(wire["args"], serde_json::json!(["--lang=en-US"]));
         assert_eq!(wire["headed"], true);
+    }
+
+    #[test]
+    fn firefox_cdp_flags_travel_with_the_command_settings() {
+        let (command, wire) = settings_of(&[
+            "--engine",
+            "firefox",
+            "--cdp",
+            "9222",
+            "--download-path",
+            "/tmp/downloads",
+            "--allowed-domains",
+            "example.com",
+            "get",
+            "url",
+        ]);
+        assert_eq!(command["action"], "url");
+        assert_eq!(wire["engine"], "firefox");
+        assert_eq!(wire["cdp"], "9222");
+        assert_eq!(wire["download-path"], "/tmp/downloads");
+        assert_eq!(wire["allowed-domains"], json!(["example.com"]));
     }
 
     #[test]
@@ -3369,10 +3371,6 @@ mod tests {
                 launch_mode_flags(false, false, true, true),
                 "Cannot use --extension with -p/--provider (extensions require local browser)",
             ),
-            (
-                launch_mode_flags(false, true, false, true),
-                "Cannot use --extension with --cdp (extensions require local browser)",
-            ),
         ];
 
         for (flags, expected) in cases {
@@ -3396,16 +3394,12 @@ mod tests {
     }
 
     #[test]
-    fn test_incompatible_launch_mode_error_rejects_webgpu_attach_modes() {
+    fn test_incompatible_launch_mode_error_rejects_webgpu_for_provider_and_auto_connect() {
         let with_webgpu = |mut flags: Flags| {
             flags.webgpu = true;
             flags
         };
         let cases = [
-            (
-                with_webgpu(launch_mode_flags(false, true, false, false)),
-                "Cannot use --webgpu with --cdp (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
-            ),
             (
                 with_webgpu(launch_mode_flags(false, false, true, false)),
                 "Cannot use --webgpu with -p/--provider (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
@@ -3430,6 +3424,31 @@ mod tests {
         assert_eq!(
             incompatible_launch_mode_error(&launch_mode_flags(false, true, false, false)),
             None
+        );
+    }
+
+    #[test]
+    fn test_incompatible_launch_mode_error_allows_launch_only_flags_with_explicit_cdp() {
+        let attach = |engine: Option<&str>| {
+            let mut flags = launch_mode_flags(false, true, false, true);
+            flags.webgpu = true;
+            flags.engine = engine.map(str::to_string);
+            flags.ca_cert = None;
+            flags
+        };
+        assert_eq!(incompatible_launch_mode_error(&attach(None)), None);
+        assert_eq!(
+            incompatible_launch_mode_error(&attach(Some("firefox"))),
+            None
+        );
+
+        let mut ca_cert = launch_mode_flags(false, true, false, true);
+        ca_cert.ca_cert = Some("/tmp/ca.pem".to_string());
+        assert_eq!(
+            incompatible_launch_mode_error(&ca_cert),
+            Some(
+                "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)"
+            )
         );
     }
 

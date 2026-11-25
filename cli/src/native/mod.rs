@@ -20,8 +20,11 @@ pub mod diff;
 pub mod downloads;
 #[allow(dead_code)]
 pub mod element;
+
+pub mod bidi;
 #[allow(dead_code)]
 pub mod flow;
+pub mod forms;
 #[allow(dead_code)]
 pub mod inspect_server;
 #[allow(dead_code)]
