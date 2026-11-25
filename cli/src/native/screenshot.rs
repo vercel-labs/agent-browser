@@ -11,21 +11,21 @@ use super::element::RefMap;
 const ANNOTATION_OVERLAY_ID: &str = "__agent_browser_annotations__";
 
 #[derive(Debug, Clone)]
-struct Rect {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+pub(crate) struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Debug, Clone)]
-struct RawAnnotation {
-    ref_id: String,
-    number: u64,
-    role: String,
-    name: Option<String>,
-    rect: Rect,
-    in_iframe: bool,
+pub(crate) struct RawAnnotation {
+    pub ref_id: String,
+    pub number: u64,
+    pub role: String,
+    pub name: Option<String>,
+    pub rect: Rect,
+    pub in_iframe: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +60,40 @@ pub struct ScreenshotOptions {
     pub quality: Option<i32>,
     pub annotate: bool,
     pub output_dir: Option<String>,
+}
+
+/// Reads the image format from `format`, then `type`, defaulting to png.
+pub(crate) fn screenshot_format(cmd: &Value) -> String {
+    cmd.get("format")
+        .or_else(|| cmd.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("png")
+        .to_string()
+}
+
+/// Builds `ScreenshotOptions` from a screenshot command.
+pub(crate) fn screenshot_options(cmd: &Value) -> ScreenshotOptions {
+    ScreenshotOptions {
+        selector: cmd
+            .get("selector")
+            .and_then(Value::as_str)
+            .map(String::from),
+        path: cmd.get("path").and_then(Value::as_str).map(String::from),
+        full_page: cmd
+            .get("fullPage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        format: screenshot_format(cmd),
+        quality: cmd.get("quality").and_then(Value::as_i64).map(|q| q as i32),
+        annotate: cmd
+            .get("annotate")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        output_dir: cmd
+            .get("screenshotDir")
+            .and_then(Value::as_str)
+            .map(String::from),
+    }
 }
 
 impl Default for ScreenshotOptions {
@@ -718,7 +752,7 @@ async fn get_rect_for_object(
     Ok(result.result.value.as_ref().and_then(parse_rect))
 }
 
-fn parse_rect(value: &Value) -> Option<Rect> {
+pub(crate) fn parse_rect(value: &Value) -> Option<Rect> {
     Some(Rect {
         x: value.get("x")?.as_f64()?,
         y: value.get("y")?.as_f64()?,
@@ -727,7 +761,7 @@ fn parse_rect(value: &Value) -> Option<Rect> {
     })
 }
 
-fn filter_annotations(
+pub(crate) fn filter_annotations(
     annotations: Vec<RawAnnotation>,
     target_rect: Option<&Rect>,
 ) -> Vec<RawAnnotation> {
@@ -752,14 +786,14 @@ fn overlaps(left: &Rect, right: &Rect) -> bool {
     left.x < right_x2 && left_x2 > right.x && left.y < right_y2 && left_y2 > right.y
 }
 
-async fn inject_annotation_overlay(
-    client: &CdpClient,
-    session_id: &str,
-    annotations: &[&RawAnnotation],
-) -> Result<(), String> {
+/// JavaScript that draws numbered boxes over `annotations` in the page.
+pub(crate) fn annotation_overlay_js<T: std::borrow::Borrow<RawAnnotation>>(
+    annotations: &[T],
+) -> String {
     let overlay_data = annotations
         .iter()
         .map(|annotation| {
+            let annotation = annotation.borrow();
             serde_json::json!({
                 "number": annotation.number,
                 "x": round(annotation.rect.x),
@@ -770,7 +804,7 @@ async fn inject_annotation_overlay(
         })
         .collect::<Vec<_>>();
 
-    let expression = format!(
+    format!(
         r#"(() => {{
             var items = {items};
             var id = {overlay_id};
@@ -800,7 +834,28 @@ async fn inject_annotation_overlay(
         items = serde_json::to_string(&overlay_data).unwrap_or_else(|_| "[]".to_string()),
         overlay_id =
             serde_json::to_string(ANNOTATION_OVERLAY_ID).unwrap_or_else(|_| "\"\"".to_string()),
-    );
+    )
+}
+
+/// JavaScript that removes the annotation overlay.
+pub(crate) fn annotation_removal_js() -> String {
+    format!(
+        r#"(() => {{
+            var el = document.getElementById({overlay_id});
+            if (el) el.remove();
+            return true;
+        }})()"#,
+        overlay_id =
+            serde_json::to_string(ANNOTATION_OVERLAY_ID).unwrap_or_else(|_| "\"\"".to_string()),
+    )
+}
+
+async fn inject_annotation_overlay(
+    client: &CdpClient,
+    session_id: &str,
+    annotations: &[&RawAnnotation],
+) -> Result<(), String> {
+    let expression = annotation_overlay_js(annotations);
 
     let _: EvaluateResult = client
         .send_command_typed(
@@ -818,15 +873,7 @@ async fn inject_annotation_overlay(
 }
 
 async fn remove_annotation_overlay(client: &CdpClient, session_id: &str) -> Result<(), String> {
-    let expression = format!(
-        r#"(() => {{
-            var el = document.getElementById({overlay_id});
-            if (el) el.remove();
-            return true;
-        }})()"#,
-        overlay_id =
-            serde_json::to_string(ANNOTATION_OVERLAY_ID).unwrap_or_else(|_| "\"\"".to_string()),
-    );
+    let expression = annotation_removal_js();
 
     let _: EvaluateResult = client
         .send_command_typed(
@@ -1125,7 +1172,7 @@ fn compose_annotations_on_image(
     Ok(base64::engine::general_purpose::STANDARD.encode(out))
 }
 
-fn project_annotations(
+pub(crate) fn project_annotations(
     annotations: &[RawAnnotation],
     target_rect: Option<&Rect>,
     scroll: Option<(f64, f64)>,
