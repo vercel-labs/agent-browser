@@ -1115,8 +1115,32 @@ impl BrowserManager {
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
-        let ws_url = resolve_cdp_url(url, headers.as_deref().unwrap_or_default()).await?;
-        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        Self::connect_cdp_inner_with_trust(
+            url,
+            direct_page,
+            headers,
+            &crate::tls::TrustOptions::default(),
+        )
+        .await
+    }
+
+    /// Connect to Kernel using the trust selected for its API requests.
+    pub async fn connect_cdp_with_trust(
+        url: &str,
+        trust: &crate::tls::TrustOptions,
+    ) -> Result<Self, String> {
+        Self::connect_cdp_inner_with_trust(url, false, None, trust).await
+    }
+
+    async fn connect_cdp_inner_with_trust(
+        url: &str,
+        direct_page: bool,
+        headers: Option<Vec<(String, String)>>,
+        trust: &crate::tls::TrustOptions,
+    ) -> Result<Self, String> {
+        let ws_url =
+            resolve_cdp_url_with_trust(url, headers.as_deref().unwrap_or_default(), trust).await?;
+        let client = Arc::new(CdpClient::connect_with_trust(&ws_url, headers, trust).await?);
         let mut manager = Self {
             client,
             browser_process: None,
@@ -3561,6 +3585,14 @@ async fn wait_while_cdp_port_refuses(input: &str, window: Duration) {
 }
 
 async fn resolve_cdp_url(input: &str, headers: &[(String, String)]) -> Result<String, String> {
+    resolve_cdp_url_with_trust(input, headers, &crate::tls::TrustOptions::default()).await
+}
+
+async fn resolve_cdp_url_with_trust(
+    input: &str,
+    headers: &[(String, String)],
+    trust: &crate::tls::TrustOptions,
+) -> Result<String, String> {
     if input.starts_with("ws://") || input.starts_with("wss://") {
         return Ok(input.to_string());
     }
@@ -3588,7 +3620,15 @@ async fn resolve_cdp_url(input: &str, headers: &[(String, String)]) -> Result<St
         // Preserve the input's encryption: an https:// CDP URL must discover
         // over https/wss so CDP auth headers are never sent in plaintext.
         let secure = parsed.scheme() == "https";
-        return discover_cdp_url_with_headers(host, port, query.as_deref(), headers, secure).await;
+        return super::cdp::discovery::discover_cdp_url_with_trust(
+            host,
+            port,
+            query.as_deref(),
+            headers,
+            secure,
+            trust,
+        )
+        .await;
     }
 
     // Try as numeric port

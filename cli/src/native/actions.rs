@@ -843,6 +843,7 @@ pub struct DaemonState {
     /// External browser this session attached to; target-less launches resolve to it.
     attached_target: Option<AttachedTarget>,
     effective_ca_cert: Option<EffectiveCaCert>,
+    tls_options: crate::tls::TrustOptions,
     /// Whether browser-level auto-attach has been enabled for the current
     /// browser so top-level popups pause before their first request.
     network_auto_attach_installed: bool,
@@ -1083,6 +1084,7 @@ impl DaemonState {
             cdp_headers: None,
             attached_target: None,
             effective_ca_cert: None,
+            tls_options: crate::tls::TrustOptions::default(),
             network_auto_attach_installed: false,
             session_setup: SessionSetup::default(),
             touch_sessions: HashSet::new(),
@@ -3193,7 +3195,9 @@ async fn attach_provider_cdp(
         return Err("Browser Use did not return a usable cdpUrl".to_string());
     }
     let attach = async {
-        if conn.direct_page {
+        if provider.eq_ignore_ascii_case("kernel") {
+            BrowserManager::connect_cdp_with_trust(&conn.ws_url, &state.tls_options).await
+        } else if conn.direct_page {
             BrowserManager::connect_cdp_direct(&conn.ws_url).await
         } else if ws_headers.is_some() {
             BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers).await
@@ -3694,6 +3698,7 @@ pub(crate) fn dialog_block_error(action: &str, cmd: &Value, state: &DaemonState)
 /// Fields the CLI adds to every command to carry session configuration. They
 /// are not part of the action, so stream broadcasts and flow recordings drop them.
 pub(crate) const ENVELOPE_KEYS: &[&str] = &[
+    "tls",
     "plugins",
     "settings",
     "pinTab",
@@ -3793,6 +3798,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+
+    if let Some(trust) = cmd.get("tls") {
+        match serde_json::from_value(trust.clone()) {
+            Ok(trust) => state.tls_options = trust,
+            Err(error) => return error_response(&id, &format!("Invalid TLS options: {error}")),
+        }
+    }
 
     let cmd_start = std::time::Instant::now();
 
@@ -5820,11 +5832,14 @@ async fn launch_browser_from_settings(
         Connection::Provider(provider) => Some(provider.clone()),
         _ => None,
     };
-    validate_ca_cert_launch_mode(
-        &options,
-        engine.as_deref(),
-        !matches!(connection, Connection::Local),
-    )?;
+    // Kernel CA trust belongs to the client connection, not remote Chromium.
+    if !matches!(&connection, Connection::Provider(name) if name.eq_ignore_ascii_case("kernel")) {
+        validate_ca_cert_launch_mode(
+            &options,
+            engine.as_deref(),
+            !matches!(connection, Connection::Local),
+        )?;
+    }
     let enable_features = state.settings.enable_features();
     let init_script_paths = state.settings.init_scripts();
     let contained = state.domain_filter.read().await.is_some();
@@ -6007,8 +6022,13 @@ async fn launch_browser_from_settings(
             return result;
         }
         if !p.is_empty() {
-            let conn =
-                providers::connect_provider_with_plugins(&p, &plugins, &state.settings).await?;
+            let conn = providers::connect_provider_with_plugins(
+                &p,
+                &plugins,
+                &state.settings,
+                &state.tls_options,
+            )
+            .await?;
             let provider_metadata = conn.metadata.clone();
             if conn.direct_page && contained {
                 if let Some(ref ps) = conn.session {
@@ -6974,11 +6994,14 @@ async fn prepare_transition(
         .get(Key::CaCert)
         .and_then(Value::as_str)
         .map(String::from);
-    validate_ca_cert_launch_mode(
-        &options,
-        plan.next.engine().as_deref(),
-        !matches!(&connection, Connection::Local),
-    )?;
+    // Kernel CA trust belongs to the client connection, not remote Chromium.
+    if !matches!(&connection, Connection::Provider(name) if name.eq_ignore_ascii_case("kernel")) {
+        validate_ca_cert_launch_mode(
+            &options,
+            plan.next.engine().as_deref(),
+            !matches!(&connection, Connection::Local),
+        )?;
+    }
     let firefox = matches!(engine, Some(Engine::Firefox))
         || engine.is_none() && plan.next.engine().as_deref() == Some("firefox");
     if firefox {
@@ -21684,6 +21707,7 @@ mod tests {
         state.active_provider_connection = true;
         state.active_provider_session = Some(ActiveProviderSession {
             session: providers::ProviderSession {
+                trust: crate::tls::TrustOptions::default(),
                 provider: "plugin:cloud-browser".to_string(),
                 session_id: r#"{"sessionId":"s1"}"#.to_string(),
             },
@@ -21747,6 +21771,7 @@ mod tests {
         state.active_provider_connection = true;
         state.active_provider_session = Some(ActiveProviderSession {
             session: providers::ProviderSession {
+                trust: crate::tls::TrustOptions::default(),
                 provider: "plugin:cloud-browser".to_string(),
                 session_id: r#"{"sessionId":"s1"}"#.to_string(),
             },
@@ -23169,6 +23194,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         state.active_provider_connection = true;
         state.active_provider_session = Some(ActiveProviderSession {
             session: providers::ProviderSession {
+                trust: crate::tls::TrustOptions::default(),
                 provider: "plugin:cloud-browser".to_string(),
                 session_id: r#"{"sessionId":"s1"}"#.to_string(),
             },
@@ -23193,6 +23219,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     fn pending_browser_use_session() -> ActiveProviderSession {
         ActiveProviderSession {
             session: providers::ProviderSession {
+                trust: crate::tls::TrustOptions::default(),
                 provider: "browser-use".to_string(),
                 session_id: "0e6ae5d0-93cf-4b9c-8c62-2c9c07b6c0f7".to_string(),
             },

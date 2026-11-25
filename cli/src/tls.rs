@@ -12,10 +12,10 @@
 //! - `--ca-cert <path>` adds a PEM bundle or DER certificate on top of the
 //!   selected roots. `SSL_CERT_FILE` is honored as an ambient fallback.
 //!
-//! Session commands such as `read` send the resolved options with every
-//! request, so the daemon holds no trust state. An explicit selection made on
-//! the command line is saved beside the session until `close`, which keeps it
-//! in effect when the daemon restarts for an unrelated config change.
+//! Session commands send resolved options with every request. Kernel sessions
+//! retain their creation options for cleanup, including after failed CDP attachment.
+//! An explicit command-line selection is saved beside the session until `close`,
+//! so it survives daemon restarts for unrelated config changes.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -231,6 +231,21 @@ pub fn apply_to_reqwest(
         .with_root_certificates(build_root_store(opts)?)
         .with_no_client_auth();
     Ok(builder.use_preconfigured_tls(config))
+}
+
+/// Use the same verified trust roots for provider CDP as for HTTPS requests.
+pub fn websocket_connector(
+    opts: &TrustOptions,
+) -> Result<Option<tokio_tungstenite::Connector>, String> {
+    if opts.is_default() {
+        return Ok(None);
+    }
+    let config = ClientConfig::builder()
+        .with_root_certificates(build_root_store(opts)?)
+        .with_no_client_auth();
+    Ok(Some(tokio_tungstenite::Connector::Rustls(
+        std::sync::Arc::new(config),
+    )))
 }
 
 /// One-line description of the selected roots, for `agent-browser doctor`.

@@ -366,17 +366,22 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
             "Cannot use --ca-cert with --auto-connect (--ca-cert requires a locally launched Chromium browser on Linux)",
         );
     }
-    if flags.ca_cert.is_some() && provider {
+    let kernel = targets
+        .provider
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case("kernel"));
+    if flags.ca_cert.is_some() && provider && !kernel {
         return Some(
             "Cannot use --ca-cert with -p/--provider (--ca-cert requires a locally launched Chromium browser on Linux)",
         );
     }
-    if flags.ca_cert.is_some() && flags.profile.is_some() {
+    if flags.ca_cert.is_some() && !kernel && flags.profile.is_some() {
         return Some(
             "Cannot use --ca-cert with --profile because isolated CA trust would change the profile's NSS environment",
         );
     }
     if flags.ca_cert.is_some()
+        && !kernel
         && flags
             .engine
             .as_deref()
@@ -384,7 +389,7 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     {
         return Some("--ca-cert is supported only with the Chrome engine on Linux");
     }
-    if flags.ca_cert.is_some() && !cfg!(target_os = "linux") {
+    if flags.ca_cert.is_some() && !kernel && !cfg!(target_os = "linux") {
         return Some("--ca-cert browser trust is currently supported only on Linux (read, install, upgrade, and doctor accept it on every platform)");
     }
 
@@ -1812,9 +1817,8 @@ fn main() {
         cmd["argv"] = json!(read_batch_stdin(&flags));
     }
     match cmd.get("action").and_then(|v| v.as_str()) {
-        Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
         Some("close") => forget_before_close(&flags.session),
-        _ => {}
+        _ => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
     }
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
@@ -2191,9 +2195,8 @@ fn run_batch(
         };
         attach_input_mode(&mut parsed, flags);
         match parsed.get("action").and_then(|v| v.as_str()) {
-            Some("read") => parsed["tls"] = json!(tls::session_options(flags, &flags.session)),
             Some("close") => tls::clear_session(&flags.session),
-            _ => {}
+            _ => parsed["tls"] = json!(tls::session_options(flags, &flags.session)),
         }
 
         let action = parsed

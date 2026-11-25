@@ -15,7 +15,7 @@
       },
       {
         "from": "# Trust a CA for locally launched Chromium on Linux",
-        "to": "# Trust a CA for CLI requests, and for local Chromium on Linux"
+        "to": "# Trust a CA for CLI requests, Kernel connections, and local Chromium on Linux"
       },
       {
         "from": "# Clear CA trust retained by the running session",
@@ -323,7 +323,7 @@
       },
       {
         "from": "The option cannot be combined with",
-        "to": "For browser commands, the option cannot be combined with"
+        "to": "When configuring browser page trust, the option cannot be combined with"
       },
       {
         "from": "It is not supported on macOS or Windows.",

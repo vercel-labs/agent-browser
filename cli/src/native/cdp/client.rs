@@ -391,6 +391,14 @@ impl CdpClient {
         url: &str,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
+        Self::connect_with_trust(url, headers, &crate::tls::TrustOptions::default()).await
+    }
+
+    pub async fn connect_with_trust(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+        trust: &crate::tls::TrustOptions,
+    ) -> Result<Self, String> {
         let normalized_url = normalize_websocket_root_path(url);
         let mut request = normalized_url
             .as_str()
@@ -415,7 +423,7 @@ impl CdpClient {
             ..Default::default()
         };
 
-        Self::connect_request(request, ws_config, None).await
+        Self::connect_request(request, ws_config, crate::tls::websocket_connector(trust)?).await
     }
 
     async fn connect_request(

@@ -4,6 +4,7 @@
 //! Each provider returns a CDP WebSocket URL for connecting via BrowserManager.
 
 use crate::session_settings::Running;
+use crate::tls::TrustOptions;
 use serde_json::{json, Value};
 use std::env;
 use std::time::Duration;
@@ -17,6 +18,8 @@ const BROWSER_USE_STOP_DEADLINE: Duration = Duration::from_secs(4);
 pub struct ProviderSession {
     pub provider: String,
     pub session_id: String,
+    /// Trust selected at creation, retained for provider cleanup.
+    pub trust: TrustOptions,
 }
 
 #[derive(Debug)]
@@ -32,7 +35,13 @@ pub struct ProviderConnection {
 /// along with session info for cleanup on failure.
 pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection, String> {
     let plugins = crate::plugins::plugins_from_env();
-    connect_provider_with_plugins(provider_name, &plugins, &Running::from_env()).await
+    connect_provider_with_plugins(
+        provider_name,
+        &plugins,
+        &Running::from_env(),
+        &TrustOptions::default(),
+    )
+    .await
 }
 
 /// Connects to a built-in provider or a plugin provider from the supplied
@@ -42,8 +51,9 @@ pub async fn connect_provider_with_plugins(
     provider_name: &str,
     plugins: &[crate::plugins::PluginConfig],
     settings: &Running,
+    trust: &TrustOptions,
 ) -> Result<ProviderConnection, String> {
-    connect_provider_with_plugins_and_options(provider_name, plugins, settings, None).await
+    connect_provider_with_plugins_and_options(provider_name, plugins, settings, trust, None).await
 }
 
 /// Connects to a built-in provider or plugin provider with launch options
@@ -54,6 +64,7 @@ pub async fn connect_provider_with_plugins_and_options(
     provider_name: &str,
     plugins: &[crate::plugins::PluginConfig],
     settings: &Running,
+    trust: &TrustOptions,
     launch_options: Option<Value>,
 ) -> Result<ProviderConnection, String> {
     match provider_name.to_lowercase().as_str() {
@@ -85,7 +96,7 @@ pub async fn connect_provider_with_plugins_and_options(
             })
         }
         "kernel" => {
-            let (url, session) = connect_kernel().await?;
+            let (url, session) = connect_kernel(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -134,7 +145,13 @@ pub async fn close_provider_session_with_plugins(
         return Ok(());
     }
 
-    let client = reqwest::Client::new();
+    let client = if session.provider == "kernel" {
+        crate::tls::apply_to_reqwest(reqwest::Client::builder(), &session.trust)?
+            .build()
+            .map_err(|e| format!("Kernel HTTP client could not be initialized: {e}"))?
+    } else {
+        reqwest::Client::new()
+    };
     match session.provider.as_str() {
         "browserbase" => {
             if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
@@ -234,6 +251,7 @@ pub async fn connect_plugin_provider_with_plugins_and_options(
         crate::plugins::connect_browser_provider_with_plugins(provider_name, plugins, request)
             .await?;
     let session = browser.cleanup.as_ref().map(|cleanup| ProviderSession {
+        trust: crate::tls::TrustOptions::default(),
         provider: format!("plugin:{}", provider_name),
         session_id: serde_json::to_string(cleanup).unwrap_or_else(|_| "{}".to_string()),
     });
@@ -291,6 +309,7 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     Ok((
         ws_url,
         Some(ProviderSession {
+            trust: crate::tls::TrustOptions::default(),
             provider: "browserbase".to_string(),
             session_id,
         }),
@@ -371,6 +390,7 @@ async fn connect_browserless() -> Result<(String, Option<ProviderSession>), Stri
     Ok((
         connect_url,
         Some(ProviderSession {
+            trust: crate::tls::TrustOptions::default(),
             provider: "browserless".to_string(),
             // Store the stop URL as the session_id for cleanup
             session_id: stop_url,
@@ -435,6 +455,7 @@ async fn connect_browser_use_at(
     Ok((
         response["cdpUrl"].as_str().unwrap_or_default().to_string(),
         Some(ProviderSession {
+            trust: crate::tls::TrustOptions::default(),
             provider: "browser-use".to_string(),
             session_id: id.to_string(),
         }),
@@ -524,7 +545,7 @@ fn kernel_profile_from_env() -> Option<Value> {
     Some(json!({ "name": name, "save_changes": save_changes }))
 }
 
-async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_kernel(trust: &TrustOptions) -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("KERNEL_API_KEY").ok();
     let endpoint =
         env::var("KERNEL_ENDPOINT").unwrap_or_else(|_| "https://api.onkernel.com".to_string());
@@ -554,7 +575,9 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
             .insert("profile".to_string(), profile);
     }
 
-    let client = reqwest::Client::new();
+    let client = crate::tls::apply_to_reqwest(reqwest::Client::builder(), trust)?
+        .build()
+        .map_err(|e| format!("Kernel HTTP client could not be initialized: {e}"))?;
     let mut request = client.post(&url).header("Content-Type", "application/json");
     if let Some(ref key) = api_key {
         request = request.header("Authorization", format!("Bearer {}", key));
@@ -605,6 +628,7 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
     Ok((
         ws_url,
         Some(ProviderSession {
+            trust: trust.clone(),
             provider: "kernel".to_string(),
             session_id,
         }),
@@ -766,6 +790,7 @@ mod agentcore {
         Ok((
             ws_url,
             Some(ProviderSession {
+                trust: crate::tls::TrustOptions::default(),
                 provider: "agentcore".to_string(),
                 session_id,
             }),
@@ -1257,7 +1282,7 @@ mod tests {
         );
         guard.set("KERNEL_ENDPOINT", &base);
 
-        let (ws_url, session) = connect_kernel().await.unwrap();
+        let (ws_url, session) = connect_kernel(&TrustOptions::default()).await.unwrap();
         assert_eq!(ws_url, "wss://example.com/cdp");
         assert_eq!(session.unwrap().session_id, "s1");
 
@@ -1283,6 +1308,7 @@ mod tests {
             "env-cloud",
             &[],
             &Running::from_env(),
+            &TrustOptions::default(),
         ));
 
         assert!(result.is_err());
@@ -1366,6 +1392,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         std::fs::set_permissions(&plugin_path, perms).unwrap();
 
         let session = ProviderSession {
+            trust: crate::tls::TrustOptions::default(),
             provider: "plugin:cloud-browser".to_string(),
             session_id: r#"{"sessionId":"s1"}"#.to_string(),
         };
@@ -1427,6 +1454,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "cloud-browser",
             &plugins,
             &Running::from_env(),
+            &TrustOptions::default(),
         ))
         .unwrap();
 
@@ -1477,6 +1505,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "cloud-browser",
             &plugins,
             &Running::from_env(),
+            &TrustOptions::default(),
         ))
         .unwrap();
 
@@ -1531,6 +1560,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "cloud-browser",
             &plugins,
             &Running::from_env(),
+            &TrustOptions::default(),
             Some(json!({
                 "colorScheme": "dark",
                 "engine": "lightpanda",
