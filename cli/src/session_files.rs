@@ -38,6 +38,10 @@ pub enum SessionFile {
     Settings,
     /// Debug log written when `AGENT_BROWSER_DEBUG` is set.
     Log,
+    /// Held while a command starts, restarts or replaces the session's daemon.
+    /// Never removed: unlinking a lock file lets a second holder in.
+    /// Owner-only (0600) on Unix.
+    Lock,
 }
 
 impl SessionFile {
@@ -55,6 +59,7 @@ impl SessionFile {
         SessionFile::Target,
         SessionFile::Settings,
         SessionFile::Log,
+        SessionFile::Lock,
     ];
 
     pub fn extension(self) -> &'static str {
@@ -71,6 +76,7 @@ impl SessionFile {
             SessionFile::Target => "target",
             SessionFile::Settings => "settings",
             SessionFile::Log => "log",
+            SessionFile::Lock => "lock",
         }
     }
 
@@ -86,7 +92,9 @@ impl SessionFile {
             | SessionFile::Engine
             | SessionFile::Provider
             | SessionFile::Extensions => true,
-            SessionFile::Target | SessionFile::Settings | SessionFile::Log => false,
+            SessionFile::Target | SessionFile::Settings | SessionFile::Log | SessionFile::Lock => {
+                false
+            }
         }
     }
 
@@ -144,7 +152,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         left.sort();
-        assert_eq!(left, ["s.log", "s.settings", "s.target"]);
+        assert_eq!(left, ["s.lock", "s.log", "s.settings", "s.target"]);
         assert_eq!(
             fs::read_to_string(SessionFile::Target.path_in(dir.path(), "s")).unwrap(),
             "x"

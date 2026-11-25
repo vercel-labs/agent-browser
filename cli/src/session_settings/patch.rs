@@ -7,8 +7,16 @@ use serde_json::{Map, Value};
 
 use crate::flags::Flags;
 
-use super::spec::{redacted, spec, spec_by_name, Effect, Key, Persist, SPECS};
+use super::spec::{redacted, spec, spec_by_name, Effect, Key, Persist, RESTORE_UNIT, SPECS};
 use super::SettingsError;
+
+/// A requested value that does not fit its setting.
+#[derive(Debug, PartialEq)]
+pub struct PatchInvalid {
+    /// The `--json` error type to report it under.
+    pub error_type: &'static str,
+    pub message: String,
+}
 
 /// What an invocation asks for one setting.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,11 +35,77 @@ pub struct Patch {
     /// Keys whose requested value equals the running one but whose content
     /// differs (a CA file edited in place). Daemon-side only: never sent.
     changed_in_place: BTreeSet<Key>,
+    /// Connection entries that came from the environment or config rather
+    /// than the command line. They are session defaults: the plan applies them
+    /// only to a session that has no connection target yet.
+    ambient: BTreeSet<Key>,
 }
 
 /// Wire name of the forced-relaunch marker. It is not a setting, so it has no
 /// row in the table.
 const RELAUNCH_FIELD: &str = "relaunch";
+
+/// Wire name of the list of ambient connection entries. Absent means every
+/// entry is explicit, which is what a CLI without the field sends.
+const AMBIENT_FIELD: &str = "ambient";
+
+/// The settings an environment or config value can make ambient.
+pub(super) const AMBIENT_KEYS: [Key; 4] =
+    [Key::Cdp, Key::AutoConnect, Key::Provider, Key::CdpHeaders];
+
+/// The mutually exclusive connection targets. A patch that names more than one
+/// is resolved by order, so a launch envelope that names one drops the rest.
+const TARGET_KEYS: [Key; 3] = [Key::Cdp, Key::AutoConnect, Key::Provider];
+
+/// The connection targets of one invocation after the environment and config
+/// defaults are resolved against the command line.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Targets {
+    pub cdp: Option<String>,
+    pub provider: Option<String>,
+    pub auto_connect: bool,
+}
+
+/// Which targets an invocation names. A target on the command line wins and
+/// drops the environment and config ones. Without one, a blank default names
+/// nothing and a single default is kept, picked by precedence: cdp, then
+/// auto-connect, then provider. A blank `-p ""` is kept: it resets the session.
+pub fn effective_targets(flags: &Flags) -> Targets {
+    let blank = |v: &String| v.trim().is_empty();
+    let mut cdp = flags.cdp.clone();
+    let mut provider = flags.provider.clone();
+    let mut auto_connect = flags.auto_connect;
+    if !flags.cli_cdp && cdp.as_ref().is_some_and(blank) {
+        cdp = None;
+    }
+    if !flags.cli_provider && provider.as_ref().is_some_and(blank) {
+        provider = None;
+    }
+    let explicit = flags.cli_cdp && cdp.is_some()
+        || flags.cli_provider && provider.as_ref().is_some_and(|v| !blank(v))
+        || flags.cli_auto_connect && auto_connect;
+    if explicit {
+        if !flags.cli_cdp {
+            cdp = None;
+        }
+        if !flags.cli_provider {
+            provider = None;
+        }
+        auto_connect &= flags.cli_auto_connect;
+    } else if cdp.is_some() {
+        auto_connect = false;
+        if !flags.cli_provider {
+            provider = None;
+        }
+    } else if auto_connect && !flags.cli_provider {
+        provider = None;
+    }
+    Targets {
+        cdp,
+        provider,
+        auto_connect,
+    }
+}
 
 impl fmt::Debug for Patch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -45,6 +119,10 @@ impl fmt::Debug for Patch {
         if self.relaunch {
             map.entry(&RELAUNCH_FIELD, &true);
         }
+        if !self.ambient.is_empty() {
+            let names: Vec<&str> = self.ambient.iter().map(|k| spec(*k).name).collect();
+            map.entry(&AMBIENT_FIELD, &names);
+        }
         map.finish()
     }
 }
@@ -52,15 +130,104 @@ impl fmt::Debug for Patch {
 impl Patch {
     /// Reads the resolved flags once per invocation. Pure.
     pub fn from_flags(flags: &Flags) -> Patch {
-        let entries = SPECS
+        let mut entries: BTreeMap<Key, Requested> = SPECS
             .iter()
             .filter_map(|s| (s.read)(flags).map(|requested| (s.key, requested)))
             .collect();
+        let targets = effective_targets(flags);
+        let mut ambient = BTreeSet::new();
+        for key in AMBIENT_KEYS {
+            let (kept, explicit) = match key {
+                Key::Cdp => (targets.cdp.is_some(), flags.cli_cdp),
+                Key::Provider => (targets.provider.is_some(), flags.cli_provider),
+                // Headers belong to an endpoint: the plan decides whether
+                // this invocation sends one.
+                Key::CdpHeaders => (
+                    flags.cli_cdp_headers
+                        || flags.cdp_headers.as_deref().is_some_and(|v| {
+                            // Defaults belong to the endpoint they name: not
+                            // to a different one given with `--cdp`.
+                            !v.trim().is_empty()
+                                && (!flags.cli_cdp
+                                    || targets
+                                        .cdp
+                                        .as_deref()
+                                        .is_none_or(|cdp| flags.default_headers_fit(cdp)))
+                        }),
+                    flags.cli_cdp_headers,
+                ),
+                _ => (
+                    targets.auto_connect || flags.no_auto_connect || flags.cli_auto_connect,
+                    flags.cli_auto_connect || flags.no_auto_connect,
+                ),
+            };
+            if !kept {
+                entries.remove(&key);
+            } else if !explicit && entries.contains_key(&key) {
+                ambient.insert(key);
+            }
+        }
         Patch {
             entries,
             relaunch: flags.relaunch,
             changed_in_place: BTreeSet::new(),
+            ambient,
         }
+    }
+
+    /// Whether the entry for `key` came from the environment or config.
+    pub fn is_ambient(&self, key: Key) -> bool {
+        self.ambient.contains(&key)
+    }
+
+    /// What a command that names its own endpoint sends: the targets from the
+    /// environment or config are dropped, and the headers from there go with
+    /// the endpoint it names.
+    pub fn without_ambient_connection(&self) -> Patch {
+        let mut patch = self.clone();
+        for key in std::mem::take(&mut patch.ambient) {
+            if key != Key::CdpHeaders {
+                patch.entries.remove(&key);
+            }
+        }
+        patch
+    }
+
+    /// This patch with a launch envelope layered over it. The envelope is what
+    /// the command itself asked for, so it wins on a key both name, and a
+    /// connection target it names displaces the other targets and the headers
+    /// that belonged to them.
+    pub fn with_envelope(&self, envelope: &Patch) -> Patch {
+        let mut patch = self.clone();
+        for key in envelope.entries.keys() {
+            patch.ambient.remove(key);
+        }
+        patch.entries.extend(
+            envelope
+                .entries
+                .iter()
+                .map(|(key, value)| (*key, value.clone())),
+        );
+        patch.ambient.extend(envelope.ambient.iter().copied());
+        patch.relaunch |= envelope.relaunch;
+        if let Some(target) = TARGET_KEYS
+            .iter()
+            .copied()
+            .find(|key| envelope.value(*key).is_some())
+        {
+            for key in TARGET_KEYS.iter().copied().filter(|key| *key != target) {
+                patch.remove(key);
+            }
+            if target != Key::Cdp && envelope.get(Key::CdpHeaders).is_none() {
+                patch.remove(Key::CdpHeaders);
+            }
+        }
+        patch
+    }
+
+    fn retain_ambient(&mut self) {
+        let entries = &self.entries;
+        self.ambient.retain(|key| entries.contains_key(key));
     }
 
     pub fn is_noop(&self) -> bool {
@@ -81,13 +248,57 @@ impl Patch {
         self.changed_in_place.contains(&key)
     }
 
+    /// Splits the restore unit (key, save policy, checks) from the rest. The
+    /// unit applies once, past the policy gates; the rest keeps the patch's
+    /// relaunch and ambient state.
+    pub fn split_restore_unit(&self) -> (Patch, Patch) {
+        let mut rest = self.clone();
+        let mut unit = Patch::default();
+        for key in RESTORE_UNIT {
+            if let Some(requested) = rest.entries.remove(&key) {
+                unit.entries.insert(key, requested);
+            }
+            if rest.changed_in_place.remove(&key) {
+                unit.changed_in_place.insert(key);
+            }
+        }
+        rest.retain_ambient();
+        (rest, unit)
+    }
+
     /// The patch without its launch settings and without a forced relaunch:
-    /// what a command that never launches a browser can apply.
+    /// what a command that never launches a browser can apply. The restore
+    /// unit's save policy and checks are dropped too, because the caller does
+    /// not know which restore key is running; see `without_launch_settings_for`.
     pub fn without_launch_settings(&self) -> Patch {
+        self.without_launch_settings_inner(None)
+    }
+
+    /// Like `without_launch_settings`, for a caller that knows the running
+    /// restore key. The save policy and checks stay when the patch names no
+    /// restore key or the running one; a different key would put them on the
+    /// wrong key, so they are dropped with it.
+    pub fn without_launch_settings_for(&self, running_key: Option<&str>) -> Patch {
+        self.without_launch_settings_inner(Some(running_key))
+    }
+
+    fn without_launch_settings_inner(&self, running_key: Option<Option<&str>>) -> Patch {
         let mut live = self.clone();
         live.relaunch = false;
         live.entries
             .retain(|key, _| spec(*key).effect == Effect::Live);
+        let patch_key = self.value(Key::RestoreKey).and_then(Value::as_str);
+        let applies_to_running_key = match (patch_key, running_key) {
+            (None, Some(_)) => true,
+            (Some(k), Some(running)) => running == Some(k),
+            (_, None) => false,
+        };
+        if !applies_to_running_key {
+            for key in RESTORE_UNIT {
+                live.entries.remove(&key);
+            }
+        }
+        live.retain_ambient();
         live
     }
 
@@ -112,6 +323,7 @@ impl Patch {
     /// Drops a key the patch would otherwise carry.
     pub fn remove(&mut self, key: Key) {
         self.entries.remove(&key);
+        self.ambient.remove(&key);
     }
 
     pub fn get(&self, key: Key) -> Option<&Requested> {
@@ -128,6 +340,23 @@ impl Patch {
 
     pub fn iter(&self) -> impl Iterator<Item = (Key, &Requested)> {
         self.entries.iter().map(|(k, r)| (*k, r))
+    }
+
+    /// Whether every value fits its setting. The CLI calls this before it
+    /// starts a daemon; the daemon applies the same rule to what it receives.
+    pub fn validate(&self) -> Result<(), PatchInvalid> {
+        for (key, requested) in &self.entries {
+            if let Requested::Set(value) = requested {
+                spec(*key)
+                    .shape
+                    .check(value)
+                    .map_err(|(error_type, message)| PatchInvalid {
+                        error_type,
+                        message,
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     /// The `settings` field of a command; `None` when there is nothing to say.
@@ -149,6 +378,14 @@ impl Patch {
         if self.relaunch {
             object.insert(RELAUNCH_FIELD.to_string(), Value::Bool(true));
         }
+        if !self.ambient.is_empty() {
+            let names: Vec<Value> = self
+                .ambient
+                .iter()
+                .map(|k| Value::from(spec(*k).name))
+                .collect();
+            object.insert(AMBIENT_FIELD.to_string(), Value::Array(names));
+        }
         Some(Value::Object(object))
     }
 
@@ -159,7 +396,23 @@ impl Patch {
         let object = wire.as_object().ok_or(SettingsError::NotAnObject)?;
         let mut entries = BTreeMap::new();
         let mut relaunch = false;
+        let mut ambient = BTreeSet::new();
         for (name, value) in object {
+            if name == AMBIENT_FIELD {
+                let names = value.as_array().ok_or_else(|| {
+                    SettingsError::UnknownKey(format!("{} (expected a list of names)", name))
+                })?;
+                for item in names {
+                    let key = item
+                        .as_str()
+                        .and_then(spec_by_name)
+                        .map(|s| s.key)
+                        .filter(|key| AMBIENT_KEYS.contains(key))
+                        .ok_or_else(|| SettingsError::UnknownKey(format!("{} {}", name, item)))?;
+                    ambient.insert(key);
+                }
+                continue;
+            }
             if name == RELAUNCH_FIELD {
                 relaunch = value.as_bool().ok_or_else(|| {
                     SettingsError::UnknownKey(format!("{} (expected a boolean)", name))
@@ -177,21 +430,22 @@ impl Patch {
                     ));
                 }
                 Requested::Default
-            } else if s.shape.accepts(value) {
-                Requested::Set(value.clone())
             } else {
-                return Err(SettingsError::Invalid(
-                    s.key,
-                    format!("expected {:?}", s.shape),
-                ));
+                s.shape
+                    .check(value)
+                    .map_err(|(_, why)| SettingsError::Invalid(s.key, why))?;
+                Requested::Set(value.clone())
             };
             entries.insert(s.key, requested);
         }
-        Ok(Patch {
+        let mut patch = Patch {
             entries,
             relaunch,
             changed_in_place: BTreeSet::new(),
-        })
+            ambient,
+        };
+        patch.retain_ambient();
+        Ok(patch)
     }
 
     /// A patch that sets the given keys. Used for tests and for translating
@@ -201,6 +455,7 @@ impl Patch {
             entries: entries.into_iter().collect(),
             relaunch: false,
             changed_in_place: BTreeSet::new(),
+            ambient: BTreeSet::new(),
         }
     }
 }

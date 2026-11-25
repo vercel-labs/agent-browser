@@ -1,3 +1,4 @@
+use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -231,15 +232,20 @@ impl WebDriverClient {
     }
 
     async fn get(&self, path: &str) -> Result<Value, WebDriverError> {
-        http_request("GET", &format!("{}{}", self.base_url, path), None).await
+        http_request(Method::GET, &format!("{}{}", self.base_url, path), None).await
     }
 
     async fn post(&self, path: &str, body: &Value) -> Result<Value, WebDriverError> {
-        http_request("POST", &format!("{}{}", self.base_url, path), Some(body)).await
+        http_request(
+            Method::POST,
+            &format!("{}{}", self.base_url, path),
+            Some(body),
+        )
+        .await
     }
 
     async fn delete(&self, path: &str) -> Result<Value, WebDriverError> {
-        http_request("DELETE", &format!("{}{}", self.base_url, path), None).await
+        http_request(Method::DELETE, &format!("{}{}", self.base_url, path), None).await
     }
 }
 
@@ -274,7 +280,7 @@ fn element_id_from_value(
 }
 
 async fn http_request(
-    method: &str,
+    method: Method,
     url: &str,
     body: Option<&Value>,
 ) -> Result<Value, WebDriverError> {
@@ -286,8 +292,6 @@ async fn http_request(
         .connect_timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| WebDriverError::transport(format!("WebDriver client error: {}", e)))?;
-    let method = reqwest::Method::from_bytes(method.as_bytes())
-        .map_err(|e| WebDriverError::transport(format!("Invalid HTTP method: {}", e)))?;
     let mut request = client.request(method, url);
     if let Some(body) = body {
         request = request.json(body);
