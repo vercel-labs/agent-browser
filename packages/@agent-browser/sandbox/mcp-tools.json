@@ -530,11 +530,11 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
+      "description": "Connect to a browser over CDP or to a running Firefox over WebDriver BiDi. A ws:// URL whose path is /session attaches to Firefox directly; an http(s):// URL or bare port falls back to BiDi when CDP discovery finds nothing. Add ?devtools=<port> to point at the Firefox DevTools server (default 6000). Firefox's RDP companion is unencrypted, so remote Firefox ports must be forwarded through an encrypted tunnel and the connection must use 127.0.0.1. With pinTab on a Chrome CDP session, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. The pinTab binding and its tab_gone guarantee are CDP-only; Firefox attach rejects pinTab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
       "inputSchema": {
         "properties": {
           "pinTab": {
-            "description": "Strict session-to-tab binding (sticky for the session). Explicit false disables a sticky pin; omitted leaves it unchanged.",
+            "description": "Strict session-to-tab binding (sticky for the session; CDP only, rejected for Firefox attach). Explicit false disables a sticky pin; omitted leaves it unchanged.",
             "type": "boolean"
           },
           "session": {
@@ -542,7 +542,7 @@
             "type": "string"
           },
           "target": {
-            "description": "CDP port or URL.",
+            "description": "CDP port or URL, or a Firefox WebDriver BiDi endpoint such as ws://127.0.0.1:9333/session or http://127.0.0.1:9333?devtools=6080.",
             "type": "string"
           }
         },
@@ -555,7 +555,7 @@
       "profiles": [
         "debug"
       ],
-      "title": "Connect CDP"
+      "title": "Connect to browser via CDP or Firefox WebDriver BiDi"
     },
     {
       "annotations": {
@@ -607,7 +607,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get cookies.",
+      "description": "Get cookies. When URLs are omitted, Firefox filters to the active page and its frames.",
       "inputSchema": {
         "properties": {
           "session": {
@@ -1140,7 +1140,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Drag one element to another.",
+      "description": "Drag one element to another. On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.",
       "inputSchema": {
         "properties": {
           "human": {
@@ -1234,7 +1234,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly; a color input takes any CSS color Chrome accepts and stores it as #rrggbb. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome backend only.",
+      "description": "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly; a color input takes any CSS color Chrome accepts and stores it as #rrggbb. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome and Firefox.",
       "inputSchema": {
         "properties": {
           "selector": {
@@ -2464,7 +2464,7 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active. Omit it to run without domain containment; an empty list is rejected.",
             "items": {
               "type": "string"
             },
@@ -2497,7 +2497,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2964,7 +2964,7 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active. Omit it to run without domain containment; an empty list is rejected.",
             "items": {
               "type": "string"
             },
@@ -3519,7 +3519,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Emulate a device by name.",
+      "description": "Emulate a device by name. Firefox does not support set device; use set viewport plus the --user-agent launch flag or AGENT_BROWSER_USER_AGENT instead of set device.",
       "inputSchema": {
         "properties": {
           "device": {
@@ -3607,7 +3607,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set media emulation.",
+      "description": "Set media emulation. Firefox does not support reduced motion.",
       "inputSchema": {
         "properties": {
           "colorScheme": {
@@ -3670,7 +3670,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set viewport size. The optional scale must be finite.",
+      "description": "Set viewport size. The optional scale must be finite. Firefox does not support mobile mode.",
       "inputSchema": {
         "properties": {
           "height": {
@@ -3981,7 +3981,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Save cookies and storage state.",
+      "description": "Save cookies and storage state, overwriting the target file.",
       "inputSchema": {
         "properties": {
           "path": {
@@ -4329,7 +4329,7 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active. Omit it to run without domain containment; an empty list is rejected.",
             "items": {
               "type": "string"
             },
@@ -4363,7 +4363,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
