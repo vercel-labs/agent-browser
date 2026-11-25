@@ -2590,6 +2590,132 @@ async fn e2e_same_site_cross_origin_iframe_check_uncheck_and_select() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_check_refuses_interactive_cover_and_allows_plain_label() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let n = stream.read(&mut buffer).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buffer[..n]);
+                let body = if req.starts_with("GET /nav ") {
+                    "<!doctype html><p>navigated</p>"
+                } else {
+                    "<!doctype html><body style='margin:0'>\
+                    <label style='position:relative;display:inline-block;width:40px;height:40px'>\
+                      <input type='checkbox' id='cb-link' style='position:absolute;left:0;top:0;width:40px;height:40px;margin:0'>\
+                      <a id='nav-cover' href='/nav' style='position:absolute;left:0;top:0;width:40px;height:40px;display:block'>Go</a>\
+                    </label>\
+                    <form onsubmit='window.__submitted=(window.__submitted||0)+1; return false;'>\
+                      <label style='position:relative;display:inline-block;width:40px;height:40px'>\
+                        <input type='checkbox' id='cb-submit' style='position:absolute;left:0;top:0;width:40px;height:40px;margin:0'>\
+                        <button id='sub-cover' type='submit' style='position:absolute;left:0;top:0;width:40px;height:40px'>Send</button>\
+                      </label>\
+                    </form>\
+                    <div style='position:relative;width:40px;height:40px'>\
+                      <input type='checkbox' id='cb-plain' style='position:absolute;left:0;top:0;width:40px;height:40px;margin:0'>\
+                      <label id='plain-lbl' for='cb-plain' style='position:absolute;left:0;top:0;width:40px;height:40px;display:block'><span>Accept</span></label>\
+                    </div>\
+                    </body>"
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{port}/")}),
+            &mut state,
+        )
+        .await,
+    );
+
+    // (a) Checkbox covered by <a href> inside its label must be refused and must not navigate.
+    let link_res = execute_command(
+        &json!({"id": "3", "action": "check", "selector": "#cb-link"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        link_res["success"], false,
+        "expected check over <a href> to fail: {link_res}"
+    );
+    let link_err = link_res["error"].as_str().unwrap_or("");
+    assert!(
+        link_err.contains("is covered by <a#nav-cover>"),
+        "expected intercepted error, got: {link_err}"
+    );
+    assert_evaluate(&mut state, "4", "location.pathname", json!("/")).await;
+
+    // (b) Checkbox covered by <button type=submit> inside its label must be refused and must not submit.
+    let submit_res = execute_command(
+        &json!({"id": "5", "action": "check", "selector": "#cb-submit"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        submit_res["success"], false,
+        "expected check over submit button to fail: {submit_res}"
+    );
+    let submit_err = submit_res["error"].as_str().unwrap_or("");
+    assert!(
+        submit_err.contains("is covered by <button#sub-cover>"),
+        "expected intercepted error, got: {submit_err}"
+    );
+    assert_evaluate(&mut state, "6", "window.__submitted || 0", json!(0)).await;
+
+    // (c) Plain associated <label> covering the checkbox still activates check/uncheck.
+    assert_success(
+        &execute_command(
+            &json!({"id": "7", "action": "check", "selector": "#cb-plain"}),
+            &mut state,
+        )
+        .await,
+    );
+    let checked = execute_command(
+        &json!({"id": "8", "action": "ischecked", "selector": "#cb-plain"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&checked);
+    assert_eq!(get_data(&checked)["checked"], true);
+
+    assert_success(
+        &execute_command(
+            &json!({"id": "9", "action": "uncheck", "selector": "#cb-plain"}),
+            &mut state,
+        )
+        .await,
+    );
+    let unchecked = execute_command(
+        &json!({"id": "10", "action": "ischecked", "selector": "#cb-plain"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&unchecked);
+    assert_eq!(get_data(&unchecked)["checked"], false);
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_semantic_find_honors_selected_frame() {
     let mut state = DaemonState::new();
     assert_success(

@@ -1774,7 +1774,7 @@ pub(crate) async fn place_object_click_point(
         .pointer("/node/backendNodeId")
         .and_then(|v| v.as_i64())
         .ok_or_else(|| format!("Element not found: {target}"))?;
-    place_in_dispatch_viewport(
+    super::click_point::place_form_control_in_dispatch_viewport(
         client,
         session_id,
         frame_id,
