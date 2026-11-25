@@ -117,16 +117,21 @@ pub(crate) fn user_agent(user_agent: &str) -> Command {
     )
 }
 
-/// Maps a locale to `emulation.setLocaleOverride`.
+/// Maps a locale to `emulation.setLocaleOverride`; an empty locale sends `null`, which
+/// clears the override.
 pub(crate) fn locale(locale: &str) -> Command {
-    ("emulation.setLocaleOverride", json!({ "locale": locale }))
+    (
+        "emulation.setLocaleOverride",
+        json!({ "locale": (!locale.is_empty()).then_some(locale) }),
+    )
 }
 
-/// Maps a timezone id to `emulation.setTimezoneOverride`.
+/// Maps a timezone id to `emulation.setTimezoneOverride`; an empty id sends `null`, which
+/// clears the override.
 pub(crate) fn timezone(timezone: &str) -> Command {
     (
         "emulation.setTimezoneOverride",
-        json!({ "timezone": timezone }),
+        json!({ "timezone": (!timezone.is_empty()).then_some(timezone) }),
     )
 }
 
@@ -560,8 +565,10 @@ pub async fn set_locale(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .ok_or("Missing 'locale' parameter")?;
     let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::locale(locale)).await?;
-    session(state)?.emulation.settings.write().unwrap().locale = Some(locale.to_string());
-    state.session_setup.locale = Some(locale.to_string());
+    // An empty locale clears the override; do not replay it onto later tabs.
+    let stored = (!locale.is_empty()).then(|| locale.to_string());
+    session(state)?.emulation.settings.write().unwrap().locale = stored.clone();
+    state.session_setup.locale = stored;
     Ok(json!({ "locale": locale }))
 }
 
@@ -574,8 +581,10 @@ pub async fn set_timezone(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .ok_or("Missing 'timezoneId' parameter")?;
     let context = session(state)?.contexts.active_tab().to_string();
     send_scoped(session(state)?, &context, self::timezone(timezone)).await?;
-    session(state)?.emulation.settings.write().unwrap().timezone = Some(timezone.to_string());
-    state.session_setup.timezone = Some(timezone.to_string());
+    // An empty timezone id clears the override; do not replay it onto later tabs.
+    let stored = (!timezone.is_empty()).then(|| timezone.to_string());
+    session(state)?.emulation.settings.write().unwrap().timezone = stored.clone();
+    state.session_setup.timezone = stored;
     Ok(json!({ "timezoneId": timezone }))
 }
 
@@ -1281,6 +1290,57 @@ mod tests {
             .unwrap()
             .iter()
             .any(|request| request["configuration"]["printSimulationEnabled"] == true));
+    }
+
+    #[tokio::test]
+    async fn empty_timezone_and_locale_send_null_and_are_not_replayed() {
+        let (ff, _, _, bidi, _) = fake_session_with_rdp().await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        set_timezone(&json!({"timezoneId": "Asia/Tokyo"}), &mut state)
+            .await
+            .unwrap();
+        set_locale(&json!({"locale": "fr-FR"}), &mut state)
+            .await
+            .unwrap();
+        set_timezone(&json!({"timezoneId": ""}), &mut state)
+            .await
+            .unwrap();
+        set_locale(&json!({"locale": ""}), &mut state)
+            .await
+            .unwrap();
+
+        let settings = session(&mut state)
+            .unwrap()
+            .emulation
+            .settings
+            .read()
+            .unwrap()
+            .clone();
+        assert!(settings.timezone.is_none());
+        assert!(settings.locale.is_none());
+        assert!(state.session_setup.timezone.is_none());
+        assert!(state.session_setup.locale.is_none());
+
+        tabs::tab_new(&json!({}), &mut state).await.unwrap();
+
+        let messages = bidi.lock().unwrap().clone();
+        let params = |method: &str, field: &str| -> Vec<Value> {
+            messages
+                .iter()
+                .filter(|m| m["method"] == method)
+                .map(|m| m["params"][field].clone())
+                .collect()
+        };
+        assert_eq!(
+            params("emulation.setTimezoneOverride", "timezone"),
+            vec![json!("Asia/Tokyo"), Value::Null]
+        );
+        assert_eq!(
+            params("emulation.setLocaleOverride", "locale"),
+            vec![json!("fr-FR"), Value::Null]
+        );
     }
 
     #[tokio::test]
