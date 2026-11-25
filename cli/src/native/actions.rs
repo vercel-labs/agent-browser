@@ -10703,6 +10703,21 @@ pub(crate) fn diff_snapshot_response(
     }))
 }
 
+/// Ensures the browser is still focused on the same page target and session.
+fn ensure_same_active_target(
+    state: &DaemonState,
+    expected_target_id: &str,
+    expected_session_id: &str,
+) -> Result<(), String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let current_target = mgr.active_target_id().ok();
+    let current_session = mgr.active_session_id().ok();
+    if current_target != Some(expected_target_id) || current_session != Some(expected_session_id) {
+        return Err("Active tab closed or changed during diff url".to_string());
+    }
+    Ok(())
+}
+
 async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if state.browser.is_none() {
         return Err("Browser not launched".to_string());
@@ -10750,14 +10765,15 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             ..ScreenshotOptions::default()
         });
 
-    // Each navigation can replace the document, so invalidate refs before it starts.
-    let first_session_id = {
+    let (target_id, session_id) = {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-        mgr.active_session_id()?.to_string()
+        (
+            mgr.active_target_id()?.to_string(),
+            mgr.active_session_id()?.to_string(),
+        )
     };
-    state.ref_map.invalidate_page(&first_session_id);
+    state.ref_map.invalidate_page(&session_id);
 
-    // Navigate to URL1, then capture it before leaving the page.
     state
         .browser
         .as_mut()
@@ -10765,13 +10781,13 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .navigate(url1, wait_until)
         .await?;
     state.drain_cdp_events_background().await?;
-    let (first_session_id, snap1, shot1, mut snap1_ref_map) = {
+    ensure_same_active_target(state, &target_id, &session_id)?;
+    let (snap1, shot1, mut snap1_ref_map) = {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-        let first_session_id = mgr.active_session_id()?.to_string();
         let mut snap1_ref_map = state.ref_map.clone();
         let snap1 = snapshot::take_snapshot(
             &mgr.client,
-            &first_session_id,
+            &session_id,
             &options,
             &mut snap1_ref_map,
             None,
@@ -10780,17 +10796,18 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .await?;
         let shot1 = capture_diff_url_screenshot(
             mgr,
-            &first_session_id,
+            &session_id,
             &snap1_ref_map,
             screenshot_options.as_ref(),
             &state.iframe_sessions,
         )
         .await?;
-        (first_session_id, snap1, shot1, snap1_ref_map)
+        (snap1, shot1, snap1_ref_map)
     };
 
-    // Navigate to URL2 and capture it the same way.
-    snap1_ref_map.invalidate_page(&first_session_id);
+    state.drain_cdp_events_background().await?;
+    ensure_same_active_target(state, &target_id, &session_id)?;
+    snap1_ref_map.invalidate_page(&session_id);
     state
         .browser
         .as_mut()
@@ -10798,13 +10815,13 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .navigate(url2, wait_until)
         .await?;
     state.drain_cdp_events_background().await?;
-    let (second_session_id, snap2, shot2, snap2_ref_map) = {
+    ensure_same_active_target(state, &target_id, &session_id)?;
+    let (snap2, shot2, snap2_ref_map) = {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-        let second_session_id = mgr.active_session_id()?.to_string();
         let mut snap2_ref_map = snap1_ref_map;
         let snap2 = snapshot::take_snapshot(
             &mgr.client,
-            &second_session_id,
+            &session_id,
             &options,
             &mut snap2_ref_map,
             None,
@@ -10813,22 +10830,20 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .await?;
         let shot2 = capture_diff_url_screenshot(
             mgr,
-            &second_session_id,
+            &session_id,
             &snap2_ref_map,
             screenshot_options.as_ref(),
             &state.iframe_sessions,
         )
         .await?;
-        (second_session_id, snap2, shot2, snap2_ref_map)
+        (snap2, shot2, snap2_ref_map)
     };
 
     let before = diff::snapshot_comparison_text(&snap1);
     let after = diff::snapshot_comparison_text(&snap2);
     let result = diff::diff_text(&before, &after);
     let snapshot_diff = diff::diff_snapshots(&before, &after);
-    state
-        .ref_map
-        .commit_snapshot(snap2_ref_map, &second_session_id);
+    state.ref_map.commit_snapshot(snap2_ref_map, &session_id);
     let mut data = json!({
         "diff": result,
         "snapshot": {
@@ -18963,6 +18978,122 @@ mod tests {
             .unwrap()
             .iter()
             .any(|call| call == "history.back()"));
+    }
+
+    #[tokio::test]
+    async fn diff_url_fails_when_url1_closes_its_tab() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let navigated_sessions: std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, String)>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server_navs = navigated_sessions.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let method = request["method"].as_str().unwrap_or_default();
+                let session = request
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let mut events = Vec::new();
+                let response = match method {
+                    "Page.navigate" => {
+                        let nav_url = request
+                            .pointer("/params/url")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        server_navs.lock().unwrap().push((session.clone(), nav_url));
+                        events.push(json!({
+                            "method": "Page.loadEventFired",
+                            "sessionId": session,
+                            "params": { "timestamp": 1.0 }
+                        }));
+                        events.push(json!({
+                            "method": "Target.targetDestroyed",
+                            "params": { "targetId": "tab-diff" }
+                        }));
+                        json!({
+                            "id": request["id"],
+                            "result": { "frameId": "tab-diff", "loaderId": "loader-1" }
+                        })
+                    }
+                    _ => json!({ "id": request["id"], "result": {} }),
+                };
+                for event in events {
+                    if ws
+                        .send(Message::Text(event.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                if ws
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut browser = BrowserManager::for_test(client, url);
+        browser.add_page(super::super::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "tab-keep".to_string(),
+            session_id: "session-keep".to_string(),
+            url: "https://example.com/keep".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        browser.add_page(super::super::browser::PageInfo {
+            tab_id: 2,
+            label: None,
+            target_id: "tab-diff".to_string(),
+            session_id: "session-diff".to_string(),
+            url: "https://example.com/start".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let mut state = DaemonState::new();
+        state.event_rx = Some(browser.client.subscribe());
+        state.browser = Some(browser);
+
+        let err = handle_diff_url(
+            &json!({
+                "url1": "https://example.com/one",
+                "url2": "https://example.com/two"
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("Active tab closed or changed during diff url"),
+            "unexpected error: {err}"
+        );
+        let navs = navigated_sessions.lock().unwrap();
+        assert_eq!(
+            navs.len(),
+            1,
+            "url2 must never navigate another tab: {navs:?}"
+        );
+        assert_eq!(
+            navs[0],
+            (
+                Some("session-diff".to_string()),
+                "https://example.com/one".to_string()
+            )
+        );
     }
 
     async fn state_with_snapshot_ref() -> DaemonState {
