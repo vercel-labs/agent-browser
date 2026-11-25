@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -366,6 +366,8 @@ pub async fn stage_snapshot(
     Ok((tree, staged))
 }
 
+const MAX_IFRAME_SNAPSHOT_DEPTH: usize = 4;
+
 pub async fn take_snapshot(
     client: &CdpClient,
     session_id: &str,
@@ -381,10 +383,6 @@ pub async fn take_snapshot(
         .send_command_no_params("Accessibility.enable", Some(session_id))
         .await?;
 
-    // If a CSS selector is provided, resolve the set of backendNodeIds that
-    // belong to the DOM subtrees rooted at every matched element.  We use this
-    // set to pick the right AX subtree root(s) later.  Hidden matches have no
-    // AX nodes, so they drop out without failing the snapshot.
     let selector_backend_ids: Option<HashMap<i64, usize>> =
         if let Some(ref selector) = options.selector {
             let resolved = resolve_selector_backend_ids(client, session_id, selector).await;
@@ -400,8 +398,46 @@ pub async fn take_snapshot(
             None
         };
 
+    let mut visited = HashSet::new();
+    let parent_session = match frame_id {
+        Some(fid) => {
+            visited.insert(fid.to_string());
+            super::element::find_frame_host_session(client, session_id, fid, iframe_sessions)
+                .await
+                .unwrap_or_else(|_| session_id.to_string())
+        }
+        None => session_id.to_string(),
+    };
+    take_snapshot_inner(
+        client,
+        session_id,
+        &parent_session,
+        options,
+        selector_backend_ids.as_ref(),
+        ref_map,
+        frame_id,
+        iframe_sessions,
+        0,
+        &mut visited,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn take_snapshot_inner(
+    client: &CdpClient,
+    session_id: &str,
+    parent_session_id: &str,
+    options: &SnapshotOptions,
+    selector_backend_ids: Option<&HashMap<i64, usize>>,
+    ref_map: &mut RefMap,
+    frame_id: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+    depth: usize,
+    visited: &mut HashSet<String>,
+) -> Result<String, String> {
     let (ax_params, effective_session_id) =
-        resolve_ax_session(frame_id, session_id, iframe_sessions);
+        resolve_ax_session(frame_id, parent_session_id, iframe_sessions);
     // Same-origin children share a CDP session but have separate loaders;
     // out-of-process children also have their own effective session identity.
     let frame_tree = client
@@ -455,7 +491,7 @@ pub async fn take_snapshot(
 
     // When a selector is given, find AX nodes whose backendDOMNodeId falls
     // within the target DOM subtree and pick the top-level ones as roots.
-    let effective_roots = if let Some(ref id_set) = selector_backend_ids {
+    let effective_roots = if let Some(id_set) = selector_backend_ids {
         // Mark which tree_nodes belong to the target DOM subtree.
         let in_subtree: Vec<bool> = tree_nodes
             .iter()
@@ -500,11 +536,15 @@ pub async fn take_snapshot(
         root_indices
     };
 
-    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
-    let mut cursor_elements: HashMap<i64, CursorElementInfo> =
+    // Pre-collect cursor-interactive elements for the top document only;
+    // child frames don't share the top document's DOM or backendNodeIds.
+    let mut cursor_elements: HashMap<i64, CursorElementInfo> = if frame_id.is_none() {
         find_cursor_interactive_elements(client, session_id)
             .await
-            .unwrap_or_default();
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
     drop_natively_interactive(&mut cursor_elements, &tree_nodes);
 
     promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
@@ -570,26 +610,31 @@ pub async fn take_snapshot(
         render_tree(&tree_nodes, root_idx, 0, &mut output, options);
     }
 
-    // Recurse into child iframes: for each Iframe node with a backend_node_id,
-    // resolve the child frame ID and take a snapshot of its content.
-    // We only recurse from the main frame (frame_id == None) to avoid
-    // unbounded depth; nested iframes within iframes are not expanded.
-    if frame_id.is_none() {
+    // Recurse into child iframes up to MAX_IFRAME_SNAPSHOT_DEPTH, guarding
+    // against cycles with `visited`.
+    if depth < MAX_IFRAME_SNAPSHOT_DEPTH {
         let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
         for (node_idx, metadata) in iframe_metadata {
             let Some(child_fid) = metadata.frame_id else {
                 continue;
             };
+            if !visited.insert(child_fid.clone()) {
+                continue;
+            }
             let ref_id = tree_nodes[node_idx].ref_id.as_deref().unwrap_or("");
             // Snapshot the child frame; errors are silently ignored
             // (e.g. cross-origin iframes)
-            if let Ok(child_text) = Box::pin(take_snapshot(
+            if let Ok(child_text) = Box::pin(take_snapshot_inner(
                 client,
                 session_id,
+                effective_session_id,
                 options,
+                None,
                 ref_map,
                 Some(&child_fid),
                 iframe_sessions,
+                depth + 1,
+                visited,
             ))
             .await
             {

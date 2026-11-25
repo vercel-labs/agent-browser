@@ -545,6 +545,21 @@ fn frame_target(frame_id: &str, session_id: &str, parent_id: Option<&str>) -> Fr
     }
 }
 
+/// Return `(frame_id -> host_session_id)` for every frame whose parent chain
+/// reaches the active page's top frame.
+pub async fn active_frame_sessions(
+    client: &CdpClient,
+    top_session_id: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    let (_, frame_targets) =
+        collect_frame_sessions(client, top_session_id, iframe_sessions).await?;
+    Ok(frame_targets
+        .into_iter()
+        .map(|target| (target.frame_id, target.session_id))
+        .collect())
+}
+
 /// Resolve the CDP session and URL for `frame_id` within `top_session_id`'s
 /// active frame tree. Returns `Ok(None)` if `frame_id` does not belong to the
 /// active page, and propagates CDP transport/timeout errors as `Err`.

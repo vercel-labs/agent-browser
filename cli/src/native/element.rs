@@ -332,132 +332,201 @@ fn active_frame() -> Option<String> {
     ACTIVE_FRAME.get().and_then(|m| m.lock().unwrap().clone())
 }
 
-/// Object handle for the <iframe> element that owns a frame, resolved on the
-/// parent session. Works for same-process frames where no dedicated CDP
-/// session exists.
-pub(super) async fn frame_owner_object_id(
+/// Create an isolated execution world for `frame_id` on `session_id`.
+/// Works for both same-origin and same-site cross-origin in-process frames
+/// without relying on `contentDocument`.
+pub(super) async fn create_frame_isolated_world(
     client: &CdpClient,
     session_id: &str,
     frame_id: &str,
-) -> Result<String, String> {
-    let owner = client
+) -> Result<i64, String> {
+    let result = client
         .send_command(
-            "DOM.getFrameOwner",
-            Some(serde_json::json!({ "frameId": frame_id })),
-            Some(session_id),
-        )
-        .await?;
-    let backend_node_id = owner
-        .get("backendNodeId")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| format!("Could not resolve the owner element of frame {}", frame_id))?;
-    let result: DomResolveNodeResult = client
-        .send_command_typed(
-            "DOM.resolveNode",
-            &DomResolveNodeParams {
-                backend_node_id: Some(backend_node_id),
-                node_id: None,
-                object_group: Some("agent-browser".to_string()),
-            },
+            "Page.createIsolatedWorld",
+            Some(serde_json::json!({
+                "frameId": frame_id,
+                "worldName": "agent-browser-frame",
+                "grantUniveralAccess": false,
+            })),
             Some(session_id),
         )
         .await?;
     result
-        .object
-        .object_id
-        .ok_or_else(|| format!("No objectId for the owner element of frame {}", frame_id))
+        .get("executionContextId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("Could not create isolated world for frame {}", frame_id))
 }
 
-/// Find a selector inside a same-process iframe and return its center in
-/// top-level viewport coordinates (input events dispatch in that space).
-/// Same-origin access to contentDocument is what makes this possible; a
-/// cross-origin frame never takes this path because it has its own session.
+/// Find the CDP session that owns `frame_id` within the active tab's frame tree.
+/// Rejects frames belonging to background tabs even if their OOPIF sessions are
+/// retained in `iframe_sessions`.
+pub(super) async fn find_frame_host_session(
+    client: &CdpClient,
+    top_session: &str,
+    frame_id: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<String, String> {
+    let active = super::a11y::active_frame_sessions(client, top_session, iframe_sessions).await?;
+    active
+        .get(frame_id)
+        .cloned()
+        .ok_or_else(|| format!("Frame {} not found in active tab", frame_id))
+}
+
+/// Find a selector inside a same-process iframe (same-origin or same-site
+/// cross-origin) and return its click point in the host session's viewport,
+/// verified with `click_point::place_in_dispatch_viewport`.
 async fn resolve_center_in_same_process_frame(
     client: &CdpClient,
-    session_id: &str,
+    host_session: &str,
     frame_id: &str,
     selector: &str,
     require_actionable: bool,
 ) -> Result<(f64, f64), String> {
-    let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
-    let find_expr = build_find_element_js_in("doc", selector);
-    let function = format!(
-        r#"async function() {{
-            const doc = this.contentDocument;
-            if (!doc) return null;
-            const el = {find_expr};
-            if (!el) return null;
-            const clickPoint = {CLICK_POINT_JS};
-            const point = await clickPoint(el, doc);
-            const blockerAt = {BLOCKER_AT_JS};
-            const notActionable = {ACTIONABILITY_JS};
-            const topDoc = (point.view && point.view.document) || doc;
-            return {{ x: point.x, y: point.y, reason: notActionable(el, point.inView), blocker: blockerAt(doc, el, point.lx, point.ly) || blockerAt(topDoc, el, point.x, point.y) }};
-        }}"#,
-    );
-    let result = client
-        .send_command(
-            "Runtime.callFunctionOn",
-            Some(serde_json::json!({
-                "objectId": owner_object_id,
-                "functionDeclaration": function,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-            Some(session_id),
+    let object_id =
+        resolve_object_in_same_process_frame(client, host_session, frame_id, selector).await?;
+
+    let result = async {
+        let mut point = node_click_point(
+            client,
+            host_session,
+            &object_id,
+            selector,
+            require_actionable,
+        )
+        .await?
+        .ok_or_else(|| format!("Element not found in the selected frame: {}", selector))?;
+
+        let describe: Value = client
+            .send_command(
+                "DOM.describeNode",
+                Some(serde_json::json!({ "objectId": object_id, "depth": 0 })),
+                Some(host_session),
+            )
+            .await?;
+        let backend_node_id = describe
+            .pointer("/node/backendNodeId")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| format!("Element not found in the selected frame: {}", selector))?;
+
+        place_in_dispatch_viewport(
+            client,
+            host_session,
+            Some(frame_id),
+            backend_node_id,
+            &mut point,
+            selector,
         )
         .await?;
-    let value = result.get("result").and_then(|r| r.get("value"));
-    if require_actionable {
-        if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
-            return Err(not_actionable_error(selector, reason));
-        }
+        Ok((point.x, point.y))
     }
-    if let Some(blocker) = value
-        .and_then(|v| v.get("blocker"))
-        .and_then(|v| v.as_str())
-    {
-        return Err(intercepted_error(selector, blocker));
-    }
-    let x = value.and_then(|v| v.get("x")).and_then(|v| v.as_f64());
-    let y = value.and_then(|v| v.get("y")).and_then(|v| v.as_f64());
-    match (x, y) {
-        (Some(x), Some(y)) => Ok((x, y)),
-        _ => Err(format!(
-            "Element not found in the selected frame: {}",
-            selector
-        )),
-    }
+    .await;
+
+    let _ = client
+        .send_command(
+            "Runtime.releaseObject",
+            Some(serde_json::json!({ "objectId": object_id })),
+            Some(host_session),
+        )
+        .await;
+
+    result
 }
 
-/// Find a selector inside a same-process iframe and return its object handle.
-async fn resolve_object_in_same_process_frame(
+async fn extract_object_id_checking_exception(
     client: &CdpClient,
     session_id: &str,
+    result: &Value,
+) -> Result<Option<String>, String> {
+    let object_id = result
+        .pointer("/result/objectId")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if let Some(details) = result.get("exceptionDetails") {
+        if let Some(oid) = object_id {
+            let _ = client
+                .send_command(
+                    "Runtime.releaseObject",
+                    Some(serde_json::json!({ "objectId": oid })),
+                    Some(session_id),
+                )
+                .await;
+        }
+        let msg = details
+            .pointer("/exception/description")
+            .or_else(|| details.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("selector lookup failed");
+        return Err(format!("Evaluation error: {}", msg));
+    }
+    Ok(object_id)
+}
+
+/// Resolve a CSS/XPath selector to `(objectId, host_session)` in the active
+/// frame (or top document when `active_frame_id` is `None`). Returns `Ok(None)`
+/// only when the selector matches nothing; propagates CDP and evaluation errors.
+pub(super) async fn query_selector_object_in_frame(
+    client: &CdpClient,
+    top_session: &str,
+    active_frame_id: Option<&str>,
+    selector: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Option<(String, String)>, String> {
+    let js = build_find_element_js(selector);
+    let (host_session, context_id) = match active_frame_id {
+        Some(fid) => {
+            let host = find_frame_host_session(client, top_session, fid, iframe_sessions).await?;
+            if iframe_sessions.get(fid).map(String::as_str) == Some(host.as_str()) {
+                (host, None)
+            } else {
+                let ctx = create_frame_isolated_world(client, &host, fid).await?;
+                (host, Some(ctx))
+            }
+        }
+        None => (top_session.to_string(), None),
+    };
+    let mut params = serde_json::json!({
+        "expression": js,
+        "returnByValue": false,
+        "awaitPromise": false,
+    });
+    if let Some(ctx) = context_id {
+        params["contextId"] = serde_json::json!(ctx);
+    }
+    let result = client
+        .send_command("Runtime.evaluate", Some(params), Some(&host_session))
+        .await?;
+    Ok(
+        extract_object_id_checking_exception(client, &host_session, &result)
+            .await?
+            .map(|oid| (oid, host_session)),
+    )
+}
+
+/// Find a selector inside a same-process iframe (same-origin or same-site
+/// cross-origin) and return its object handle in `host_session`.
+async fn resolve_object_in_same_process_frame(
+    client: &CdpClient,
+    host_session: &str,
     frame_id: &str,
     selector: &str,
 ) -> Result<String, String> {
-    let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
-    let find_expr = build_find_element_js_in("doc", selector);
-    let function = format!(
-        "function() {{ const doc = this.contentDocument; if (!doc) return null; return {find_expr}; }}",
-    );
+    let ctx_id = create_frame_isolated_world(client, host_session, frame_id).await?;
+    let js = build_find_element_js(selector);
     let result = client
         .send_command(
-            "Runtime.callFunctionOn",
+            "Runtime.evaluate",
             Some(serde_json::json!({
-                "objectId": owner_object_id,
-                "functionDeclaration": function,
+                "expression": js,
+                "contextId": ctx_id,
                 "returnByValue": false,
+                "awaitPromise": false,
             })),
-            Some(session_id),
+            Some(host_session),
         )
         .await?;
-    result
-        .get("result")
-        .and_then(|r| r.get("objectId"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    extract_object_id_checking_exception(client, host_session, &result)
+        .await?
         .ok_or_else(|| format!("Element not found in the selected frame: {}", selector))
 }
 
@@ -490,17 +559,22 @@ pub(super) async fn ensure_ref_document_current(
     let Some((issued_session, issued_loader)) = entry.document.as_ref() else {
         return Ok(());
     };
-    let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
     let stale = || {
         format!(
             "Ref @{ref_id} {STALE_DOCUMENT_MARKER} (the page navigated or the frame was removed). Take a new snapshot and use a fresh ref."
         )
     };
-    if issued_session != effective_session_id {
+    let effective_session_id = match frame {
+        Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions)
+            .await
+            .map_err(|_| stale())?,
+        None => session_id.to_string(),
+    };
+    if issued_session != &effective_session_id {
         return Err(stale());
     }
     let Ok(tree) = client
-        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id.as_str()))
         .await
     else {
         return Ok(());
@@ -520,13 +594,18 @@ pub(super) async fn current_document(
     frame: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Option<(String, String)> {
-    let effective_session_id = resolve_frame_session(frame, session_id, iframe_sessions);
+    let effective_session_id = match frame {
+        Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions)
+            .await
+            .ok()?,
+        None => session_id.to_string(),
+    };
     let tree = client
-        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id.as_str()))
         .await
         .ok()?;
     let loader = super::snapshot::frame_loader(&tree["frameTree"], frame)?;
-    Some((effective_session_id.to_string(), loader.to_string()))
+    Some((effective_session_id, loader.to_string()))
 }
 
 async fn resolve_ref_center(
@@ -538,8 +617,11 @@ async fn resolve_ref_center(
     iframe_sessions: &HashMap<String, String>,
     require_actionable: bool,
 ) -> Result<(f64, f64, String), String> {
-    let effective_session_id =
-        resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
+    let effective_session_id = match entry.frame_id.as_deref() {
+        Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions).await?,
+        None => session_id.to_string(),
+    };
+    let effective_session_id = effective_session_id.as_str();
 
     // Try cached backend_node_id first (fast path)
     if let Some(backend_node_id) = entry.backend_node_id {
@@ -639,23 +721,25 @@ pub async fn resolve_element_center(
 
     // CSS selector: honor an active `frame <sel>` selection.
     if let Some(frame_id) = active_frame() {
+        let host_session =
+            find_frame_host_session(client, session_id, &frame_id, iframe_sessions).await?;
         // Cross-process iframe: its dedicated session's main frame IS the
         // iframe, so plain document-rooted resolution works there.
-        if let Some(frame_session) = iframe_sessions.get(&frame_id) {
+        if iframe_sessions.get(&frame_id).map(String::as_str) == Some(host_session.as_str()) {
             let (x, y) =
-                resolve_by_selector(client, frame_session, selector_or_ref, require_actionable)
+                resolve_by_selector(client, &host_session, selector_or_ref, require_actionable)
                     .await?;
-            return Ok((x, y, frame_session.clone()));
+            return Ok((x, y, host_session));
         }
         let (x, y) = resolve_center_in_same_process_frame(
             client,
-            session_id,
+            &host_session,
             &frame_id,
             selector_or_ref,
             require_actionable,
         )
         .await?;
-        return Ok((x, y, session_id.to_string()));
+        return Ok((x, y, host_session));
     }
     let (x, y) =
         resolve_by_selector(client, session_id, selector_or_ref, require_actionable).await?;
@@ -814,8 +898,11 @@ async fn resolve_ref_object_id(
     ref_id: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(String, String), String> {
-    let effective_session_id =
-        resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
+    let effective_session_id = match entry.frame_id.as_deref() {
+        Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions).await?,
+        None => session_id.to_string(),
+    };
+    let effective_session_id = effective_session_id.as_str();
 
     // Try cached backend_node_id first (fast path)
     if let Some(backend_node_id) = entry.backend_node_id {
@@ -893,7 +980,9 @@ pub async fn resolve_element_object_id(
 
     // Selector fallback (CSS or XPath): honor an active `frame <sel>` selection.
     if let Some(frame_id) = active_frame() {
-        if let Some(frame_session) = iframe_sessions.get(&frame_id) {
+        let host_session =
+            find_frame_host_session(client, session_id, &frame_id, iframe_sessions).await?;
+        if iframe_sessions.get(&frame_id).map(String::as_str) == Some(host_session.as_str()) {
             let js = build_find_element_js(selector_or_ref);
             let result: EvaluateResult = client
                 .send_command_typed(
@@ -903,19 +992,19 @@ pub async fn resolve_element_object_id(
                         return_by_value: Some(false),
                         await_promise: Some(false),
                     },
-                    Some(frame_session.as_str()),
+                    Some(host_session.as_str()),
                 )
                 .await?;
             let object_id = result
                 .result
                 .object_id
                 .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
-            return Ok((object_id, frame_session.clone()));
+            return Ok((object_id, host_session));
         }
         let object_id =
-            resolve_object_in_same_process_frame(client, session_id, &frame_id, selector_or_ref)
+            resolve_object_in_same_process_frame(client, &host_session, &frame_id, selector_or_ref)
                 .await?;
-        return Ok((object_id, session_id.to_string()));
+        return Ok((object_id, host_session));
     }
 
     let js = build_find_element_js(selector_or_ref);
@@ -987,9 +1076,7 @@ pub(super) fn resolve_ax_session<'a>(
     }
 }
 
-/// Resolve the effective CDP session for an element's frame.
-/// If the element's frame_id has a dedicated cross-origin iframe session, return it.
-/// Otherwise, return the parent session.
+#[cfg(test)]
 fn resolve_frame_session<'a>(
     frame_id: Option<&str>,
     session_id: &'a str,
@@ -1017,8 +1104,12 @@ async fn find_node_id_by_role_name(
             role, name
         ));
     }
+    let host_session = match frame_id {
+        Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions).await?,
+        None => session_id.to_string(),
+    };
     let (ax_params, effective_session_id) =
-        resolve_ax_session(frame_id, session_id, iframe_sessions);
+        resolve_ax_session(frame_id, &host_session, iframe_sessions);
     let ax_tree: GetFullAXTreeResult = client
         .send_command_typed_raw(
             "Accessibility.getFullAXTree",
@@ -1651,50 +1742,48 @@ pub async fn is_element_checked(
         .unwrap_or(false))
 }
 
-/// Scrolls the element in and returns the point to press, refusing one that
-/// another element covers there; an element inside the target counts as
-/// covering it too.
-pub(crate) async fn unblocked_point(
+pub(crate) fn target_frame_id(ref_map: &RefMap, selector_or_ref: &str) -> Option<String> {
+    if let Some(ref_id) = parse_ref(selector_or_ref) {
+        ref_map.get(&ref_id).and_then(|e| e.frame_id.clone())
+    } else {
+        active_frame()
+    }
+}
+
+/// Scrolls the element in, places its click point in `session_id`'s viewport
+/// using browser geometry, and confirms the browser hit-test delivers the
+/// press to the element (or its activating label/subtree).
+pub(crate) async fn place_object_click_point(
     client: &CdpClient,
     session_id: &str,
+    frame_id: Option<&str>,
     object_id: &str,
     target: &str,
 ) -> Result<(f64, f64), String> {
-    let js = format!(
-        r#"async function() {{
-            const doc = this.ownerDocument || document;
-            const clickPoint = {CLICK_POINT_JS};
-            const point = await clickPoint(this, doc);
-            const blockerAt = {BLOCKER_AT_JS};
-            const topDoc = (point.view && point.view.document) || doc;
-            const blocker = blockerAt(doc, this, point.lx, point.ly, true) || blockerAt(topDoc, this, point.x, point.y, true);
-            return {{ blocker, x: point.x, y: point.y }};
-        }}"#
-    );
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: js,
-                object_id: Some(object_id.to_string()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(true),
-            },
+    let mut point = node_click_point(client, session_id, object_id, target, true)
+        .await?
+        .ok_or_else(|| format!("Element not found: {target}"))?;
+    let describe: Value = client
+        .send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "objectId": object_id, "depth": 0 })),
             Some(session_id),
         )
         .await?;
-    let value = result.result.value.unwrap_or(Value::Null);
-    if let Some(blocker) = value.get("blocker").and_then(Value::as_str) {
-        return Err(intercepted_error(target, blocker));
-    }
-    match (
-        value.get("x").and_then(Value::as_f64),
-        value.get("y").and_then(Value::as_f64),
-    ) {
-        (Some(x), Some(y)) => Ok((x, y)),
-        _ => Err(format!("Element not found: {target}")),
-    }
+    let backend_node_id = describe
+        .pointer("/node/backendNodeId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("Element not found: {target}"))?;
+    super::click_point::place_form_control_in_dispatch_viewport(
+        client,
+        session_id,
+        frame_id,
+        backend_node_id,
+        &mut point,
+        target,
+    )
+    .await?;
+    Ok((point.x, point.y))
 }
 
 pub(crate) const ELEMENT_INNER_TEXT_JS: &str = "function() { return this.innerText || ''; }";
