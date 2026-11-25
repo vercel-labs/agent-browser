@@ -168,6 +168,7 @@ async fn collect_annotations(
             role: entry.role,
             name: (!entry.name.is_empty()).then_some(entry.name),
             rect,
+            in_iframe: context != capture,
         };
         if context == capture {
             overlay_annotations.push(annotation.clone());
