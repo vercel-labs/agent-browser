@@ -1742,50 +1742,48 @@ pub async fn is_element_checked(
         .unwrap_or(false))
 }
 
-/// Scrolls the element in and returns the point to press, refusing one that
-/// another element covers there; an element inside the target counts as
-/// covering it too.
-pub(crate) async fn unblocked_point(
+pub(crate) fn target_frame_id(ref_map: &RefMap, selector_or_ref: &str) -> Option<String> {
+    if let Some(ref_id) = parse_ref(selector_or_ref) {
+        ref_map.get(&ref_id).and_then(|e| e.frame_id.clone())
+    } else {
+        active_frame()
+    }
+}
+
+/// Scrolls the element in, places its click point in `session_id`'s viewport
+/// using browser geometry, and confirms the browser hit-test delivers the
+/// press to the element (or its activating label/subtree).
+pub(crate) async fn place_object_click_point(
     client: &CdpClient,
     session_id: &str,
+    frame_id: Option<&str>,
     object_id: &str,
     target: &str,
 ) -> Result<(f64, f64), String> {
-    let js = format!(
-        r#"async function() {{
-            const doc = this.ownerDocument || document;
-            const clickPoint = {CLICK_POINT_JS};
-            const point = await clickPoint(this, doc);
-            const blockerAt = {BLOCKER_AT_JS};
-            const topDoc = (point.view && point.view.document) || doc;
-            const blocker = blockerAt(doc, this, point.lx, point.ly, true) || blockerAt(topDoc, this, point.x, point.y, true);
-            return {{ blocker, x: point.x, y: point.y }};
-        }}"#
-    );
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: js,
-                object_id: Some(object_id.to_string()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(true),
-            },
+    let mut point = node_click_point(client, session_id, object_id, target, true)
+        .await?
+        .ok_or_else(|| format!("Element not found: {target}"))?;
+    let describe: Value = client
+        .send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "objectId": object_id, "depth": 0 })),
             Some(session_id),
         )
         .await?;
-    let value = result.result.value.unwrap_or(Value::Null);
-    if let Some(blocker) = value.get("blocker").and_then(Value::as_str) {
-        return Err(intercepted_error(target, blocker));
-    }
-    match (
-        value.get("x").and_then(Value::as_f64),
-        value.get("y").and_then(Value::as_f64),
-    ) {
-        (Some(x), Some(y)) => Ok((x, y)),
-        _ => Err(format!("Element not found: {target}")),
-    }
+    let backend_node_id = describe
+        .pointer("/node/backendNodeId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("Element not found: {target}"))?;
+    place_in_dispatch_viewport(
+        client,
+        session_id,
+        frame_id,
+        backend_node_id,
+        &mut point,
+        target,
+    )
+    .await?;
+    Ok((point.x, point.y))
 }
 
 pub(crate) const ELEMENT_INNER_TEXT_JS: &str = "function() { return this.innerText || ''; }";

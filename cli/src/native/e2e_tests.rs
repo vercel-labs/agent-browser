@@ -2442,6 +2442,154 @@ async fn e2e_same_site_cross_origin_iframe_selectors_overlay_and_scale() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_same_site_cross_origin_iframe_check_uncheck_and_select() {
+    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p1 = l1.local_addr().unwrap().port();
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p2 = l2.local_addr().unwrap().port();
+
+    let s1 = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = l1.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let body = format!(
+                    "<!doctype html><body style='margin:0'>\
+                    <button id='parent-trap' style='position:absolute;left:0;top:0;width:120px;height:120px' \
+                    onclick='window.__trapClicks=(window.__trapClicks||0)+1'>Trap</button>\
+                    <iframe id='frame' src='http://localhost:{p2}/controls' \
+                    style='position:absolute;left:200px;top:360px;width:300px;height:200px;border:2px solid #000'></iframe>\
+                    </body>"
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    let s2 = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = l2.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let body = "<!doctype html><body style='margin:0'>\
+                    <input type='checkbox' id='cb' style='position:absolute;left:16px;top:16px;width:24px;height:24px'>\
+                    <input type='radio' name='g' id='rd' style='position:absolute;left:16px;top:56px;width:24px;height:24px'>\
+                    <select id='sel' style='position:absolute;left:16px;top:96px'>\
+                      <option value='a'>Alpha</option><option value='b'>Beta</option>\
+                    </select></body>";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "1", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "2", "action": "navigate", "url": format!("http://localhost:{p1}/")}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "3", "action": "frame", "selector": "#frame"}),
+            &mut state,
+        )
+        .await,
+    );
+    assert!(
+        state.iframe_sessions.is_empty(),
+        "same-site cross-origin controls fixture must stay in-process: {:?}",
+        state.iframe_sessions
+    );
+
+    assert_success(
+        &execute_command(
+            &json!({"id": "4", "action": "check", "selector": "#cb"}),
+            &mut state,
+        )
+        .await,
+    );
+    let checked = execute_command(
+        &json!({"id": "5", "action": "ischecked", "selector": "#cb"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&checked);
+    assert_eq!(get_data(&checked)["checked"], true);
+
+    assert_success(
+        &execute_command(
+            &json!({"id": "6", "action": "uncheck", "selector": "#cb"}),
+            &mut state,
+        )
+        .await,
+    );
+    let unchecked = execute_command(
+        &json!({"id": "7", "action": "ischecked", "selector": "#cb"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&unchecked);
+    assert_eq!(get_data(&unchecked)["checked"], false);
+
+    assert_success(
+        &execute_command(
+            &json!({"id": "8", "action": "check", "selector": "#rd"}),
+            &mut state,
+        )
+        .await,
+    );
+    let radio = execute_command(
+        &json!({"id": "9", "action": "ischecked", "selector": "#rd"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&radio);
+    assert_eq!(get_data(&radio)["checked"], true);
+
+    assert_success(
+        &execute_command(
+            &json!({"id": "10", "action": "select", "selector": "#sel", "values": ["b"]}),
+            &mut state,
+        )
+        .await,
+    );
+    let sel_val = execute_command(
+        &json!({"id": "11", "action": "inputvalue", "selector": "#sel"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&sel_val);
+    assert_eq!(get_data(&sel_val)["value"], "b");
+
+    // The trap button at the iframe's frame-local coordinates in the parent must never be clicked.
+    assert_success(&execute_command(&json!({"id": "12", "action": "mainframe"}), &mut state).await);
+    assert_evaluate(&mut state, "13", "window.__trapClicks || 0", json!(0)).await;
+
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    s1.abort();
+    s2.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_semantic_find_honors_selected_frame() {
     let mut state = DaemonState::new();
     assert_success(

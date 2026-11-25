@@ -5,8 +5,8 @@ use serde_json::Value;
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::{
-    document_gone, resolve_element_center, resolve_element_object_id, session_viewport_offset,
-    unblocked_point, RefMap,
+    document_gone, place_object_click_point, resolve_element_center, resolve_element_object_id,
+    session_viewport_offset, target_frame_id, RefMap,
 };
 use super::forms::{CallError, FormControl};
 use super::pointer::{ClickSpec, Modifiers, MouseButton};
@@ -173,6 +173,7 @@ pub(crate) struct CdpControl<'a> {
     ref_map: &'a RefMap,
     iframe_sessions: &'a HashMap<String, String>,
     target: &'a str,
+    frame_id: Option<String>,
     session: String,
     object_id: String,
 }
@@ -189,12 +190,14 @@ impl<'a> CdpControl<'a> {
         let (object_id, session) =
             resolve_element_object_id(client, page_session, ref_map, target, iframe_sessions)
                 .await?;
+        let frame_id = target_frame_id(ref_map, target);
         Ok(Self {
             client,
             page_session,
             ref_map,
             iframe_sessions,
             target,
+            frame_id,
             session,
             object_id,
         })
@@ -283,6 +286,7 @@ impl FormControl for CdpControl<'_> {
         .await
         .map_err(cdp_error)?;
         (self.object_id, self.session) = (object_id, session);
+        self.frame_id = target_frame_id(self.ref_map, self.target);
         Ok(())
     }
 
@@ -308,9 +312,15 @@ impl FormControl for CdpControl<'_> {
     }
 
     async fn click(&mut self) -> Result<(f64, f64), CallError> {
-        let (x, y) = unblocked_point(self.client, &self.session, &self.object_id, self.target)
-            .await
-            .map_err(cdp_error)?;
+        let (x, y) = place_object_click_point(
+            self.client,
+            &self.session,
+            self.frame_id.as_deref(),
+            &self.object_id,
+            self.target,
+        )
+        .await
+        .map_err(cdp_error)?;
         let offset = session_viewport_offset(
             self.client,
             self.page_session,
