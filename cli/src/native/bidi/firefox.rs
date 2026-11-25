@@ -373,6 +373,11 @@ impl FirefoxProcess {
         Err(format!("{failure}\nstderr:\n{}", p.stderr_tail()))
     }
 
+    /// Returns the OS process ID of the Firefox child process.
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Returns true if the process has exited.
     pub fn has_exited(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))

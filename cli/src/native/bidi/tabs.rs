@@ -344,6 +344,33 @@ pub(crate) async fn tab_count(ff: &FirefoxSession) -> Result<usize, String> {
         .ok_or_else(|| "Firefox did not return browsing contexts".to_string())
 }
 
+/// Lightweight top-level tab inventory for `session info` using a single `getTree` call.
+pub(crate) async fn session_tabs(ff: &FirefoxSession) -> Result<Vec<Value>, String> {
+    let tree = ff
+        .bidi
+        .send("browsingContext.getTree", json!({"maxDepth": 0}))
+        .await?;
+    let contexts = tree["contexts"]
+        .as_array()
+        .ok_or_else(|| "Firefox did not return browsing contexts".to_string())?;
+    let active = ff.contexts.active_tab();
+    Ok(contexts
+        .iter()
+        .filter_map(|c| {
+            let context = c["context"].as_str()?;
+            let tab = ff.contexts.tab(context);
+            Some(json!({
+                "tabId": tab.map(|t| format_tab_id(t.id)),
+                "targetId": context,
+                "label": tab.and_then(|t| t.label.as_deref()),
+                "url": c["url"],
+                "type": "page",
+                "active": context == active,
+            }))
+        })
+        .collect())
+}
+
 /// A context id has the shape of a UUID, which `TabRef`'s hex target-id heuristic does not accept.
 fn looks_like_context_id(s: &str) -> bool {
     s.len() >= 32 && s.contains('-') && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')

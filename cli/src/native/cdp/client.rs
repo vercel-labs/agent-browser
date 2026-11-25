@@ -708,6 +708,10 @@ impl CdpClient {
         }
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
     fn ensure_open(&self) -> Result<(), String> {
         if self.closed.load(Ordering::SeqCst) {
             Err(CONNECTION_CLOSED_ERROR.to_string())

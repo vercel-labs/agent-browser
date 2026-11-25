@@ -741,6 +741,21 @@ impl BrowserProcess {
             BrowserProcess::Obscura(p) => p.has_exited(),
         }
     }
+
+    pub fn pid(&self) -> u32 {
+        match self {
+            BrowserProcess::Chrome(p) => p.id(),
+            BrowserProcess::Lightpanda(p) => p.id(),
+            BrowserProcess::Obscura(p) => p.id(),
+        }
+    }
+
+    pub fn user_data_dir(&self) -> Option<&std::path::Path> {
+        match self {
+            BrowserProcess::Chrome(p) => Some(p.user_data_dir()),
+            BrowserProcess::Lightpanda(_) | BrowserProcess::Obscura(_) => None,
+        }
+    }
 }
 
 pub struct BrowserManager {
@@ -2011,6 +2026,24 @@ impl BrowserManager {
 
     pub fn get_cdp_url(&self) -> &str {
         &self.ws_url
+    }
+
+    pub fn is_owned_browser(&self) -> bool {
+        self.browser_process.is_some()
+    }
+
+    pub fn browser_pid(&self) -> Option<u32> {
+        self.browser_process.as_ref().map(BrowserProcess::pid)
+    }
+
+    pub fn user_data_dir(&self) -> Option<&std::path::Path> {
+        self.browser_process
+            .as_ref()
+            .and_then(BrowserProcess::user_data_dir)
+    }
+
+    pub fn is_connected(&self) -> bool {
+        !self.client.is_closed()
     }
 
     /// A manager over an already connected client, for tests that serve CDP

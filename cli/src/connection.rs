@@ -1317,6 +1317,7 @@ const READ_ONLY_ACTIONS: &[&str] = &[
     "storage_get",
     "tab_list",
     "cdp_url",
+    "session_info",
     "stream_status",
 ];
 

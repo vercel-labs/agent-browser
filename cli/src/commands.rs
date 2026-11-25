@@ -68,14 +68,7 @@ impl ParseError {
 }
 
 pub fn gen_id() -> String {
-    format!(
-        "r{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros()
-            % 1000000
-    )
+    format!("r{}", uuid::Uuid::new_v4().simple())
 }
 
 /// Normalize browser navigation inputs while preserving schemes Chrome can

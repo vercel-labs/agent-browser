@@ -687,25 +687,20 @@ fn run_session_id(args: &[String], json_mode: bool) {
 fn run_session_info(session: &str, json_mode: bool) {
     let inventory = walk_daemons();
     let active = inventory.sessions.iter().find(|s| s.name == session);
-    let runtime = active.and_then(|_| {
-        send_command(
+    let (runtime_data, runtime_error) = match active {
+        Some(_) => match send_command(
             json!({
                 "id": gen_id(),
                 "action": "session_info"
             }),
             session,
-        )
-        .ok()
-    });
-
-    let runtime_data = runtime.as_ref().and_then(|resp| resp.data.clone());
-    let runtime_error = runtime.as_ref().and_then(|resp| {
-        if resp.success {
-            None
-        } else {
-            resp.error.clone()
-        }
-    });
+        ) {
+            Ok(resp) if resp.success => (resp.data, None),
+            Ok(resp) => (resp.data, resp.error),
+            Err(err) => (None, Some(err)),
+        },
+        None => (None, None),
+    };
 
     if json_mode {
         print_json_value(json!({
@@ -749,6 +744,40 @@ fn run_session_info(session: &str, json_mode: bool) {
         }
         if let Some(launched) = data.get("browserLaunched").and_then(|v| v.as_bool()) {
             println!("Browser launched: {}", launched);
+        }
+        if let Some(browser) = data.get("browser") {
+            if let Some(pid) = browser.get("pid").and_then(|v| v.as_u64()) {
+                let owned = browser
+                    .get("owned")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                println!(
+                    "Browser PID: {} ({})",
+                    pid,
+                    if owned { "owned" } else { "attached" }
+                );
+            }
+            if let Some(dir) = browser.get("userDataDir").and_then(|v| v.as_str()) {
+                println!("User data dir: {}", dir);
+            }
+            if let Some(tabs) = browser.get("tabs").and_then(|v| v.as_array()) {
+                println!("Tabs: {}", tabs.len());
+            }
+        }
+        if let Some(recording) = data.get("recording") {
+            if recording.get("active").and_then(|v| v.as_bool()) == Some(true) {
+                let path = recording["current"]["path"].as_str().unwrap_or("unknown");
+                let captured = recording["current"]["capturedFrames"].as_u64().unwrap_or(0);
+                println!("Recording: active ({}, {} captured frames)", path, captured);
+            } else if let Some(last) = recording.get("last").filter(|v| !v.is_null()) {
+                let path = last["path"].as_str().unwrap_or("unknown");
+                if let Some(err) = last["error"].as_str() {
+                    println!("Last recording: failed ({}: {})", path, err);
+                } else {
+                    let frames = last["frames"].as_u64().unwrap_or(0);
+                    println!("Last recording: saved ({}, {} frames)", path, frames);
+                }
+            }
         }
     } else if let Some(err) = runtime_error {
         println!("Runtime info unavailable: {}", err);

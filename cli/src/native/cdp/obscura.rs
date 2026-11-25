@@ -20,6 +20,10 @@ pub struct ObscuraProcess {
 }
 
 impl ObscuraProcess {
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(child: Child, ws_url: String) -> Self {
         Self {

@@ -515,6 +515,17 @@ fn cursor_video_frame(source: &[u8], cursor: RecordingCursorState) -> Result<Vec
     Ok(output)
 }
 
+/// Cached handler outcome for idempotent retry of `recording_stop` / `video_stop`
+/// after policy and settings checks have succeeded.
+#[derive(Clone)]
+pub struct StopReplay {
+    pub id: String,
+    pub action: String,
+    pub result: Result<Value, String>,
+    pub error_data: Option<Value>,
+    pub warning: Option<String>,
+}
+
 pub struct RecordingState {
     pub active: bool,
     pub output_path: String,
@@ -548,6 +559,12 @@ pub struct RecordingState {
     /// screencast, because the screencast was below the page's device scale.
     pub screenshot_capture: bool,
     pub shared_screenshot_capture: Option<Arc<AtomicBool>>,
+    /// Monotonic start instant of the active recording, used for duration and capture-rate stats.
+    pub started_at: Option<std::time::Instant>,
+    /// Structured receipt from the most recent completed or failed recording.
+    pub last_receipt: Option<Value>,
+    /// Cached outcome for idempotent retry of `recording_stop` / `video_stop`.
+    pub last_stop_replay: Option<StopReplay>,
 }
 
 impl RecordingState {
@@ -574,6 +591,9 @@ impl RecordingState {
             device_scale: 1.0,
             screenshot_capture: false,
             shared_screenshot_capture: None,
+            started_at: None,
+            last_receipt: None,
+            last_stop_replay: None,
         }
     }
 }
@@ -666,6 +686,8 @@ pub fn recording_start(
     state.contact_sheet = options.contact_sheet;
     state.contact_sheet_threshold = threshold;
     state.contact_sheet_path = options.contact_sheet.then(|| contact_sheet_path(path));
+    state.started_at = Some(std::time::Instant::now());
+    state.last_stop_replay = None;
 
     let mut result = json!({
         "started": true,
@@ -681,6 +703,133 @@ pub fn recording_start(
     Ok(result)
 }
 
+fn build_recording_receipt(state: &RecordingState, error: Option<&str>) -> Value {
+    let path = state.output_path.as_str();
+    let duration_ms = state.started_at.map(|s| s.elapsed().as_millis() as u64);
+    let output_bytes = (!path.is_empty())
+        .then(|| std::fs::metadata(path).ok().map(|m| m.len()))
+        .flatten();
+    let effective_fps = match (duration_ms, state.captured_count) {
+        (Some(ms), count) if ms > 0 && count > 0 => {
+            Some(((count as f64 / (ms as f64 / 1000.0)) * 100.0).round() / 100.0)
+        }
+        _ => None,
+    };
+    let warning = if error.is_none()
+        && state.captured_count == 1
+        && state.frame_count > state.fps as u64
+    {
+        Some(format!(
+            "Only 1 unique frame was captured while encoding {} output frames at {} fps; the page may not have repainted during recording.",
+            state.frame_count, state.fps
+        ))
+    } else {
+        None
+    };
+
+    let mut result = json!({
+        "path": path,
+        "frames": state.frame_count,
+        "capturedFrames": state.captured_count,
+        "fps": state.fps,
+        "captureStats": {
+            "framesCaptured": state.captured_count,
+            "effectiveFps": effective_fps,
+        },
+        "output": {
+            "framesEncoded": state.frame_count,
+            "fps": state.fps,
+            "bytes": output_bytes,
+            "durationMs": duration_ms,
+        },
+    });
+    if let Some(ms) = duration_ms {
+        result["durationMs"] = json!(ms);
+    }
+    if let Some(bytes) = output_bytes {
+        result["outputBytes"] = json!(bytes);
+    }
+    if let Some(ref contact_path) = state.contact_sheet_path {
+        result["contactSheetPath"] = json!(contact_path);
+        result["contactSheetFrames"] = json!(state.contact_sheet_frame_count);
+        result["contactSheetThreshold"] = json!(state.contact_sheet_threshold);
+    }
+    if state.screenshot_capture {
+        result["capture"] = json!("screenshots");
+        result["deviceScaleFactor"] = json!(state.device_scale);
+    }
+    if let Some(ref w) = warning {
+        result["warning"] = json!(w);
+    }
+    if let Some(err) = error {
+        result["success"] = json!(false);
+        result["error"] = json!(err);
+    }
+    result
+}
+
+pub fn record_failed_recording(state: &mut RecordingState, error: &str) -> Value {
+    state.active = false;
+    let receipt = build_recording_receipt(state, Some(error));
+    state.started_at = None;
+    state.last_receipt = Some(receipt.clone());
+    receipt
+}
+
+/// Record a preflight failure before `recording_start` reset counters, without
+/// inheriting frame counts or options from an earlier take.
+pub fn record_failed_preflight(state: &mut RecordingState, path: &str, error: &str) -> Value {
+    let receipt = json!({
+        "success": false,
+        "path": path,
+        "frames": 0,
+        "capturedFrames": 0,
+        "error": error,
+    });
+    state.last_receipt = Some(receipt.clone());
+    receipt
+}
+
+pub fn recording_status(state: &RecordingState) -> Value {
+    let current = if state.active {
+        let captured = state
+            .shared_captured_count
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(state.captured_count);
+        let screenshot_capture = state
+            .shared_screenshot_capture
+            .as_ref()
+            .map(|b| b.load(Ordering::Relaxed))
+            .unwrap_or(state.screenshot_capture);
+        let mut cur = json!({
+            "path": state.output_path,
+            "fps": state.fps,
+            "capturedFrames": captured,
+            "cursor": state.cursor,
+            "contactSheet": state.contact_sheet,
+            "durationMs": state.started_at.map(|s| s.elapsed().as_millis() as u64),
+        });
+        if let Some(ref contact_path) = state.contact_sheet_path {
+            cur["contactSheetPath"] = json!(contact_path);
+            cur["contactSheetThreshold"] = json!(state.contact_sheet_threshold);
+        }
+        if screenshot_capture {
+            cur["capture"] = json!("screenshots");
+            cur["deviceScaleFactor"] = json!(state.device_scale);
+        }
+        cur
+    } else {
+        Value::Null
+    };
+
+    json!({
+        "active": state.active,
+        "current": current,
+        "last": state.last_receipt,
+    })
+}
+
 pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
     if !state.active {
         return Err("No recording in progress".to_string());
@@ -689,24 +838,13 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
     state.active = false;
 
     if state.frame_count == 0 {
+        record_failed_recording(state, "No frames captured");
         return Err("No frames captured".to_string());
     }
 
-    let mut result = json!({
-        "path": &state.output_path,
-        "frames": state.frame_count,
-        "capturedFrames": state.captured_count,
-        "fps": state.fps,
-    });
-    if let Some(ref path) = state.contact_sheet_path {
-        result["contactSheetPath"] = json!(path);
-        result["contactSheetFrames"] = json!(state.contact_sheet_frame_count);
-        result["contactSheetThreshold"] = json!(state.contact_sheet_threshold);
-    }
-    if state.screenshot_capture {
-        result["capture"] = json!("screenshots");
-        result["deviceScaleFactor"] = json!(state.device_scale);
-    }
+    let result = build_recording_receipt(state, None);
+    state.started_at = None;
+    state.last_receipt = Some(result.clone());
     Ok(result)
 }
 
@@ -3378,5 +3516,57 @@ mod tests {
             .and_then(|i| args.get(i + 1))
             .map(String::as_str);
         assert_eq!(threads, Some("1"));
+    }
+
+    #[test]
+    fn test_recording_receipt_and_status_distinguish_capture_and_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("demo.webm");
+        std::fs::write(&output_path, b"webm-bytes").unwrap();
+
+        let mut state = RecordingState::new();
+        recording_start(&mut state, output_path.to_str().unwrap(), options(Some(30))).unwrap();
+        state.captured_count = 1;
+        state.frame_count = 60;
+
+        let active_status = recording_status(&state);
+        assert_eq!(active_status["active"], true);
+        assert_eq!(active_status["current"]["capturedFrames"], 1);
+        assert!(active_status["last"].is_null());
+
+        let receipt = recording_stop(&mut state).unwrap();
+        assert_eq!(receipt["frames"], 60);
+        assert_eq!(receipt["capturedFrames"], 1);
+        assert_eq!(receipt["outputBytes"], 10);
+        assert_eq!(receipt["captureStats"]["framesCaptured"], 1);
+        assert_eq!(receipt["output"]["framesEncoded"], 60);
+        assert_eq!(receipt["output"]["fps"], 30);
+        assert!(receipt["warning"]
+            .as_str()
+            .unwrap()
+            .contains("Only 1 unique frame"));
+
+        let stopped_status = recording_status(&state);
+        assert_eq!(stopped_status["active"], false);
+        assert!(stopped_status["current"].is_null());
+        assert_eq!(
+            stopped_status["last"]["path"],
+            output_path.to_str().unwrap()
+        );
+        assert_eq!(stopped_status["last"]["output"]["bytes"], 10);
+    }
+
+    #[test]
+    fn test_recording_stop_no_frames_records_failed_receipt() {
+        let mut state = RecordingState::new();
+        recording_start(&mut state, "/tmp/empty.webm", options(None)).unwrap();
+        let err = recording_stop(&mut state).unwrap_err();
+        assert!(err.contains("No frames"));
+
+        let status = recording_status(&state);
+        assert_eq!(status["active"], false);
+        assert_eq!(status["last"]["success"], false);
+        assert_eq!(status["last"]["path"], "/tmp/empty.webm");
+        assert_eq!(status["last"]["error"], "No frames captured");
     }
 }
