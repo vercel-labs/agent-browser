@@ -7,6 +7,15 @@ use super::*;
 use crate::flags::{split_launch_args, try_parse_flags, Flags};
 use crate::test_utils::EnvGuard;
 
+/// A path that is absolute on every platform; a bare `/x` is not on Windows.
+fn absolute_path(name: &str) -> String {
+    std::env::temp_dir()
+        .join(name)
+        .to_str()
+        .expect("temp dir is valid UTF-8")
+        .to_string()
+}
+
 /// Flags with no environment and an empty config file, so nothing is set.
 fn blank_flags() -> Flags {
     let names: Vec<String> = std::env::vars()
@@ -36,17 +45,19 @@ pub(crate) fn full_flags() -> Flags {
     f.debug = true;
     f.executable_path = Some("/bin/chrome".to_string());
     f.cdp = Some("ws://127.0.0.1:9333/devtools".to_string());
+    f.cli_cdp = true;
     f.cdp_headers = Some(r#"{"Authorization":"Bearer x"}"#.to_string());
     f.extensions = vec!["/ext/a".to_string(), "/ext/b".to_string()];
     f.init_scripts = vec!["/init/a.js".to_string()];
     f.enable = vec!["react-devtools".to_string()];
     f.profile = Some("/profile".to_string());
     f.state = Some("/state.json".to_string());
-    f.proxy = Some("http://user:pw@proxy.example:8080".to_string());
+    f.proxy = Some(parse_proxy("http://user:pw@proxy.example:8080"));
     f.proxy_bypass = Some("localhost".to_string());
     f.args = Some("--no-first-run,--window-size=1280,720".to_string());
     f.user_agent = Some("ua/1".to_string());
     f.provider = Some("browserless".to_string());
+    f.cli_provider = true;
     f.ignore_https_errors = true;
     f.ca_cert = Some("/ca.pem".to_string());
     f.clear_ca_cert = true;
@@ -60,6 +71,7 @@ pub(crate) fn full_flags() -> Flags {
     f.no_xvfb = true;
     f.device = Some("iPhone 15".to_string());
     f.auto_connect = true;
+    f.cli_auto_connect = true;
     f.pin_tab = true;
     f.cli_pin_tab = true;
     f.restore = Some("work".to_string());
@@ -187,7 +199,7 @@ fn every_value_has_the_shape_its_row_declares() {
 fn patch_carries_every_daemon_options_field() {
     let f = full_flags();
     let p = Patch::from_flags(&f);
-    let parsed = parse_proxy(f.proxy.as_deref().unwrap());
+    let parsed = f.proxy.as_ref().unwrap();
 
     assert_eq!(set(&p, Key::Headed), json!(true)); // headed
     assert_eq!(set(&p, Key::Debug), json!(true)); // debug
@@ -200,10 +212,16 @@ fn patch_carries_every_daemon_options_field() {
         json!(split_launch_args(f.args.as_deref().unwrap()))
     ); // args
     assert_eq!(set(&p, Key::UserAgent), json!("ua/1")); // user_agent
-    assert_eq!(set(&p, Key::Proxy), json!(parsed.server)); // proxy
+    assert_eq!(set(&p, Key::Proxy), json!(parsed.server.as_str()));
     assert_eq!(set(&p, Key::ProxyBypass), json!("localhost")); // proxy_bypass
-    assert_eq!(set(&p, Key::ProxyUsername), json!("user")); // proxy_username
-    assert_eq!(set(&p, Key::ProxyPassword), json!("pw")); // proxy_password
+    assert_eq!(
+        set(&p, Key::ProxyUsername),
+        json!(parsed.username.as_ref().unwrap().as_str())
+    );
+    assert_eq!(
+        set(&p, Key::ProxyPassword),
+        json!(parsed.password.as_ref().unwrap().as_str())
+    );
     assert_eq!(set(&p, Key::IgnoreHttpsErrors), json!(true)); // ignore_https_errors
     assert_eq!(set(&p, Key::AllowFileAccess), json!(true)); // allow_file_access
     assert_eq!(set(&p, Key::HideScrollbars), json!(false)); // hide_scrollbars
@@ -293,11 +311,76 @@ fn patch_carries_every_launch_envelope_field() {
 #[test]
 fn proxy_without_credentials_sets_no_credentials() {
     let mut f = blank_flags();
-    f.proxy = Some("socks5://proxy.example:1080".to_string());
+    f.proxy = Some(parse_proxy("socks5://proxy.example:1080"));
     let p = Patch::from_flags(&f);
     assert_eq!(set(&p, Key::Proxy), json!("socks5://proxy.example:1080"));
-    assert!(p.get(Key::ProxyUsername).is_none());
-    assert!(p.get(Key::ProxyPassword).is_none());
+    assert_eq!(p.get(Key::ProxyUsername), Some(&Requested::Default));
+    assert_eq!(p.get(Key::ProxyPassword), Some(&Requested::Default));
+}
+
+#[test]
+fn proxy_credentials_follow_the_effective_proxy_source() {
+    let keys = [
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_USERNAME",
+        "AGENT_BROWSER_PROXY_PASSWORD",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    let env = EnvGuard::new(&keys);
+    for key in keys {
+        env.remove(key);
+    }
+    env.set("AGENT_BROWSER_PROXY_USERNAME", "ambient-user");
+    env.set("AGENT_BROWSER_PROXY_PASSWORD", "ambient-password");
+    env.set("HTTP_PROXY", "http://standard:8080");
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("proxy.json");
+    let parsed = |args: &[&str]| {
+        let mut argv = vec![
+            "--config".to_string(),
+            config.to_string_lossy().into_owned(),
+        ];
+        argv.extend(args.iter().map(|arg| arg.to_string()));
+        let flags = try_parse_flags(&argv).unwrap();
+        let patch = Patch::from_flags(&flags);
+        let wire = patch.to_wire().unwrap();
+        let wire = Patch::from_wire(Some(&wire)).unwrap();
+        Running::defaults().plan(&wire).next.launch_options()
+    };
+    let check = |options: crate::native::cdp::chrome::LaunchOptions, server, username, password| {
+        assert_eq!(options.proxy.as_deref(), Some(server));
+        assert_eq!(options.proxy_username.as_deref(), username);
+        assert_eq!(options.proxy_password.as_deref(), password);
+    };
+    std::fs::write(&config, "{}").unwrap();
+    check(parsed(&[]), "http://standard:8080", None, None);
+    std::fs::write(&config, r#"{"proxy":"http://configured:8080"}"#).unwrap();
+    check(
+        parsed(&[]),
+        "http://configured:8080",
+        Some("ambient-user"),
+        Some("ambient-password"),
+    );
+    env.set("AGENT_BROWSER_PROXY", "http://env:8080");
+    check(
+        parsed(&[]),
+        "http://env:8080",
+        Some("ambient-user"),
+        Some("ambient-password"),
+    );
+    check(
+        parsed(&["--proxy", "http://different:8080"]),
+        "http://different:8080",
+        None,
+        None,
+    );
+    env.set("AGENT_BROWSER_PROXY", "http://inline-user@env:8080");
+    check(parsed(&[]), "http://env:8080", Some("inline-user"), None);
 }
 
 #[test]
@@ -656,32 +739,29 @@ fn timeout_views() {
 
 #[test]
 fn security_view() {
+    let policy = absolute_path("policy.json");
     let r = seeded(&[
         ("AGENT_BROWSER_ALLOWED_DOMAINS", " a.test , ,*.b.test "),
         ("AGENT_BROWSER_CONFIRM_ACTIONS", "click,fill"),
-        ("AGENT_BROWSER_ACTION_POLICY", "/policy.json"),
+        ("AGENT_BROWSER_ACTION_POLICY", policy.as_str()),
     ]);
     assert_eq!(
         r.security(),
         SecurityView {
             allowed_domains: Some(vec!["a.test".into(), "*.b.test".into()]),
-            action_policy_path: Some("/policy.json".into()),
+            action_policy_path: Some(policy.clone()),
             confirm_actions: Some("click,fill".into()),
         }
     );
 }
 
 #[test]
-fn blank_allowed_domains_do_not_restrict() {
-    let r = seeded(&[("AGENT_BROWSER_ALLOWED_DOMAINS", "  ")]);
-    assert_eq!(r.security().allowed_domains, None);
-    assert!(!r.launch_options().restrict_webrtc);
-}
-
-#[test]
-fn separator_only_allowed_domains_seed_an_empty_list() {
-    let r = seeded(&[("AGENT_BROWSER_ALLOWED_DOMAINS", " , ")]);
-    assert_eq!(r.security().allowed_domains, Some(vec![]));
+fn blank_or_separator_only_allowed_domains_seed_nothing() {
+    for raw in ["", "  ", " , "] {
+        let r = seeded(&[("AGENT_BROWSER_ALLOWED_DOMAINS", raw)]);
+        assert_eq!(r.security().allowed_domains, None, "{raw:?}");
+        assert!(!r.launch_options().restrict_webrtc);
+    }
 }
 
 #[test]
@@ -712,18 +792,20 @@ fn provider_view_ignores_connection_precedence() {
 
 #[test]
 fn legacy_policy_variable_applies_only_when_the_current_one_is_unset() {
-    let legacy = seeded(&[("AGENT_BROWSER_POLICY", "/old.json")]);
+    let old = absolute_path("old.json");
+    let new = absolute_path("new.json");
+    let legacy = seeded(&[("AGENT_BROWSER_POLICY", old.as_str())]);
     assert_eq!(
         legacy.security().action_policy_path.as_deref(),
-        Some("/old.json")
+        Some(old.as_str())
     );
     let both = seeded(&[
-        ("AGENT_BROWSER_POLICY", "/old.json"),
-        ("AGENT_BROWSER_ACTION_POLICY", "/new.json"),
+        ("AGENT_BROWSER_POLICY", old.as_str()),
+        ("AGENT_BROWSER_ACTION_POLICY", new.as_str()),
     ]);
     assert_eq!(
         both.security().action_policy_path.as_deref(),
-        Some("/new.json")
+        Some(new.as_str())
     );
 }
 
@@ -816,7 +898,7 @@ fn debug_output_never_contains_secrets() {
     assert!(out.contains("proxy.example"));
 
     let mut f = full_flags();
-    f.proxy = Some("http://user:hunter2@proxy.example:8080".to_string());
+    f.proxy = Some(parse_proxy("http://user:hunter2@proxy.example:8080"));
     f.cdp_headers = Some(r#"{"Authorization":"Bearer s3cret"}"#.to_string());
     let patch = format!("{:?}", Patch::from_flags(&f));
     for secret in ["hunter2", "s3cret"] {
@@ -1044,6 +1126,8 @@ fn plan_is_pure_and_next_holds_the_requested_values() {
             key: Key::Profile,
             requested: Requested::Set(json!("/b")),
             running: Some(json!("/a")),
+            effect: super::spec::Effect::Launch,
+            in_place: false,
         }
     );
 }
@@ -1063,6 +1147,40 @@ fn a_forced_relaunch_needs_no_change() {
     let wire = patch.to_wire().unwrap();
     assert_eq!(wire, json!({"relaunch": true}));
     assert_eq!(Patch::from_wire(Some(&wire)).unwrap(), patch);
+}
+
+#[test]
+fn changing_proxy_drops_only_inherited_credentials() {
+    let running = running_with(&[
+        (Key::Proxy, json!("http://old-proxy:8080")),
+        (Key::ProxyUsername, json!("old-user")),
+        (Key::ProxyPassword, json!("old-password")),
+    ]);
+    assert_eq!(running.plan(&Patch::default()).next, running);
+
+    let mut flags = blank_flags();
+    for (proxy, username, password) in [
+        ("http://new-proxy:8080", None, None),
+        ("http://new-user@new-proxy:8080", Some("new-user"), None),
+        (
+            "http://new-user:new-password@new-proxy:8080",
+            Some("new-user"),
+            Some("new-password"),
+        ),
+    ] {
+        flags.proxy = Some(parse_proxy(proxy));
+        let patch = Patch::from_flags(&flags);
+        let wire = patch.to_wire().unwrap();
+        let patch = Patch::from_wire(Some(&wire)).unwrap();
+        let plan = running.plan(&patch);
+        let options = plan.next.launch_options();
+        assert!(plan.relaunch);
+        assert!(plan.ignored.is_empty());
+        assert_eq!(options.proxy.as_deref(), Some("http://new-proxy:8080"));
+        assert_eq!(options.proxy_username.as_deref(), username);
+        assert_eq!(options.proxy_password.as_deref(), password);
+        assert!(plan.next.plan(&patch).is_empty());
+    }
 }
 
 #[test]
@@ -1302,6 +1420,179 @@ fn a_patch_without_launch_settings_keeps_only_live_ones() {
 }
 
 #[test]
+fn attached_browser_settings_follow_the_placement_table() {
+    let attached_firefox = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let plan = attached_firefox.plan(&patch_of(&[
+        is(Key::UserAgent, json!("AttachedUA/1")),
+        is(Key::Profile, json!("/profile")),
+    ]));
+    assert_eq!(changed_keys(&plan), vec![Key::UserAgent]);
+    assert_eq!(plan.changes[0].effect, super::spec::Effect::Live);
+    assert!(!plan.relaunch, "an in-place change needs no new browser");
+    assert_eq!(plan.next.user_agent().as_deref(), Some("AttachedUA/1"));
+    assert_eq!(
+        plan.ignored.iter().map(|c| c.key).collect::<Vec<_>>(),
+        vec![Key::Profile]
+    );
+
+    let cleared = plan
+        .next
+        .plan(&patch_of(&[(Key::UserAgent, Requested::Default)]));
+    assert_eq!(changed_keys(&cleared), vec![Key::UserAgent]);
+    assert_eq!(cleared.changes[0].effect, super::spec::Effect::Live);
+    assert_eq!(cleared.next.user_agent(), None);
+
+    let launch_only = attached_firefox.plan(&patch_of(&[is(Key::Args, json!(["--x"]))]));
+    assert!(launch_only.is_empty());
+    assert_eq!(launch_only.ignored[0].key, Key::Args);
+
+    // A browser attached over CDP is unchanged: the same request is ignored.
+    let attached_chrome =
+        running_with(&[(Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x"))]);
+    let plan = attached_chrome.plan(&patch_of(&[is(Key::UserAgent, json!("AttachedUA/1"))]));
+    assert!(plan.is_empty());
+    assert_eq!(plan.ignored[0].key, Key::UserAgent);
+    assert_eq!(plan.next, attached_chrome);
+}
+
+#[test]
+fn a_user_agent_for_a_new_target_waits_for_the_attach_to_name_its_engine() {
+    let plan = Running::defaults().plan(&patch_of(&[
+        is(Key::Cdp, json!("9550")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    assert!(plan.relaunch);
+    assert_eq!(changed_keys(&plan), vec![Key::Cdp, Key::UserAgent]);
+    assert!(plan.ignored.is_empty());
+    assert_eq!(
+        plan.awaiting_engine
+            .iter()
+            .map(|change| change.key)
+            .collect::<Vec<_>>(),
+        vec![Key::UserAgent]
+    );
+    assert_eq!(plan.next.user_agent().as_deref(), Some("ProbeUA/5"));
+
+    let attached = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let effect = |plan: &super::plan::Plan, key: Key| {
+        plan.changes
+            .iter()
+            .find(|change| change.key == key)
+            .map(|change| change.effect)
+    };
+
+    let moved = attached.plan(&patch_of(&[
+        is(Key::Cdp, json!("http://127.0.0.1:9444")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    assert_eq!(effect(&moved, Key::UserAgent), Some(Effect::Launch));
+    assert_eq!(
+        moved
+            .awaiting_engine
+            .iter()
+            .map(|change| change.key)
+            .collect::<Vec<_>>(),
+        vec![Key::UserAgent]
+    );
+
+    let named = attached.plan(&patch_of(&[
+        is(Key::Cdp, json!("http://127.0.0.1:9444")),
+        is(Key::Engine, json!("firefox")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    assert_eq!(effect(&named, Key::UserAgent), Some(Effect::Live));
+    assert!(named.awaiting_engine.is_empty());
+}
+
+#[test]
+fn only_a_cdp_target_waits_for_its_engine() {
+    for target in [
+        is(Key::Provider, json!("browserbase")),
+        is(Key::AutoConnect, json!(true)),
+    ] {
+        let plan =
+            Running::defaults().plan(&patch_of(&[target, is(Key::UserAgent, json!("ProbeUA/5"))]));
+        assert!(plan.awaiting_engine.is_empty());
+        assert_eq!(
+            plan.ignored.iter().map(|c| c.key).collect::<Vec<_>>(),
+            vec![Key::UserAgent]
+        );
+        assert_eq!(plan.next.user_agent(), None, "nothing reaches the provider");
+    }
+}
+
+#[test]
+fn a_patch_for_an_attached_firefox_splits_into_session_and_in_place_changes() {
+    let attached_firefox = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let plan = attached_firefox.plan(&patch_of(&[
+        is(Key::UserAgent, json!("AttachedUA/1")),
+        is(Key::DownloadPath, json!("/tmp/downloads")),
+        is(Key::ColorScheme, json!("dark")),
+        is(Key::DefaultTimeout, json!(5000)),
+    ]));
+
+    let live = plan.live_only(&attached_firefox);
+    assert_eq!(changed_keys(&live), vec![Key::DefaultTimeout]);
+    assert_eq!(live.next.user_agent(), None);
+    assert_eq!(live.next.launch_options().download_path, None);
+    assert_eq!(live.next.color_scheme(), None);
+    assert_eq!(live.next.default_timeout_ms(), 5000);
+    assert!(!live.relaunch);
+
+    let in_place = plan.in_place_only(&attached_firefox);
+    assert_eq!(
+        changed_keys(&in_place),
+        vec![Key::UserAgent, Key::DownloadPath]
+    );
+    assert_eq!(in_place.next.user_agent().as_deref(), Some("AttachedUA/1"));
+    assert_eq!(
+        in_place.next.launch_options().download_path.as_deref(),
+        Some("/tmp/downloads")
+    );
+    assert!(!in_place.relaunch);
+}
+
+#[test]
+fn a_non_launch_patch_keeps_restore_policy_only_for_the_running_key() {
+    let unit = |key: Option<&str>| {
+        let mut entries = vec![
+            is(Key::RestoreSave, json!("never")),
+            is(Key::RestoreCheckUrl, json!("**/x")),
+        ];
+        if let Some(k) = key {
+            entries.push(is(Key::RestoreKey, json!(k)));
+        }
+        patch_of(&entries)
+    };
+    // A different key: policy and checks must not reach the running key.
+    let live = unit(Some("new")).without_launch_settings_for(Some("old"));
+    for key in RESTORE_UNIT {
+        assert!(live.get(key).is_none(), "{key:?}");
+    }
+    let live = unit(Some("new")).without_launch_settings_for(None);
+    assert!(live.get(Key::RestoreSave).is_none());
+    // The same key, or no key in the patch: they apply to the running session.
+    for patch in [unit(Some("old")), unit(None)] {
+        let live = patch.without_launch_settings_for(Some("old"));
+        assert!(live.get(Key::RestoreSave).is_some());
+        assert!(live.get(Key::RestoreCheckUrl).is_some());
+        assert!(live.get(Key::RestoreKey).is_none());
+    }
+    // A caller that cannot name the running key sends none of the unit.
+    let live = unit(Some("old")).without_launch_settings();
+    assert!(live.get(Key::RestoreSave).is_none());
+}
+
+#[test]
 fn local_only_settings_are_ignored_for_external_sessions() {
     for target in [
         (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
@@ -1343,6 +1634,122 @@ fn local_only_settings_are_ignored_for_external_sessions() {
         );
         assert!(only_local.is_empty());
     }
+}
+
+#[test]
+fn external_connections_drop_inherited_engines_and_preserve_explicit_firefox() {
+    let targets = [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::AutoConnect, json!(true)),
+        (Key::Provider, json!("browserbase")),
+    ];
+
+    for (key, target) in targets {
+        let plan = Running::defaults().plan(&patch_of(&[
+            is(key, target.clone()),
+            is(Key::Engine, json!("firefox")),
+        ]));
+        assert_eq!(plan.next.get(Key::Engine), Some(&json!("firefox")));
+        assert!(!plan.ignored.iter().any(|change| change.key == Key::Engine));
+
+        let inherited = running_with(&[(Key::Engine, json!("firefox"))]);
+        let plan = inherited.plan(&patch_of(&[is(key, target.clone())]));
+        assert_eq!(plan.next.get(Key::Engine), None);
+        assert!(plan
+            .ignored
+            .iter()
+            .any(|change| { change.key == Key::Engine && change.requested == Requested::Default }));
+
+        let attached = running_with(&[(key, target.clone()), (Key::Engine, json!("firefox"))]);
+        let plan = attached.plan(&Patch::default());
+        assert_eq!(plan.next, attached);
+
+        let plan = attached.plan(&patch_of(&[is(key, target.clone())]));
+        assert_eq!(plan.next, attached);
+
+        let (changed_key, changed_target) = match key {
+            Key::Cdp | Key::AutoConnect => {
+                (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/y"))
+            }
+            Key::Provider => (Key::Provider, json!("lambdatest")),
+            _ => unreachable!(),
+        };
+        let plan = attached.plan(&patch_of(&[is(changed_key, changed_target.clone())]));
+        assert_eq!(plan.next.get(Key::Engine), None);
+        assert!(plan
+            .ignored
+            .iter()
+            .any(|change| { change.key == Key::Engine && change.requested == Requested::Default }));
+
+        let plan = attached.plan(&patch_of(&[
+            is(changed_key, changed_target),
+            is(Key::Engine, json!("firefox")),
+        ]));
+        assert_eq!(plan.next.get(Key::Engine), Some(&json!("firefox")));
+        assert!(!plan.ignored.iter().any(|change| change.key == Key::Engine));
+    }
+
+    for requested in [
+        Requested::Set(json!("chrome")),
+        Requested::Set(json!("lightpanda")),
+        Requested::Default,
+    ] {
+        let inherited = running_with(&[(Key::Engine, json!("firefox"))]);
+        let plan = inherited.plan(&patch_of(&[
+            is(Key::Provider, json!("browserbase")),
+            (Key::Engine, requested),
+        ]));
+        assert_ne!(plan.next.engine().as_deref(), Some("firefox"));
+    }
+
+    for key in [Key::Cdp, Key::AutoConnect] {
+        let target = match key {
+            Key::Cdp => json!("ws://127.0.0.1:9999/devtools/browser/x"),
+            Key::AutoConnect => json!(true),
+            _ => unreachable!(),
+        };
+        for engine in ["chrome", "lightpanda"] {
+            let running = running_with(&[(Key::Engine, json!(engine))]);
+            let plan = running.plan(&patch_of(&[is(key, target.clone())]));
+            assert_eq!(plan.next.get(Key::Engine), None, "{key:?} {engine}");
+            assert!(
+                plan.ignored.iter().any(|change| {
+                    change.key == Key::Engine && change.requested == Requested::Default
+                }),
+                "{key:?} {engine}"
+            );
+        }
+    }
+}
+
+#[test]
+fn external_firefox_can_switch_to_the_default_engine() {
+    let endpoint = "http://127.0.0.1:9333";
+    let running = running_with(&[(Key::Cdp, json!(endpoint)), (Key::Engine, json!("firefox"))]);
+    for requested in [Requested::Set(json!("chrome")), Requested::Default] {
+        for target in [endpoint, "http://127.0.0.1:9444"] {
+            let patch = patch_of(&[
+                is(Key::Cdp, json!(target)),
+                (Key::Engine, requested.clone()),
+            ]);
+            let plan = running.plan(&patch);
+            assert!(plan.relaunch);
+            assert_eq!(plan.next.engine(), None);
+            assert_eq!(plan.next.connection(), Connection::Cdp(target.to_string()));
+            assert!(plan.changes.iter().any(|change| change.key == Key::Engine));
+            assert!(plan.next.plan(&patch).is_empty());
+        }
+    }
+    let same = running.plan(&patch_of(&[is(Key::Engine, json!("firefox"))]));
+    assert!(same.is_empty());
+    assert_eq!(same.next, running);
+
+    let generic = running_with(&[(Key::Cdp, json!(endpoint))]);
+    let plan = generic.plan(&patch_of(&[is(Key::Engine, json!("chrome"))]));
+    assert!(plan.is_empty());
+    assert_eq!(plan.next, generic);
+    assert_eq!(plan.ignored.len(), 1);
+    assert_eq!(plan.ignored[0].key, Key::Engine);
 }
 
 #[test]
@@ -1418,4 +1825,617 @@ fn an_empty_provider_resets_the_session_to_local() {
     let plan = running.plan(&patch_of(&[is(Key::Provider, json!(""))]));
     assert_eq!(plan.next.connection(), Connection::Local);
     assert!(plan.relaunch);
+}
+
+// ---- ambient connection entries ----
+
+fn ambient_flags(cdp: Option<&str>, provider: Option<&str>, headers: Option<&str>) -> Flags {
+    let mut f = blank_flags();
+    f.cdp = cdp.map(str::to_string);
+    f.provider = provider.map(str::to_string);
+    f.cdp_headers = headers.map(str::to_string);
+    f
+}
+
+#[test]
+fn environment_connection_values_are_ambient_and_flags_are_explicit() {
+    let p = Patch::from_flags(&ambient_flags(Some("9222"), None, None));
+    assert!(p.is_ambient(Key::Cdp));
+
+    let mut f = ambient_flags(Some("9222"), Some("ios"), Some(r#"{"A":"b"}"#));
+    f.cli_cdp = true;
+    f.cli_cdp_headers = true;
+    f.cli_provider = true;
+    let p = Patch::from_flags(&f);
+    for key in [Key::Cdp, Key::Provider, Key::CdpHeaders] {
+        assert!(!p.is_ambient(key), "{key:?}");
+        assert!(p.get(key).is_some(), "{key:?}");
+    }
+}
+
+#[test]
+fn an_ambient_target_does_not_replace_the_session_target() {
+    let running = running_with(&[(Key::Cdp, json!("ws://a.example/cdp"))]);
+    let patch = Patch::from_flags(&ambient_flags(Some("ws://b.example/cdp"), None, None));
+    let plan = running.plan(&patch);
+    assert!(plan.changes.is_empty() && !plan.relaunch);
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://a.example/cdp".to_string())
+    );
+
+    let provider = Patch::from_flags(&ambient_flags(None, Some("ios"), None));
+    let plan = running.plan(&provider);
+    assert!(plan.changes.is_empty() && !plan.relaunch);
+}
+
+#[test]
+fn an_ambient_target_applies_to_a_session_without_one() {
+    let patch = Patch::from_flags(&ambient_flags(Some("ws://b.example/cdp"), None, None));
+    let plan = Running::defaults().plan(&patch);
+    assert_eq!(changed_keys(&plan), vec![Key::Cdp]);
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://b.example/cdp".to_string())
+    );
+}
+
+#[test]
+fn an_explicit_target_replaces_the_session_target_and_beats_an_ambient_one() {
+    let running = running_with(&[(Key::Cdp, json!("ws://a.example/cdp"))]);
+    let mut f = ambient_flags(Some("ws://env.example/cdp"), Some("ios"), None);
+    f.cli_provider = true;
+    let plan = running.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Provider("ios".to_string())
+    );
+}
+
+#[test]
+fn an_explicit_reset_lets_an_ambient_target_apply() {
+    // `--no-auto-connect` clears the session target, so the env endpoint that
+    // is processed after it applies to the now target-less session.
+    let running = running_with(&[(Key::AutoConnect, json!(true))]);
+    let mut f = ambient_flags(Some("ws://env.example/cdp"), None, None);
+    f.no_auto_connect = true;
+    let plan = running.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://env.example/cdp".to_string())
+    );
+
+    // `-p ""` resets a provider the same way.
+    let running = running_with(&[(Key::Provider, json!("ios"))]);
+    let mut f = ambient_flags(Some("ws://env.example/cdp"), Some(""), None);
+    f.cli_provider = true;
+    let plan = running.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://env.example/cdp".to_string())
+    );
+}
+
+#[test]
+fn a_reset_reapplies_the_ambient_target_the_session_already_runs() {
+    // `-p ""` clears the running endpoint, and the same endpoint as a default
+    // applies again to the now target-less session.
+    let running = running_with(&[(Key::Cdp, json!("ws://env.example/cdp"))]);
+    let mut f = ambient_flags(Some("ws://env.example/cdp"), Some(""), None);
+    f.cli_provider = true;
+    let plan = running.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://env.example/cdp".to_string())
+    );
+}
+
+#[test]
+fn headers_never_reach_a_session_that_stays_on_another_endpoint() {
+    let attached = running_with(&[(Key::Cdp, json!("ws://a.example/cdp"))]);
+    // The default endpoint B is skipped because the session stays on A, and
+    // the environment headers given for B are dropped with it.
+    let f = ambient_flags(Some("ws://b.example/cdp"), None, Some(ENV_HEADERS));
+    let (headers, changes) = headers_after(&attached, &f);
+    assert_eq!(
+        attached.plan(&Patch::from_flags(&f)).next.connection(),
+        Connection::Cdp("ws://a.example/cdp".to_string())
+    );
+    assert_eq!(headers, None);
+    assert!(changes.is_empty(), "{changes:?}");
+
+    // Command-line headers name B too, so they are dropped with it instead of
+    // reaching the retained endpoint A.
+    let mut f = ambient_flags(Some("ws://b.example/cdp"), None, Some(OWN_HEADERS));
+    f.cli_cdp_headers = true;
+    let plan = attached.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://a.example/cdp".to_string())
+    );
+    assert_eq!(plan.next.cdp_headers(), None);
+    assert!(plan.changes.is_empty() && !plan.relaunch);
+
+    // Headers alone, with no other endpoint named, update the attached one.
+    let mut f = blank_flags();
+    f.cdp_headers = Some(OWN_HEADERS.to_string());
+    f.cli_cdp_headers = true;
+    let plan = attached.plan(&Patch::from_flags(&f));
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(OWN_HEADERS));
+
+    // The default endpoint when it is the attached one takes them.
+    let mut f = ambient_flags(Some("ws://a.example/cdp"), None, Some(OWN_HEADERS));
+    f.cli_cdp_headers = true;
+    let plan = attached.plan(&Patch::from_flags(&f));
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(OWN_HEADERS));
+}
+
+const ENV_HEADERS: &str = r#"{"Authorization":"env"}"#;
+const OWN_HEADERS: &str = r#"{"Authorization":"own"}"#;
+
+#[test]
+fn command_line_headers_join_an_ambient_endpoint_that_attaches() {
+    // The environment names the endpoint and the session has none yet, so the
+    // endpoint attaches. `--cdp-headers` belong to it and must be kept.
+    let mut f = ambient_flags(Some("ws://b.example/cdp"), None, Some(OWN_HEADERS));
+    f.cli_cdp_headers = true;
+    let plan = Running::defaults().plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://b.example/cdp".to_string())
+    );
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(OWN_HEADERS));
+    let keys = changed_keys(&plan);
+    assert!(
+        keys.contains(&Key::Cdp) && keys.contains(&Key::CdpHeaders),
+        "{keys:?}"
+    );
+
+    // The same when an explicit reset clears the running target first.
+    let running = running_with(&[(Key::Provider, json!("ios"))]);
+    let mut f = ambient_flags(Some("ws://b.example/cdp"), Some(""), Some(OWN_HEADERS));
+    f.cli_provider = true;
+    f.cli_cdp_headers = true;
+    let plan = running.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Cdp("ws://b.example/cdp".to_string())
+    );
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(OWN_HEADERS));
+}
+
+#[test]
+fn command_line_headers_do_not_replace_a_skipped_endpoints_own_headers() {
+    // The env names B but the session stays on A: `--cdp-headers` belongs to
+    // B, so A keeps the headers it already had.
+    let attached = running_with(&[
+        (Key::Cdp, json!("ws://a.example/cdp")),
+        (Key::CdpHeaders, json!(r#"{"Authorization":"a"}"#)),
+    ]);
+    let mut f = ambient_flags(Some("ws://b.example/cdp"), None, Some(OWN_HEADERS));
+    f.cli_cdp_headers = true;
+    let plan = attached.plan(&Patch::from_flags(&f));
+    assert_eq!(
+        plan.next.cdp_headers().as_deref(),
+        Some(r#"{"Authorization":"a"}"#)
+    );
+    assert!(plan.changes.is_empty() && !plan.relaunch);
+}
+
+fn headers_after(running: &Running, f: &Flags) -> (Option<String>, Vec<Key>) {
+    let plan = running.plan(&Patch::from_flags(f));
+    (plan.next.cdp_headers(), changed_keys(&plan))
+}
+
+#[test]
+fn env_headers_are_ambient_and_explicit_ones_are_not() {
+    let p = Patch::from_flags(&ambient_flags(Some("9222"), None, Some(ENV_HEADERS)));
+    assert!(p.is_ambient(Key::CdpHeaders));
+    let mut f = ambient_flags(Some("9222"), None, Some(OWN_HEADERS));
+    f.cli_cdp_headers = true;
+    assert!(!Patch::from_flags(&f).is_ambient(Key::CdpHeaders));
+    // A blank value names nothing.
+    let p = Patch::from_flags(&ambient_flags(Some("9222"), None, Some("  ")));
+    assert!(p.get(Key::CdpHeaders).is_none());
+}
+
+#[test]
+fn env_headers_never_replace_the_headers_of_a_session_attached_by_connect() {
+    // `connect wss://a --cdp-headers A`, then a plain command in a shell with
+    // an env endpoint and env headers: nothing changes.
+    let running = running_with(&[
+        (Key::Cdp, json!("wss://a.example/cdp")),
+        (Key::CdpHeaders, json!(OWN_HEADERS)),
+    ]);
+    let f = ambient_flags(Some("wss://env.example/cdp"), None, Some(ENV_HEADERS));
+    let (headers, changes) = headers_after(&running, &f);
+    assert_eq!(headers.as_deref(), Some(OWN_HEADERS));
+    assert!(changes.is_empty(), "{changes:?}");
+
+    // Attached with no headers, env headers and no env endpoint.
+    let running = running_with(&[(Key::Cdp, json!("wss://a.example/cdp"))]);
+    let f = ambient_flags(None, None, Some(ENV_HEADERS));
+    let (headers, changes) = headers_after(&running, &f);
+    assert_eq!(headers, None);
+    assert!(changes.is_empty(), "{changes:?}");
+
+    // Same for a session on a provider.
+    let running = running_with(&[(Key::Provider, json!("ios"))]);
+    assert!(headers_after(&running, &f).1.is_empty());
+}
+
+#[test]
+fn env_headers_go_with_an_endpoint_the_command_names() {
+    // An explicit --cdp.
+    let mut f = ambient_flags(Some("wss://b.example/cdp"), None, Some(ENV_HEADERS));
+    f.cli_cdp = true;
+    let running = running_with(&[(Key::Cdp, json!("wss://a.example/cdp"))]);
+    assert_eq!(headers_after(&running, &f).0.as_deref(), Some(ENV_HEADERS));
+
+    // An ambient endpoint that applies to a session with no target.
+    let f = ambient_flags(Some("wss://b.example/cdp"), None, Some(ENV_HEADERS));
+    assert_eq!(
+        headers_after(&Running::defaults(), &f).0.as_deref(),
+        Some(ENV_HEADERS)
+    );
+
+    // `connect` names its endpoint in the launch envelope: its patch keeps the
+    // env headers as explicit ones.
+    let patch = Patch::from_flags(&f).without_ambient_connection();
+    assert!(patch.get(Key::Cdp).is_none() && !patch.is_ambient(Key::CdpHeaders));
+    let plan = Running::defaults().plan(&patch);
+    assert_eq!(plan.next.cdp_headers().as_deref(), Some(ENV_HEADERS));
+}
+
+#[test]
+fn rotated_env_headers_reconnect_only_on_the_same_ambient_endpoint() {
+    let running = running_with(&[
+        (Key::Cdp, json!("wss://a.example/cdp")),
+        (Key::CdpHeaders, json!(r#"{"A":"old"}"#)),
+    ]);
+    // Same endpoint: the rotation applies.
+    let same = ambient_flags(Some("wss://a.example/cdp"), None, Some(ENV_HEADERS));
+    let (headers, changes) = headers_after(&running, &same);
+    assert_eq!(headers.as_deref(), Some(ENV_HEADERS));
+    assert_eq!(changes, vec![Key::CdpHeaders]);
+    // A different env endpoint: dropped, the session keeps its headers.
+    let other = ambient_flags(Some("wss://b.example/cdp"), None, Some(ENV_HEADERS));
+    let (headers, changes) = headers_after(&running, &other);
+    assert_eq!(headers.as_deref(), Some(r#"{"A":"old"}"#));
+    assert!(changes.is_empty(), "{changes:?}");
+}
+
+#[test]
+fn effective_targets_resolve_flags_over_defaults_and_defaults_by_precedence() {
+    let t = |f: &Flags| effective_targets(f);
+    // Two defaults: cdp wins over auto-connect over provider.
+    let both = ambient_flags(Some("9222"), Some("ios"), None);
+    assert_eq!(t(&both).cdp.as_deref(), Some("9222"));
+    assert_eq!(t(&both).provider, None);
+    let mut auto = ambient_flags(None, Some("ios"), None);
+    auto.auto_connect = true;
+    assert!(t(&auto).auto_connect && t(&auto).provider.is_none());
+
+    // An explicit target drops every default.
+    let mut f = ambient_flags(Some("9222"), Some("ios"), None);
+    f.cli_provider = true;
+    assert_eq!((t(&f).cdp, t(&f).provider.as_deref()), (None, Some("ios")));
+    let mut f = ambient_flags(Some("9222"), Some("ios"), None);
+    f.cli_cdp = true;
+    assert_eq!((t(&f).cdp.as_deref(), t(&f).provider), (Some("9222"), None));
+
+    // An explicit blank provider names nothing, so the default stays.
+    let mut f = ambient_flags(Some("9222"), Some(""), None);
+    f.cli_provider = true;
+    assert_eq!(t(&f).cdp.as_deref(), Some("9222"));
+    assert_eq!(t(&f).provider.as_deref(), Some(""));
+}
+
+#[test]
+fn blank_ambient_values_name_nothing_and_one_ambient_target_wins() {
+    let p = Patch::from_flags(&ambient_flags(Some("  "), None, None));
+    assert!(p.get(Key::Cdp).is_none());
+
+    let p = Patch::from_flags(&ambient_flags(Some("9222"), Some("ios"), None));
+    assert!(p.get(Key::Cdp).is_some());
+    assert!(p.get(Key::Provider).is_none());
+}
+
+#[test]
+fn ambient_marks_survive_the_wire_and_reject_unknown_names() {
+    let patch = Patch::from_flags(&ambient_flags(Some("9222"), None, None));
+    let wire = patch.to_wire().unwrap();
+    assert_eq!(wire["ambient"], json!(["cdp"]));
+    let with_headers =
+        json!({"cdp": "9222", "cdp-headers": "{}", "ambient": ["cdp", "cdp-headers"]});
+    assert!(Patch::from_wire(Some(&with_headers))
+        .unwrap()
+        .is_ambient(Key::CdpHeaders));
+    let back = Patch::from_wire(Some(&wire)).unwrap();
+    assert_eq!(back, patch);
+    assert!(back.is_ambient(Key::Cdp));
+
+    // No field: everything is explicit.
+    let plain = json!({"cdp": "9222"});
+    assert!(!Patch::from_wire(Some(&plain)).unwrap().is_ambient(Key::Cdp));
+
+    for bad in [json!("cdp"), json!(["headed"]), json!([1]), json!(["nope"])] {
+        let wire = json!({"cdp": "9222", "ambient": bad});
+        assert!(Patch::from_wire(Some(&wire)).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn without_ambient_connection_keeps_explicit_entries() {
+    let mut f = ambient_flags(Some("9222"), None, None);
+    f.headed = true;
+    f.cli_headed = true;
+    let p = Patch::from_flags(&f).without_ambient_connection();
+    assert!(p.get(Key::Cdp).is_none());
+    assert!(p.get(Key::Headed).is_some());
+    assert!(p.to_wire().unwrap().get("ambient").is_none());
+}
+
+// ---- where the connection markers come from ----
+
+/// Parses `args` with the given environment and an empty config file.
+fn parse_with_env(env: &[(&str, &str)], args: &[&str]) -> Flags {
+    let all: Vec<String> = std::env::vars()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with("AGENT_BROWSER_"))
+        .collect();
+    let mut names: Vec<&str> = all.iter().map(String::as_str).collect();
+    names.extend(env.iter().map(|(k, _)| *k));
+    let guard = EnvGuard::new(&names);
+    for name in &names {
+        guard.remove(name);
+    }
+    for (k, v) in env {
+        guard.set(k, v);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.json");
+    std::fs::write(&config, "{}").unwrap();
+    let mut argv = vec![
+        "--config".to_string(),
+        config.to_string_lossy().into_owned(),
+    ];
+    argv.extend(args.iter().map(|a| a.to_string()));
+    try_parse_flags(&argv).unwrap()
+}
+
+#[test]
+fn connection_flags_set_their_marker_and_environment_values_do_not() {
+    let f = parse_with_env(&[], &["--cdp", "9222"]);
+    assert!(f.cli_cdp && !f.cli_provider);
+    let f = parse_with_env(&[], &["-p", "ios"]);
+    assert!(f.cli_provider && !f.cli_cdp);
+    let f = parse_with_env(&[], &["--provider", "ios"]);
+    assert!(f.cli_provider);
+
+    let f = parse_with_env(
+        &[
+            ("AGENT_BROWSER_CDP", "9222"),
+            ("AGENT_BROWSER_PROVIDER", "ios"),
+        ],
+        &[],
+    );
+    assert_eq!(f.cdp.as_deref(), Some("9222"));
+    assert_eq!(f.provider.as_deref(), Some("ios"));
+    assert!(!f.cli_cdp && !f.cli_provider);
+}
+
+#[test]
+fn parsed_flags_and_environment_reach_the_wire_as_explicit_and_ambient() {
+    let env = [("AGENT_BROWSER_CDP", "9222")];
+    let wire = Patch::from_flags(&parse_with_env(&env, &["get", "url"]))
+        .to_wire()
+        .unwrap();
+    assert_eq!(wire["cdp"], "9222");
+    assert_eq!(wire["ambient"], json!(["cdp"]));
+
+    let wire = Patch::from_flags(&parse_with_env(&env, &["--cdp", "9333", "get", "url"]))
+        .to_wire()
+        .unwrap();
+    assert_eq!(wire["cdp"], "9333");
+    assert!(wire.get("ambient").is_none());
+
+    // A provider on the command line drops the environment cdp.
+    let wire = Patch::from_flags(&parse_with_env(&env, &["-p", "ios", "get", "url"]))
+        .to_wire()
+        .unwrap();
+    assert_eq!(wire["provider"], "ios");
+    assert!(wire.get("cdp").is_none() && wire.get("ambient").is_none());
+}
+
+#[test]
+fn a_replaced_target_receives_an_equal_in_place_setting_again() {
+    let attached = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+        (Key::UserAgent, json!("ProbeUA/5")),
+        (Key::DownloadPath, json!("/tmp/downloads")),
+    ]);
+    let plan = attached.plan(&patch_of(&[
+        is(Key::Cdp, json!("http://127.0.0.1:9444")),
+        is(Key::Engine, json!("firefox")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+        is(Key::DownloadPath, json!("/tmp/downloads")),
+    ]));
+    assert_eq!(
+        changed_keys(&plan),
+        vec![Key::Cdp, Key::UserAgent, Key::DownloadPath]
+    );
+    assert!(plan.changes[1..].iter().all(|change| change.in_place));
+
+    let reused = attached.plan(&patch_of(&[
+        is(Key::Engine, json!("firefox")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+        is(Key::DownloadPath, json!("/tmp/downloads")),
+    ]));
+    assert!(reused.is_empty());
+    assert_eq!(reused.next, attached);
+
+    let same_target = patch_of(&[is(Key::UserAgent, json!("ProbeUA/5"))]);
+    assert_eq!(
+        attached.destination(&same_target).transition,
+        Transition::Reuse
+    );
+    let recovered =
+        attached.plan_with_transition(&same_target, Engine::Firefox, Transition::Replace);
+    assert_eq!(changed_keys(&recovered), vec![Key::UserAgent]);
+    assert!(recovered.changes[0].in_place);
+
+    let mut flags = blank_flags();
+    flags.relaunch = true;
+    let forced = Patch::from_flags(&flags).with_envelope(&patch_of(&[
+        is(Key::Engine, json!("firefox")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    let replaced = attached.plan(&forced);
+    assert_eq!(changed_keys(&replaced), vec![Key::UserAgent]);
+    assert!(replaced.changes[0].in_place);
+    assert!(replaced.relaunch);
+}
+
+#[test]
+fn a_probed_firefox_takes_a_setting_a_target_it_has_not_attached_to_cannot() {
+    let attached = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let patch = patch_of(&[
+        is(Key::Cdp, json!("http://127.0.0.1:9444")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]);
+    let waiting = attached.plan(&patch);
+    assert_eq!(waiting.awaiting_engine.len(), 1);
+    assert_eq!(waiting.next.engine(), None);
+
+    let probed = attached.plan_with_engine(&patch, Engine::Firefox);
+    assert!(probed.awaiting_engine.is_empty());
+    assert_eq!(probed.next.engine().as_deref(), Some("firefox"));
+    assert!(probed.ignored.is_empty());
+    let user_agent = probed
+        .changes
+        .iter()
+        .find(|change| change.key == Key::UserAgent)
+        .expect("the user agent is planned");
+    assert!(user_agent.in_place);
+
+    let other = attached.plan_with_engine(&patch, Engine::Other);
+    assert_eq!(other.next.engine(), None);
+    assert_eq!(other.next.user_agent(), None);
+    assert!(other
+        .ignored
+        .iter()
+        .any(|change| change.key == Key::UserAgent));
+    assert!(other
+        .ignored
+        .iter()
+        .any(|change| change.key == Key::Engine && change.requested == Requested::Default));
+}
+
+#[test]
+fn launch_only_options_are_ignored_and_dropped_for_an_external_session() {
+    for target in [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::Provider, json!("browserbase")),
+        (Key::AutoConnect, json!(true)),
+    ] {
+        let plan = running_with(std::slice::from_ref(&target)).plan(&patch_of(&[
+            is(Key::AllowFileAccess, json!(true)),
+            is(Key::Webgpu, json!(true)),
+        ]));
+        let ignored: Vec<Key> = plan.ignored.iter().map(|change| change.key).collect();
+        assert_eq!(ignored, vec![Key::AllowFileAccess, Key::Webgpu]);
+        assert_eq!(plan.next.get(Key::AllowFileAccess), None);
+        assert_eq!(plan.next.get(Key::Webgpu), None);
+
+        let plan = running_with(&[
+            target.clone(),
+            (Key::AllowFileAccess, json!(true)),
+            (Key::Webgpu, json!(true)),
+        ])
+        .plan(&patch_of(&[is(Key::DefaultTimeout, json!(5000))]));
+        let ignored: Vec<Key> = plan.ignored.iter().map(|change| change.key).collect();
+        assert_eq!(ignored, vec![Key::AllowFileAccess, Key::Webgpu]);
+        assert_eq!(plan.next.get(Key::AllowFileAccess), None);
+        assert_eq!(plan.next.get(Key::Webgpu), None);
+    }
+}
+
+#[test]
+fn headed_and_no_xvfb_are_normalized_for_an_attached_browser_not_a_provider() {
+    for target in [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::Provider, json!("browserbase")),
+    ] {
+        let mut running = Running::defaults();
+        running.set(target.0, target.1.clone());
+        running.assign(Key::Headed, json!(true));
+        running.assign(Key::NoXvfb, json!(true));
+        running.assign(Key::HideScrollbars, json!(false));
+        let plan = running.plan(&patch_of(&[is(Key::DefaultTimeout, json!(5000))]));
+        let ignored: Vec<Key> = plan.ignored.iter().map(|change| change.key).collect();
+        if target.0 == Key::Provider {
+            assert!(ignored.is_empty(), "{:?}", ignored);
+            assert_eq!(plan.next.get(Key::Headed), Some(&json!(true)));
+            assert_eq!(plan.next.get(Key::NoXvfb), Some(&json!(true)));
+            assert_eq!(plan.next.get(Key::HideScrollbars), Some(&json!(false)));
+            assert!(plan.next.plugin_provider_headed());
+        } else {
+            assert_eq!(ignored, vec![Key::Headed, Key::NoXvfb, Key::HideScrollbars]);
+            assert_eq!(plan.next.get(Key::Headed), None);
+            assert_eq!(plan.next.get(Key::NoXvfb), None);
+            assert_eq!(plan.next.get(Key::HideScrollbars), None);
+            assert!(!plan.next.plugin_provider_headed());
+        }
+    }
+}
+
+#[test]
+fn an_envelope_target_wins_and_is_never_ambient() {
+    let mut flags = ambient_flags(Some("9222"), None, None);
+    flags.relaunch = true;
+    let wire = Patch::from_flags(&flags);
+    assert!(wire.is_ambient(Key::Cdp));
+    let merged = wire.with_envelope(&patch_of(&[
+        is(Key::Cdp, json!("9333")),
+        is(Key::DownloadPath, json!("/d")),
+    ]));
+    assert!(!merged.is_ambient(Key::Cdp));
+    assert_eq!(merged.value(Key::Cdp), Some(&json!("9333")));
+    assert!(merged.forces_relaunch());
+    let plan = Running::defaults().plan(&merged);
+    assert_eq!(changed_keys(&plan), vec![Key::Cdp, Key::DownloadPath]);
+    assert_eq!(plan.next.connection(), Connection::Cdp("9333".to_string()));
+}
+
+#[test]
+fn an_envelope_target_displaces_the_other_connection_keys() {
+    let wire = patch_of(&[
+        is(Key::Provider, json!("browserbox")),
+        is(Key::AutoConnect, json!(true)),
+        is(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer x"}"#)),
+    ]);
+    let merged = wire.with_envelope(&patch_of(&[is(Key::Cdp, json!("9333"))]));
+    assert_eq!(merged.value(Key::Provider), None);
+    assert_eq!(merged.value(Key::AutoConnect), None);
+    assert!(merged.get(Key::CdpHeaders).is_some());
+    let plan = Running::defaults().plan(&merged);
+    assert_eq!(plan.next.connection(), Connection::Cdp("9333".to_string()));
+
+    let wire = patch_of(&[
+        is(Key::Cdp, json!("9333")),
+        is(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer x"}"#)),
+    ]);
+    let merged = wire.with_envelope(&patch_of(&[is(Key::Provider, json!("browserbox"))]));
+    assert_eq!(merged.value(Key::Cdp), None);
+    assert_eq!(merged.get(Key::CdpHeaders), None);
+    let plan = Running::defaults().plan(&merged);
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Provider("browserbox".to_string())
+    );
 }

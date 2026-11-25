@@ -1,4 +1,4 @@
-//! What one request of a run came back with, and how a run's results are judged.
+//! What a tier returned for one request, and how a run's results are judged.
 
 use super::*;
 
@@ -17,6 +17,11 @@ pub enum Stop {
     Blocked,
     /// A write was sent and no answer came back.
     OutcomeUnknown,
+    /// A write was accepted but its answer is not the recorded one.
+    WriteApplied,
+    /// The host resolved to an address flow run does not send to; nothing
+    /// was sent, and no tier tries it.
+    AddressRefused,
 }
 
 impl Stop {
@@ -29,6 +34,8 @@ impl Stop {
             Stop::RateLimited => "rate_limited",
             Stop::Blocked => "blocked",
             Stop::OutcomeUnknown => "outcome_unknown",
+            Stop::WriteApplied => "write_applied",
+            Stop::AddressRefused => "address_refused",
         }
     }
 
@@ -43,12 +50,17 @@ impl Stop {
             }
             Stop::RateLimited => "Wait before rerunning",
             Stop::OutcomeUnknown => "Check the site before rerunning; the write is not sent again",
+            Stop::WriteApplied => {
+                "The site accepted the write, so it was applied; do not repeat it. Check the site for the result"
+            }
             Stop::Blocked => "Continue in the UI or let the user clear the challenge",
+            Stop::AddressRefused => "Nothing was sent; continue in the UI",
         }
     }
 }
 
-pub struct RequestResult {
+#[derive(Clone)]
+pub struct TierResult {
     pub id: String,
     pub step: usize,
     pub ok: bool,
@@ -63,20 +75,27 @@ pub struct RequestResult {
     /// The response matches the recording except that its lists are absent,
     /// which is how many APIs answer a query with no results.
     pub empty: bool,
-    /// The response says the run cannot go on.
+    pub tier: Tier,
+    /// The response says the run cannot go on, whatever tier sends it.
     pub stop: Option<Stop>,
+    /// The stop this denial would be, when a later tier may still get through.
+    pub soft_stop: Option<Stop>,
+    /// The request never got an answer; another tier may reach the site.
+    pub transport: bool,
+    /// The tier was not tried, so the result says nothing about it.
+    pub skipped: bool,
     pub retry_after: Option<String>,
 }
 
-impl RequestResult {
-    /// A request that did not produce an answer.
-    pub fn fail(req: &PreparedRequest, started: Instant, f: Failure) -> RequestResult {
+impl TierResult {
+    /// A way of sending that did not produce an answer.
+    pub fn fail(req: &PreparedRequest, tier: Tier, started: Instant, f: Failure) -> TierResult {
         let ms = started.elapsed().as_millis();
-        RequestResult::failed(req, ms, f)
+        TierResult::failed(req, tier, ms, f)
     }
 
-    fn failed(req: &PreparedRequest, ms: u128, f: Failure) -> RequestResult {
-        RequestResult {
+    fn failed(req: &PreparedRequest, tier: Tier, ms: u128, f: Failure) -> TierResult {
+        TierResult {
             id: req.id.clone(),
             step: req.step,
             ok: false,
@@ -87,7 +106,11 @@ impl RequestResult {
             drift: f.drift,
             shape_changed: f.shape_changed,
             empty: false,
+            tier,
             stop: f.stop,
+            soft_stop: None,
+            transport: f.transport,
+            skipped: f.skipped,
             retry_after: None,
         }
     }
@@ -100,15 +123,33 @@ pub struct Failure {
     pub drift: bool,
     pub shape_changed: bool,
     pub stop: Option<Stop>,
+    pub transport: bool,
+    pub skipped: bool,
 }
 
 impl Failure {
-    /// The request failed in a way that says the site changed.
+    /// The site answered with something other than what was recorded: a
+    /// different shape, a page that is not JSON, a missing element in a
+    /// replayed command. The flow is unverified and the next tier is tried.
+    /// A local failure, a timeout or a skipped tier is never drift.
     pub fn drift(reason: String) -> Failure {
         Failure::new(true, None, reason)
     }
 
-    /// A write was sent and no answer came back: it is not sent again.
+    /// The tier was not tried; another tier may still send the request.
+    pub fn skipped(reason: String) -> Failure {
+        Failure {
+            skipped: true,
+            ..Failure::new(false, None, reason)
+        }
+    }
+
+    /// The tier cannot express this run; that says nothing about the site.
+    pub fn unavailable(reason: String) -> Failure {
+        Failure::new(false, None, reason)
+    }
+
+    /// A write whose outcome is not known is never sent again by another tier.
     pub fn unknown_outcome(reason: String) -> Failure {
         Failure {
             status: None,
@@ -116,6 +157,8 @@ impl Failure {
             drift: false,
             shape_changed: false,
             stop: Some(Stop::OutcomeUnknown),
+            transport: false,
+            skipped: false,
         }
     }
 
@@ -126,10 +169,31 @@ impl Failure {
             drift,
             shape_changed: false,
             stop: None,
+            transport: false,
+            skipped: false,
         }
     }
 
-    /// A response that ends the run, and does not mean the site changed.
+    /// The request never reached the site or got no answer back; a read may
+    /// still get through another way.
+    pub fn transport(reason: String) -> Failure {
+        Failure {
+            transport: true,
+            ..Failure::new(false, None, reason)
+        }
+    }
+
+    /// A response that ends the run: another tier would get the same answer,
+    /// and it does not mean the site changed.
+    /// The resolver refused the destination before any connection: the
+    /// run ends without trying another tier.
+    pub fn refused(reason: String) -> Failure {
+        Failure {
+            stop: Some(Stop::AddressRefused),
+            ..Failure::new(false, None, reason)
+        }
+    }
+
     pub(crate) fn stop(stop: Stop, status: u16, reason: String) -> Failure {
         Failure {
             status: Some(status),
@@ -137,6 +201,8 @@ impl Failure {
             drift: false,
             shape_changed: false,
             stop: Some(stop),
+            transport: false,
+            skipped: false,
         }
     }
 }
@@ -294,12 +360,25 @@ fn classify_signature_headers(
     (signed, unsure)
 }
 
-/// Judge a response: blocked, rejected input, changed shape, or data.
+/// Judge a response the same way on every tier: blocked, rejected input,
+/// changed shape, or data.
 pub fn check_response(
     req: &PreparedRequest,
     status: u16,
     text: &str,
 ) -> Result<(Value, bool), Failure> {
+    check_response_on(Tier::Http, req, status, text)
+}
+
+/// The recorded credential and signature headers describe what the first
+/// tiers send; the replay sends whatever the page's own scripts produce.
+fn check_response_on(
+    tier: Tier,
+    req: &PreparedRequest,
+    status: u16,
+    text: &str,
+) -> Result<(Value, bool), Failure> {
+    let recorded = tier != Tier::Replay;
     if (matches!(status, 401 | 403 | 429) || (200..300).contains(&status))
         && looks_like_html(text)
         && looks_like_challenge(text)
@@ -311,7 +390,7 @@ pub fn check_response(
         ));
     }
     match status {
-        401 | 403 if req.expect.stripped_auth => {
+        401 | 403 if recorded && req.expect.stripped_auth => {
             return Err(Failure::stop(
                 Stop::CredentialNotSendable,
                 status,
@@ -322,7 +401,11 @@ pub fn check_response(
             ))
         }
         401 | 403 => {
-            let (signed, unsure) = classify_signature_headers(&req.headers, &req.repeated_headers);
+            let (signed, unsure) = if recorded {
+                classify_signature_headers(&req.headers, &req.repeated_headers)
+            } else {
+                (Vec::new(), Vec::new())
+            };
             if !signed.is_empty() {
                 return Err(Failure::stop(
                     Stop::RequestSigned,
@@ -358,7 +441,12 @@ pub fn check_response(
                 "HTTP 429: the site is rate limiting this session".to_string(),
             ))
         }
-        407 => return Err(Failure::new(true, Some(status), format!("HTTP {}", status))),
+        // The proxy refused the request; the site never saw it.
+        407 => {
+            return Err(Failure::transport(
+                "HTTP 407: the proxy requires authentication".to_string(),
+            ))
+        }
         _ => {}
     }
     if !(200..300).contains(&status) {
@@ -391,6 +479,8 @@ pub fn check_response(
             drift: true,
             shape_changed: true,
             stop: None,
+            transport: false,
+            skipped: false,
         });
     }
     if let Err(reason) = signature_matches(&req.expect.signature, &current) {
@@ -416,16 +506,31 @@ pub fn check_response(
             drift: true,
             shape_changed: true,
             stop: None,
+            transport: false,
+            skipped: false,
         });
     }
     Ok((parsed, false))
 }
 
-pub fn request_result(
+pub fn tier_result(
     req: &PreparedRequest,
+    tier: Tier,
     started: Instant,
     outcome: Result<(u16, String), Failure>,
-) -> RequestResult {
+) -> TierResult {
+    tier_result_of(req, tier, started, outcome, true)
+}
+
+/// `sent` is false for an answer a session route made up: no write left the
+/// machine, so a 5xx or 408 does not mean it may have been applied.
+pub fn tier_result_of(
+    req: &PreparedRequest,
+    tier: Tier,
+    started: Instant,
+    outcome: Result<(u16, String), Failure>,
+    sent: bool,
+) -> TierResult {
     let ms = started.elapsed().as_millis();
     let outcome = match req.expect.extract.as_ref().filter(|x| !x.is_null()) {
         Some(spec) => outcome.and_then(|(status, text)| match extract_embedded(&text, spec) {
@@ -439,10 +544,11 @@ pub fn request_result(
         }),
         None => outcome,
     };
-    let checked = outcome
-        .and_then(|(status, text)| check_response(req, status, &text).map(|body| (status, body)));
+    let checked = outcome.and_then(|(status, text)| {
+        check_response_on(tier, req, status, &text).map(|body| (status, body))
+    });
     match checked {
-        Ok((status, (body, empty))) => RequestResult {
+        Ok((status, (body, empty))) => TierResult {
             id: req.id.clone(),
             step: req.step,
             ok: true,
@@ -453,49 +559,152 @@ pub fn request_result(
             drift: false,
             shape_changed: false,
             empty,
+            tier,
             stop: None,
+            soft_stop: None,
+            transport: false,
+            skipped: false,
             retry_after: None,
         },
-        Err(f) => RequestResult::failed(req, ms, f),
+        Err(mut f) => {
+            // A write answered with a 5xx or 408 may still have been applied,
+            // unless a session route answered it and nothing was sent.
+            if sent && req.write && f.stop.is_none() && matches!(f.status, Some(408 | 500..=599)) {
+                f.stop = Some(Stop::OutcomeUnknown);
+                f.drift = false;
+                f.reason = format!("{}: the write may have been applied", f.reason);
+            }
+            // A challenge page in answer to a write that went out does not say
+            // it was not applied.
+            if sent
+                && req.write
+                && f.stop == Some(Stop::Blocked)
+                && matches!(f.status, Some(200..=299))
+            {
+                f.stop = Some(Stop::OutcomeUnknown);
+                f.reason = format!(
+                    "{}: the write was sent, but the answer does not say it was applied",
+                    f.reason
+                );
+            }
+            // A write the site answered with a 2xx JSON body of another shape
+            // was applied. Any other accepted-looking answer (a redirect to a
+            // login, an HTML page) does not say it was.
+            if sent && req.write && f.stop.is_none() && is_accepted(f.status) {
+                if f.shape_changed && matches!(f.status, Some(200..=299)) {
+                    f.stop = Some(Stop::WriteApplied);
+                    f.drift = false;
+                    f.reason = format!("{}: the write was applied", f.reason);
+                } else {
+                    f.stop = Some(Stop::OutcomeUnknown);
+                    f.drift = false;
+                    f.reason = format!(
+                        "{}: the write was sent, but the answer does not say it was applied",
+                        f.reason
+                    );
+                }
+            }
+            // The recording sent credentials or a signature a run cannot
+            // copy, so a 401 or 403 may only mean this tier lacks them; the
+            // next tier sends them from the page.
+            let soft = f
+                .stop
+                .filter(|s| matches!(s, Stop::CredentialNotSendable | Stop::RequestSigned))
+                .filter(|_| tier != Tier::Replay);
+            if soft.is_some() {
+                f.stop = None;
+                f.drift = true;
+            }
+            TierResult {
+                soft_stop: soft,
+                ..TierResult::failed(req, tier, ms, f)
+            }
+        }
     }
 }
 
-pub(crate) fn with_retry_after(
-    mut result: RequestResult,
-    retry_after: Option<String>,
-) -> RequestResult {
+pub(crate) fn with_retry_after(mut result: TierResult, retry_after: Option<String>) -> TierResult {
     if result.stop == Some(Stop::RateLimited) {
         result.retry_after = retry_after.filter(|v| !v.trim().is_empty());
     }
     result
 }
 
-/// Fold the results of a run into its response. The flow is verified only
-/// when every request came back with the recorded shape.
+/// The last failed attempt, when every way of sending that request was
+/// refused with a 401 or 403. A last answer whose shape changed is drift.
+pub fn denied_everywhere(results: &[TierResult]) -> Option<&TierResult> {
+    let last = results.last().filter(|r| !r.ok && !r.shape_changed)?;
+    let attempts: Vec<&TierResult> = results.iter().filter(|r| r.id == last.id).collect();
+    (attempts.iter().all(|r| !r.ok) && attempts.iter().any(|r| matches!(r.status, Some(401 | 403))))
+        .then_some(last)
+}
+
+/// Fold tier results into the run response. `attempts` holds every tier
+/// tried, in order; the last attempt per request is the one that counts.
+/// The flow is verified only when every request came back with the recorded
+/// shape and no tier saw that shape change.
 pub fn finish_run(
     flow: &mut Flow,
-    results: &[RequestResult],
+    attempts: &[TierResult],
     now: &str,
     total_ms: u128,
     shape: &Shape,
 ) -> Value {
-    let all_ok = !results.is_empty() && results.iter().all(|r| r.ok);
-    let shape_changed = results.iter().find(|r| r.shape_changed);
+    let mut last: Vec<&TierResult> = Vec::new();
+    for a in attempts {
+        match last.iter().position(|r| r.id == a.id) {
+            Some(i) => last[i] = a,
+            None => last.push(a),
+        }
+    }
+    let all_ok = !last.is_empty() && last.iter().all(|r| r.ok);
+    let shape_changed = attempts.iter().find(|a| a.shape_changed);
     // An empty answer cannot confirm the recorded lists still exist, so it
     // leaves the verified state as it was.
-    let any_empty = results.iter().any(|r| r.ok && r.empty);
+    let any_empty = last.iter().any(|r| r.ok && r.empty);
     // Only the answer itself reads as no results; an empty dependency does
     // not replace a response that has data.
-    let empty = results
-        .iter()
-        .any(|r| r.id == flow.output && r.ok && r.empty);
+    let empty = last.iter().any(|r| r.id == flow.output && r.ok && r.empty);
     if all_ok && shape_changed.is_none() && any_empty {
     } else if all_ok && shape_changed.is_none() {
         flow.verified_at = Some(now.to_string());
-    } else if shape_changed.is_some() || (!all_ok && results.iter().any(|r| !r.ok && r.drift)) {
+    } else if shape_changed.is_some()
+        || (!all_ok && attempts.iter().any(|r| !r.ok && r.drift && !r.skipped))
+    {
         flow.verified_at = None;
     }
-    let output = results
+    // Remember the tier that worked, so the next run starts there. A transport
+    // error or a skipped tier says nothing about its tier, so the next run
+    // starts after the last tier that failed for a reason that does.
+    for r in last.iter().filter(|r| r.ok) {
+        let learned = attempts
+            .iter()
+            .take_while(|a| !std::ptr::eq(*a, *r))
+            .filter(|a| a.id == r.id && !a.transport && !a.skipped)
+            .last();
+        let before_any = attempts
+            .iter()
+            .take_while(|a| !std::ptr::eq(*a, *r))
+            .any(|a| a.id == r.id);
+        let next = match learned {
+            Some(f) => Tier::ALL
+                .iter()
+                .position(|t| *t == f.tier)
+                .and_then(|i| Tier::ALL.get(i + 1).copied()),
+            None if before_any => continue,
+            None => Some(r.tier),
+        };
+        let Some(next) = next else { continue };
+        for req in flow
+            .steps
+            .iter_mut()
+            .flat_map(|s| s.requests.iter_mut())
+            .filter(|req| req.id == r.id)
+        {
+            req.tier = (next != Tier::Http).then_some(next);
+        }
+    }
+    let output = last
         .iter()
         .find(|r| r.id == flow.output && r.ok)
         .and_then(|r| r.body.clone())
@@ -506,16 +715,26 @@ pub fn finish_run(
                 apply_shape(b, shape)
             }
         });
-    let steps: Vec<Value> = results
+    let steps: Vec<Value> = last
         .iter()
         .map(|r| {
-            json!({
+            let fell_back: Vec<Value> = attempts
+                .iter()
+                .filter(|a| a.id == r.id && !std::ptr::eq(*a, *r))
+                .map(|a| json!({ "tier": a.tier, "error": a.reason }))
+                .collect();
+            let mut step = json!({
                 "id": r.id,
                 "step": r.step,
+                "tier": if r.ok { json!(r.tier) } else { Value::Null },
                 "status": r.status,
                 "ms": r.ms,
                 "error": r.reason,
-            })
+            });
+            if !fell_back.is_empty() {
+                step["fellBack"] = json!(fell_back);
+            }
+            step
         })
         .collect();
     let mut response = json!({
@@ -530,28 +749,40 @@ pub fn finish_run(
     if empty {
         response["empty"] = json!(true);
     }
-    if let Some(r) = shape_changed {
-        response["drift"] = json!({ "step": r.step, "reason": r.reason });
+    if let Some(a) = shape_changed {
+        response["drift"] = json!({ "tier": a.tier, "step": a.step, "reason": a.reason });
     }
     response
+}
+
+/// A run that ended on a stop still saw the shapes of the tiers before it:
+/// a changed shape leaves the flow unverified. Returns whether it did.
+pub fn unverify_on_shape_change(flow: &mut Flow, attempts: &[TierResult]) -> bool {
+    let changed = attempts.iter().any(|a| a.shape_changed);
+    if changed {
+        flow.verified_at = None;
+    }
+    changed
 }
 
 /// How a run that did not return data ended.
 #[derive(Debug, PartialEq)]
 pub enum RunOutcome {
-    /// A response that ends the run.
+    /// A response that ends the run, or a request every way of sending was
+    /// refused.
     Stopped {
         stop: Stop,
         step: usize,
+        tier: Tier,
         status: Option<u16>,
         reason: String,
         retry_after: Option<String>,
     },
-    /// The request failed in a way that says the site changed.
+    /// Every tier failed in a way that says the site changed.
     Drift {
         step: usize,
-        reason: String,
-        /// The response no longer has the recorded shape.
+        tried: String,
+        /// A response no longer has the recorded shape.
         shape_changed: bool,
     },
     /// A request failed; `examples` are the recorded param values when the
@@ -565,11 +796,26 @@ pub enum RunOutcome {
 
 impl RunOutcome {
     /// A stop in the results, before anything is judged.
-    pub fn stopped(results: &[RequestResult]) -> Option<RunOutcome> {
-        let (stop, result) = results.iter().rev().find_map(|r| r.stop.map(|s| (s, r)))?;
+    pub fn stopped(results: &[TierResult]) -> Option<RunOutcome> {
+        let (stop, result) = results
+            .iter()
+            .rev()
+            .find_map(|r| r.stop.map(|s| (s, r)))
+            .or_else(|| {
+                denied_everywhere(results).map(|r| {
+                    let stop = results
+                        .iter()
+                        .rev()
+                        .filter(|a| a.id == r.id)
+                        .find_map(|a| a.soft_stop)
+                        .unwrap_or(Stop::CredentialNotSendable);
+                    (stop, r)
+                })
+            })?;
         Some(RunOutcome::Stopped {
             stop,
             step: result.step,
+            tier: result.tier,
             status: result.status,
             reason: result.reason.clone().unwrap_or_default(),
             retry_after: result.retry_after.clone(),
@@ -577,14 +823,31 @@ impl RunOutcome {
     }
 
     /// Why a run that finished without data failed.
-    pub fn failed(results: &[RequestResult], flow: &Flow) -> RunOutcome {
-        let failure = results.iter().rev().find(|r| !r.ok);
+    pub fn failed(results: &[TierResult], flow: &Flow) -> RunOutcome {
+        // A skipped tier was never tried, so the last real failure is the one to report.
+        let failure = results
+            .iter()
+            .rev()
+            .find(|r| !r.ok && !r.skipped)
+            .or_else(|| results.iter().rev().find(|r| !r.ok));
         let step = failure.map(|r| r.step).unwrap_or(0);
-        if let Some(r) = results.iter().find(|r| r.step == step && r.drift) {
+        // Only the failing request's own attempts say what went wrong.
+        let own = |r: &&TierResult| failure.is_some_and(|f| r.id == f.id);
+        if results.iter().filter(own).any(|r| r.drift && !r.skipped) {
+            let tried = results
+                .iter()
+                .filter(own)
+                .map(|r| format!("{}: {}", r.tier.name(), r.reason.as_deref().unwrap_or("ok")))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let shape_changed = results
+                .iter()
+                .filter(own)
+                .any(|r| r.drift && r.shape_changed);
             return RunOutcome::Drift {
                 step,
-                reason: r.reason.clone().unwrap_or_default(),
-                shape_changed: r.shape_changed,
+                tried,
+                shape_changed,
             };
         }
         let examples = flow
@@ -605,6 +868,7 @@ impl RunOutcome {
             RunOutcome::Stopped {
                 stop,
                 step,
+                tier,
                 reason,
                 retry_after,
                 ..
@@ -614,10 +878,11 @@ impl RunOutcome {
                     .map(|w| format!("; retry after {}", w))
                     .unwrap_or_default();
                 format!(
-                    "{}: flow '{}' step {}: {}{}. {}",
+                    "{}: flow '{}' step {} ({}): {}{}. {}",
                     stop.code(),
                     name,
                     step,
+                    tier.name(),
                     reason,
                     wait,
                     stop.advice()
@@ -625,15 +890,15 @@ impl RunOutcome {
             }
             RunOutcome::Drift {
                 step,
-                reason,
+                tried,
                 shape_changed: true,
             } => format!(
-                "drifted: flow '{}' step {}: {}. The flow is now marked unverified; use the page for this task and save the flow again",
-                name, step, reason
+                "drifted: flow '{}' step {} ({}). The flow is now marked unverified; use the page for this task and save the flow again",
+                name, step, tried
             ),
-            RunOutcome::Drift { step, reason, .. } => format!(
-                "flow '{}' failed at step {}: {}. The flow is now marked unverified; drive the browser for this task instead",
-                name, step, reason
+            RunOutcome::Drift { step, tried, .. } => format!(
+                "flow '{}' failed at step {} ({}). The flow is now marked unverified; drive the browser for this task instead",
+                name, step, tried
             ),
             RunOutcome::Failed {
                 step,

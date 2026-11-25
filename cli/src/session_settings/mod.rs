@@ -7,6 +7,7 @@
 //! its environment.
 
 // Accessors the tests use have no non-test caller yet.
+mod attach;
 #[allow(dead_code)]
 mod patch;
 mod plan;
@@ -17,14 +18,16 @@ mod seed;
 mod spec;
 mod store;
 
-pub use patch::{Patch, Requested};
-pub use proxy::parse_proxy;
+pub use attach::{Engine, Transition};
+pub use patch::{effective_targets, Patch, Requested};
+pub use plan::Change;
+pub use proxy::{parse_proxy, ParsedProxy};
 #[cfg(test)]
 pub use running::resolve_idle_timeout;
 pub use running::SecurityView;
 pub use running::{named, Connection, IdleTimeout, Running, DEFAULT_IDLE_TIMEOUT_MS};
 #[allow(unused_imports)]
-pub use spec::{spec, spec_by_name, Effect, Key, Persist, Shape, Spec, SPECS};
+pub use spec::{spec, spec_by_name, Effect, Key, Persist, Shape, Spec, RESTORE_UNIT, SPECS};
 pub use store::{clear_file, is_refusal, orphan_sessions, FsStore, Store};
 #[cfg(test)]
 pub use store::{MemStore, StoreError};
