@@ -1,0 +1,17 @@
+/* The Vercel pointer (see vercel-cursor.tsx): Geist ink, a crisp 1px light edge,
+   mitered corners. Shared by the hero and the use-case cards. */
+.ab-vercel-arrow { display: block; overflow: visible; }
+.ab-vercel-arrow-edge {
+  fill: var(--ds-background-100, #fff);
+  stroke: var(--ds-background-100, #fff);
+  stroke-width: 2;
+  stroke-linejoin: miter;
+  stroke-miterlimit: 10;
+}
+.ab-vercel-arrow-fill { fill: var(--ds-gray-1000, #171717); }
+
+/* In the cards: the kit's pointer glyph draws this arrow instead of its own,
+   so the kit still moves, presses and crossfades it (to the I-beam over text).
+   The kit's glyph box puts its hotspot at (4, 3); our tip is (3, 3). */
+.ss-cursor__glyph[data-glyph='pointer'] > .ss-cursor__arrow { display: none; }
+.ss-cursor__glyph[data-glyph='pointer'] > .ab-vercel-arrow { margin-left: 1px; }

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getPageTitle, renderOgImage } from "../og-image";
+import { getPageTitle } from "@/lib/page-titles";
+import { renderLabsOg } from "../labs-og";
 
 export async function GET(
   _request: Request,
@@ -12,5 +13,5 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  return renderOgImage(title);
+  return renderLabsOg({ product: "agent-browser", title });
 }

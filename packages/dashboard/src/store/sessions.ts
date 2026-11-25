@@ -261,9 +261,7 @@ export function useSessionsSync(pollInterval = 5000) {
                 if (tabsResp?.ok) {
                   const tabs = await tabsResp.json();
                   if (signal.aborted) return;
-                  if (tabs.length > 0) {
-                    set(tabCacheAtom, (prev) => ({ ...prev, [s.port]: tabs }));
-                  }
+                  set(tabCacheAtom, (prev) => ({ ...prev, [s.port]: tabs }));
                 }
               } catch {
                 // Session unreachable
