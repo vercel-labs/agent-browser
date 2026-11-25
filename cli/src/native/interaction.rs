@@ -324,7 +324,7 @@ pub async fn type_text_into_active_context(
 }
 
 pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Result<bool, String> {
-    press_key_with_modifiers(client, session_id, key, None).await
+    press_key_with_modifiers(client, session_id, key, None, false).await
 }
 
 /// Dispatch a keyDown+keyUp sequence for `key` with an optional CDP modifier bitmask.
@@ -336,12 +336,15 @@ pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Resul
 /// Ctrl elsewhere) must choose the value themselves -- see `cfg!(target_os)`.
 ///
 /// Returns true if a JavaScript dialog opened during the sequence; the
-/// remaining key event is then skipped since the page is blocked.
+/// remaining key event is then skipped since the page is blocked. With
+/// `auto_dialog`, alert/beforeunload dialogs are accepted in the background,
+/// so the sequence waits for them and still sends keyUp.
 pub async fn press_key_with_modifiers(
     client: &CdpClient,
     session_id: &str,
     key: &str,
     modifiers: Option<i32>,
+    auto_dialog: bool,
 ) -> Result<bool, String> {
     let (key_name, code, key_code) = named_key_info(key);
 
@@ -363,7 +366,7 @@ pub async fn press_key_with_modifiers(
         windows_virtual_key_code: Some(key_code),
         modifiers,
     };
-    if dispatch_key_or_dialog(client, session_id, &key_down).await? {
+    if dispatch_key_or_dialog(client, session_id, auto_dialog, &key_down).await? {
         return Ok(true);
     }
 
@@ -376,7 +379,7 @@ pub async fn press_key_with_modifiers(
         windows_virtual_key_code: Some(key_code),
         modifiers,
     };
-    dispatch_key_or_dialog(client, session_id, &key_up).await
+    dispatch_key_or_dialog(client, session_id, auto_dialog, &key_up).await
 }
 
 pub async fn scroll(
@@ -1090,33 +1093,49 @@ async fn dispatch_mouse_or_dialog(
         "Input.dispatchMouseEvent",
         session_id,
         accept_sessions,
+        &[],
         params,
     )
     .await
 }
 
+/// Dialog types the daemon accepts on its own when auto-dialog is on.
+const AUTO_HANDLED_DIALOGS: &[&str] = &["alert", "beforeunload"];
+
 /// Key-event counterpart of `dispatch_mouse_or_dialog`: a key press that opens
-/// a confirm/prompt blocks the renderer just like a click does.
+/// a confirm/prompt blocks the renderer just like a click does. When
+/// `auto_dialog` is on, an alert/beforeunload is accepted in the background,
+/// so the ack still arrives and we keep waiting for it.
 async fn dispatch_key_or_dialog(
     client: &CdpClient,
     session_id: &str,
+    auto_dialog: bool,
     params: &DispatchKeyEventParams,
 ) -> Result<bool, String> {
+    let wait_through = if auto_dialog {
+        AUTO_HANDLED_DIALOGS
+    } else {
+        &[]
+    };
     dispatch_input_or_dialog(
         client,
         "Input.dispatchKeyEvent",
         session_id,
         &[session_id],
+        wait_through,
         params,
     )
     .await
 }
 
+/// `wait_through` lists dialog types that do not abort the wait because
+/// something else resolves them, after which the ack arrives as usual.
 async fn dispatch_input_or_dialog<P: serde::Serialize>(
     client: &CdpClient,
     method: &str,
     session_id: &str,
     accept_sessions: &[&str],
+    wait_through: &[&str],
     params: &P,
 ) -> Result<bool, String> {
     use tokio::sync::broadcast::error::RecvError;
@@ -1142,7 +1161,9 @@ async fn dispatch_input_or_dialog<P: serde::Serialize>(
                             Some(sid) => accept_sessions.contains(&sid),
                             None => true,
                         };
-                        if ours {
+                        let dialog_type =
+                            e.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        if ours && !wait_through.contains(&dialog_type) {
                             return Ok(true);
                         }
                         continue;
@@ -1567,7 +1588,7 @@ mod tests {
         let client = CdpClient::connect(&url).await.unwrap();
         let opened = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            press_key_with_modifiers(&client, "page", "Enter", None),
+            press_key_with_modifiers(&client, "page", "Enter", None, true),
         )
         .await
         .expect("press must not wait for the key ack while a dialog is open")
@@ -1577,6 +1598,53 @@ mod tests {
         client.close().await;
         let key_events = server.await.unwrap();
         assert_eq!(key_events, ["keyDown"]);
+    }
+
+    /// An alert opened by keyDown is auto-accepted by the daemon, so the key
+    /// ack still arrives: press must wait for it and send keyUp, as before.
+    #[tokio::test]
+    async fn press_key_sends_key_up_after_auto_accepted_alert() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut key_events = Vec::new();
+            while let Some(Ok(message)) = ws.next().await {
+                if !message.is_text() {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                let event_type = request["params"]["type"].as_str().unwrap().to_string();
+                if event_type == "keyDown" {
+                    // The alert blocks the ack until the background handler accepts it.
+                    let event = r#"{"method":"Page.javascriptDialogOpening","params":{"type":"alert","message":"Saved"},"sessionId":"page"}"#;
+                    ws.send(Message::Text(event.into())).await.unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                key_events.push(event_type);
+                let ack = serde_json::json!({ "id": request["id"], "result": {} }).to_string();
+                ws.send(Message::Text(ack.into())).await.unwrap();
+            }
+            key_events
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let opened = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            press_key_with_modifiers(&client, "page", "Enter", None, true),
+        )
+        .await
+        .expect("press must finish once the alert is accepted")
+        .unwrap();
+        assert!(!opened);
+
+        client.close().await;
+        let key_events = server.await.unwrap();
+        assert_eq!(key_events, ["keyDown", "keyUp"]);
     }
 
     #[test]

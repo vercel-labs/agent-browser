@@ -7376,9 +7376,14 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     // Parse modifier+key chords like "Control+a", "Shift+Enter", "Control+Shift+a"
     let (actual_key, modifiers) = parse_key_chord(key);
 
-    let dialog_opened =
-        interaction::press_key_with_modifiers(&mgr.client, &session_id, &actual_key, modifiers)
-            .await?;
+    let dialog_opened = interaction::press_key_with_modifiers(
+        &mgr.client,
+        &session_id,
+        &actual_key,
+        modifiers,
+        state.auto_dialog,
+    )
+    .await?;
     if dialog_opened {
         return Ok(json!({ "pressed": key, "dialogOpened": true }));
     }
@@ -10125,13 +10130,25 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
             Ok(json!({ "written": text }))
         }
         "copy" => {
-            interaction::press_key_with_modifiers(&mgr.client, &session_id, "c", Some(modifier))
-                .await?;
+            interaction::press_key_with_modifiers(
+                &mgr.client,
+                &session_id,
+                "c",
+                Some(modifier),
+                state.auto_dialog,
+            )
+            .await?;
             Ok(json!({ "copied": true }))
         }
         "paste" => {
-            interaction::press_key_with_modifiers(&mgr.client, &session_id, "v", Some(modifier))
-                .await?;
+            interaction::press_key_with_modifiers(
+                &mgr.client,
+                &session_id,
+                "v",
+                Some(modifier),
+                state.auto_dialog,
+            )
+            .await?;
             Ok(json!({ "pasted": true }))
         }
         _ => {
