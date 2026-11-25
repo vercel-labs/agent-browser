@@ -302,8 +302,8 @@ fn origins_from_targets(
 }
 
 /// Create a temporary CDP target, navigate it to each origin to collect localStorage,
-/// then close it. Uses private Fetch interception to serve blank HTML instead of
-/// making real network requests.
+/// then close it. Uses private Fetch interception and service worker bypass to serve
+/// blank HTML instead of making real network requests.
 async fn collect_storage_via_temp_target(
     client: &CdpClient,
     origins: &[String],
@@ -313,8 +313,38 @@ async fn collect_storage_via_temp_target(
     let target_id = create_result.target_id;
     let _target_guard = StorageTargetGuard::register(target_id.clone());
 
-    let result = collect_storage_in_target(client, &target_id, origins, origin_js).await;
+    let attach_result: Result<AttachToTargetResult, String> = client
+        .send_command_typed(
+            "Target.attachToTarget",
+            &AttachToTargetParams {
+                target_id: target_id.clone(),
+                flatten: true,
+            },
+            None,
+        )
+        .await;
 
+    let (result, attached_session) = match attach_result {
+        Ok(attach) => {
+            let temp_session = attach.session_id;
+            let session_guard = StorageSessionGuard::register(temp_session.clone());
+            let mut event_rx = client.subscribe_session(&temp_session);
+            let res = collect_storage_in_session(
+                client,
+                &temp_session,
+                &mut event_rx,
+                origins,
+                origin_js,
+            )
+            .await;
+            (res, Some((temp_session, session_guard, event_rx)))
+        }
+        Err(err) => (Err(err), None),
+    };
+
+    // Keep `_session_guard` and the private session subscription alive across
+    // `Target.closeTarget` so a late `Fetch.requestPaused` cannot fall through
+    // to the shared handler while the target shuts down.
     let _ = client
         .send_command_typed::<_, Value>(
             "Target.closeTarget",
@@ -323,24 +353,30 @@ async fn collect_storage_via_temp_target(
         )
         .await;
 
+    if let Some((temp_session, _session_guard, _event_rx)) = attached_session {
+        client.unsubscribe_session(&temp_session);
+    }
+
     result
 }
 
+/// Answer a paused request on the scratch session. Returns `true` when a
+/// `Document` request was fulfilled with the blank HTML stub.
 async fn handle_storage_fetch_paused(
     client: &CdpClient,
     temp_session: &str,
     params: &Value,
     blank_html_b64: &str,
-) {
+) -> bool {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
-        return;
+        return false;
     };
     let resource_type = params
         .get("resourceType")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if resource_type == "Document" {
-        let _ = client
+        let ok = client
             .send_command(
                 "Fetch.fulfillRequest",
                 Some(json!({
@@ -353,7 +389,9 @@ async fn handle_storage_fetch_paused(
                 })),
                 Some(temp_session),
             )
-            .await;
+            .await
+            .is_ok();
+        ok
     } else {
         let _ = client
             .send_command(
@@ -365,132 +403,146 @@ async fn handle_storage_fetch_paused(
                 Some(temp_session),
             )
             .await;
+        false
     }
 }
 
-async fn collect_storage_in_target(
+async fn collect_storage_in_session(
     client: &CdpClient,
-    target_id: &str,
+    temp_session: &str,
+    event_rx: &mut tokio::sync::mpsc::Receiver<super::cdp::types::CdpEvent>,
     origins: &[String],
     origin_js: &str,
 ) -> Result<Vec<OriginStorage>, String> {
-    let attach_result: AttachToTargetResult = client
-        .send_command_typed(
-            "Target.attachToTarget",
-            &AttachToTargetParams {
-                target_id: target_id.to_string(),
-                flatten: true,
-            },
-            None,
+    client
+        .send_command_no_params("Page.enable", Some(temp_session))
+        .await?;
+    client
+        .send_command_no_params("Runtime.enable", Some(temp_session))
+        .await?;
+    client
+        .send_command_no_params("Network.enable", Some(temp_session))
+        .await?;
+    client
+        .send_command(
+            "Network.setBypassServiceWorker",
+            Some(json!({ "bypass": true })),
+            Some(temp_session),
         )
         .await?;
 
-    let temp_session = attach_result.session_id;
-    let _session_guard = StorageSessionGuard::register(temp_session.clone());
-    let mut event_rx = client.subscribe_session(&temp_session);
+    let blank_html_b64 = base64::engine::general_purpose::STANDARD.encode("<html></html>");
 
-    let outcome = async {
-        client
-            .send_command_no_params("Page.enable", Some(&temp_session))
-            .await?;
-        client
-            .send_command_no_params("Runtime.enable", Some(&temp_session))
-            .await?;
+    client
+        .send_command(
+            "Fetch.enable",
+            Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
+            Some(temp_session),
+        )
+        .await?;
 
-        let blank_html_b64 = base64::engine::general_purpose::STANDARD.encode("<html></html>");
+    let mut results = Vec::new();
 
-        client
-            .send_command(
-                "Fetch.enable",
-                Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
-                Some(&temp_session),
-            )
-            .await?;
+    for target_origin in origins {
+        // Drain any stale events (e.g. delayed loadEventFired from about:blank
+        // or the previous origin) before starting the next navigation.
+        while event_rx.try_recv().is_ok() {}
 
-        let mut results = Vec::new();
+        let nav_url = format!("{}/", target_origin.trim_end_matches('/'));
+        let nav_fut = client.send_command(
+            "Page.navigate",
+            Some(json!({ "url": nav_url })),
+            Some(temp_session),
+        );
+        tokio::pin!(nav_fut);
 
-        for target_origin in origins {
-            let nav_url = format!("{}/", target_origin.trim_end_matches('/'));
-            let nav_fut = client.send_command(
-                "Page.navigate",
-                Some(json!({ "url": nav_url })),
-                Some(&temp_session),
-            );
-            tokio::pin!(nav_fut);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let mut nav_done = false;
+        let mut nav_error: Option<String> = None;
+        let mut document_fulfilled = false;
+        let mut page_loaded = false;
 
-            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-            let mut nav_done = false;
-            let mut nav_failed = false;
-            let mut page_loaded = false;
-
-            while tokio::time::Instant::now() < deadline {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                if !nav_done {
-                    tokio::select! {
-                        res = &mut nav_fut => {
-                            nav_done = true;
-                            if res.is_err() {
-                                nav_failed = true;
-                                break;
-                            }
-                            if page_loaded {
-                                break;
-                            }
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if !nav_done {
+                tokio::select! {
+                    res = &mut nav_fut => {
+                        nav_done = true;
+                        if let Err(err) = res {
+                            nav_error = Some(err);
+                            break;
                         }
-                        evt = tokio::time::timeout(remaining, event_rx.recv()) => {
-                            match evt {
-                                Ok(Some(evt)) if evt.method == "Fetch.requestPaused" => {
-                                    handle_storage_fetch_paused(client, &temp_session, &evt.params, &blank_html_b64).await;
-                                }
-                                Ok(Some(evt)) if evt.method == "Page.loadEventFired" => {
-                                    page_loaded = true;
-                                }
-                                Ok(Some(_)) => {}
-                                Ok(None) | Err(_) => break,
-                            }
+                        if page_loaded {
+                            break;
                         }
                     }
-                } else {
-                    match tokio::time::timeout(remaining, event_rx.recv()).await {
-                        Ok(Some(evt)) if evt.method == "Fetch.requestPaused" => {
-                            handle_storage_fetch_paused(
-                                client,
-                                &temp_session,
-                                &evt.params,
-                                &blank_html_b64,
-                            )
-                            .await;
+                    evt = tokio::time::timeout(remaining, event_rx.recv()) => {
+                        match evt {
+                            Ok(Some(evt)) if evt.method == "Fetch.requestPaused" => {
+                                if handle_storage_fetch_paused(client, temp_session, &evt.params, &blank_html_b64).await {
+                                    document_fulfilled = true;
+                                }
+                            }
+                            Ok(Some(evt)) if evt.method == "Page.loadEventFired" => {
+                                if document_fulfilled {
+                                    page_loaded = true;
+                                }
+                            }
+                            Ok(Some(_)) => {}
+                            Ok(None) | Err(_) => break,
                         }
-                        Ok(Some(evt)) if evt.method == "Page.loadEventFired" => {
+                    }
+                }
+            } else {
+                match tokio::time::timeout(remaining, event_rx.recv()).await {
+                    Ok(Some(evt)) if evt.method == "Fetch.requestPaused" => {
+                        if handle_storage_fetch_paused(
+                            client,
+                            temp_session,
+                            &evt.params,
+                            &blank_html_b64,
+                        )
+                        .await
+                        {
+                            document_fulfilled = true;
+                        }
+                    }
+                    Ok(Some(evt)) if evt.method == "Page.loadEventFired" => {
+                        if document_fulfilled {
                             page_loaded = true;
                             break;
                         }
-                        Ok(Some(_)) => {}
-                        Ok(None) | Err(_) => break,
                     }
-                }
-            }
-
-            if nav_failed || !page_loaded {
-                continue;
-            }
-
-            if let Ok(Some(storage)) = eval_origin_storage(client, &temp_session, origin_js).await {
-                if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
-                    results.push(storage);
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => break,
                 }
             }
         }
 
-        Ok(results)
-    }
-    .await;
+        if let Some(err) = nav_error {
+            return Err(format!(
+                "Failed to navigate temporary storage target to {}: {}",
+                target_origin, err
+            ));
+        }
+        if !page_loaded {
+            return Err(format!(
+                "Timed out loading {} in temporary storage target",
+                target_origin
+            ));
+        }
 
-    client.unsubscribe_session(&temp_session);
-    outcome
+        if let Some(storage) = eval_origin_storage(client, temp_session, origin_js).await? {
+            if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
+                results.push(storage);
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 /// Page function that collects the current origin's localStorage and sessionStorage.
@@ -1613,5 +1665,206 @@ mod tests {
         assert_eq!(shown["cookieCount"], 2);
         assert_eq!(shown["originCount"], 1);
         assert_eq!(shown["filename"], "demo-default.json");
+    }
+
+    #[tokio::test]
+    async fn test_collect_storage_bypasses_sw_ignores_stale_load_keeps_guard_and_propagates_errors()
+    {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // 1. Stale Page.loadEventFired before Fetch.requestPaused is ignored,
+        //    Network.setBypassServiceWorker is enabled, and STORAGE_SESSIONS
+        //    still holds the scratch session during Target.closeTarget.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+        let observed =
+            std::sync::Arc::new(std::sync::Mutex::new((Vec::<String>::new(), false, false)));
+        let obs_srv = std::sync::Arc::clone(&observed);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let id = cmd["id"].clone();
+                let method = cmd["method"].as_str().unwrap_or("").to_string();
+                obs_srv.lock().unwrap().0.push(method.clone());
+                match method.as_str() {
+                    "Target.createTarget" => {
+                        ws.send(Message::Text(
+                            json!({ "id": id, "result": { "targetId": "T-SW" } }).to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    "Target.attachToTarget" => {
+                        ws.send(Message::Text(
+                            json!({ "id": id, "result": { "sessionId": "S-SW" } }).to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    "Page.navigate" => {
+                        // Send a stale loadEventFired BEFORE Fetch.requestPaused.
+                        ws.send(Message::Text(
+                            json!({ "method": "Page.loadEventFired", "sessionId": "S-SW", "params": {} }).to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                        ws.send(Message::Text(
+                            json!({
+                                "method": "Fetch.requestPaused",
+                                "sessionId": "S-SW",
+                                "params": { "requestId": "req-1", "resourceType": "Document" }
+                            })
+                            .to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                        ws.send(Message::Text(
+                            json!({ "id": id, "result": { "frameId": "F1" } }).to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    "Fetch.fulfillRequest" => {
+                        obs_srv.lock().unwrap().1 = true;
+                        ws.send(Message::Text(json!({ "id": id, "result": {} }).to_string()))
+                            .await
+                            .unwrap();
+                        ws.send(Message::Text(
+                            json!({ "method": "Page.loadEventFired", "sessionId": "S-SW", "params": {} }).to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    "Runtime.evaluate" => {
+                        ws.send(Message::Text(
+                            json!({
+                                "id": id,
+                                "result": {
+                                    "result": {
+                                        "type": "object",
+                                        "value": {
+                                            "origin": "http://127.0.0.1:9001",
+                                            "localStorage": [{ "name": "k", "value": "v" }],
+                                            "sessionStorage": []
+                                        }
+                                    }
+                                }
+                            })
+                            .to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    "Target.closeTarget" => {
+                        obs_srv.lock().unwrap().2 = owns_storage_session("S-SW");
+                        ws.send(Message::Text(
+                            json!({ "id": id, "result": { "success": true } }).to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    _ => {
+                        ws.send(Message::Text(json!({ "id": id, "result": {} }).to_string()))
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        });
+
+        let client = CdpClient::connect(&ws_url).await.unwrap();
+        let collected = collect_storage_via_temp_target(
+            &client,
+            &["http://127.0.0.1:9001".to_string()],
+            "({})",
+        )
+        .await
+        .expect("collection should succeed after ignoring stale loadEventFired");
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].local_storage[0].value, "v");
+        let (methods, fulfilled, guard_alive_during_close) = observed.lock().unwrap().clone();
+        assert!(
+            fulfilled,
+            "document must be fulfilled before load completes"
+        );
+        assert!(
+            guard_alive_during_close,
+            "session guard must stay registered across Target.closeTarget"
+        );
+        let sw_idx = methods
+            .iter()
+            .position(|m| m == "Network.setBypassServiceWorker")
+            .expect("Network.setBypassServiceWorker should be called");
+        let fetch_idx = methods
+            .iter()
+            .position(|m| m == "Fetch.enable")
+            .expect("Fetch.enable should be called");
+        assert!(sw_idx < fetch_idx, "SW bypass must precede Fetch.enable");
+        assert!(!owns_storage_session("S-SW"));
+        drop(client);
+        server.abort();
+
+        // 2. Per-origin navigation failure propagates so an existing state file stays intact.
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url2 = format!("ws://{}", listener2.local_addr().unwrap());
+        let server2 = tokio::spawn(async move {
+            let (stream, _) = listener2.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let id = cmd["id"].clone();
+                let method = cmd["method"].as_str().unwrap_or("");
+                let reply = match method {
+                    "Network.getAllCookies" => json!({ "id": id, "result": { "cookies": [] } }),
+                    "Target.createTarget" => json!({ "id": id, "result": { "targetId": "T-ERR" } }),
+                    "Target.attachToTarget" => {
+                        json!({ "id": id, "result": { "sessionId": "S-ERR" } })
+                    }
+                    "Page.navigate" => json!({
+                        "id": id,
+                        "error": { "code": -32000, "message": "Cannot navigate to invalid URL" }
+                    }),
+                    "Runtime.evaluate" => json!({
+                        "id": id,
+                        "result": {
+                            "result": {
+                                "type": "object",
+                                "value": { "origin": "http://127.0.0.1:9000", "localStorage": [], "sessionStorage": [] }
+                            }
+                        }
+                    }),
+                    _ => json!({ "id": id, "result": {} }),
+                };
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
+            }
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_file = tmp.path().join("keep.json");
+        let original = r#"{"cookies":[],"origins":[{"origin":"http://127.0.0.1:9002","localStorage":[{"name":"keep","value":"1"}]}]}"#;
+        fs::write(&state_file, original).unwrap();
+
+        let client2 = CdpClient::connect(&ws_url2).await.unwrap();
+        let visited = HashSet::from(["http://127.0.0.1:9002".to_string()]);
+        let err = save_state(
+            &client2,
+            "S-TOP",
+            Some(state_file.to_str().unwrap()),
+            Some("keep"),
+            "s1",
+            &visited,
+            &TargetOriginScope::default(),
+        )
+        .await;
+        assert!(
+            err.is_err(),
+            "per-origin navigation failure must return Err"
+        );
+        assert_eq!(fs::read_to_string(&state_file).unwrap(), original);
+        drop(client2);
+        server2.abort();
     }
 }
