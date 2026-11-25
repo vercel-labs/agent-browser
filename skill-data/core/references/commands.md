@@ -2,7 +2,7 @@
 
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md. Unknown commands exit with status 1, including when you request command help.
 
-These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`. Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently.
+These commands reject unknown flags and use the same `--` boundary. Navigation: `open`, `goto`, `navigate`, `back`, `forward`, `reload`, `pushstate`. Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `drag`, `scroll`, `scrollintoview`, `tap`. Capture and files: `screenshot`, `pdf`, `download`, `record start|restart`. Inspection and state: `snapshot`, `frame`, `highlight`, `console`, `errors`, `trace start|stop`, `profiler start|stop`, `state save|load|list|clear|show|clean`, `network`, `flow steps|list`, `react`, `vitals`, `close`, `inspect`. Operands of `select`, `upload`, `press`, `keydown`, `keyup`, `keyboard`, `set`, `clipboard`, `auth`, `webmcp`, `dialog`, `tab`, `skills` and `plugin` also follow a leading `--`; a lone `--` stays an operand. Put flags before `--`; values after `--` are positional. Commands that accept negative numbers take them directly. Other commands may validate options differently.
 
 ## Linux dependencies
 
@@ -89,8 +89,8 @@ agent-browser click @e1 --modifiers control,shift  # Hold keys during the click
 agent-browser dblclick @e1        # Double-click
 agent-browser dblclick @e1 --modifiers shift  # Double-click with Shift held
 agent-browser focus @e1           # Focus element
-agent-browser fill @e2 "text"     # Clear and fill
-agent-browser type @e2 "text"     # Type without clearing
+agent-browser fill @e2 "text"     # Clear and fill (date/time/color/range set directly, color takes any CSS color; errors if readonly, disabled or not text)
+agent-browser type @e2 "text"     # Type without clearing (--clear on a readonly field is an error)
 agent-browser press Enter         # Press key (alias: key)
 agent-browser press Control+a     # Key combination
 agent-browser keydown Shift       # Hold key down
@@ -98,22 +98,38 @@ agent-browser keyup Shift         # Release key
 agent-browser hover @e1           # Hover
 agent-browser check @e1           # Check checkbox
 agent-browser uncheck @e1         # Uncheck checkbox
-agent-browser select @e1 "value"  # Select by value or visible label
+agent-browser select @e1 "value"  # Select by visible label or value; an ambiguous string is an error, use --by value|label
 agent-browser select @e1 "a" "b"  # Select multiple options
 # On a custom ARIA combobox/listbox (Radix, Headless UI), select opens it and clicks the
-# role=option whose name or value matches; no match errors with the available options,
+# role=option whose name or value matches; no match errors, with the options in data.options (page content),
 # and a matched aria-disabled option errors instead of being clicked.
 agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
-agent-browser upload @e1 file.pdf # Upload files
+agent-browser upload @e1 file.pdf # Upload files (relative to cwd; errors: file_not_found, not_file_input)
 ```
 
+On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.
+
+Firefox cancels an HTTP auth challenge that the session has no credentials for, so the page loads the server's 401 response instead of waiting on a browser prompt. Run `set credentials` before you open the page.
+
+Pointer commands inside an iframe that has a CSS transform can miss their target.
+
+`type` focuses the element without clearing its current value. Printable characters are inserted as text; Enter, Tab, and line breaks use key events. Use `fill` to replace the current value.
+
+On Firefox, `fill`, `type`, `check`, `uncheck`, and `select` run the same prechecks, refusal codes, and warnings as Chrome, and `select --by value|label` restricts matching. `check` and `uncheck` target the checkbox control itself rather than its label or wrapper, refuse covered checkboxes, and use a DOM click for hidden native checkboxes. `fill` and `type` return `dialogOpened: true` when interrupted by a page dialog.
+
+`upload` fails with `file_not_found` when a path does not exist and with `not_file_input` when the target is not a file input; relative paths resolve against the current directory. `diff snapshot` compares against the last snapshot taken on the tab with that snapshot's options, failing with `no_baseline` when there is none and `baseline_mismatch` when a named option differs.
+
 For `fill` and `type`, put options before the optional `--` marker. Text after the marker is literal, including values that look like flags. For example, `agent-browser fill @e2 -- --json` fills with `--json`, and `agent-browser type @e2 --clear --delay 10 -- --clear` clears the field, then types `--clear`. MCP `agent_browser_fill` and `agent_browser_type` pass typed `text` values literally, so they do not need the marker.
+
+MCP tools pass typed values literally where they are emitted as positionals (`fill` and `type` text, `select` values, `press` and `keyboard` text, `auth save` and `auth login` names and credential values, `webmcp invoke` tool names, `webmcp result` invocation ids, `plugin run` names and request types, and the other covered commands; `frameId` for `webmcp invoke` is still refused when it starts with `-`). In every other free-form field (for example storage, cookie, credential and wait values, and option values), MCP refuses a value that equals a global CLI token or has the form `--<global>=...`, such as `-v`, `-q`, `-p`, `--help`, `--session` or `--json=1`, because the CLI could read it as a global flag. Examples: `wait_for_text "--help"`, `storage_set` with value `-v`, `cookies_set` with value `-q`, `set_credentials` with password `-p`, `find` with `action: "fill"` and text `--json`, and `chat "--help"`. There is no workaround for those fields yet; use `agent_browser_fill` for flag-shaped text input. Carrying such values as data in every field is a planned follow-up.
 
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
+
+A click or dblclick result includes `dialogOpened: true` when a page dialog interrupts the action. On Firefox, this also applies to `tap` and `drag`; an interrupted drag returns `dragged: false`, and with `--no-auto-dialog` a `dblclick` whose first click opens a dialog delivers the second click after the dialog closes. Resolve the dialog before sending the next page action.
 
 `--button` presses `left` (default), `right`, `middle`, `back`, or `forward`; a right click fires the page's `contextmenu` event and a middle click fires `auxclick`. `--modifiers` holds `alt`, `control` (alias `ctrl`), `meta` (aliases `cmd`, `command`), and `shift` during the click, joined by a comma or a plus, such as `control,shift`. Flags go before or after the selector, unknown flags are rejected, and `--new-tab` cannot be combined with `--button` or `--modifiers`. `dblclick` takes `--button`, `--modifiers`, and `--human`, follows the session input mode, and sends two full clicks, so the page receives `click`, `click`, `dblclick`. On macOS, `control` click opens the context menu, so use `meta` for a click that opens a link in a new tab; on Windows and Linux that key is `control`.
 
@@ -230,6 +246,8 @@ agent-browser find last ".item" click
 agent-browser find nth 2 "a" hover
 ```
 
+An action policy or `--confirm-actions` rule for `click`, `fill`, `check`, `hover`, or `gettext` also applies to the `find` action that runs it (`text` counts as `gettext`).
+
 ## Browser Settings
 
 ```bash
@@ -247,6 +265,8 @@ agent-browser set media dark                  # Emulate color scheme
 agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```
 
+Firefox does not support mobile viewport mode, `set device`, or `reduced-motion` media emulation. Use `set viewport` plus the `--user-agent` launch flag (or `AGENT_BROWSER_USER_AGENT`) instead of `set device`.
+
 Viewport scales and geolocation coordinates must be finite numbers.
 
 `set geo` sets coordinates only. Grant `geolocation` with `set permissions geolocation` so `navigator.geolocation.getCurrentPosition` is not denied in headless Chrome. The same pairing applies to clipboard APIs (`clipboard-read`). Names accept kebab aliases and CDP names. CLI to CDP: `camera` to `videoCapture`, `microphone` to `audioCapture`, `clipboard-read` to `clipboardReadWrite`, `clipboard-write` to `clipboardSanitizedWrite`, `midi-sysex` to `midiSysex`, `background-sync` to `backgroundSync`, `idle-detection` to `idleDetection`, `persistent-storage` to `durableStorage`, `payment-handler` to `paymentHandler`, `window-management` to `windowManagement`. Identity names: `geolocation`, `notifications`, `midi`, `sensors`. `agent-browser set --help` lists the same aliases. Optional `--origin <url>` scopes the grant; omit it to grant for the whole browser context.
@@ -254,7 +274,7 @@ Viewport scales and geolocation coordinates must be finite numbers.
 ## Cookies and Storage
 
 ```bash
-agent-browser cookies                     # Get all cookies
+agent-browser cookies                     # Get cookies (Firefox defaults to active page and frames)
 agent-browser cookies set name value      # Set cookie
 agent-browser cookies clear               # Clear cookies
 agent-browser storage local               # Get all localStorage
@@ -289,6 +309,8 @@ agent-browser network har stop [output.har]    # Stop and save HAR
 ```
 
 If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
+
+`har stop` fails with `no_har_recording` when no recording is active, for example after a daemon restart (`close` or idle shutdown).
 
 ## Saved flows
 
@@ -363,7 +385,7 @@ agent-browser frame main          # Back to main frame
 
 ### Iframe support
 
-Iframes are detected automatically during snapshots. When the main-frame snapshot runs, `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the output (one level of nesting; iframes within iframes are not expanded).
+Iframes are detected automatically during snapshots. When the snapshot runs, `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the output (nested iframes are expanded up to 4 levels deep).
 
 ```bash
 agent-browser snapshot -i
@@ -375,9 +397,10 @@ agent-browser snapshot -i
 agent-browser fill @e4 "4111111111111111"
 agent-browser click @e5
 
-# Or switch frame context for scoped snapshots
+# Or switch frame context for scoped snapshots and eval
 agent-browser frame @e3               # Switch using element ref
 agent-browser snapshot -i             # Snapshot scoped to that iframe
+agent-browser eval "document.title"   # Runs inside that iframe
 agent-browser frame main              # Return to main frame
 ```
 
@@ -385,6 +408,8 @@ The `frame` command accepts:
 - **Element refs** — `frame @e3` resolves the ref to an iframe element
 - **CSS selectors** — `frame "#payment-iframe"` finds the iframe by selector
 - **Frame name/URL** — matches against the browser's frame tree
+
+While a frame is selected, `eval` runs in that frame's context and reports the frame's own URL as `origin`. `console` and `errors` include messages and uncaught exceptions from cross-origin iframes on the active tab.
 
 ## Dialogs
 
@@ -473,7 +498,7 @@ Clients connect to `ws://127.0.0.1:<port>` and receive `frame`, `status`, `tabs`
 
 ## WebMCP page tools
 
-Experimental. Browser responses announce brief tool summaries (names, short descriptions, origins, and frame IDs) on first discovery and when the catalog changes. Choose a relevant tool, fetch its schema, then invoke it within the user's task. Schemas and annotations are never included proactively. Omission means no update; an empty or unavailable update invalidates earlier tools. Support is enabled by default in managed Chrome; `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP` opts out. See [trust-boundaries.md](trust-boundaries.md#webmcp-tools-are-page-content) for how to treat tool metadata and results.
+Experimental. Browser responses announce a tool list (origins, names, frame IDs, and descriptions) on first discovery and when the catalog changes. The announcement names the top-level page's origin, starts each tool with `[origin <origin>]` when it shares that origin or `[cross-origin <origin>]` when it comes from an embedded frame on another origin, and shows direct `webmcp invoke` examples only for tools from the page's own origin. Before invoking a cross-origin tool, confirm that its origin matches the user's task; its inputs go to that origin. Catalogs of up to four tools show full descriptions; larger ones show up to 16 tools with descriptions shortened to 160 bytes, and the announcement says how many are listed. Choose a relevant tool, fetch its schema when the description does not show the arguments, then invoke it within the user's task. Schemas and annotations are never included proactively. Omission means no update; an empty or unavailable update invalidates earlier tools. Support is enabled by default in managed Chrome; `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP` opts out. See [trust-boundaries.md](trust-boundaries.md#webmcp-tools-are-page-content) for how to treat tool metadata and results.
 
 ```bash
 agent-browser webmcp list <tool> --frame <frame-id> --json   # One tool's schema
@@ -560,7 +585,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`. The typed `relaunch` argument maps to `--relaunch`; `open` and `tab_new` list it in their schema. The typed `button` and `modifiers` arguments on `agent_browser_click` and `agent_browser_dblclick` map to `--button` and `--modifiers`; `agent_browser_dblclick` also accepts `human`.
+Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains`, including Firefox blocking non-HTTP document navigations, and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`. The typed `relaunch` argument maps to `--relaunch`; `open` and `tab_new` list it in their schema. The typed `button` and `modifiers` arguments on `agent_browser_click` and `agent_browser_dblclick` map to `--button` and `--modifiers`; `agent_browser_dblclick` also accepts `human`.
 
 For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__open`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, backed by agent-browser inside the eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship in `@agent-browser/eve/sandbox`.
 
@@ -578,11 +603,12 @@ agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless; on displayless Linux an Xvfb display starts automatically)
 agent-browser --webgpu ...            # Enable WebGPU (SwiftShader software Vulkan on Linux, no GPU needed)
 agent-browser --no-webmcp ...         # Disable default experimental WebMCP Chrome features (or AGENT_BROWSER_NO_WEBMCP env)
-agent-browser --cdp <port|url> ...    # Connect via CDP; root query slash is optional
+agent-browser --cdp <port|url> ...    # CDP or Firefox BiDi; Firefox accepts ?devtools=<port>
 agent-browser --cdp <url> --cdp-headers '{"Authorization":"Bearer <token>"}' ...  # Auth headers for discovery and handshake
-agent-browser --pin-tab ...           # Pin the session to its bound tab (strict tab binding)
+agent-browser --pin-tab ...           # Pin the session to its bound tab (CDP only; Firefox attach rejects it)
 agent-browser --no-pin-tab ...        # Disable a sticky pin previously enabled with --pin-tab
 agent-browser -p <provider> ...       # Browser provider or configured provider plugin
+agent-browser -p ladybird ...         # Ladybird over WebDriver: CSS selectors, no snapshot refs
 agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
@@ -594,7 +620,7 @@ agent-browser --ca-cert <path>        # Trust a CA for CLI requests, and in loca
 agent-browser --no-ca-cert            # Clear CA trust retained by the running session
 agent-browser --use-system-ca         # OS trust store for CLI requests (read, install, upgrade, doctor)
 agent-browser --hide-scrollbars false # Keep native scrollbars visible in headless Chromium screenshots
-agent-browser --engine <name> ...     # chrome (default), lightpanda, obscura (experimental)
+agent-browser --engine <name> ...     # chrome (default), lightpanda, obscura, firefox
 agent-browser --auto-connect ...      # Connect to an already-running Chrome
 agent-browser --no-auto-connect ...   # Return an --auto-connect session to a local launch
 agent-browser --profile <name|path>   # Use a Chrome profile (login state survives)
@@ -608,6 +634,8 @@ agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
 ```
+
+A Firefox agent-browser launches rejects `--auto-connect`, `--provider`, profiles, extensions, `--args`, `--allow-file-access`, `--webgpu`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. An attached Firefox ignores the options that describe a browser agent-browser launches, including extensions and `--webgpu`, and rejects `--pin-tab`, `--allowed-domains`, `--ca-cert`, `--enable`, `--init-script`, and `--capture flow`. Authenticated proxies work through `--proxy` with credentials. Firefox takes `http://`, `socks4://`, and `socks5://` proxies and rejects `https://` proxies instead of connecting to them without TLS.
 
 ## Debugging
 
@@ -628,6 +656,8 @@ agent-browser trace stop trace.json       # Stop and save trace
 agent-browser profiler start              # Start Chrome DevTools profiling
 agent-browser profiler stop trace.json    # Stop and save profile
 ```
+
+`console` and `errors` keep the latest 1,000 entries each, and drop the oldest sooner once either holds about 8 MiB. Text over 64 KiB ends with `...[truncated N bytes]`, and console arguments over 64 KiB are replaced by a note, so a page that logs without pause shows only its latest output.
 
 ## React / Web Vitals
 
@@ -651,7 +681,7 @@ agent-browser pushstate <url>                       # SPA client-side nav (auto-
 
 ## Accessibility audit
 
-Runs an embedded axe-core audit with no CDN fetch. The vendored engine runs private partial audits through CDP across the page's frame tree and merges serialized results without page messaging, so page CSP does not block it, page-provided `window.axe` values remain intact, and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions. Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
+Runs an embedded axe-core audit with no CDN fetch. The vendored engine runs private partial audits through CDP across the page's frame tree and merges serialized results without page messaging, so page CSP does not block it, page-provided `window.axe` values remain intact, and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari, iOS, or Ladybird WebDriver sessions. Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
 
 ```bash
 agent-browser a11y                                  # Audit the current page
@@ -714,3 +744,5 @@ AGENT_BROWSER_PLUGINS='[{"name":"vault","command":"agent-browser-plugin-vault","
 ```
 
 Browser Use Cloud lifecycle: setup is bounded to 18s plus up to 4s for timeout cleanup (10s create, 8s CDP attach, 4s stop). `close` succeeds only after the Cloud session acknowledges it stopped; a failed stop returns an error, keeps the session id for retrying `close`, and blocks a new launch until released. If create fails before an id arrives, the outcome is unknown; inspect the Browser Use Cloud dashboard before retrying. If the daemon exits before a successful stop, inspect and stop the browser in Cloud.
+
+Firefox does not support `--capture flow`.

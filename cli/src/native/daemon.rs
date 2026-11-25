@@ -117,6 +117,12 @@ pub async fn run_daemon(session: &str) {
     let version_path = SessionFile::Version.path_in(&socket_dir, session);
     let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
 
+    let stream_path = SessionFile::Stream.path_in(&socket_dir, session);
+    let _ = fs::remove_file(&stream_path);
+    let _ = fs::remove_file(SessionFile::Engine.path_in(&socket_dir, session));
+    let _ = fs::remove_file(SessionFile::Provider.path_in(&socket_dir, session));
+    let _ = fs::remove_file(SessionFile::Extensions.path_in(&socket_dir, session));
+
     // The pid and version exist now, so the socket may become reachable.
     #[cfg(unix)]
     if let Err(e) = publish_listener(&socket_path) {
@@ -128,12 +134,6 @@ pub async fn run_daemon(session: &str) {
     {
         let _ = fs::remove_file(SessionFile::Port.path_in(&socket_dir, session));
     }
-
-    let stream_path = SessionFile::Stream.path_in(&socket_dir, session);
-    let _ = fs::remove_file(&stream_path);
-    let _ = fs::remove_file(SessionFile::Engine.path_in(&socket_dir, session));
-    let _ = fs::remove_file(SessionFile::Provider.path_in(&socket_dir, session));
-    let _ = fs::remove_file(SessionFile::Extensions.path_in(&socket_dir, session));
 
     if let Ok(days_str) = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
         if let Ok(days) = days_str.parse::<u64>() {
@@ -606,10 +606,11 @@ fn spawn_background_tick_if_idle(
             .browser
             .as_mut()
             .map(|mgr| mgr.has_process_exited())
+            .or_else(|| state.firefox.as_mut().map(|ff| ff.has_exited()))
             .unwrap_or(false);
         if process_exited {
             let _ = close_current_browser(&mut state).await;
-        } else if state.browser.is_some() {
+        } else if state.browser.is_some() || state.firefox.is_some() {
             if let Err(error) = state.drain_cdp_events_background().await {
                 let _ = writeln!(
                     std::io::stderr(),
@@ -618,6 +619,7 @@ fn spawn_background_tick_if_idle(
                 );
             } else {
                 maybe_autosave_restore_state(&mut state, autosave_interval_ms).await;
+                state.sync_firefox_live().await;
             }
         }
     });

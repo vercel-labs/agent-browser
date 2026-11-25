@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use serde_json::{json, Value};
 use std::process::Command;
 use tempfile::TempDir;
@@ -13,6 +15,12 @@ fn mcp_batch_rejects_invalid_commands() {
     .to_string();
     let output = Command::new(env!("CARGO_BIN_EXE_agent-browser"))
         .env_clear()
+        .envs(
+            ["SystemRoot", "windir", "TEMP", "TMP"]
+                .into_iter()
+                .filter(|_| cfg!(windows))
+                .filter_map(|key| std::env::var_os(key).map(|value| (key, value))),
+        )
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
@@ -29,14 +37,14 @@ fn mcp_batch_rejects_invalid_commands() {
     assert!(
         batch["structuredContent"]["response"][0]["error"]
             .as_str()
-            .unwrap()
+            .unwrap_or_else(|| panic!("{batch}"))
             .contains("Unknown subcommand: delete"),
         "{batch}"
     );
     assert!(
         batch["structuredContent"]["response"][1]["error"]
             .as_str()
-            .unwrap()
+            .unwrap_or_else(|| panic!("{batch}"))
             .contains("close --all is only supported outside a batch"),
         "{batch}"
     );

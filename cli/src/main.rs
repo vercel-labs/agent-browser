@@ -45,6 +45,7 @@ use install::run_install;
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
 };
+#[cfg(test)]
 use session_settings::parse_proxy;
 use upgrade::run_upgrade;
 
@@ -280,8 +281,23 @@ fn restore_key_from_flags(flags: &Flags) -> Option<&str> {
     flags.restore.as_deref().or(flags.session_name.as_deref())
 }
 
-fn is_valid_restore_save_policy(policy: &str) -> bool {
-    matches!(policy, "auto" | "always" | "never")
+/// The save policy is checked with or without a restore key, so a bad value
+/// from a flag, env or config never passes silently.
+fn validate_restore_settings(flags: &Flags) -> Result<(), (&'static str, String)> {
+    if let Some(policy) = flags.restore_save.as_deref() {
+        if !matches!(policy, "auto" | "always" | "never") {
+            return Err((
+                "invalid_value",
+                format!(
+                    "Invalid --restore-save value '{}'. Use auto, always, or never.",
+                    policy
+                ),
+            ));
+        }
+    }
+    session_settings::Patch::from_flags(flags)
+        .validate()
+        .map_err(|invalid| (invalid.error_type, invalid.message))
 }
 
 fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
@@ -323,19 +339,6 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
         );
     }
 
-    if cdp && !flags.extensions.is_empty() {
-        return Some("Cannot use --extension with --cdp (extensions require local browser)");
-    }
-
-    // The WebGPU preset is Chrome launch flags; it cannot be applied to a
-    // browser agent-browser did not launch. Rejecting (rather than silently
-    // ignoring) matches the --extension handling above. `--webgpu false`
-    // overrides an env/config-enabled preset for these modes.
-    if flags.webgpu && cdp {
-        return Some(
-            "Cannot use --webgpu with --cdp (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
-        );
-    }
     if flags.webgpu && provider {
         return Some(
             "Cannot use --webgpu with -p/--provider (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
@@ -386,28 +389,6 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     }
 
     None
-}
-
-fn attach_restore_config_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
-    if let Some(restore_key) = restore_key_from_flags(flags) {
-        cmd["restoreKey"] = json!(restore_key);
-        cmd["restoreSave"] = json!(flags.restore_save.as_deref().unwrap_or("auto"));
-        cmd["restoreCheckUrl"] = flags
-            .restore_check_url
-            .as_ref()
-            .map(|check| json!(check))
-            .unwrap_or(serde_json::Value::Null);
-        cmd["restoreCheckText"] = flags
-            .restore_check_text
-            .as_ref()
-            .map(|check| json!(check))
-            .unwrap_or(serde_json::Value::Null);
-        cmd["restoreCheckFn"] = flags
-            .restore_check_fn
-            .as_ref()
-            .map(|check| json!(check))
-            .unwrap_or(serde_json::Value::Null);
-    }
 }
 
 fn mark_restarted_background(resp: &mut Response) {
@@ -1730,6 +1711,8 @@ fn main() {
         clean.first().map(|s| s.as_str()),
         Some("plugin") | Some("plugins")
     ) {
+        let mut clean = clean;
+        commands::strip_operand_marker(&mut clean);
         plugins::run_plugin_command(&clean, &flags.plugins, flags.json);
         return;
     }
@@ -1869,34 +1852,15 @@ fn main() {
     // broadcasts before observers see the command payload.
     attach_plugins_to_command(&mut cmd, &flags.plugins);
 
-    attach_restore_config_to_command(&mut cmd, &flags);
-
-    // Validate restore/session persistence name before starting daemon
-    if let Some(name) = restore_key_from_flags(&flags) {
-        if !validation::is_valid_session_name(name) {
-            let msg = validation::session_name_error(name);
-            if flags.json {
-                print_json_error_with_type(msg, "invalid_session_name");
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
+    // Validate the settings before a daemon starts: a bad restore key or save
+    // policy must not leave one behind.
+    if let Err((error_type, message)) = validate_restore_settings(&flags) {
+        if flags.json {
+            print_json_error_with_type(message, error_type);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), message);
         }
-    }
-
-    if let Some(ref policy) = flags.restore_save {
-        if !is_valid_restore_save_policy(policy) {
-            let msg = format!(
-                "Invalid --restore-save value '{}'. Use auto, always, or never.",
-                policy
-            );
-            if flags.json {
-                print_json_error_with_type(msg, "invalid_value");
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
-        }
+        exit(1);
     }
 
     // Handle state management commands locally — these are pure file operations
@@ -1966,13 +1930,6 @@ fn main() {
 
     let restore_key = restore_key_from_flags(&flags);
 
-    // Parse proxy URL to separate server from credentials for the daemon.
-    let (proxy_server, proxy_username, proxy_password) = if let Some(ref proxy_str) = flags.proxy {
-        let parsed = parse_proxy(proxy_str);
-        (Some(parsed.server), parsed.username, parsed.password)
-    } else {
-        (None, None, None)
-    };
     let plugin_registry_json =
         serde_json::to_string(&flags.plugins).unwrap_or_else(|_| "[]".to_string());
     let daemon_opts = DaemonOptions {
@@ -1984,10 +1941,10 @@ fn main() {
         enable: &flags.enable,
         args: flags.args.as_deref(),
         user_agent: flags.user_agent.as_deref(),
-        proxy: proxy_server.as_deref(),
+        proxy: flags.proxy.as_ref().map(|p| p.server.as_str()),
         proxy_bypass: flags.proxy_bypass.as_deref(),
-        proxy_username: proxy_username.as_deref(),
-        proxy_password: proxy_password.as_deref(),
+        proxy_username: flags.proxy.as_ref().and_then(|p| p.username.as_deref()),
+        proxy_password: flags.proxy.as_ref().and_then(|p| p.password.as_deref()),
         ignore_https_errors: flags.ignore_https_errors,
         allow_file_access: flags.allow_file_access,
         hide_scrollbars: flags.hide_scrollbars,
@@ -2244,7 +2201,6 @@ fn run_batch(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         attach_plugins_to_command(&mut parsed, &flags.plugins);
-        attach_restore_config_to_command(&mut parsed, flags);
         let settings = batch_item_settings(flags, &parsed, relaunch_applied);
         if let Some(wire) = settings.to_wire() {
             parsed["settings"] = wire;
@@ -2587,6 +2543,27 @@ mod tests {
         assert_eq!(wire["profile"], "/tmp/profile");
         assert_eq!(wire["args"], serde_json::json!(["--lang=en-US"]));
         assert_eq!(wire["headed"], true);
+    }
+
+    #[test]
+    fn firefox_cdp_flags_travel_with_the_command_settings() {
+        let (command, wire) = settings_of(&[
+            "--engine",
+            "firefox",
+            "--cdp",
+            "9222",
+            "--download-path",
+            "/tmp/downloads",
+            "--allowed-domains",
+            "example.com",
+            "get",
+            "url",
+        ]);
+        assert_eq!(command["action"], "url");
+        assert_eq!(wire["engine"], "firefox");
+        assert_eq!(wire["cdp"], "9222");
+        assert_eq!(wire["download-path"], "/tmp/downloads");
+        assert_eq!(wire["allowed-domains"], json!(["example.com"]));
     }
 
     #[test]
@@ -3191,60 +3168,162 @@ mod tests {
         assert_eq!(cmd["plugins"], json!([]));
     }
 
-    #[test]
-    fn test_attach_restore_config_to_command_uses_session_for_bare_restore() {
-        let args = vec![
-            "--session".to_string(),
-            "next-loop".to_string(),
-            "--restore".to_string(),
-            "--restore-save".to_string(),
-            "always".to_string(),
-            "--restore-check-url".to_string(),
-            "**/dashboard".to_string(),
-            "--restore-check-text".to_string(),
-            "Dashboard".to_string(),
-            "--restore-check-fn".to_string(),
-            "!!localStorage.getItem('session')".to_string(),
-            "open".to_string(),
-            "http://localhost:3000".to_string(),
-        ];
+    fn restore_flags(extra: &[&str]) -> Flags {
+        let mut args: Vec<String> = ["--session", "next-loop", "--restore"]
+            .iter()
+            .chain(extra)
+            .map(|s| s.to_string())
+            .collect();
+        args.extend(["open".to_string(), "http://localhost:3000".to_string()]);
         let mut flags = parse_flags(&args);
         if flags.restore_uses_session {
             flags.restore = Some(flags.session.clone());
         }
-        let mut cmd = json!({ "action": "launch" });
-
-        attach_restore_config_to_command(&mut cmd, &flags);
-
-        assert_eq!(cmd["restoreKey"], "next-loop");
-        assert_eq!(cmd["restoreSave"], "always");
-        assert_eq!(cmd["restoreCheckUrl"], "**/dashboard");
-        assert_eq!(cmd["restoreCheckText"], "Dashboard");
-        assert_eq!(cmd["restoreCheckFn"], "!!localStorage.getItem('session')");
+        flags
     }
 
     #[test]
-    fn test_attach_restore_config_to_command_sends_defaults_and_clears_checks() {
-        let args = vec![
-            "--session".to_string(),
-            "next-loop".to_string(),
-            "--restore".to_string(),
-            "open".to_string(),
-            "http://localhost:3000".to_string(),
-        ];
-        let mut flags = parse_flags(&args);
-        if flags.restore_uses_session {
-            flags.restore = Some(flags.session.clone());
+    fn test_restore_rides_the_settings_patch_and_uses_session_for_bare_restore() {
+        let flags = restore_flags(&[
+            "--restore-save",
+            "always",
+            "--restore-check-url",
+            "**/dashboard",
+            "--restore-check-text",
+            "Dashboard",
+            "--restore-check-fn",
+            "!!localStorage.getItem('session')",
+        ]);
+        let cmd = json!({ "action": "navigate" });
+        let wire = command_settings(&flags, &cmd).to_wire().unwrap();
+
+        assert_eq!(wire["restore-key"], "next-loop");
+        assert_eq!(wire["restore-save"], "always");
+        assert_eq!(wire["restore-check-url"], "**/dashboard");
+        assert_eq!(wire["restore-check-text"], "Dashboard");
+        assert_eq!(
+            wire["restore-check-fn"],
+            "!!localStorage.getItem('session')"
+        );
+        assert_eq!(
+            batch_item_settings(&flags, &cmd, false).to_wire().unwrap(),
+            wire
+        );
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_drops_the_whole_restore_unit() {
+        let flags = restore_flags(&[
+            "--restore-save",
+            "never",
+            "--restore-check-url",
+            "**/dashboard",
+        ]);
+        let cmd = json!({ "action": "cdp_url" });
+        assert!(command_is_cdp_url_metadata(&cmd));
+        let patch = command_settings(&flags, &cmd);
+        for key in session_settings::RESTORE_UNIT {
+            assert!(patch.get(key).is_none(), "{key:?} must not ride along");
         }
-        let mut cmd = json!({ "action": "navigate" });
+    }
 
-        attach_restore_config_to_command(&mut cmd, &flags);
+    #[test]
+    fn test_restore_settings_send_defaults_and_clear_checks() {
+        let wire = command_settings(&restore_flags(&[]), &json!({ "action": "navigate" }))
+            .to_wire()
+            .unwrap();
 
-        assert_eq!(cmd["restoreKey"], "next-loop");
-        assert_eq!(cmd["restoreSave"], "auto");
-        assert!(cmd["restoreCheckUrl"].is_null());
-        assert!(cmd["restoreCheckText"].is_null());
-        assert!(cmd["restoreCheckFn"].is_null());
+        assert_eq!(wire["restore-key"], "next-loop");
+        assert_eq!(wire["restore-save"], "auto");
+        for check in [
+            "restore-check-url",
+            "restore-check-text",
+            "restore-check-fn",
+        ] {
+            assert!(wire[check].is_null(), "{check} must clear a sticky check");
+        }
+    }
+
+    #[test]
+    fn test_restore_save_rides_the_settings_patch_without_a_restore_key() {
+        let without_key = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let mut flags = parse_flags(&args);
+            flags.restore = None;
+            flags.session_name = None;
+            let cmd = crate::commands::parse_command(&clean_args(&args), &flags).unwrap();
+            command_settings(&flags, &cmd)
+        };
+        let patch = without_key(&["--restore-save", "never", "close"]);
+        assert_eq!(
+            patch.value(session_settings::Key::RestoreKey),
+            None,
+            "{patch:?}"
+        );
+        assert_eq!(
+            patch.value(session_settings::Key::RestoreSave),
+            Some(&json!("never")),
+            "{patch:?}"
+        );
+        for check in [
+            session_settings::Key::RestoreCheckUrl,
+            session_settings::Key::RestoreCheckText,
+            session_settings::Key::RestoreCheckFn,
+        ] {
+            assert!(patch.get(check).is_none(), "{check:?}: {patch:?}");
+        }
+        let patch = without_key(&["close"]);
+        assert!(
+            patch.get(session_settings::Key::RestoreSave).is_none(),
+            "{patch:?}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_restore_save_is_rejected_without_a_restore_key() {
+        let args: Vec<String> = ["--restore-save", "sometimes", "state", "list"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut flags = parse_flags(&args);
+        flags.restore = None;
+        flags.session_name = None;
+        let (error_type, message) = validate_restore_settings(&flags).unwrap_err();
+        assert_eq!(error_type, "invalid_value");
+        assert!(message.contains("Invalid --restore-save value 'sometimes'"));
+
+        // Env and config land in the same field as the flag.
+        let mut from_env = parse_flags(&["state".to_string(), "list".to_string()]);
+        from_env.restore = None;
+        from_env.session_name = None;
+        from_env.restore_save = Some("bogus".to_string());
+        assert_eq!(
+            validate_restore_settings(&from_env).unwrap_err().0,
+            "invalid_value"
+        );
+        from_env.restore_save = Some("never".to_string());
+        assert!(validate_restore_settings(&from_env).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_restore_settings_fail_validation_with_the_json_error_types() {
+        let key = session_settings::Patch::from_flags(&restore_flags(&[]));
+        assert!(key.validate().is_ok());
+
+        let mut flags = restore_flags(&[]);
+        flags.restore = Some("../bad".to_string());
+        let invalid = session_settings::Patch::from_flags(&flags)
+            .validate()
+            .unwrap_err();
+        assert_eq!(invalid.error_type, "invalid_session_name");
+        assert!(invalid.message.contains("Invalid session name"));
+
+        let invalid =
+            session_settings::Patch::from_flags(&restore_flags(&["--restore-save", "sometimes"]))
+                .validate()
+                .unwrap_err();
+        assert_eq!(invalid.error_type, "invalid_value");
+        assert!(invalid.message.contains("sometimes"));
     }
 
     fn launch_mode_flags(auto_connect: bool, cdp: bool, provider: bool, extensions: bool) -> Flags {
@@ -3284,10 +3363,6 @@ mod tests {
                 launch_mode_flags(false, false, true, true),
                 "Cannot use --extension with -p/--provider (extensions require local browser)",
             ),
-            (
-                launch_mode_flags(false, true, false, true),
-                "Cannot use --extension with --cdp (extensions require local browser)",
-            ),
         ];
 
         for (flags, expected) in cases {
@@ -3311,16 +3386,12 @@ mod tests {
     }
 
     #[test]
-    fn test_incompatible_launch_mode_error_rejects_webgpu_attach_modes() {
+    fn test_incompatible_launch_mode_error_rejects_webgpu_for_provider_and_auto_connect() {
         let with_webgpu = |mut flags: Flags| {
             flags.webgpu = true;
             flags
         };
         let cases = [
-            (
-                with_webgpu(launch_mode_flags(false, true, false, false)),
-                "Cannot use --webgpu with --cdp (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
-            ),
             (
                 with_webgpu(launch_mode_flags(false, false, true, false)),
                 "Cannot use --webgpu with -p/--provider (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
@@ -3345,6 +3416,31 @@ mod tests {
         assert_eq!(
             incompatible_launch_mode_error(&launch_mode_flags(false, true, false, false)),
             None
+        );
+    }
+
+    #[test]
+    fn test_incompatible_launch_mode_error_allows_launch_only_flags_with_explicit_cdp() {
+        let attach = |engine: Option<&str>| {
+            let mut flags = launch_mode_flags(false, true, false, true);
+            flags.webgpu = true;
+            flags.engine = engine.map(str::to_string);
+            flags.ca_cert = None;
+            flags
+        };
+        assert_eq!(incompatible_launch_mode_error(&attach(None)), None);
+        assert_eq!(
+            incompatible_launch_mode_error(&attach(Some("firefox"))),
+            None
+        );
+
+        let mut ca_cert = launch_mode_flags(false, true, false, true);
+        ca_cert.ca_cert = Some("/tmp/ca.pem".to_string());
+        assert_eq!(
+            incompatible_launch_mode_error(&ca_cert),
+            Some(
+                "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)"
+            )
         );
     }
 

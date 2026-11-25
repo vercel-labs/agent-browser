@@ -11,32 +11,22 @@ use super::actions::{execute_command, DaemonState};
 
 const ENCRYPTION_KEY_ENV: &str = "AGENT_BROWSER_ENCRYPTION_KEY";
 
+/// Sets the encryption key and points the home directory at a scratch dir.
 struct TestKeyGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    original: Option<String>,
+    _env: crate::test_utils::EnvGuard<'static>,
+    _home: tempfile::TempDir,
 }
 
 impl TestKeyGuard {
     fn new() -> Self {
-        let lock = super::auth::AUTH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let original = std::env::var(ENCRYPTION_KEY_ENV).ok();
-        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
-        unsafe { std::env::set_var(ENCRYPTION_KEY_ENV, "a".repeat(64)) };
+        let env = crate::test_utils::EnvGuard::new(&["HOME", "USERPROFILE", ENCRYPTION_KEY_ENV]);
+        let home = tempfile::TempDir::new().unwrap();
+        env.set("HOME", home.path().to_str().unwrap());
+        env.set("USERPROFILE", home.path().to_str().unwrap());
+        env.set(ENCRYPTION_KEY_ENV, &"a".repeat(64));
         Self {
-            _lock: lock,
-            original,
-        }
-    }
-}
-
-impl Drop for TestKeyGuard {
-    fn drop(&mut self) {
-        // SAFETY: AUTH_TEST_MUTEX is held via _lock.
-        match &self.original {
-            Some(val) => unsafe { std::env::set_var(ENCRYPTION_KEY_ENV, val) },
-            None => unsafe { std::env::remove_var(ENCRYPTION_KEY_ENV) },
+            _env: env,
+            _home: home,
         }
     }
 }
@@ -594,30 +584,24 @@ async fn test_request_tracking_state() {
     assert!(!state.request_tracking);
     assert!(state.tracked_requests.is_empty());
 
-    state.tracked_requests.push(super::actions::TrackedRequest {
-        url: "https://example.com".to_string(),
-        method: "GET".to_string(),
-        headers: json!({}),
-        timestamp: 1,
-        resource_type: "Document".to_string(),
-        request_id: "1.1".to_string(),
-        post_data: None,
-        status: None,
-        response_headers: None,
-        mime_type: None,
-    });
-    state.tracked_requests.push(super::actions::TrackedRequest {
-        url: "https://other.com".to_string(),
-        method: "POST".to_string(),
-        headers: json!({}),
-        timestamp: 2,
-        resource_type: "XHR".to_string(),
-        request_id: "1.2".to_string(),
-        post_data: None,
-        status: None,
-        response_headers: None,
-        mime_type: None,
-    });
+    state.tracked_requests.record_request(
+        "1.1",
+        "https://example.com",
+        "GET",
+        json!({}),
+        1,
+        "Document",
+        None,
+    );
+    state.tracked_requests.record_request(
+        "1.2",
+        "https://other.com",
+        "POST",
+        json!({}),
+        2,
+        "XHR",
+        None,
+    );
     assert_eq!(state.tracked_requests.len(), 2);
 
     // Filter

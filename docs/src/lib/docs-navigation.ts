@@ -51,6 +51,7 @@ export const navigation: NavSection[] = [
       { name: "Init Scripts", href: "/init-scripts" },
       { name: "Proxy", href: "/proxy" },
       { name: "iOS Simulator", href: "/ios" },
+      { name: "Ladybird", href: "/ladybird" },
       { name: "Security", href: "/security" },
       { name: "Next.js + Vercel", href: "/next" },
       { name: "eve Extension", href: "/eve" },
@@ -76,6 +77,7 @@ export const navigation: NavSection[] = [
     items: [
       { name: "Chrome", href: "/engines/chrome" },
       { name: "Lightpanda", href: "/engines/lightpanda" },
+      { name: "Firefox", href: "/engines/firefox" },
       { name: "Obscura", href: "/engines/obscura" },
     ],
   },

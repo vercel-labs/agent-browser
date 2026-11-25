@@ -174,7 +174,7 @@ mod tests {
     use serde_json::Value;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::RwLock;
+    use tokio::sync::{Mutex, RwLock};
 
     const PORT: u16 = 38000;
 
@@ -247,9 +247,20 @@ mod tests {
         let peeked = request.as_bytes().to_vec();
         let last_tabs: Arc<RwLock<Vec<Value>>> = Arc::new(RwLock::new(Vec::new()));
         let last_engine = Arc::new(RwLock::new("chrome".to_string()));
+        let clients = Arc::new(Mutex::new(0));
+        let firefox_tabs = Arc::new(crate::native::stream::FirefoxTabs::default());
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_http_request(stream, &peeked, &last_tabs, &last_engine, "origin-test").await;
+            handle_http_request(
+                stream,
+                &peeked,
+                &last_tabs,
+                &last_engine,
+                &clients,
+                &firefox_tabs,
+                "origin-test",
+            )
+            .await;
         });
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
         client.write_all(request.as_bytes()).await.unwrap();

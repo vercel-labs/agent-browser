@@ -435,17 +435,29 @@ pub(super) async fn cdp_event_loop(
                                         if let Some(data) = evt.params.get("data").and_then(|v| v.as_str()) {
                                             let meta = evt.params.get("metadata");
                                             let seq = super::next_frame_seq();
+                                            let positive_finite = |key: &str, fallback: f64| {
+                                                meta.and_then(|m| m.get(key))
+                                                    .and_then(|v| v.as_f64())
+                                                    .filter(|v| v.is_finite() && *v > 0.0)
+                                                    .unwrap_or(fallback)
+                                            };
+                                            let non_neg_finite = |key: &str| {
+                                                meta.and_then(|m| m.get(key))
+                                                    .and_then(|v| v.as_f64())
+                                                    .filter(|v| v.is_finite() && *v >= 0.0)
+                                                    .unwrap_or(0.0)
+                                            };
                                             let msg = json!({
                                                 "type": "frame",
                                                 "seq": seq,
                                                 "data": data,
                                                 "metadata": {
-                                                    "offsetTop": meta.and_then(|m| m.get("offsetTop")).and_then(|v| v.as_f64()).unwrap_or(0.0),
-                                                    "pageScaleFactor": meta.and_then(|m| m.get("pageScaleFactor")).and_then(|v| v.as_f64()).unwrap_or(1.0),
-                                                    "deviceWidth": vw,
-                                                    "deviceHeight": vh,
-                                                    "scrollOffsetX": meta.and_then(|m| m.get("scrollOffsetX")).and_then(|v| v.as_f64()).unwrap_or(0.0),
-                                                    "scrollOffsetY": meta.and_then(|m| m.get("scrollOffsetY")).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                                    "offsetTop": non_neg_finite("offsetTop"),
+                                                    "pageScaleFactor": positive_finite("pageScaleFactor", 1.0),
+                                                    "deviceWidth": positive_finite("deviceWidth", vw as f64),
+                                                    "deviceHeight": positive_finite("deviceHeight", vh as f64),
+                                                    "scrollOffsetX": meta.and_then(|m| m.get("scrollOffsetX")).and_then(|v| v.as_f64()).filter(|v| v.is_finite()).unwrap_or(0.0),
+                                                    "scrollOffsetY": meta.and_then(|m| m.get("scrollOffsetY")).and_then(|v| v.as_f64()).filter(|v| v.is_finite()).unwrap_or(0.0),
                                                     "timestamp": frame_timestamp_ms(meta),
                                                 }
                                             });

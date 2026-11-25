@@ -1,8 +1,140 @@
 # agent-browser
 
-## 0.43.0
+## 0.45.0
 
 <!-- release:start -->
+
+### New Features
+
+- Added a **Firefox engine** driven over WebDriver BiDi: pass `--engine firefox` (or set `AGENT_BROWSER_ENGINE=firefox`) with Firefox 150 or newer to drive a local Firefox install with snapshots and `@eN` refs across open and closed shadow roots and iframes, `find` locators, shared form preconditions and error codes (`fill`, `type`, `check`, `uncheck`, `select --by`), right-click, middle-click, and modifier keys (`--button`, `--modifiers`), network routes and HAR capture, `--allowed-domains`, downloads, viewport, media, geolocation, header, and offline emulation, isolated windows, `--pin-tab`, screenshots, PDF export, and dashboard live view (#2205, #2206, #2207, #2208, #2595, #2633)
+- Added **Firefox attach mode**: connect to an existing Firefox instance over WebDriver BiDi with `--cdp` or `connect` (including `ws://.../session?devtools=<port>` endpoints), apply live settings in place, and detach on `close` without closing the running browser (#2227)
+
+### Bug Fixes
+
+- Fixed **keyboard `keydown`, `keyup`, and `press` modifier handling**: `keydown` and `keyup` now send `code`, `keyCode`, `location`, and printable text and carry held modifiers across subsequent keyboard, mouse, and flow-recorder commands. `press` applies US-layout Shift mapping, suppresses printable text for Alt, Control, and Meta chords, and dispatches modifier key events for chords not already held (#2734)
+- Fixed **saved flow host rules, write consent, deadlines, and result shaping**: saved host rules now match hostnames regardless of case or a trailing DNS root dot, non-`POST` requests carrying GraphQL queries require write declarations and consent, HTTP preflight cookie and route lookups and in-page fetches stop at the run deadline, empty result lists no longer fail `--fields` or `--where`, and `--limit` shapes only retained rows (#2735)
+- Fixed **saved flow replay** finishing before late-reported first-party Chrome requests settle (#2711)
+- Fixed **iframe targeting**: `frame` resolves cross-origin, unnamed, and nested iframes by CSS selector or `@ref`, and selector commands, `find` locators, `wait`, `check`, and `uncheck` act inside the selected frame, including same-site cross-origin iframes, without reaching tabs pinned by other sessions (#2737)
+- Fixed **`eval` and `console` in iframes**: `eval` runs in the frame selected with `frame` and reports that frame's origin, and `console` and `errors` capture messages from cross-origin iframes on the active tab (#2738)
+- Fixed **iframe snapshots and annotated screenshots**: snapshots label iframes by their `title` or `name`, and `screenshot --annotate` places boxes for elements inside iframes in page coordinates, including cross-origin, scrolled, and scaled frames (#2739)
+- Fixed **dashboard live view pointer and tabs**: clicks map to the real page size, drags send held buttons, touchpad two-finger taps open the context menu, and a tab that closes itself resyncs the tab bar (#2744)
+- Fixed **dashboard live view keyboard and clipboard**: editing shortcuts such as select all, undo, and line navigation reach the page, Option and AltGr characters type, and copy, cut, and paste work through the live view without granting the browser clipboard permissions (#2745)
+- Fixed **`state save` collection**: it no longer stalls under `--allowed-domains`, sends requests to previously visited origins, runs their service workers, or brings a temporary tab to the front. It includes origins from attached sessions but not tabs pinned by other sessions, and keeps the previous autosave when collection fails (#2746)
+- Fixed **`state list`, `state show`, and bulk storage reads**: `state list` shows modified dates, `state show` reports cookie and origin counts (`cookieCount` and `originCount` in JSON, with `summary` unchanged), and `storage local` and `storage session` keep keys such as `__proto__` (#2747)
+
+### Documentation
+
+- Added the **Firefox engine guide** (`/engines/firefox`) and updated CLI help, MCP tool schemas, command references, and core skills for Firefox support and form command behavior (#2208, #2227, #2595, #2633)
+
+### Contributors
+
+- @Afloat16
+- @Bella-rab
+- @Ehsan-hash
+- @MrCoder
+- @OBOneProtocol
+- @Railly
+- @adity982
+- @cavalcanticampos
+- @ctate
+- @devxoul
+- @fitchmultz
+- @funnyjacy
+- @hanneslipusch
+- @hyunjinee
+- @kevingatera
+- @lahfir
+- @leejaew
+- @lurenjia534
+- @osrjv
+- @patrickballard
+- @pei711
+- @pqminh27
+- @shtefcs
+- @sx4im
+- @thecodeartificerX
+- @yusufgngor
+
+<!-- release:end -->
+
+## 0.44.0
+
+### New Features
+
+- Added a **Ladybird provider**: `-p ladybird` drives Ladybird over WebDriver, headless by default or with `--headed`. Safari and Ladybird share one local driver launcher, and the WebDriver client now honors `Content-Length`, so it no longer hangs on drivers that keep the connection open. Snapshots and refs stay Chrome-only, as with Safari (#2721)
+- Added **background tab controls**: `tab keep live [tab]` keeps a background tab running at full speed instead of throttled, `tab keep throttled` returns it to the default, and `tab keep frozen <tab>` pauses it until the agent switches back. The daemon unfreezes a tab before any command runs on it and when the session closes (#2624, #2627)
+- Added **right-click, middle-click, and modifier keys** to `click` and `dblclick` with `--button` and `--modifiers`. A double click now sends two full clicks (#2594)
+- **WebMCP announcements** now tell agents what the page's tools are and when to use them, list each tool as `[origin] name [frame]: description` with full descriptions for small catalogs, mark tools from other origins as cross-origin, and include a ready-to-run `webmcp invoke` command for the page's own tools. `webmcp invoke` also accepts the JSON input right after the tool name (#2606, #2591, #2720)
+- Added **feature flag overrides** to the `vercel` skill, renamed from `protected-vercel-deployments`. Agents set the Flags SDK override cookie so only their own browser sees a variant, instead of changing the flag for everyone on the environment (#2441)
+
+### Behavior Changes
+
+- **Unknown flags are rejected** across command parsers instead of being read as selectors or file paths, or ignored. Arguments after `--` stay literal in the CLI and MCP (#2665)
+- **Refs from a replaced document fail** with a "no longer loaded" error after a full page load or an iframe navigation, instead of acting on the wrong element. Take a new snapshot after each load (#2685)
+- **`fill`, `type`, `check`, `uncheck`, and `select` check the target first** and refuse with a stable `code` (`not_editable`, `read_only`, `disabled`, `not_checkable`, `option_not_found`, `ambiguous`, `not_multiple`, `malformed_value`) without changing the field. `fill` sets date, time, color, and range inputs directly, `select --by value` or `--by label` resolves an ambiguous option, and a value the page changes afterward is reported as a warning (#2687)
+- **`snapshot -s <sel>` covers every match**, not only the first. The cursor-interactive scan now refs `<summary>`, native controls with non-interactive roles, and clickables inside open shadow roots, without writing attributes to the page (#2688)
+- **`upload`, `network har stop`, `diff snapshot`, and `diff url` check their preconditions**. `upload` resolves relative paths against the CLI's working directory and fails on a missing file or a target that is not a file input, `har stop` fails when nothing is recording, `diff snapshot` without `--baseline` compares against the tab's last snapshot, and `diff url` prints its result and honors `--screenshot` and `--full` (#2689)
+- **`--restore`, `--restore-save`, and `--restore-check-*` travel only through the settings patch**, like the other session settings. A save policy without a key applies to the running key, a key change on a command that never launches closes the browser without relaunching it, and `get cdp-url` and `session info` leave the restore settings alone. A launch that fails after a key change closes the new browser without saving (#2667)
+
+### Security
+
+- **Stream server `/api` routes** now require a same-origin request and a loopback `Host`, and rejected requests carry no CORS headers (#2678)
+- **Stream WebSocket upgrades** require the `Origin` to match the `Host`, so a page on another localhost port can no longer read frames or inject input (#2682)
+- **An allowlist that lists no domain is an error** from the flag, environment, config, or MCP, instead of turning containment off. An empty `AGENT_BROWSER_ALLOWED_DOMAINS` now fails for commands that run a browser; unset it to run without containment. `chat` no longer lets the model answer `confirm` or `deny` (#2683)
+- **MCP tool arguments** can no longer be read as global CLI flags, and flag-shaped values in fields that are not passed literally are refused (#2681)
+- **Saved flow replay** sends only each command's interaction fields and runs under the current session's settings, plugins, and policy (#2607)
+- **Daemon warnings** travel out of band, so page-controlled JSON can no longer forge `postActionWarning` or `sessionSetupWarning` (#2693)
+- **Session lock files** are created owner-only on Unix (#2676)
+
+### Bug Fixes
+
+- Fixed **clicks on elements at the viewport edge or that reflow** missing while reporting success. Clicks, hover, and tap now scroll the point into view, wait for layout to settle, and press the settled point (#2587)
+- Fixed **ref clicks inside nested and cross-origin frames** landing on the parent page. The press is verified to reach the ref, an element it activates, or a frame it embeds (#2611)
+- Fixed **refs lost after a failed snapshot**. Snapshot, snapshot diff, and annotated screenshots replace refs only on success (#2666)
+- Fixed **session setup lost on relaunch**. Viewport, user agent, media, timezone, locale, geolocation, headers, offline mode, and init scripts carry across a relaunch and apply to new tabs and windows, and `set device` mobile presets enable touch emulation (#2686)
+- Fixed **`select` on custom ARIA comboboxes and listboxes** such as Radix and Headless UI, which reported success without changing anything (#2592)
+- Fixed **env and config connection targets** replacing a browser attached with `connect`. `AGENT_BROWSER_CDP`, `AGENT_BROWSER_PROVIDER`, `AGENT_BROWSER_AUTO_CONNECT`, and their config keys now apply only to a session with no target, and CDP headers are bound to their endpoint (#2642)
+- Fixed **two concurrent first commands** spawning two daemons for one session (#2648)
+- Fixed **direct-page providers** dropping page events, which left logs empty and recordings unable to finish (#2445)
+- Fixed **WebMCP on Chrome 157 and later**, and cross-origin iframes timing out under `--allowed-domains` on Chrome 157 (#2700)
+- Fixed **temporary Chrome profiles** left behind by killed daemons. Each launch removes profiles older than two hours whose Chrome is gone (#2586)
+- Fixed **installs under Volta** leaving a dangling global link, and failed fallback downloads leaving a 0-byte binary (#2675)
+- Fixed **pin-tab** taking two paths that could disagree; it now travels only through the settings patch (#2643)
+
+### Documentation
+
+- Launched the **agent-browser.dev homepage** with a Browser/Desktop switcher. The docs introduction moved to `/introduction` (#2411, #2625, #2626, #2638, #2658, #2659, #2717, #2718, #2719)
+
+### Contributors
+
+- @FredAmartey
+- @HoneyTyagii
+- @Mohammad-Maraqa
+- @Raed2180416
+- @Railly
+- @ZhYGuoL
+- @Zhao0335
+- @cavalcanticampos
+- @ctate
+- @danted4
+- @dwin-gharibi
+- @hassnalalshaikh
+- @holny
+- @hyunjinee
+- @jamesvclements
+- @jpelaez-23blocks
+- @kevingatera
+- @lahfir
+- @linzch3
+- @luxleader
+- @on101094
+- @riesvriend
+- @shtefcs
+- @swjtuhuangjunfu
+- @xunguangzlj-cloud
+- @yavorpunchev
+
+## 0.43.0
 
 ### New Features
 
@@ -28,8 +160,6 @@
 - @ctate
 - @lahfir
 - @shuding
-
-<!-- release:end -->
 
 ## 0.42.0
 

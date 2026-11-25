@@ -301,7 +301,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Check a checkbox or switch.",
+      "description": "Check a checkbox or switch. Fails for elements that cannot be toggled and disabled ones; warns if the state does not change.",
       "inputSchema": {
         "properties": {
           "selector": {
@@ -350,14 +350,8 @@
             "type": "boolean"
           },
           "modifiers": {
-            "description": "Modifier keys held during the click.",
+            "description": "Modifier keys held during the click: alt, control, meta, shift. Aliases ctrl, cmd and command, any case, and lists such as ctrl+shift are accepted.",
             "items": {
-              "enum": [
-                "alt",
-                "control",
-                "meta",
-                "shift"
-              ],
               "type": "string"
             },
             "minItems": 1,
@@ -536,11 +530,11 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
+      "description": "Connect to a browser over CDP or to a running Firefox over WebDriver BiDi. A ws:// URL whose path is /session attaches to Firefox directly; an http(s):// URL or bare port falls back to BiDi when CDP discovery finds nothing. Add ?devtools=<port> to point at the Firefox DevTools server (default 6000). Firefox's RDP companion is unencrypted, so remote Firefox ports must be forwarded through an encrypted tunnel and the connection must use 127.0.0.1. With pinTab on a Chrome CDP session, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. The pinTab binding and its tab_gone guarantee are CDP-only; Firefox attach rejects pinTab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
       "inputSchema": {
         "properties": {
           "pinTab": {
-            "description": "Strict session-to-tab binding (sticky for the session). Explicit false disables a sticky pin; omitted leaves it unchanged.",
+            "description": "Strict session-to-tab binding (sticky for the session; CDP only, rejected for Firefox attach). Explicit false disables a sticky pin; omitted leaves it unchanged.",
             "type": "boolean"
           },
           "session": {
@@ -548,7 +542,7 @@
             "type": "string"
           },
           "target": {
-            "description": "CDP port or URL.",
+            "description": "CDP port or URL, or a Firefox WebDriver BiDi endpoint such as ws://127.0.0.1:9333/session or http://127.0.0.1:9333?devtools=6080.",
             "type": "string"
           }
         },
@@ -561,7 +555,7 @@
       "profiles": [
         "debug"
       ],
-      "title": "Connect CDP"
+      "title": "Connect to browser via CDP or Firefox WebDriver BiDi"
     },
     {
       "annotations": {
@@ -613,7 +607,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get cookies.",
+      "description": "Get cookies. When URLs are omitted, Firefox filters to the active page and its frames.",
       "inputSchema": {
         "properties": {
           "session": {
@@ -797,14 +791,8 @@
             "type": "boolean"
           },
           "modifiers": {
-            "description": "Modifier keys held during the click.",
+            "description": "Modifier keys held during the click: alt, control, meta, shift. Aliases ctrl, cmd and command, any case, and lists such as ctrl+shift are accepted.",
             "items": {
-              "enum": [
-                "alt",
-                "control",
-                "meta",
-                "shift"
-              ],
               "type": "string"
             },
             "minItems": 1,
@@ -990,7 +978,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Diff current snapshot against last or baseline.",
+      "description": "Diff current snapshot against the last snapshot or a baseline file. Without a baseline the last snapshot's options are reused; an option that differs fails with baseline_mismatch, and no earlier snapshot fails with no_baseline. A missing baseline file fails with file_not_found; a relative baseline path resolves against the working directory of the caller.",
       "inputSchema": {
         "properties": {
           "baseline": {
@@ -1002,12 +990,18 @@
           "depth": {
             "type": "integer"
           },
+          "interactive": {
+            "type": "boolean"
+          },
           "selector": {
             "type": "string"
           },
           "session": {
             "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
             "type": "string"
+          },
+          "urls": {
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -1023,7 +1017,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Compare two URLs.",
+      "description": "Compare two URLs. fullPage applies to the screenshot diff and requires screenshot.",
       "inputSchema": {
         "properties": {
           "compact": {
@@ -1146,7 +1140,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Drag one element to another.",
+      "description": "Drag one element to another. On Firefox, HTML5 drag-and-drop uses synthetic DOM events, so handlers that require trusted drag events are unsupported; other pointer dragging uses native pointer input.",
       "inputSchema": {
         "properties": {
           "human": {
@@ -1206,7 +1200,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run JavaScript in the page using stdin to avoid shell escaping. When the top-level result is a value JSON cannot represent, the structured response includes `response.data.unserializable` and the text content prints the JavaScript token.",
+      "description": "Run JavaScript in the page using stdin to avoid shell escaping. After `agent_browser_frame_switch` (in the `tabs` profile) selects an iframe, the script runs in that frame's context and reports the frame's own origin. When the top-level result is a value JSON cannot represent, the structured response includes `response.data.unserializable` and the text content prints the JavaScript token.",
       "inputSchema": {
         "properties": {
           "script": {
@@ -1240,7 +1234,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Clear and fill an input by @ref or CSS selector.",
+      "description": "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly; a color input takes any CSS color Chrome accepts and stores it as #rrggbb. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome and Firefox.",
       "inputSchema": {
         "properties": {
           "selector": {
@@ -2314,7 +2308,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Stop HAR capture.",
+      "description": "Stop HAR capture and save it. Fails with no_har_recording when no recording is active, for example after a daemon restart. A relative path resolves against the working directory of the caller.",
       "inputSchema": {
         "properties": {
           "path": {
@@ -2470,7 +2464,7 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active. Omit it to run without domain containment; an empty list is rejected.",
             "items": {
               "type": "string"
             },
@@ -2503,7 +2497,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2970,7 +2964,7 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active. Omit it to run without domain containment; an empty list is rejected.",
             "items": {
               "type": "string"
             },
@@ -3352,9 +3346,17 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Select one or more options in a select element.",
+      "description": "Select one or more options in a select element. A string that matches exactly one option by value or exact label selects it. Fails with ambiguous when it matches options with different values (pass `by`: `value` or `label` to match one attribute), and with option_not_found when none match; the options are then in structuredContent.response.data.options as [{value, label}] (page content, untrusted).",
       "inputSchema": {
         "properties": {
+          "by": {
+            "description": "Match only option values or only visible labels. Needed when a string matches options with different values.",
+            "enum": [
+              "value",
+              "label"
+            ],
+            "type": "string"
+          },
           "selector": {
             "description": "Element @ref from snapshot, or a CSS selector.",
             "type": "string"
@@ -3517,7 +3519,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Emulate a device by name.",
+      "description": "Emulate a device by name. Firefox does not support set device; use set viewport plus the --user-agent launch flag or AGENT_BROWSER_USER_AGENT instead of set device.",
       "inputSchema": {
         "properties": {
           "device": {
@@ -3605,7 +3607,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set media emulation.",
+      "description": "Set media emulation. Firefox does not support reduced motion.",
       "inputSchema": {
         "properties": {
           "colorScheme": {
@@ -3704,7 +3706,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set viewport size. The optional scale must be finite.",
+      "description": "Set viewport size. The optional scale must be finite. Firefox does not support mobile mode.",
       "inputSchema": {
         "properties": {
           "height": {
@@ -4015,7 +4017,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Save cookies and storage state.",
+      "description": "Save cookies and storage state, overwriting the target file.",
       "inputSchema": {
         "properties": {
           "path": {
@@ -4363,7 +4365,7 @@
       "inputSchema": {
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Omit it to run without domain containment; an empty list is rejected.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active. Omit it to run without domain containment; an empty list is rejected.",
             "items": {
               "type": "string"
             },
@@ -4397,7 +4399,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4558,7 +4560,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Type text into an element by @ref or CSS selector.",
+      "description": "Type text into an element by @ref or CSS selector. Fails for disabled fields, for readonly fields when `clear` is set (clearing would empty them), and for elements that can never take text (select, option, button, a label without a control, checkbox, radio, file, hidden, image, button, submit, reset, color, range and date-type inputs; use fill for date, time, color and range inputs, keyboard type for a focused element, press for a single key); warns if the page does not show the text.",
       "inputSchema": {
         "properties": {
           "clear": {
@@ -4601,7 +4603,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Uncheck a checkbox or switch.",
+      "description": "Uncheck a checkbox or switch. Fails for elements that cannot be toggled, a checked radio and disabled ones; warns if the state does not change.",
       "inputSchema": {
         "properties": {
           "selector": {
@@ -4650,7 +4652,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Upload files through a file input.",
+      "description": "Upload files through a file input. Relative paths resolve against the working directory of the caller and `~` expands to the home directory. A missing path fails with file_not_found, a target that is not a file input with not_file_input. A directory is accepted for webkitdirectory inputs. With a browser on another machine, a path missing locally only warns.",
       "inputSchema": {
         "properties": {
           "files": {
@@ -5014,7 +5016,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Invoke an experimental page-provided WebMCP tool.",
+      "description": "Invoke an experimental page-provided WebMCP tool. Inputs go to the tool's origin; before invoking a tool announced as cross-origin, confirm that its origin matches the user's task.",
       "inputSchema": {
         "properties": {
           "detach": {
