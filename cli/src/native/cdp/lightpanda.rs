@@ -46,6 +46,11 @@ fn build_lightpanda_serve_args(port: u16, proxy: Option<&str>) -> Vec<String> {
         "127.0.0.1".to_string(),
         "--port".to_string(),
         port.to_string(),
+        // Fetch external stylesheets so their rules contribute to computed
+        // styles; without this, elements hidden via a linked stylesheet
+        // (display: none) still appear in snapshots as interactive.
+        "--load-resources".to_string(),
+        "stylesheet".to_string(),
     ];
 
     if let Some(proxy) = proxy {
@@ -464,6 +469,8 @@ mod tests {
                 "127.0.0.1".to_string(),
                 "--port".to_string(),
                 "9222".to_string(),
+                "--load-resources".to_string(),
+                "stylesheet".to_string(),
             ]
         );
     }
@@ -480,6 +487,8 @@ mod tests {
                 "127.0.0.1".to_string(),
                 "--port".to_string(),
                 "9333".to_string(),
+                "--load-resources".to_string(),
+                "stylesheet".to_string(),
                 "--http_proxy".to_string(),
                 "http://127.0.0.1:8080".to_string(),
             ]
