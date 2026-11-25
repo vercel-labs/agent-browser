@@ -247,7 +247,20 @@ pub async fn send(
     req: &PreparedRequest,
     deadline: Instant,
 ) -> TierResult {
-    let cookie = browser.cookie_header(&req.url).await;
-    let routed = browser.routed_response(&req.url).await;
+    let started = Instant::now();
+    let Ok((cookie, routed)) = tokio::time::timeout_at(deadline.into(), async {
+        let cookie = browser.cookie_header(&req.url).await;
+        let routed = browser.routed_response(&req.url).await;
+        (cookie, routed)
+    })
+    .await
+    else {
+        return TierResult::fail(
+            req,
+            Tier::Http,
+            started,
+            Failure::unavailable("the run's time is up".to_string()),
+        );
+    };
     run_http(client, req, cookie.as_deref(), routed, deadline).await
 }

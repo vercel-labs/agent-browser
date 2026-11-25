@@ -11,6 +11,10 @@ use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::discovery::discover_sessions;
 use super::http::serve_embedded_file;
+use super::origin::{
+    is_loopback_authority, normalize_host_authority, normalize_origin_authority,
+    normalized_http_origin, origin_matches_host, request_header_value,
+};
 
 /// Dashboard same-origin proxy endpoints for session metadata and streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,109 +125,8 @@ fn is_websocket_upgrade(request: &str) -> bool {
     })
 }
 
-fn request_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
-    request_headers(request).lines().find_map(|line| {
-        let (header_name, value) = line.split_once(':')?;
-        if header_name.trim().eq_ignore_ascii_case(name) {
-            Some(value.trim())
-        } else {
-            None
-        }
-    })
-}
-
-fn request_headers(request: &str) -> &str {
-    request
-        .find("\r\n\r\n")
-        .or_else(|| request.find("\n\n"))
-        .map(|header_end| &request[..header_end])
-        .unwrap_or(request)
-}
-
-fn normalize_origin_authority(origin: &str) -> Option<String> {
-    let url = url::Url::parse(origin).ok()?;
-    if !url.username().is_empty() || url.password().is_some() {
-        return None;
-    }
-    // `url::Url::host_str` already includes brackets around IPv6 literals.
-    // Adding another pair would turn `[::1]` into `[[::1]]` and prevent the
-    // documented IPv6 loopback origin from matching the Host header.
-    let host = url.host_str()?.to_ascii_lowercase();
-    let default_port = (url.scheme() == "http" && url.port() == Some(80))
-        || (url.scheme() == "https" && url.port() == Some(443));
-    Some(match url.port() {
-        Some(port) if !default_port => format!("{host}:{port}"),
-        _ => host,
-    })
-}
-
-fn normalize_host_authority(host: &str, scheme: Option<&str>) -> String {
-    let host = host.trim().to_ascii_lowercase();
-    let default_port = match scheme {
-        Some("http") => Some("80"),
-        Some("https") => Some("443"),
-        _ => None,
-    };
-
-    if let Some(bracket_end) = host.rfind(']') {
-        if bracket_end == host.len() - 1 {
-            return host;
-        }
-
-        if host.as_bytes().get(bracket_end + 1) == Some(&b':') {
-            let port = &host[bracket_end + 2..];
-            if Some(port) == default_port {
-                return host[..=bracket_end].to_string();
-            }
-        }
-
-        return host;
-    }
-
-    if let Some((name, port)) = host.rsplit_once(':') {
-        if !name.contains(':') && Some(port) == default_port {
-            return name.to_string();
-        }
-    }
-
-    host
-}
-
-fn authority_host(authority: &str) -> &str {
-    if let Some(stripped) = authority.strip_prefix('[') {
-        if let Some(bracket_end) = stripped.find(']') {
-            return &authority[..=bracket_end + 1];
-        }
-    }
-
-    if let Some((host, _port)) = authority.rsplit_once(':') {
-        if !host.contains(':') {
-            return host;
-        }
-    }
-
-    authority
-}
-
-fn is_loopback_authority(authority: &str) -> bool {
-    matches!(
-        authority_host(authority),
-        "localhost" | "127.0.0.1" | "::1" | "[::1]"
-    )
-}
-
 fn is_loopback_dashboard_origin(origin: &str) -> bool {
     normalize_origin_authority(origin).is_some_and(|authority| is_loopback_authority(&authority))
-}
-
-fn normalized_dashboard_origin(value: &str) -> Option<String> {
-    let url = url::Url::parse(value).ok()?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return None;
-    }
-
-    let authority = normalize_origin_authority(value)?;
-    Some(format!("{}://{authority}", url.scheme()))
 }
 
 fn normalized_dashboard_allowed_origin(value: &str) -> Option<String> {
@@ -231,7 +134,7 @@ fn normalized_dashboard_allowed_origin(value: &str) -> Option<String> {
     if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
         return None;
     }
-    let origin = normalized_dashboard_origin(value)?;
+    let origin = normalized_http_origin(value)?;
     let authority = normalize_origin_authority(&origin)?;
     if is_loopback_authority(&authority) {
         return None;
@@ -331,23 +234,20 @@ fn request_access_token(request: &str) -> Option<&str> {
 }
 
 fn header_is_trusted_dashboard_origin(request: &str, header_name: &str) -> bool {
-    let Some(origin) =
-        request_header_value(request, header_name).and_then(normalized_dashboard_origin)
+    let Some(origin) = request_header_value(request, header_name).and_then(normalized_http_origin)
     else {
         return false;
     };
+    let Some(host) = request_header_value(request, "host") else {
+        return false;
+    };
+    if !origin_matches_host(&origin, host) {
+        return false;
+    }
     let Some((scheme, _)) = origin.split_once("://") else {
         return false;
     };
-    let Some(host) = request_header_value(request, "host")
-        .map(|host| normalize_host_authority(host, Some(scheme)))
-    else {
-        return false;
-    };
-
-    if normalize_origin_authority(&origin).as_deref() != Some(host.as_str()) {
-        return false;
-    }
+    let host = normalize_host_authority(host, Some(scheme));
 
     (is_loopback_authority(&host) && is_loopback_dashboard_origin(&origin))
         || allowed_dashboard_origins()
@@ -744,7 +644,6 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
 
     let request = String::from_utf8_lossy(&buf[..n]).to_string();
     let (method, path) = parse_request_method_and_path(&request);
-    let origin = request_header_value(&request, "origin").map(|value| value.to_string());
 
     if path.starts_with("/api/") && !is_same_origin_dashboard_request(&request) {
         write_json_error_response_no_cors(
@@ -764,12 +663,12 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
 
     if method == "POST" && path == "/api/chat" {
         let body_str = read_post_body(&mut stream, &buf, n).await;
-        handle_chat_request(&mut stream, &body_str, origin.as_deref()).await;
+        handle_chat_request(&mut stream, &body_str).await;
         return;
     }
 
     if method == "GET" && path == "/api/models" {
-        handle_models_request(&mut stream, origin.as_deref()).await;
+        handle_models_request(&mut stream).await;
         return;
     }
 
@@ -1557,6 +1456,26 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_gate_refuses_every_foreign_origin_and_allows_same_origin() {
+        use super::super::origin::invariant::{host, refused_origins, same_origin};
+        let port = 4848;
+        let request = |origin: &str| {
+            format!(
+                "GET /api/session/9222/stream HTTP/1.1\r\nHost: {}\r\nOrigin: {origin}\r\nUpgrade: websocket\r\n\r\n",
+                host(port)
+            )
+        };
+        for origin in refused_origins(port) {
+            let request = request(&origin);
+            assert!(!is_same_origin_ws_request(&request), "{origin} ws");
+            assert!(!is_same_origin_http_request(&request), "{origin} http");
+        }
+        let request = request(&same_origin(port));
+        assert!(is_same_origin_ws_request(&request));
+        assert!(is_same_origin_http_request(&request));
+    }
+
+    #[test]
     fn test_cross_origin_ws_request_rejected() {
         let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: https://evil.com\r\nUpgrade: websocket\r\n\r\n";
         assert!(!is_same_origin_ws_request(req));
@@ -1649,5 +1568,67 @@ mod tests {
         assert_eq!(parsed.0, "200 OK");
         assert_eq!(parsed.1, "application/json; charset=utf-8");
         assert_eq!(parsed.2, b"{\"ok\":true}".to_vec());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn proxied_tabs_request_reaches_session_server_with_loopback_host() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let temp_parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("t");
+        std::fs::create_dir_all(&temp_parent).unwrap();
+        let socket_dir = tempfile::Builder::new()
+            .prefix("dash-")
+            .tempdir_in(temp_parent)
+            .unwrap();
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            socket_dir.path().to_str().unwrap(),
+        );
+        guard.remove("XDG_RUNTIME_DIR");
+
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        std::fs::write(socket_dir.path().join("s.stream"), port.to_string()).unwrap();
+        std::fs::write(
+            socket_dir.path().join("s.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+
+        let upstream_request = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let read = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n[{\"url\":\"/x\"}]",
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&request[..read]).to_string()
+        });
+
+        let (status, _content_type, body) =
+            proxy_session_http_route(port, SessionProxyEndpoint::Tabs)
+                .await
+                .unwrap();
+
+        assert_eq!(status, "200 OK");
+        assert_eq!(body, b"[{\"url\":\"/x\"}]".to_vec());
+
+        let request = upstream_request.await.unwrap();
+        assert!(
+            request.starts_with("GET /api/tabs HTTP/1.1\r\n"),
+            "unexpected upstream request: {request}"
+        );
+        assert!(
+            request.contains(&format!("Host: 127.0.0.1:{port}")),
+            "upstream request did not carry a loopback Host: {request}"
+        );
+        assert!(
+            !request.to_ascii_lowercase().contains("\r\norigin:"),
+            "upstream request unexpectedly carried an Origin: {request}"
+        );
     }
 }

@@ -16,6 +16,11 @@ export const hash = (body) => createHash("sha256").update(body).digest("hex");
 export const canonical = (path) => `${origin}${path === "/" ? "" : path}`;
 export const markdownPath = (path) =>
   path === "/" ? "/index.md" : `${path}.md`;
+/** Fixture page `/` carries the introduction; its public canonical is `/introduction`. */
+export const docsCanonical = (path) =>
+  path === "/" ? `${origin}/introduction` : canonical(path);
+export const docsMarkdownPath = (path) =>
+  path === "/" ? "/introduction.md" : markdownPath(path);
 export const apiPath = (path) => `/api/docs-md${path === "/" ? "" : path}`;
 export const tokens = (value) =>
   (value ?? "")
@@ -74,6 +79,26 @@ export const addedPages = [
     ogDescription: "Browser automation CLI for AI agents",
     ogAlt: "Modern Web Guidance - agent-browser",
     twitterTitle: "Modern Web Guidance | agent-browser",
+  },
+  {
+    path: "/engines/firefox",
+    markdownTitle: "Firefox",
+    title: "Firefox | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Firefox | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Firefox - agent-browser",
+    twitterTitle: "Firefox | agent-browser",
+  },
+  {
+    path: "/ladybird",
+    markdownTitle: "Ladybird",
+    title: "Ladybird | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Ladybird | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Ladybird - agent-browser",
+    twitterTitle: "Ladybird | agent-browser",
   },
 ];
 
@@ -356,6 +381,45 @@ export function assertContainsLines(body, original, label) {
     );
     from = at + line.length;
   }
+}
+
+const HOME_FEATURES = [
+  ["Put your agent in control", "/commands"],
+  ["Read only what matters", "/snapshots"],
+  ["Take screenshots and recordings", "/recording"],
+  ["Run performance tests", "/profiler"],
+  ["Run agents side by side", "/sessions"],
+  ["Mock and inspect the network", "/network"],
+];
+
+export function assertHomeMarkdown(body) {
+  const frontmatter = `---\ntitle: "agent-browser"\ndescription: "Browser automation CLI for AI agents"\ncanonical_url: "${origin}"\n---\n\n`;
+  assert.ok(body.startsWith(frontmatter), "homepage: canonical frontmatter");
+  assert.match(body, /^# agent-browser$/m);
+  for (const [title, path] of HOME_FEATURES)
+    assert.ok(
+      body.includes(`**[${title}](${origin}${path})**`),
+      `homepage: missing feature ${JSON.stringify(title)}`,
+    );
+  assert.ok(
+    body.includes(`[Browser automation built for any agent](${origin}/introduction)`),
+    "homepage: missing browser docs link",
+  );
+  assert.ok(
+    body.includes(
+      `[Desktop automation built for any agent](${origin}/desktop)`,
+    ),
+    "homepage: missing desktop docs link",
+  );
+  assert.ok(
+    body.includes(`Read the [agent-browser documentation](${origin}/introduction)`),
+    "homepage: missing docs pointer",
+  );
+  assert.ok(
+    body.includes(`[llms.txt](${origin}/llms.txt)`),
+    "homepage: missing docs index link",
+  );
+  assert.ok(body.includes("Accept: text/markdown"));
 }
 
 export function assertModernMarkdown(body, page) {
