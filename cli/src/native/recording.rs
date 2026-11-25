@@ -1849,21 +1849,25 @@ async fn collect_frames(
     Ok(Collected::Done)
 }
 
-/// Screenshots requested at once while capturing at full density: Chrome
-/// renders them one after another, and overlapping requests hide the round
-/// trip, which roughly doubles the rate at a 2x scale.
-const SCREENSHOTS_IN_FLIGHT: usize = 3;
+/// Screenshots requested at once while capturing at full density.
+///
+/// Chrome's `Page.captureScreenshot` temporarily mutates device emulation while
+/// capturing an emulated scale and restores it on completion. Overlapping two
+/// requests on the same session lets the second save the first's temporary
+/// state and restore it permanently, leaving subsequent input coordinates
+/// divided by `deviceScaleFactor`. Keep at most one request in flight.
+const SCREENSHOTS_IN_FLIGHT: usize = 1;
 /// A screenshot that takes longer than this is dropped, as one can during a
 /// navigation; the encoder repeats the previous frame meanwhile.
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Capture the page with `Page.captureScreenshot`, which renders at the page's
-/// device scale, emulated or not, at up to `fps` frames a second with a few
-/// requests in flight. Slower pages capture fewer frames, and the encoder
-/// repeats the latest one to keep the video's rate. Screenshots go through the
-/// page's own session, which holds its emulation: the recorder's session
-/// would render at the window's real scale. `events` is still the recorder's,
-/// for when the page closes.
+/// device scale, emulated or not, at up to `fps` frames a second with one
+/// request in flight at a time. Slower pages capture fewer frames, and the
+/// encoder repeats the latest one to keep the video's rate. Screenshots go
+/// through the page's own session, which holds its emulation: the recorder's
+/// session would render at the window's real scale. `events` is still the
+/// recorder's, for when the page closes.
 #[allow(clippy::too_many_arguments)]
 async fn collect_screenshots(
     client: &CdpClient,
@@ -1904,7 +1908,12 @@ async fn collect_screenshots(
 
     loop {
         tokio::select! {
-            _ = &mut *cancel_rx => break,
+            _ = &mut *cancel_rx => {
+                if !pending.is_empty() {
+                    let _ = tokio::time::timeout(TEARDOWN_TIMEOUT, pending.next()).await;
+                }
+                break;
+            }
             event = events.recv() => {
                 match event {
                     Some(event) if event.method == "Inspector.detached" => break,
@@ -3378,5 +3387,106 @@ mod tests {
             .and_then(|i| args.get(i + 1))
             .map(String::as_str);
         assert_eq!(threads, Some("1"));
+    }
+
+    #[tokio::test]
+    async fn collect_screenshots_keeps_at_most_one_request_in_flight() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let in_flight = Arc::new(AtomicU64::new(0));
+        let max_in_flight = Arc::new(AtomicU64::new(0));
+        let total = Arc::new(AtomicU64::new(0));
+
+        let srv_in_flight = Arc::clone(&in_flight);
+        let srv_max = Arc::clone(&max_in_flight);
+        let srv_total = Arc::clone(&total);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (ws_tx, mut ws_rx) = ws.split();
+            let ws_tx = Arc::new(tokio::sync::Mutex::new(ws_tx));
+
+            while let Some(Ok(Message::Text(text))) = ws_rx.next().await {
+                let parsed: Value = serde_json::from_str(&text).unwrap();
+                let id = parsed["id"].as_u64().unwrap();
+                if parsed["method"].as_str() == Some("Page.captureScreenshot") {
+                    srv_total.fetch_add(1, Ordering::SeqCst);
+                    let current = srv_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    srv_max.fetch_max(current, Ordering::SeqCst);
+
+                    let ws_tx = Arc::clone(&ws_tx);
+                    let srv_in_flight = Arc::clone(&srv_in_flight);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(45)).await;
+                        srv_in_flight.fetch_sub(1, Ordering::SeqCst);
+                        let resp = json!({ "id": id, "result": { "data": "AAAA" } });
+                        let _ = ws_tx
+                            .lock()
+                            .await
+                            .send(Message::Text(resp.to_string()))
+                            .await;
+                    });
+                }
+            }
+        });
+
+        let client = CdpClient::connect(&format!("ws://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let (_event_tx, mut events) = mpsc::channel(8);
+        let (frame_tx, mut frame_rx) = mpsc::channel(16);
+        let captured = AtomicU64::new(0);
+        let outputs = FrameOutputs {
+            frames: &frame_tx,
+            contact: None,
+            captured: &captured,
+        };
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
+        let mut sequence = 0u64;
+
+        let drain = tokio::spawn(async move {
+            let mut count = 0usize;
+            while frame_rx.recv().await.is_some() {
+                count += 1;
+                if count >= 3 {
+                    let _ = cancel_tx.send(());
+                    break;
+                }
+            }
+            while frame_rx.recv().await.is_some() {}
+        });
+
+        collect_screenshots(
+            &client,
+            "S-1",
+            &mut events,
+            &outputs,
+            PageSize {
+                width: 390.0,
+                height: 844.0,
+                scale: 2.0,
+            },
+            60,
+            &mut sequence,
+            tokio::time::Instant::now(),
+            &mut cancel_rx,
+        )
+        .await
+        .unwrap();
+
+        drop(frame_tx);
+        drain.await.unwrap();
+        assert!(total.load(Ordering::SeqCst) >= 3);
+        assert_eq!(
+            max_in_flight.load(Ordering::SeqCst),
+            1,
+            "at most one Page.captureScreenshot may be in flight at a time"
+        );
+
+        drop(client);
+        server.abort();
     }
 }
