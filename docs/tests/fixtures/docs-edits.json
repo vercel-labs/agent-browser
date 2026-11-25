@@ -2,6 +2,14 @@
   "pages": {
     "/commands": [
       {
+        "from": "--engine <name>          # Browser engine: chrome (default), lightpanda, obscura (experimental)",
+        "to": "--engine <name>          # Browser engine: chrome (default), lightpanda, obscura, firefox"
+      },
+      {
+        "from": "agent-browser type <sel> <text>       # Type into element",
+        "to": "agent-browser type <sel> <text>       # Type without clearing"
+      },
+      {
         "from": "--auto-connect           # Auto-discover and connect to running Chrome",
         "to": "--auto-connect           # Auto-discover and connect to running Chrome\n--no-auto-connect        # Return an --auto-connect session to a local launch (overrides AGENT_BROWSER_AUTO_CONNECT)"
       },
@@ -32,6 +40,14 @@
       {
         "from": "--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional\n--auto-connect",
         "to": "--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional\n--cdp-headers <json>     # Headers for --cdp discovery and WebSocket handshake (or AGENT_BROWSER_CDP_HEADERS env)\n--auto-connect"
+      },
+      {
+        "from": "agent-browser connect <port|url>      # Connect to browser via CDP",
+        "to": "agent-browser connect <port|url>      # Connect to a browser via CDP or Firefox BiDi"
+      },
+      {
+        "from": "--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional",
+        "to": "--cdp <port|url>         # Connect via CDP or Firefox WebDriver BiDi; Firefox accepts ?devtools=<port>"
       },
       {
         "from": "agent-browser network route <url> --body <json>  # Mock response",
@@ -70,6 +86,10 @@
         "to": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser click <sel> --button right # Right-click (fires contextmenu) agent-browser click <sel> --modifiers control,shift # Hold keys during the click agent-browser dblclick <sel> # Double-click agent-browser dblclick <sel> --modifiers shift # Double-click with Shift held"
       },
       {
+        "from": "agent-browser select <sel> <val>      # Select dropdown by value or visible label",
+        "to": "agent-browser select <sel> <val> [--by value|label]  # Select dropdown by value or visible label"
+      },
+      {
         "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
         "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
       },
@@ -84,9 +104,21 @@
       {
         "from": "agent-browser set device <name>       # Emulate device (\"iPhone 14\")",
         "to": "agent-browser set device <name>       # Emulate a device (\"iPhone 14\"): viewport, user agent and touch input (touch events exist after the next navigation)"
+      },
+      {
+        "from": "not available with Safari or iOS WebDriver sessions",
+        "to": "not available with Safari, iOS, or Ladybird WebDriver sessions"
       }
     ],
     "/configuration": [
+      {
+        "from": "Browser engine to use: chrome (default), lightpanda, obscura (experimental).",
+        "to": "Browser engine to use: chrome (default), lightpanda, firefox, obscura (experimental)."
+      },
+      {
+        "from": "<code>chrome</code> (default), <code>lightpanda</code>, <code>obscura</code> (experimental)",
+        "to": "<code>chrome</code> (default), <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code> (experimental)"
+      },
       {
         "from": "This initial implementation does not support",
         "to": "Browser trust does not support"
@@ -192,6 +224,14 @@
         "to": "<tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance. <code>0</code>, <code>false</code>, <code>no</code> or an empty value leave it off.</td><td>(disabled)</td></tr>"
       },
       {
+        "from": "<tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>obscura</code>)</td></tr>",
+        "to": "<tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code>)</td></tr>"
+      },
+      {
+        "from": "string (chrome, lightpanda, obscura)",
+        "to": "string (chrome, lightpanda, firefox, obscura)"
+      },
+      {
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
       },
@@ -230,6 +270,10 @@
       {
         "from": "All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.",
         "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust."
+      },
+      {
+        "from": "iOS, Safari, and direct-page provider plugins",
+        "to": "iOS, Safari, Ladybird, and direct-page provider plugins"
       }
     ],
     "/init-scripts": [
@@ -290,6 +334,18 @@
       {
         "from": "pass it once and later commands and daemon restarts keep the strict semantics.",
         "to": "pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit close releases it so other sessions can take the tab, and the next pinned command pins again."
+      },
+      {
+        "from": "    <tr><td><code>{\"--cdp <port|url>\"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>",
+        "to": "    <tr><td><code>--cdp &lt;port|url&gt;</code></td><td>CDP or Firefox WebDriver BiDi connection (port or WebSocket URL; Firefox accepts <code>?devtools=&lt;port&gt;</code>)</td></tr>"
+      },
+      {
+        "from": "CDP connection (port or WebSocket URL)",
+        "to": "CDP or Firefox WebDriver BiDi connection (port or WebSocket URL; Firefox accepts ?devtools=<port>)"
+      },
+      {
+        "from": "Pin the session to its bound tab (strict tab binding)",
+        "to": "Pin the session to its bound tab (CDP only; Firefox attach rejects it)"
       }
     ],
     "/engines/chrome": [
@@ -326,6 +382,22 @@
       {
         "from": "Or in your agent-browser.json config:",
         "to": "Or in ~/.agent-browser/config.json or a file loaded with --config:"
+      },
+      {
+        "from": "Use the `--engine` flag to select Obscura:",
+        "to": "Set `--engine` on the command that launches the browser. Later commands in the same session use Obscura without the flag:"
+      },
+      {
+        "from": "Use the --engine flag to select Obscura:",
+        "to": "Set --engine on the command that launches the browser. Later commands in the same session use Obscura without the flag:"
+      },
+      {
+        "from": "agent-browser --engine obscura snapshot",
+        "to": "agent-browser snapshot"
+      },
+      {
+        "from": "agent-browser --engine obscura screenshot",
+        "to": "agent-browser screenshot"
       }
     ],
     "/eve": [
@@ -368,6 +440,16 @@
       {
         "from": "protected-vercel-deployments: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens.",
         "to": "vercel: Access and test Vercel deployments behind Vercel Authentication, SSO, or Deployment Protection with short-lived Trusted Sources OIDC tokens, and view them at a different feature flag variant with a per-browser override cookie."
+      }
+    ],
+    "/streaming": [
+      {
+        "from": "Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.",
+        "to": "Browser clients must load over HTTP or HTTPS from the same loopback host and port as the stream socket (`localhost`, `127.0.0.1` or `::1`). Any other origin, including `file://`, gets a 403 on the upgrade and needs a proxy. A client that sends no Origin header, such as a server-side bridge, can connect."
+      },
+      {
+        "from": "Browser clients must load from localhost, 127.0.0.1, ::1 or file://. Any other origin gets a 403 on the upgrade and needs a proxy.",
+        "to": "Browser clients must load over HTTP or HTTPS from the same loopback host and port as the stream socket (localhost, 127.0.0.1 or ::1). Any other origin, including file://, gets a 403 on the upgrade and needs a proxy. A client that sends no Origin header, such as a server-side bridge, can connect."
       }
     ],
     "/webgpu": [
@@ -417,11 +499,11 @@
       },
       {
         "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
-        "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+        "to": "The announcement names the top-level page's origin and lists each tool's origin, name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. Each record starts with the browser-reported origin that receives the tool's inputs: `[origin <origin>]` when it matches the page's origin, or `[cross-origin <origin>]` when the tool comes from an embedded frame on another origin. Direct `webmcp invoke` examples cover only tools from the page's own origin. Before invoking a cross-origin tool, confirm that its origin matches the user's task. When every tool is listed and the page's own tools share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to `agent-browser webmcp list --json`. If a description does not show the arguments, fetch the schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
       },
       {
         "from": "Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context.",
-        "to": "The announcement lists each tool's name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. When every tool is listed and all share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to agent-browser webmcp list --json. If a description does not show the arguments, fetch the schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
+        "to": "The announcement names the top-level page's origin and lists each tool's origin, name, frame ID, and description, and tells you to use one when it fits, before driving the DOM. Each record starts with the browser-reported origin that receives the tool's inputs: [origin <origin>] when it matches the page's origin, or [cross-origin <origin>] when the tool comes from an embedded frame on another origin. Direct webmcp invoke examples cover only tools from the page's own origin. Before invoking a cross-origin tool, confirm that its origin matches the user's task. When every tool is listed and the page's own tools share one frame, the call examples carry that frame ID; when the catalog is too large to show any tool, the announcement points to agent-browser webmcp list --json. If a description does not show the arguments, fetch the schema with agent-browser webmcp list <tool> --frame <frame-id> --json before invoking. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context."
       },
       {
         "from": "they fetch the selected tool's schema with `webmcp list <tool> --frame <frame-id> --json` and invoke it with the same `--frame`.",
@@ -430,6 +512,26 @@
       {
         "from": "they fetch the selected tool's schema with webmcp list <tool> --frame <frame-id> --json and invoke it with the same --frame.",
         "to": "they use an announced tool directly, fetch its schema with webmcp list <tool> --frame <frame-id> --json when the description does not show the arguments, and invoke it with the same --frame."
+      },
+      {
+        "from": "\"toolCount\": 1,\n      \"tools\": [{",
+        "to": "\"toolCount\": 1,\n      \"pageOrigin\": \"https://example.com\",\n      \"tools\": [{"
+      },
+      {
+        "from": "JSON exposes updates as `data.webmcp`; CLI and MCP text use the same summaries. An omitted field",
+        "to": "JSON exposes updates as `data.webmcp`; CLI and MCP text use the same summaries. `pageOrigin` is the browser-reported origin of the top-level page and is omitted until the browser reports it. Each tool's `origin` comes from the frame that registered it. A tool whose origin differs from `pageOrigin`, or any tool when `pageOrigin` is missing or opaque (`null`), is announced as cross-origin. An omitted field"
+      },
+      {
+        "from": "JSON exposes updates as data.webmcp; CLI and MCP text use the same summaries. An omitted field",
+        "to": "JSON exposes updates as data.webmcp; CLI and MCP text use the same summaries. pageOrigin is the browser-reported origin of the top-level page and is omitted until the browser reports it. Each tool's origin comes from the frame that registered it. A tool whose origin differs from pageOrigin, or any tool when pageOrigin is missing or opaque (null), is announced as cross-origin. An omitted field"
+      },
+      {
+        "from": "they use an announced tool directly, fetch its schema",
+        "to": "they use an announced tool from the page's own origin directly, check a cross-origin tool's origin against the request before using it, fetch its schema"
+      },
+      {
+        "from": "Lightpanda, Safari, iOS,",
+        "to": "Lightpanda, Safari, iOS, Ladybird,"
       }
     ],
     "/native-mode": [
@@ -471,8 +573,8 @@
   },
   "resources": {
     "/schema.json": {
-      "size": 9834,
-      "sha256": "22667a9fa7f532356116f762bedab84c8b1bad997352589a46add84023ef125c"
+      "size": 9845,
+      "sha256": "49f5ff702ebdfd97cc87b923ac6a92cce646b6ab21d291474b202ef7ebd68b40"
     }
   }
 }

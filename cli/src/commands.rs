@@ -459,6 +459,19 @@ fn reject_batch_global_flag(batch_item: bool, arg: &str) -> Result<(), ParseErro
     }
 }
 
+/// Adds the launch settings that also apply when attaching to a running browser.
+pub fn apply_attach_launch_options(cmd: &mut Value, flags: &Flags) {
+    if let Some(ref domains) = flags.allowed_domains {
+        cmd["allowedDomains"] = json!(domains);
+    }
+    if let Some(ref path) = flags.download_path {
+        cmd["downloadPath"] = json!(path);
+    }
+    if let Some(ref engine) = flags.engine {
+        cmd["engine"] = json!(engine);
+    }
+}
+
 /// Stamps `timeout` on a wait-family command, `flow_save` or `flow_run` that
 /// has none, so the client read timeout follows it.
 pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
@@ -897,20 +910,67 @@ fn parse_command_inner(
             parse_selector_command(&rest, &id, "uncheck", "uncheck <selector>", batch_item)
         }
         "select" => {
+            const USAGE: &str = "select <selector> <value...> [--by value|label]";
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "select".to_string(),
-                usage: "select <selector> <value...>",
+                usage: USAGE,
             })?;
-            let _val = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "select".to_string(),
-                usage: "select <selector> <value...>",
-            })?;
-            let values = &rest[1..];
-            if values.len() == 1 {
-                Ok(json!({ "id": id, "action": "select", "selector": sel, "values": values[0] }))
-            } else {
-                Ok(json!({ "id": id, "action": "select", "selector": sel, "values": values }))
+            // Only `--by <v>`, `--by=<v>` and a `--` marker are special. Every
+            // other argument is an option value, including ones that start with
+            // `-` such as "-- Select --" or "-none-"; after `--` nothing is.
+            let mut by: Option<&str> = None;
+            let mut values: Vec<&str> = Vec::new();
+            let mut i = 1;
+            while i < rest.len() {
+                let arg = rest[i];
+                let by_value = if arg == "--by" {
+                    i += 1;
+                    Some(*rest.get(i).ok_or_else(|| ParseError::MissingArguments {
+                        context: "select --by".to_string(),
+                        usage: USAGE,
+                    })?)
+                } else {
+                    arg.strip_prefix("--by=")
+                };
+                match by_value {
+                    Some(value) => {
+                        if value != "value" && value != "label" {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("--by must be 'value' or 'label', got '{value}'"),
+                                usage: USAGE,
+                            });
+                        }
+                        if by.is_some() {
+                            return Err(ParseError::InvalidValue {
+                                message: "--by was given more than once".to_string(),
+                                usage: USAGE,
+                            });
+                        }
+                        by = Some(value);
+                    }
+                    None if arg == "--" => {
+                        values.extend_from_slice(&rest[i + 1..]);
+                        break;
+                    }
+                    None => values.push(arg),
+                }
+                i += 1;
             }
+            if values.is_empty() {
+                return Err(ParseError::MissingArguments {
+                    context: "select".to_string(),
+                    usage: USAGE,
+                });
+            }
+            let mut cmd = if values.len() == 1 {
+                json!({ "id": id, "action": "select", "selector": sel, "values": values[0] })
+            } else {
+                json!({ "id": id, "action": "select", "selector": sel, "values": values })
+            };
+            if let Some(by) = by {
+                cmd["by"] = json!(by);
+            }
+            Ok(cmd)
         }
         "drag" => {
             const USAGE: &str = "drag <source> <target> [--human]";
@@ -1864,6 +1924,7 @@ fn parse_command_inner(
                 || endpoint.starts_with("https://")
             {
                 let mut cmd = json!({ "id": id, "action": "launch", "cdpUrl": endpoint });
+                apply_attach_launch_options(&mut cmd, flags);
                 if let Some(raw) = connect_headers(flags, endpoint) {
                     cmd["cdpHeaders"] =
                         parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
@@ -1902,6 +1963,7 @@ fn parse_command_inner(
                     }
                 };
                 let mut cmd = json!({ "id": id, "action": "launch", "cdpPort": port });
+                apply_attach_launch_options(&mut cmd, flags);
                 if let Some(raw) = connect_headers(flags, endpoint) {
                     cmd["cdpHeaders"] =
                         parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
@@ -6199,6 +6261,90 @@ mod tests {
     }
 
     #[test]
+    fn test_select_by_flag() {
+        for by in ["value", "label"] {
+            let cmd = parse_command(
+                &args(&format!("select #menu 1 --by {by}")),
+                &default_flags(),
+            )
+            .unwrap();
+            assert_eq!(cmd["values"], "1");
+            assert_eq!(cmd["by"], by);
+        }
+        let cmd = parse_command(&args("select #menu --by value 1 2"), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], json!(["1", "2"]));
+        assert_eq!(cmd["by"], "value");
+        let cmd = parse_command(&args("select #menu 1"), &default_flags()).unwrap();
+        assert!(cmd.get("by").is_none());
+    }
+
+    #[test]
+    fn test_select_by_flag_is_validated() {
+        let err = parse_command(&args("select #menu 1 --by text"), &default_flags()).unwrap_err();
+        assert!(err.format().contains("--by"));
+        let err = parse_command(&args("select #menu 1 --by"), &default_flags()).unwrap_err();
+        assert!(err.format().contains("select"));
+        let err = parse_command(
+            &args("select #menu 1 --by value --by label"),
+            &default_flags(),
+        )
+        .unwrap_err();
+        assert!(err.format().contains("more than once"));
+        let cmd = parse_command(&args("select #menu 1 --by=label"), &default_flags()).unwrap();
+        assert_eq!(cmd["by"], "label");
+        assert_eq!(cmd["values"], "1");
+        let err = parse_command(&args("select #menu --by=nope 1"), &default_flags()).unwrap_err();
+        assert!(err.format().contains("--by"));
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn test_select_values_that_start_with_a_dash_are_data() {
+        for value in ["-- Select --", "- None -", "-none-", "--x", "-1", "--"] {
+            let tokens = if value == "--" {
+                argv(&["select", "#d", "--", "--"])
+            } else {
+                argv(&["select", "#d", value])
+            };
+            let cmd = parse_command(&tokens, &default_flags()).unwrap();
+            assert_eq!(cmd["selector"], "#d");
+            assert_eq!(cmd["values"], value, "{value}");
+            assert!(cmd.get("by").is_none());
+        }
+        let cmd = parse_command(&argv(&["select", "#m", "x", "-none-"]), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], json!(["x", "-none-"]));
+        // After `--` a value that looks like the flag is literal.
+        let cmd = parse_command(
+            &argv(&["select", "#d", "--", "--by", "value"]),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["values"], json!(["--by", "value"]));
+        assert!(cmd.get("by").is_none());
+        // The flag still works next to a dash-leading value.
+        let cmd = parse_command(
+            &argv(&["select", "#d", "-- Select --", "--by", "label"]),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["values"], "-- Select --");
+        assert_eq!(cmd["by"], "label");
+    }
+
+    #[test]
+    fn test_select_dash_values_in_a_batch() {
+        let cmd = parse_batch_command(&argv(&["select", "#d", "-- Select --"]), &default_flags())
+            .unwrap();
+        assert_eq!(cmd["values"], "-- Select --");
+        let cmd =
+            parse_batch_command(&argv(&["select", "#d", "x", "-none-"]), &default_flags()).unwrap();
+        assert_eq!(cmd["values"], json!(["x", "-none-"]));
+    }
+
+    #[test]
     fn test_frame_main() {
         let cmd = parse_command(&args("frame main"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "mainframe");
@@ -8170,6 +8316,27 @@ mod tests {
         let cmd = parse_command(&args("connect 1"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 1);
+    }
+
+    #[test]
+    fn test_connect_forwards_attach_launch_options() {
+        let mut flags = default_flags();
+        flags.download_path = Some("/tmp/downloads".to_string());
+        flags.allowed_domains = Some(vec!["example.com".to_string()]);
+        flags.engine = Some("firefox".to_string());
+        flags.profile = Some("/tmp/profile".to_string());
+        flags.init_scripts = vec!["/tmp/init.js".to_string()];
+
+        let port = parse_command(&args("connect 9222"), &flags).unwrap();
+        assert_eq!(port["downloadPath"], "/tmp/downloads");
+        assert_eq!(port["allowedDomains"], json!(["example.com"]));
+        assert_eq!(port["engine"], "firefox");
+        assert!(port.get("profile").is_none());
+        assert!(port.get("initScripts").is_none());
+
+        let url = parse_command(&args("connect ws://127.0.0.1:9222/session"), &flags).unwrap();
+        assert_eq!(url["downloadPath"], "/tmp/downloads");
+        assert_eq!(url["engine"], "firefox");
     }
 
     // === Runtime stream control tests ===

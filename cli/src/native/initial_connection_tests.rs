@@ -40,140 +40,145 @@ async fn mock_browser_with_event_burst(stall_child: bool, event_burst: usize) ->
     let commands = Arc::new(Mutex::new(Vec::new()));
     let recorded = commands.clone();
     let task = tokio::spawn(async move {
-        let mut ws = loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            match tokio_tungstenite::accept_async(stream).await {
-                Ok(ws) => break ws,
-                // CDP attachment can probe the port with a TCP connection
-                // before opening the actual WebSocket, just like real Chrome.
+        // Attachment probes the port with a bare TCP connection, then opens a
+        // short WebSocket to ask Browser.getVersion, and only then connects
+        // the session. Each of those must leave the listener in place.
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => break,
+            };
+            let mut ws = match tokio_tungstenite::accept_async(stream).await {
+                Ok(ws) => ws,
+                // A TCP readiness probe carries no WebSocket handshake.
                 Err(WebSocketError::Protocol(ProtocolError::HandshakeIncomplete)) => continue,
                 Err(error) => panic!("Mock browser WebSocket handshake failed: {error}"),
-            }
-        };
-        let mut attached = HashSet::new();
-        while let Some(Ok(message)) = ws.next().await {
-            let Message::Text(text) = message else {
-                continue;
             };
-            let cmd: Value = serde_json::from_str(&text).unwrap();
-            recorded.lock().unwrap().push(cmd.clone());
-            let method = cmd["method"].as_str().unwrap();
-            let sid = cmd["sessionId"].as_str().unwrap_or("");
-            if stall_child && method == "Page.enable" && sid == "session-child" {
-                continue;
-            }
-            // Events are deliberately sent before the command response. This
-            // needs no scheduler sleeps to reproduce the initialization race.
-            let mut events = Vec::new();
-            let result = match method {
-                "Target.getTargets" => {
-                    json!({"targetInfos": [target("top", "page"), target("background", "page")]})
+            let mut attached = HashSet::new();
+            while let Some(Ok(message)) = ws.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                recorded.lock().unwrap().push(cmd.clone());
+                let method = cmd["method"].as_str().unwrap();
+                let sid = cmd["sessionId"].as_str().unwrap_or("");
+                if stall_child && method == "Page.enable" && sid == "session-child" {
+                    continue;
                 }
-                "Target.attachToTarget" => {
-                    let id = cmd["params"]["targetId"].as_str().unwrap();
-                    events.push(attachment(id, "page", ""));
-                    json!({"sessionId": format!("session-{id}")})
-                }
-                "Target.setAutoAttach" if attached.insert(sid.to_string()) => {
-                    match sid {
-                        "session-top" => {
-                            events.push(attachment("child", "iframe", sid));
-                            events.push(attachment("detached", "iframe", sid));
-                            events.push(json!({"method":"Target.detachedFromTarget", "params":{"sessionId":"session-detached"}}));
-                            events.push(attachment("destroyed", "iframe", sid));
-                            events.push(json!({"method":"Target.targetDestroyed", "params":{"targetId":"destroyed"}}));
-                            events.push(attachment("worker", "worker", sid));
+                // Events are deliberately sent before the command response. This
+                // needs no scheduler sleeps to reproduce the initialization race.
+                let mut events = Vec::new();
+                let result = match method {
+                    "Target.getTargets" => {
+                        json!({"targetInfos": [target("top", "page"), target("background", "page")]})
+                    }
+                    "Target.attachToTarget" => {
+                        let id = cmd["params"]["targetId"].as_str().unwrap();
+                        events.push(attachment(id, "page", ""));
+                        json!({"sessionId": format!("session-{id}")})
+                    }
+                    "Target.setAutoAttach" if attached.insert(sid.to_string()) => {
+                        match sid {
+                            "session-top" => {
+                                events.push(attachment("child", "iframe", sid));
+                                events.push(attachment("detached", "iframe", sid));
+                                events.push(json!({"method":"Target.detachedFromTarget", "params":{"sessionId":"session-detached"}}));
+                                events.push(attachment("destroyed", "iframe", sid));
+                                events.push(json!({"method":"Target.targetDestroyed", "params":{"targetId":"destroyed"}}));
+                                events.push(attachment("worker", "worker", sid));
+                            }
+                            "session-child" => events.push(attachment("nested", "iframe", sid)),
+                            _ => {}
                         }
-                        "session-child" => events.push(attachment("nested", "iframe", sid)),
-                        _ => {}
+                        json!({})
                     }
-                    json!({})
-                }
-                "Test.attach" => {
-                    events.push(attachment("later", "iframe", "session-top"));
-                    json!({})
-                }
-                "Test.destroy" => {
-                    events.push(
+                    "Test.attach" => {
+                        events.push(attachment("later", "iframe", "session-top"));
+                        json!({})
+                    }
+                    "Test.destroy" => {
+                        events.push(
                         json!({"method":"Target.targetDestroyed", "params":{"targetId":"later"}}),
                     );
-                    json!({})
-                }
-                "Test.eventOrder" => {
-                    let console = || json!({"method":"Runtime.consoleAPICalled", "sessionId":"session-top", "params":{"type":"log", "args":[]}});
-                    events.push(console());
-                    events.push(attachment("later", "iframe", "session-top"));
-                    events.push(console());
-                    events.push(
+                        json!({})
+                    }
+                    "Test.eventOrder" => {
+                        let console = || json!({"method":"Runtime.consoleAPICalled", "sessionId":"session-top", "params":{"type":"log", "args":[]}});
+                        events.push(console());
+                        events.push(attachment("later", "iframe", "session-top"));
+                        events.push(console());
+                        events.push(
                         json!({"method":"Target.targetDestroyed", "params":{"targetId":"later"}}),
                     );
-                    events.push(console());
-                    json!({})
+                        events.push(console());
+                        json!({})
+                    }
+                    "Page.getFrameTree" => {
+                        let id = sid.strip_prefix("session-").unwrap_or("top");
+                        let mut frame =
+                            json!({"id": id, "loaderId":"loader-1", "url":"http://example.test/"});
+                        if id == "child" {
+                            frame["parentId"] = json!("top");
+                        }
+                        if id == "nested" {
+                            frame["parentId"] = json!("child");
+                        }
+                        let mut tree = json!({"frame": frame});
+                        if id == "top" {
+                            tree["childFrames"] = json!([{"frame":{"id":"child","parentId":"top","url":"http://example.test/"}}]);
+                        }
+                        if id == "child" {
+                            tree["childFrames"] = json!([{"frame":{"id":"nested","parentId":"child","url":"http://example.test/"}}]);
+                        }
+                        json!({"frameTree":tree})
+                    }
+                    "Accessibility.getFullAXTree" => {
+                        if sid == "session-top" && cmd["params"]["frameId"] == "child" {
+                            ws.send(Message::Text(json!({"id":cmd["id"],"error":{"code":-32000,"message":"Frame with the given frameId is not found"}}).to_string())).await.unwrap();
+                            continue;
+                        }
+                        let (role, name, bid) = if sid == "session-top" {
+                            ("Iframe", "Report", 10)
+                        } else {
+                            ("button", "Choose metrics", 20)
+                        };
+                        json!({"nodes":[{"nodeId":"1","role":{"type":"role","value":role},"name":{"type":"string","value":name},"backendDOMNodeId":bid}]})
+                    }
+                    "DOM.describeNode" => {
+                        json!({"node":{"nodeName":"IFRAME","frameId":"child","backendNodeId":10}})
+                    }
+                    "Runtime.evaluate" => json!({"result":{"type":"object","value":[]}}),
+                    _ => json!({}),
+                };
+                let emitted_events = !events.is_empty();
+                for event in events {
+                    ws.send(Message::Text(event.to_string())).await.unwrap();
                 }
-                "Page.getFrameTree" => {
-                    let id = sid.strip_prefix("session-").unwrap_or("top");
-                    let mut frame =
-                        json!({"id": id, "loaderId":"loader-1", "url":"http://example.test/"});
-                    if id == "child" {
-                        frame["parentId"] = json!("top");
+                if emitted_events {
+                    // Overflow the ordinary broadcast before the command returns,
+                    // after the target events that initialization must retain.
+                    for n in 0..event_burst {
+                        ws.send(Message::Text(
+                            json!({
+                                "method": "Network.dataReceived", "sessionId": sid,
+                                "params": {"requestId": "noise", "dataLength": n}
+                            })
+                            .to_string(),
+                        ))
+                        .await
+                        .unwrap();
                     }
-                    if id == "nested" {
-                        frame["parentId"] = json!("child");
-                    }
-                    let mut tree = json!({"frame": frame});
-                    if id == "top" {
-                        tree["childFrames"] = json!([{"frame":{"id":"child","parentId":"top","url":"http://example.test/"}}]);
-                    }
-                    if id == "child" {
-                        tree["childFrames"] = json!([{"frame":{"id":"nested","parentId":"child","url":"http://example.test/"}}]);
-                    }
-                    json!({"frameTree":tree})
                 }
-                "Accessibility.getFullAXTree" => {
-                    if sid == "session-top" && cmd["params"]["frameId"] == "child" {
-                        ws.send(Message::Text(json!({"id":cmd["id"],"error":{"code":-32000,"message":"Frame with the given frameId is not found"}}).to_string())).await.unwrap();
-                        continue;
-                    }
-                    let (role, name, bid) = if sid == "session-top" {
-                        ("Iframe", "Report", 10)
-                    } else {
-                        ("button", "Choose metrics", 20)
-                    };
-                    json!({"nodes":[{"nodeId":"1","role":{"type":"role","value":role},"name":{"type":"string","value":name},"backendDOMNodeId":bid}]})
-                }
-                "DOM.describeNode" => {
-                    json!({"node":{"nodeName":"IFRAME","frameId":"child","backendNodeId":10}})
-                }
-                "Runtime.evaluate" => json!({"result":{"type":"object","value":[]}}),
-                _ => json!({}),
-            };
-            let emitted_events = !events.is_empty();
-            for event in events {
-                ws.send(Message::Text(event.to_string())).await.unwrap();
-            }
-            if emitted_events {
-                // Overflow the ordinary broadcast before the command returns,
-                // after the target events that initialization must retain.
-                for n in 0..event_burst {
-                    ws.send(Message::Text(
-                        json!({
-                            "method": "Network.dataReceived", "sessionId": sid,
-                            "params": {"requestId": "noise", "dataLength": n}
-                        })
-                        .to_string(),
+                if ws
+                    .send(Message::Text(
+                        json!({"id":cmd["id"],"result":result}).to_string(),
                     ))
                     .await
-                    .unwrap();
+                    .is_err()
+                {
+                    break;
                 }
-            }
-            if ws
-                .send(Message::Text(
-                    json!({"id":cmd["id"],"result":result}).to_string(),
-                ))
-                .await
-                .is_err()
-            {
-                break;
             }
         }
     });

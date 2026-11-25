@@ -644,7 +644,7 @@ pub struct Flags {
     pub enable: Vec<String>,
     pub profile: Option<String>,
     pub state: Option<String>,
-    pub proxy: Option<String>,
+    pub proxy: Option<crate::session_settings::ParsedProxy>,
     pub proxy_bypass: Option<String>,
     pub args: Option<String>,
     pub user_agent: Option<String>,
@@ -758,6 +758,40 @@ impl Flags {
     }
 }
 
+fn resolve_proxy(
+    explicit: Option<&str>,
+    configured: Option<&str>,
+) -> Option<crate::session_settings::ParsedProxy> {
+    use crate::session_settings::parse_proxy;
+
+    let configured = configured.map(parse_proxy);
+    let explicit = explicit.map(parse_proxy);
+    let accepts_separate_credentials = configured.as_ref().is_some_and(|default| {
+        explicit
+            .as_ref()
+            .is_none_or(|proxy| proxy.server == default.server)
+    });
+    let mut proxy = explicit.or(configured).or_else(|| {
+        [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ]
+        .iter()
+        .find_map(|name| env::var(name).ok())
+        .as_deref()
+        .map(parse_proxy)
+    })?;
+    if accepts_separate_credentials && proxy.username.is_none() && proxy.password.is_none() {
+        proxy.username = env::var("AGENT_BROWSER_PROXY_USERNAME").ok();
+        proxy.password = env::var("AGENT_BROWSER_PROXY_PASSWORD").ok();
+    }
+    Some(proxy)
+}
+
 pub fn parse_flags(args: &[String]) -> Flags {
     try_parse_flags(args).unwrap_or_else(|e| {
         eprintln!("{} {}", color::warning_indicator(), e);
@@ -849,6 +883,8 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
     } else {
         "default"
     };
+    let configured_proxy = env::var("AGENT_BROWSER_PROXY").ok().or(config.proxy);
+    let mut explicit_proxy = None;
     let mut flags = Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
         headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
@@ -887,15 +923,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         enable,
         profile: env::var("AGENT_BROWSER_PROFILE").ok().or(config.profile),
         state: env::var("AGENT_BROWSER_STATE").ok().or(config.state),
-        proxy: env::var("AGENT_BROWSER_PROXY")
-            .ok()
-            .or(config.proxy)
-            .or_else(|| env::var("HTTP_PROXY").ok())
-            .or_else(|| env::var("http_proxy").ok())
-            .or_else(|| env::var("HTTPS_PROXY").ok())
-            .or_else(|| env::var("https_proxy").ok())
-            .or_else(|| env::var("ALL_PROXY").ok())
-            .or_else(|| env::var("all_proxy").ok()),
+        proxy: None,
         proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS")
             .ok()
             .or(config.proxy_bypass)
@@ -1228,7 +1256,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             }
             "--proxy" => {
                 if let Some(p) = args.get(i + 1) {
-                    flags.proxy = Some(p.clone());
+                    explicit_proxy = Some(p.clone());
                     flags.cli_proxy = true;
                     i += 1;
                 }
@@ -1521,6 +1549,8 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         }
         i += 1;
     }
+    flags.proxy = resolve_proxy(explicit_proxy.as_deref(), configured_proxy.as_deref());
+
     // The policy is stored with the session and read again by later daemons,
     // which start in whatever directory their command ran from.
     if let (Some(path), Ok(cwd)) = (flags.action_policy.as_mut(), env::current_dir()) {

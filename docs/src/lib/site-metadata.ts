@@ -1,6 +1,10 @@
 import type { Metadata, Viewport } from 'next';
+import { versionedOgImage } from './og-version';
+import { HOME_OG_TITLE } from './page-titles';
 
 export const viewport: Viewport = { viewportFit: 'cover' };
+
+const ogImage = versionedOgImage('/og', HOME_OG_TITLE);
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://agent-browser.dev'),
@@ -16,12 +20,12 @@ export const metadata: Metadata = {
     siteName: 'agent-browser',
     title: 'agent-browser | Browser Automation for AI',
     description: 'Browser automation CLI for AI agents',
-    images: [{ url: '/og', width: 1200, height: 630, alt: 'agent-browser' }],
+    images: [{ url: ogImage, width: 1200, height: 630, alt: 'agent-browser' }],
   },
   twitter: {
     card: 'summary_large_image',
     title: 'agent-browser | Browser Automation for AI',
     description: 'Browser automation CLI for AI agents',
-    images: ['/og'],
+    images: [{ url: ogImage, width: 1200, height: 630, alt: 'agent-browser' }],
   },
 };

@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::{
-    resolve_element_center, resolve_element_object_id, session_viewport_offset, RefMap,
+    document_gone, resolve_element_center, resolve_element_object_id, session_viewport_offset,
+    unblocked_point, RefMap,
 };
+use super::forms::{CallError, FormControl};
 use super::pointer::{ClickSpec, Modifiers, MouseButton};
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
@@ -28,11 +30,38 @@ pub struct ClickResult {
 
 pub struct PendingRelease {
     pub session_id: String,
+    pub owner_tab: Option<String>,
+    pub blocked: bool,
+    pub owner_position: (f64, f64),
     pub x: f64,
     pub y: f64,
-    pub button: MouseButton,
+    pub button: Option<MouseButton>,
     pub click_count: u8,
     pub modifiers: Modifiers,
+}
+
+impl PendingRelease {
+    /// The tab that owns this hold: the cached tab, or the context itself when none was cached.
+    pub fn owner_tab(&self) -> &str {
+        self.owner_tab.as_deref().unwrap_or(&self.session_id)
+    }
+
+    /// True when this hold's owning tab is among the contexts that left the tree.
+    pub fn tab_removed(&self, removed: &HashSet<String>) -> bool {
+        removed.contains(self.owner_tab())
+    }
+
+    /// True when the context this hold was recorded for left the tree while its tab stayed.
+    pub fn context_removed(&self, removed: &HashSet<String>) -> bool {
+        removed.contains(&self.session_id)
+    }
+
+    /// Clears the bit this hold kept pressed.
+    pub fn clear_pressed(&self, buttons: &mut i32) {
+        if let Some(button) = self.button {
+            *buttons &= !button.mask();
+        }
+    }
 }
 
 pub async fn click(
@@ -132,129 +161,176 @@ pub async fn hover(
     Ok((x + offset.0, y + offset.1))
 }
 
-pub async fn fill(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    value: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
+pub(crate) const FOCUS_JS: &str = "function() { this.focus(); }";
 
-    // Focus the element
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
+/// Resolves `this`'s href against the document base, or null for a non-link.
+pub(crate) const CLICK_HREF_JS: &str = "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }";
 
-    // Select all + delete to clear
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    this.select && this.select();
-                    this.value = '';
-                    this.dispatchEvent(new Event('input', { bubbles: true }));
-                }"#
-                .to_string(),
-                object_id: Some(object_id),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
-    // Insert text (keyboard input dispatched at page level, use parent session_id)
-    client
-        .send_command_typed::<_, Value>(
-            "Input.insertText",
-            &InsertTextParams {
-                text: value.to_string(),
-            },
-            Some(session_id),
-        )
-        .await?;
-
-    Ok(())
+/// The element a form action works on in Chrome, reached over CDP.
+pub(crate) struct CdpControl<'a> {
+    client: &'a CdpClient,
+    page_session: &'a str,
+    ref_map: &'a RefMap,
+    iframe_sessions: &'a HashMap<String, String>,
+    target: &'a str,
+    session: String,
+    object_id: String,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn type_text(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    text: &str,
-    clear: bool,
-    delay_ms: Option<u64>,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
-
-    // Focus
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
-    if clear {
-        client
-            .send_command_typed::<_, Value>(
-                "Runtime.callFunctionOn",
-                &CallFunctionOnParams {
-                    function_declaration: r#"function() {
-                        this.select && this.select();
-                        this.value = '';
-                        this.dispatchEvent(new Event('input', { bubbles: true }));
-                    }"#
-                    .to_string(),
-                    object_id: Some(object_id),
-                    arguments: None,
-                    return_by_value: Some(true),
-                    await_promise: Some(false),
-                },
-                Some(&effective_session_id),
-            )
-            .await?;
+impl<'a> CdpControl<'a> {
+    /// Resolves the element `target` names in the page `page_session` shows.
+    pub(crate) async fn resolve(
+        client: &'a CdpClient,
+        page_session: &'a str,
+        ref_map: &'a RefMap,
+        target: &'a str,
+        iframe_sessions: &'a HashMap<String, String>,
+    ) -> Result<Self, String> {
+        let (object_id, session) =
+            resolve_element_object_id(client, page_session, ref_map, target, iframe_sessions)
+                .await?;
+        Ok(Self {
+            client,
+            page_session,
+            ref_map,
+            iframe_sessions,
+            target,
+            session,
+            object_id,
+        })
     }
 
-    type_text_into_active_context(client, session_id, text, delay_ms).await
+    async fn call_function(
+        &self,
+        js: &str,
+        args: Vec<Value>,
+        by_value: bool,
+    ) -> Result<EvaluateResult, CallError> {
+        let result: EvaluateResult = self
+            .client
+            .send_command_typed(
+                "Runtime.callFunctionOn",
+                &CallFunctionOnParams {
+                    function_declaration: js.to_string(),
+                    object_id: Some(self.object_id.clone()),
+                    arguments: (!args.is_empty()).then(|| {
+                        args.into_iter()
+                            .map(|value| CallArgument {
+                                value: Some(value),
+                                object_id: None,
+                            })
+                            .collect()
+                    }),
+                    return_by_value: Some(by_value),
+                    await_promise: Some(true),
+                },
+                Some(&self.session),
+            )
+            .await
+            .map_err(cdp_error)?;
+        if result.exception_details.is_some() {
+            return Err(CallError::Threw);
+        }
+        Ok(result)
+    }
+}
+
+/// Sorts a CDP failure: a document or element that is gone is not a failure
+/// of an action that already happened.
+fn cdp_error(error: String) -> CallError {
+    let lower = error.to_lowercase();
+    if document_gone(&error)
+        || [
+            "element not found",
+            "cannot find object",
+            "target navigated",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        CallError::Gone
+    } else {
+        CallError::Failed(error)
+    }
+}
+
+impl FormControl for CdpControl<'_> {
+    fn target(&self) -> &str {
+        self.target
+    }
+
+    async fn call(&mut self, js: &str, args: Vec<Value>) -> Result<Value, CallError> {
+        let result = self.call_function(js, args, true).await?;
+        Ok(result.result.value.unwrap_or(Value::Null))
+    }
+
+    async fn bind(&mut self, js: &str) -> Result<(), CallError> {
+        let result = self.call_function(js, Vec::new(), false).await?;
+        if let Some(object_id) = result.result.object_id {
+            self.object_id = object_id;
+        }
+        Ok(())
+    }
+
+    async fn rebind(&mut self) -> Result<(), CallError> {
+        let (object_id, session) = resolve_element_object_id(
+            self.client,
+            self.page_session,
+            self.ref_map,
+            self.target,
+            self.iframe_sessions,
+        )
+        .await
+        .map_err(cdp_error)?;
+        (self.object_id, self.session) = (object_id, session);
+        Ok(())
+    }
+
+    async fn insert_text(&mut self, text: &str) -> Result<(), CallError> {
+        // Keyboard input is dispatched at page level.
+        self.client
+            .send_command_typed::<_, Value>(
+                "Input.insertText",
+                &InsertTextParams {
+                    text: text.to_string(),
+                },
+                Some(self.page_session),
+            )
+            .await
+            .map_err(cdp_error)?;
+        Ok(())
+    }
+
+    async fn type_text(&mut self, text: &str, delay_ms: Option<u64>) -> Result<(), CallError> {
+        type_text_into_active_context(self.client, self.page_session, text, delay_ms)
+            .await
+            .map_err(cdp_error)
+    }
+
+    async fn click(&mut self) -> Result<(f64, f64), CallError> {
+        let (x, y) = unblocked_point(self.client, &self.session, &self.object_id, self.target)
+            .await
+            .map_err(cdp_error)?;
+        let offset = session_viewport_offset(
+            self.client,
+            self.page_session,
+            &self.session,
+            self.iframe_sessions,
+        )
+        .await
+        .map_err(cdp_error)?;
+        dispatch_click(
+            self.client,
+            &self.session,
+            &[self.session.as_str(), self.page_session],
+            x,
+            y,
+            ClickSpec::default(),
+        )
+        .await
+        .map_err(cdp_error)?;
+        Ok((x + offset.0, y + offset.1))
+    }
 }
 
 pub async fn type_text_into_active_context(
@@ -280,6 +356,7 @@ pub async fn type_text_into_active_context(
                         unmodified_text: text_str,
                         windows_virtual_key_code: Some(key_code),
                         modifiers: None,
+                        location: None,
                     },
                     Some(session_id),
                 )
@@ -296,6 +373,7 @@ pub async fn type_text_into_active_context(
                         unmodified_text: None,
                         windows_virtual_key_code: Some(key_code),
                         modifiers: None,
+                        location: None,
                     },
                     Some(session_id),
                 )
@@ -340,50 +418,173 @@ pub async fn press_key_with_modifiers(
     key: &str,
     modifiers: Option<i32>,
 ) -> Result<(), String> {
-    let (key_name, code, key_code) = named_key_info(key);
+    press_key_with_chord_and_held(client, session_id, key, modifiers.unwrap_or(0), 0).await
+}
 
-    // Suppress text insertion when Control (2) or Meta (4) modifiers are active,
-    // since these are command chords (e.g. Ctrl+A = select-all), not text input.
-    let has_command_modifier = modifiers.is_some_and(|m| m & (2 | 4) != 0);
-    let text = if has_command_modifier {
-        None
-    } else {
-        key_text(&key_name)
-    };
+/// Dispatch keyDown/keyUp for `key` with chord modifiers (emitting keyDown/keyUp
+/// for chord modifiers not already held) combined with `held_modifiers`.
+pub async fn press_key_with_chord_and_held(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    chord_modifiers: i32,
+    held_modifiers: i32,
+) -> Result<(), String> {
+    let chord_only = chord_modifiers & !held_modifiers;
+    let modifier_keys = modifier_key_names(chord_only);
+    let mut pressed_modifiers: Vec<&'static str> = Vec::with_capacity(modifier_keys.len());
+    let mut active_modifiers = held_modifiers;
 
+    for modifier in &modifier_keys {
+        let bit = key_modifier_bit(modifier).expect("modifier names have a CDP bit");
+        let next_modifiers = active_modifiers | bit;
+        if let Err(error) = dispatch_single_key_event(
+            client,
+            session_id,
+            modifier,
+            "keyDown",
+            nonzero_modifiers(next_modifiers),
+        )
+        .await
+        {
+            for pressed in pressed_modifiers.iter().rev() {
+                active_modifiers &=
+                    !key_modifier_bit(pressed).expect("modifier names have a CDP bit");
+                let _ = dispatch_single_key_event(
+                    client,
+                    session_id,
+                    pressed,
+                    "keyUp",
+                    nonzero_modifiers(active_modifiers),
+                )
+                .await;
+            }
+            return Err(error);
+        }
+        pressed_modifiers.push(*modifier);
+        active_modifiers = next_modifiers;
+    }
+
+    let own_bit = key_modifier_bit(key).unwrap_or(0);
+    let down_modifiers = nonzero_modifiers(active_modifiers | own_bit);
+    let up_modifiers = nonzero_modifiers(active_modifiers & !(own_bit & !held_modifiers));
+
+    let key_result = async {
+        dispatch_single_key_event(client, session_id, key, "keyDown", down_modifiers).await?;
+        dispatch_single_key_event(client, session_id, key, "keyUp", up_modifiers).await
+    }
+    .await;
+
+    let mut release_error = None;
+    for modifier in pressed_modifiers.iter().rev() {
+        active_modifiers &= !key_modifier_bit(modifier).expect("modifier names have a CDP bit");
+        if let Err(error) = dispatch_single_key_event(
+            client,
+            session_id,
+            modifier,
+            "keyUp",
+            nonzero_modifiers(active_modifiers),
+        )
+        .await
+        {
+            release_error.get_or_insert(error);
+        }
+    }
+
+    key_result?;
+    release_error.map_or(Ok(()), Err)
+}
+
+/// Press `key` without releasing it and return the updated held modifier mask.
+pub async fn key_down(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    held_modifiers: i32,
+) -> Result<i32, String> {
+    let next_modifiers = held_modifiers | key_modifier_bit(key).unwrap_or(0);
+    dispatch_single_key_event(
+        client,
+        session_id,
+        key,
+        "keyDown",
+        nonzero_modifiers(next_modifiers),
+    )
+    .await?;
+    Ok(next_modifiers)
+}
+
+/// Release `key` and return the updated held modifier mask.
+pub async fn key_up(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    held_modifiers: i32,
+) -> Result<i32, String> {
+    let next_modifiers = held_modifiers & !key_modifier_bit(key).unwrap_or(0);
+    dispatch_single_key_event(
+        client,
+        session_id,
+        key,
+        "keyUp",
+        nonzero_modifiers(next_modifiers),
+    )
+    .await?;
+    Ok(next_modifiers)
+}
+
+async fn dispatch_single_key_event(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    event_type: &str,
+    modifiers: Option<i32>,
+) -> Result<(), String> {
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchKeyEvent",
-            &DispatchKeyEventParams {
-                event_type: "keyDown".to_string(),
-                key: Some(key_name.clone()),
-                code: Some(code.clone()),
-                text: text.clone(),
-                unmodified_text: text.clone(),
-                windows_virtual_key_code: Some(key_code),
-                modifiers,
-            },
+            &single_key_event_params(key, event_type, modifiers),
             Some(session_id),
         )
         .await?;
-
-    client
-        .send_command_typed::<_, Value>(
-            "Input.dispatchKeyEvent",
-            &DispatchKeyEventParams {
-                event_type: "keyUp".to_string(),
-                key: Some(key_name),
-                code: Some(code),
-                text: None,
-                unmodified_text: None,
-                windows_virtual_key_code: Some(key_code),
-                modifiers,
-            },
-            Some(session_id),
-        )
-        .await?;
-
     Ok(())
+}
+
+pub(crate) const SCROLL_BY_JS: &str = "function(dx, dy) { this.scrollBy(dx, dy); }";
+
+fn single_key_event_params(
+    key: &str,
+    event_type: &str,
+    modifiers: Option<i32>,
+) -> DispatchKeyEventParams {
+    let (key_name, code, key_code, text, unmodified_text) = modified_key_info(key, modifiers);
+    let is_down = event_type == "keyDown";
+    let modifiers = if is_down {
+        with_own_modifier_bit(&key_name, modifiers)
+    } else {
+        modifiers
+    };
+    DispatchKeyEventParams {
+        event_type: event_type.to_string(),
+        location: key_location(&code),
+        key: Some(key_name),
+        code: Some(code),
+        text: if is_down { text } else { None },
+        unmodified_text: if is_down { unmodified_text } else { None },
+        windows_virtual_key_code: Some(key_code),
+        modifiers,
+    }
+}
+
+fn nonzero_modifiers(modifiers: i32) -> Option<i32> {
+    (modifiers != 0).then_some(modifiers)
+}
+
+fn modifier_key_names(modifiers: i32) -> Vec<&'static str> {
+    [(2, "Control"), (1, "Alt"), (8, "Shift"), (4, "Meta")]
+        .into_iter()
+        .filter_map(|(bit, key)| (modifiers & bit != 0).then_some(key))
+        .collect()
 }
 
 pub async fn scroll(
@@ -398,7 +599,7 @@ pub async fn scroll(
     if let Some(sel) = selector_or_ref {
         let (object_id, effective_session_id) =
             resolve_element_object_id(client, session_id, ref_map, sel, iframe_sessions).await?;
-        let js = "function(dx, dy) { this.scrollBy(dx, dy); }".to_string();
+        let js = SCROLL_BY_JS.to_string();
         client
             .send_command_typed::<_, Value>(
                 "Runtime.callFunctionOn",
@@ -438,362 +639,6 @@ pub async fn scroll(
     Ok(())
 }
 
-pub async fn select_option(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    values: &[String],
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
-
-    // Matching nothing must be an error, not a silent success: an agent that
-    // selects a misspelled option otherwise sees "Done", and only discovers
-    // the page state is wrong after more commands. List what was available.
-    //
-    // Native <select> keeps its own path. For a div-based ARIA combobox/listbox
-    // (Radix, Headless UI, ui-sdk) there is no `this.options`, so open the widget
-    // when it is not already expanded, wait for its role=option items, and click
-    // the ones whose accessible name or value matches.
-    let js = r#"async function(vals) {
-            const normalize = (value) => String(value ?? '')
-                .replace(/[\u200B\u200C\u200D\u2060\uFEFF]/g, '')
-                .replace(/\s+/g, ' ')
-                .trim();
-            if (!(this instanceof HTMLSelectElement)) {
-                const role = this.getAttribute('role');
-                if (role !== 'combobox' && role !== 'listbox') {
-                    return { error: 'select target <' + this.tagName.toLowerCase() + '> is not a <select> or a role=combobox/listbox element' };
-                }
-                const realClick = (el) => {
-                    const r = el.getBoundingClientRect();
-                    const o = { bubbles: true, cancelable: true, composed: true,
-                                clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
-                                button: 0, pointerId: 1, isPrimary: true };
-                    el.dispatchEvent(new PointerEvent('pointerdown', o));
-                    el.dispatchEvent(new MouseEvent('mousedown', o));
-                    el.dispatchEvent(new PointerEvent('pointerup', o));
-                    el.dispatchEvent(new MouseEvent('mouseup', o));
-                    el.dispatchEvent(new MouseEvent('click', o));
-                };
-                // Clicking an open combobox toggles it shut, so only open when collapsed.
-                if (role === 'combobox' && this.getAttribute('aria-expanded') !== 'true') {
-                    realClick(this);
-                }
-                const collect = () => {
-                    let scope = role === 'listbox' ? this : null;
-                    if (!scope) {
-                        const controls = this.getAttribute('aria-controls');
-                        if (controls) {
-                            // Radix sets aria-controls before the popup mounts, so a
-                            // missing target means "not rendered yet": return nothing
-                            // and let the wait loop retry, instead of collecting another
-                            // listbox's options from the document.
-                            scope = document.getElementById(controls);
-                            if (!scope) return [];
-                        }
-                    }
-                    const nodes = Array.from((scope || document).querySelectorAll('[role=option]'));
-                    return nodes.filter((o) => o.getClientRects().length > 0);
-                };
-                let options = collect();
-                for (let i = 0; i < 40 && options.length === 0; i++) {
-                    await new Promise((r) => setTimeout(r, 50));
-                    options = collect();
-                }
-                if (options.length === 0) {
-                    return { error: 'combobox opened but no visible role=option elements were found' };
-                }
-                // Accessible name precedence: aria-labelledby, aria-label, text
-                // content. Option rows often carry an indicator or a description
-                // next to the label, so textContent alone misses their name.
-                const nameOf = (o) => {
-                    const labels = (o.getAttribute('aria-labelledby') || '').trim();
-                    if (labels) {
-                        const text = labels.split(/\s+/)
-                            .map((id) => { const el = document.getElementById(id); return el ? el.textContent : ''; })
-                            .join(' ');
-                        if (normalize(text)) return normalize(text);
-                    }
-                    return normalize(o.getAttribute('aria-label')) || normalize(o.textContent);
-                };
-                const valueOf = (o) => normalize(o.getAttribute('data-value')) || normalize(o.getAttribute('value'));
-                const wanted = new Set();
-                for (const value of vals) {
-                    const want = normalize(value);
-                    const matches = options.filter((o) => nameOf(o) === want || (valueOf(o) && valueOf(o) === want));
-                    if (matches.length === 0) {
-                        const available = options.map((o) => '"' + nameOf(o) + '"').join(', ');
-                        return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-                    }
-                    if (matches.length > 1) {
-                        return { error: 'Multiple options matched ' + JSON.stringify(value) };
-                    }
-                    // A disabled option swallows the click, so selecting it would
-                    // report success with an unchanged widget.
-                    if (matches[0].getAttribute('aria-disabled') === 'true') {
-                        return { error: 'Option "' + nameOf(matches[0]) + '" is disabled' };
-                    }
-                    wanted.add(matches[0]);
-                }
-                // A click toggles selection in a multi-select listbox, so an option
-                // that is already selected must be left alone.
-                const multi = role === 'listbox' && this.getAttribute('aria-multiselectable') === 'true';
-                for (const opt of wanted) {
-                    if (multi && opt.getAttribute('aria-selected') === 'true') continue;
-                    opt.scrollIntoView({ block: 'nearest' });
-                    realClick(opt);
-                }
-                return { matched: wanted.size };
-            }
-            const options = Array.from(this.options);
-            const wanted = new Set();
-            for (const value of vals) {
-                let matches = options.filter((opt) =>
-                    value === opt.value ||
-                    value === opt.label.trim() ||
-                    value === opt.textContent.trim()
-                );
-                if (matches.length === 0) {
-                    const normalizedValue = normalize(value);
-                    matches = options.filter((opt) =>
-                        normalize(opt.label) === normalizedValue
-                    );
-                    if (matches.length > 1) {
-                        return { error: 'Multiple options matched ' + JSON.stringify(value) + ' after whitespace normalization' };
-                    }
-                }
-                if (matches.length === 0) {
-                    const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
-                    return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-                }
-                for (const opt of matches) wanted.add(opt);
-            }
-            if (wanted.size === 0) {
-                const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
-                return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-            }
-            for (const opt of options) opt.selected = wanted.has(opt);
-            this.dispatchEvent(new Event('change', { bubbles: true }));
-            return { matched: wanted.size };
-        }"#
-    .to_string();
-
-    let result = client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: js,
-                object_id: Some(object_id),
-                arguments: Some(vec![CallArgument {
-                    value: Some(serde_json::json!(values)),
-                    object_id: None,
-                }]),
-                return_by_value: Some(true),
-                await_promise: Some(true),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
-    // A thrown script error must surface instead of reporting success.
-    if let Some(exc) = result.get("exceptionDetails") {
-        let msg = exc
-            .get("exception")
-            .and_then(|e| e.get("description"))
-            .and_then(|d| d.as_str())
-            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
-            .unwrap_or("select failed: script error");
-        return Err(msg.to_string());
-    }
-
-    if let Some(error) = result
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.get("error"))
-        .and_then(|e| e.as_str())
-    {
-        return Err(error.to_string());
-    }
-
-    Ok(())
-}
-
-/// What a check or uncheck did. `verified` is false when the page navigated
-/// before the toggle could be read back.
-pub struct ToggleOutcome {
-    pub position: Option<(f64, f64)>,
-    pub verified: bool,
-}
-
-pub async fn check(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<ToggleOutcome, String> {
-    Box::pin(toggle(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-        true,
-    ))
-    .await
-}
-
-pub async fn uncheck(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<ToggleOutcome, String> {
-    Box::pin(toggle(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-        false,
-    ))
-    .await
-}
-
-async fn toggle(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-    want_checked: bool,
-) -> Result<ToggleOutcome, String> {
-    use super::element::read_after_action;
-    let mut outcome = ToggleOutcome {
-        position: None,
-        verified: true,
-    };
-    let is_checked = super::element::is_element_checked(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
-    if is_checked == want_checked {
-        return Ok(outcome);
-    }
-    let result = click_element(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        ClickSpec::default(),
-        iframe_sessions,
-        false,
-    )
-    .await?;
-    outcome.position = Some(result.position);
-
-    // Verify the click changed the state (Playwright parity: _setChecked re-checks).
-    // If the coordinate-based click missed (e.g. hidden input, overlay), retry
-    // with a JS .click() on the element and its associated input. The click has
-    // already happened, so a document replaced by it ends the verification
-    // without failing the action.
-    let after = read_after_action(super::element::is_element_checked(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    ))
-    .await?;
-    match after {
-        None => outcome.verified = false,
-        Some(checked) if checked != want_checked => {
-            let retried = read_after_action(js_click_checkbox(
-                client,
-                session_id,
-                ref_map,
-                selector_or_ref,
-                iframe_sessions,
-            ))
-            .await?;
-            outcome.verified = retried.is_some();
-        }
-        Some(_) => {}
-    }
-    Ok(outcome)
-}
-
-async fn js_click_checkbox(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
-
-    let js = r#"function() {
-            var el = this;
-            var tag = el.tagName && el.tagName.toUpperCase();
-            // 1. Native input — click it directly
-            if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
-                el.click();
-                return;
-            }
-            // 2. Follow label → control association
-            var label = tag === 'LABEL' ? el : (el.closest && el.closest('label'));
-            if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
-                label.control.click();
-                return;
-            }
-            // 3. Nested native input
-            var input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
-            if (input) {
-                input.click();
-                return;
-            }
-            // 4. ARIA role control — click the element itself
-            el.click();
-        }"#;
-
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: js.to_string(),
-                object_id: Some(object_id),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
-    Ok(())
-}
-
 pub async fn focus(
     client: &CdpClient,
     session_id: &str,
@@ -814,7 +659,7 @@ pub async fn focus(
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
+                function_declaration: FOCUS_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -826,6 +671,13 @@ pub async fn focus(
 
     Ok(())
 }
+
+pub(crate) const CLEAR_VALUE_JS: &str = r#"function() {
+                    this.focus();
+                    this.value = '';
+                    this.dispatchEvent(new Event('input', { bubbles: true }));
+                    this.dispatchEvent(new Event('change', { bubbles: true }));
+                }"#;
 
 pub async fn clear(
     client: &CdpClient,
@@ -847,13 +699,7 @@ pub async fn clear(
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    this.focus();
-                    this.value = '';
-                    this.dispatchEvent(new Event('input', { bubbles: true }));
-                    this.dispatchEvent(new Event('change', { bubbles: true }));
-                }"#
-                .to_string(),
+                function_declaration: CLEAR_VALUE_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -865,6 +711,19 @@ pub async fn clear(
 
     Ok(())
 }
+
+pub(crate) const SELECT_ALL_JS: &str = r#"function() {
+                    this.focus();
+                    if (typeof this.select === 'function') {
+                        this.select();
+                    } else {
+                        const range = document.createRange();
+                        range.selectNodeContents(this);
+                        const sel = window.getSelection();
+                        sel.removeAllRanges();
+                        sel.addRange(range);
+                    }
+                }"#;
 
 pub async fn select_all(
     client: &CdpClient,
@@ -886,19 +745,7 @@ pub async fn select_all(
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    this.focus();
-                    if (typeof this.select === 'function') {
-                        this.select();
-                    } else {
-                        const range = document.createRange();
-                        range.selectNodeContents(this);
-                        const sel = window.getSelection();
-                        sel.removeAllRanges();
-                        sel.addRange(range);
-                    }
-                }"#
-                .to_string(),
+                function_declaration: SELECT_ALL_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -910,6 +757,9 @@ pub async fn select_all(
 
     Ok(())
 }
+
+pub(crate) const SCROLL_INTO_VIEW_JS: &str =
+    "function() { this.scrollIntoView({ block: 'center', inline: 'center' }); }";
 
 pub async fn scroll_into_view(
     client: &CdpClient,
@@ -931,9 +781,7 @@ pub async fn scroll_into_view(
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration:
-                    "function() { this.scrollIntoView({ block: 'center', inline: 'center' }); }"
-                        .to_string(),
+                function_declaration: SCROLL_INTO_VIEW_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -944,6 +792,18 @@ pub async fn scroll_into_view(
         .await?;
 
     Ok(())
+}
+
+/// The page JS that dispatches `event_type` with `event_init` on `this`.
+pub(crate) fn dispatch_event_js(event_type: &str, event_init: Option<&Value>) -> String {
+    let init_json = event_init
+        .map(|v| serde_json::to_string(v).unwrap_or("{}".to_string()))
+        .unwrap_or_else(|| "{ bubbles: true }".to_string());
+    format!(
+        "function() {{ this.dispatchEvent(new Event({}, {})); }}",
+        serde_json::to_string(event_type).unwrap_or_default(),
+        init_json
+    )
 }
 
 pub async fn dispatch_event(
@@ -964,15 +824,7 @@ pub async fn dispatch_event(
     )
     .await?;
 
-    let init_json = event_init
-        .map(|v| serde_json::to_string(v).unwrap_or("{}".to_string()))
-        .unwrap_or_else(|| "{ bubbles: true }".to_string());
-
-    let js = format!(
-        "function() {{ this.dispatchEvent(new Event({}, {})); }}",
-        serde_json::to_string(event_type).unwrap_or_default(),
-        init_json
-    );
+    let js = dispatch_event_js(event_type, event_init);
 
     client
         .send_command_typed::<_, Value>(
@@ -990,6 +842,16 @@ pub async fn dispatch_event(
 
     Ok(())
 }
+
+pub(crate) const HIGHLIGHT_JS: &str = r#"function() {
+                    this.style.outline = '2px solid red';
+                    this.style.outlineOffset = '2px';
+                    const el = this;
+                    setTimeout(() => {
+                        el.style.outline = '';
+                        el.style.outlineOffset = '';
+                    }, 3000);
+                }"#;
 
 pub async fn highlight(
     client: &CdpClient,
@@ -1011,16 +873,7 @@ pub async fn highlight(
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    this.style.outline = '2px solid red';
-                    this.style.outlineOffset = '2px';
-                    const el = this;
-                    setTimeout(() => {
-                        el.style.outline = '';
-                        el.style.outlineOffset = '';
-                    }, 3000);
-                }"#
-                .to_string(),
+                function_declaration: HIGHLIGHT_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1216,9 +1069,12 @@ async fn dispatch_click(
                 pending_release: match current {
                     ClickPhase::Press(n) => Some(PendingRelease {
                         session_id: session_id.to_string(),
+                        owner_tab: None,
+                        blocked: true,
+                        owner_position: (x, y),
                         x,
                         y,
-                        button: spec.button,
+                        button: Some(spec.button),
                         click_count: n,
                         modifiers: spec.modifiers,
                     }),
@@ -1247,6 +1103,9 @@ pub async fn dispatch_pending_release(
     client: &CdpClient,
     release: &PendingRelease,
 ) -> Result<(), String> {
+    let Some(button) = release.button else {
+        return Ok(());
+    };
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
@@ -1254,7 +1113,7 @@ pub async fn dispatch_pending_release(
                 event_type: "mouseReleased".to_string(),
                 x: release.x,
                 y: release.y,
-                button: Some(release.button.name().to_string()),
+                button: Some(button.name().to_string()),
                 buttons: Some(0),
                 click_count: Some(i32::from(release.click_count)),
                 delta_x: None,
@@ -1267,7 +1126,7 @@ pub async fn dispatch_pending_release(
     Ok(())
 }
 
-fn char_to_key_info(ch: char) -> (String, String, i32) {
+pub(crate) fn char_to_key_info(ch: char) -> (String, String, i32) {
     match ch {
         '\n' | '\r' => ("Enter".to_string(), "Enter".to_string(), 13),
         '\t' => ("Tab".to_string(), "Tab".to_string(), 9),
@@ -1331,7 +1190,7 @@ fn punctuation_key_info(ch: char) -> (&'static str, i32) {
 /// `keyDown` event so that Chrome performs the default action for the key.
 /// For example Enter needs `"\r"` to actually submit a form, and Tab needs
 /// `"\t"` to move focus.  Non-printable / navigation keys return `None`.
-fn key_text(key_name: &str) -> Option<String> {
+pub(crate) fn key_text(key_name: &str) -> Option<String> {
     match key_name {
         "Enter" => Some("\r".to_string()),
         "Tab" => Some("\t".to_string()),
@@ -1347,7 +1206,115 @@ fn key_text(key_name: &str) -> Option<String> {
     }
 }
 
-fn named_key_info(key: &str) -> (String, String, i32) {
+pub(crate) fn modified_key_info(
+    key: &str,
+    modifiers: Option<i32>,
+) -> (String, String, i32, Option<String>, Option<String>) {
+    let (unmodified_key, code, key_code) = named_key_info(key);
+    let mask = modifiers.unwrap_or(0);
+    let key_name = if mask & 8 != 0 {
+        shifted_char(&unmodified_key)
+            .map(|ch| ch.to_string())
+            .unwrap_or_else(|| unmodified_key.clone())
+    } else {
+        unmodified_key.clone()
+    };
+    let (text, unmodified_text) = if mask & (1 | 2 | 4) != 0 {
+        (None, None)
+    } else {
+        (key_text(&key_name), key_text(&unmodified_key))
+    };
+    (key_name, code, key_code, text, unmodified_text)
+}
+
+pub(crate) fn parse_key_chord(input: &str) -> (String, Option<i32>) {
+    let parts: Vec<&str> = input.split('+').collect();
+    if parts.len() < 2 {
+        return (input.to_string(), None);
+    }
+
+    let mut modifiers = 0i32;
+    let mut key_parts: Vec<&str> = Vec::new();
+
+    for part in &parts {
+        if let Some(bit) = key_modifier_bit(part) {
+            modifiers |= bit;
+        } else {
+            key_parts.push(part);
+        }
+    }
+
+    if modifiers == 0 {
+        return (input.to_string(), None);
+    }
+
+    let actual_key = if key_parts.is_empty() {
+        input.to_string()
+    } else {
+        key_parts.join("+")
+    };
+
+    (actual_key, Some(modifiers))
+}
+
+pub(crate) fn is_non_printable_control_key(key_name: &str) -> bool {
+    matches!(
+        key_name,
+        "Enter"
+            | "Tab"
+            | "Escape"
+            | "Backspace"
+            | "Delete"
+            | "ArrowUp"
+            | "ArrowDown"
+            | "ArrowLeft"
+            | "ArrowRight"
+            | "Home"
+            | "End"
+            | "PageUp"
+            | "PageDown"
+    )
+}
+
+pub(crate) fn shifted_char(key_name: &str) -> Option<char> {
+    let mut chars = key_name.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    if ch.is_ascii_lowercase() {
+        return Some(ch.to_ascii_uppercase());
+    }
+    const PAIRS: &[(char, char)] = &[
+        ('1', '!'),
+        ('2', '@'),
+        ('3', '#'),
+        ('4', '$'),
+        ('5', '%'),
+        ('6', '^'),
+        ('7', '&'),
+        ('8', '*'),
+        ('9', '('),
+        ('0', ')'),
+        ('`', '~'),
+        ('-', '_'),
+        ('=', '+'),
+        ('[', '{'),
+        (']', '}'),
+        ('\\', '|'),
+        (';', ':'),
+        ('\'', '"'),
+        (',', '<'),
+        ('.', '>'),
+        ('/', '?'),
+    ];
+    PAIRS
+        .iter()
+        .find(|(plain, _)| *plain == ch)
+        .map(|(_, shifted)| *shifted)
+}
+
+pub(crate) fn named_key_info(key: &str) -> (String, String, i32) {
     match key.to_lowercase().as_str() {
         "enter" | "return" => ("Enter".to_string(), "Enter".to_string(), 13),
         "tab" => ("Tab".to_string(), "Tab".to_string(), 9),
@@ -1363,8 +1330,28 @@ fn named_key_info(key: &str) -> (String, String, i32) {
         "pageup" => ("PageUp".to_string(), "PageUp".to_string(), 33),
         "pagedown" => ("PageDown".to_string(), "PageDown".to_string(), 34),
         "space" | " " => (" ".to_string(), "Space".to_string(), 32),
-        _ => {
-            if key.len() == 1 {
+        "shift" | "shiftleft" => ("Shift".to_string(), "ShiftLeft".to_string(), 16),
+        "shiftright" => ("Shift".to_string(), "ShiftRight".to_string(), 16),
+        "control" | "ctrl" | "controlleft" => {
+            ("Control".to_string(), "ControlLeft".to_string(), 17)
+        }
+        "controlright" => ("Control".to_string(), "ControlRight".to_string(), 17),
+        "alt" | "altleft" => ("Alt".to_string(), "AltLeft".to_string(), 18),
+        "altright" => ("Alt".to_string(), "AltRight".to_string(), 18),
+        "meta" | "cmd" | "command" | "metaleft" => ("Meta".to_string(), "MetaLeft".to_string(), 91),
+        "metaright" => ("Meta".to_string(), "MetaRight".to_string(), 92),
+        lower => {
+            let code_char = lower
+                .strip_prefix("key")
+                .filter(|rest| rest.len() == 1 && rest.as_bytes()[0].is_ascii_lowercase())
+                .or_else(|| {
+                    lower
+                        .strip_prefix("digit")
+                        .filter(|rest| rest.len() == 1 && rest.as_bytes()[0].is_ascii_digit())
+                });
+            if let Some(rest) = code_char {
+                char_to_key_info(rest.chars().next().unwrap())
+            } else if key.len() == 1 {
                 let ch = key.chars().next().unwrap();
                 char_to_key_info(ch)
             } else {
@@ -1372,6 +1359,31 @@ fn named_key_info(key: &str) -> (String, String, i32) {
             }
         }
     }
+}
+
+fn key_location(code: &str) -> Option<i32> {
+    match code {
+        "ShiftLeft" | "ControlLeft" | "AltLeft" | "MetaLeft" => Some(1),
+        "ShiftRight" | "ControlRight" | "AltRight" | "MetaRight" => Some(2),
+        _ => None,
+    }
+}
+
+pub(crate) fn key_modifier_bit(key: &str) -> Option<i32> {
+    match key.to_ascii_lowercase().as_str() {
+        "alt" | "altleft" | "altright" => Some(1),
+        "control" | "ctrl" | "controlleft" | "controlright" => Some(2),
+        "meta" | "cmd" | "command" | "metaleft" | "metaright" => Some(4),
+        "shift" | "shiftleft" | "shiftright" => Some(8),
+        _ => None,
+    }
+}
+
+fn with_own_modifier_bit(key_name: &str, modifiers: Option<i32>) -> Option<i32> {
+    let Some(bit) = key_modifier_bit(key_name) else {
+        return modifiers;
+    };
+    Some(modifiers.unwrap_or(0) | bit)
 }
 
 #[cfg(test)]
@@ -1520,5 +1532,155 @@ mod tests {
         assert_eq!(key_text("ArrowUp"), None);
         assert_eq!(key_text("Backspace"), None);
         assert_eq!(key_text("Delete"), None);
+    }
+
+    #[test]
+    fn cdp_failures_of_a_gone_document_or_element_end_verification() {
+        for error in [
+            "CDP error (Runtime.callFunctionOn): Cannot find context with specified id",
+            "Element not found: #cb",
+            "Ref @e1 is from a document that is no longer loaded (x)",
+        ] {
+            assert!(
+                matches!(cdp_error(error.to_string()), CallError::Gone),
+                "{error}"
+            );
+        }
+        assert!(matches!(
+            cdp_error("Could not inspect the element".to_string()),
+            CallError::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn test_named_key_info_modifiers_and_code_names() {
+        let cases: &[(&str, &str, &str, i32, Option<i32>)] = &[
+            ("Shift", "Shift", "ShiftLeft", 16, Some(1)),
+            ("ShiftRight", "Shift", "ShiftRight", 16, Some(2)),
+            ("Control", "Control", "ControlLeft", 17, Some(1)),
+            ("ctrl", "Control", "ControlLeft", 17, Some(1)),
+            ("ControlRight", "Control", "ControlRight", 17, Some(2)),
+            ("Alt", "Alt", "AltLeft", 18, Some(1)),
+            ("AltRight", "Alt", "AltRight", 18, Some(2)),
+            ("Meta", "Meta", "MetaLeft", 91, Some(1)),
+            ("Cmd", "Meta", "MetaLeft", 91, Some(1)),
+            ("MetaRight", "Meta", "MetaRight", 92, Some(2)),
+            ("KeyW", "w", "KeyW", 87, None),
+            ("keya", "a", "KeyA", 65, None),
+            ("Digit7", "7", "Digit7", 55, None),
+            ("Key", "Key", "Key", 0, None),
+            ("KeyAB", "KeyAB", "KeyAB", 0, None),
+            ("Digit10", "Digit10", "Digit10", 0, None),
+            ("w", "w", "KeyW", 87, None),
+            ("ArrowUp", "ArrowUp", "ArrowUp", 38, None),
+        ];
+        for &(input, key, code, vk, location) in cases {
+            assert_eq!(
+                (named_key_info(input), key_location(code)),
+                ((key.to_string(), code.to_string(), vk), location),
+                "input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_modified_key_info_applies_shift_and_suppresses_command_text() {
+        let check = |key: &str,
+                     modifiers: Option<i32>,
+                     want: (&str, &str, i32, Option<&str>, Option<&str>)| {
+            let (want_key, want_code, want_vk, want_text, want_unmod) = want;
+            assert_eq!(
+                modified_key_info(key, modifiers),
+                (
+                    want_key.to_string(),
+                    want_code.to_string(),
+                    want_vk,
+                    want_text.map(String::from),
+                    want_unmod.map(String::from),
+                ),
+                "press {key} with modifiers {modifiers:?}"
+            );
+        };
+        check("l", None, ("l", "KeyL", 76, Some("l"), Some("l")));
+        check("l", Some(8), ("L", "KeyL", 76, Some("L"), Some("l")));
+        check("1", Some(8), ("!", "Digit1", 49, Some("!"), Some("1")));
+        check("/", Some(8), ("?", "Slash", 191, Some("?"), Some("/")));
+        check("L", Some(8), ("L", "KeyL", 76, Some("L"), Some("L")));
+        check(
+            "Enter",
+            Some(8),
+            ("Enter", "Enter", 13, Some("\r"), Some("\r")),
+        );
+        check("l", Some(1), ("l", "KeyL", 76, None, None));
+        check("l", Some(1 | 8), ("L", "KeyL", 76, None, None));
+        check("a", Some(2), ("a", "KeyA", 65, None, None));
+        check("a", Some(4), ("a", "KeyA", 65, None, None));
+    }
+
+    #[test]
+    fn test_single_key_event_params() {
+        let params = |key, event_type, modifiers| {
+            serde_json::to_value(single_key_event_params(key, event_type, modifiers)).unwrap()
+        };
+        assert_eq!(
+            params("Shift", "keyDown", Some(8)),
+            serde_json::json!({
+                "type": "keyDown", "key": "Shift", "code": "ShiftLeft",
+                "windowsVirtualKeyCode": 16, "modifiers": 8, "location": 1
+            })
+        );
+        assert_eq!(
+            params("Shift", "keyUp", None),
+            serde_json::json!({
+                "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
+                "windowsVirtualKeyCode": 16, "location": 1
+            })
+        );
+        assert_eq!(
+            params("w", "keyDown", None),
+            serde_json::json!({
+                "type": "keyDown", "key": "w", "code": "KeyW", "text": "w",
+                "unmodifiedText": "w", "windowsVirtualKeyCode": 87
+            })
+        );
+        assert_eq!(
+            params("w", "keyDown", Some(8)),
+            serde_json::json!({
+                "type": "keyDown", "key": "W", "code": "KeyW", "text": "W",
+                "unmodifiedText": "w", "windowsVirtualKeyCode": 87, "modifiers": 8
+            })
+        );
+        assert_eq!(
+            params("w", "keyUp", None),
+            serde_json::json!({
+                "type": "keyUp", "key": "w", "code": "KeyW", "windowsVirtualKeyCode": 87
+            })
+        );
+    }
+
+    #[test]
+    fn test_modifier_helpers() {
+        assert_eq!(key_modifier_bit("Alt"), Some(1));
+        assert_eq!(key_modifier_bit("AltRight"), Some(1));
+        assert_eq!(key_modifier_bit("Control"), Some(2));
+        assert_eq!(key_modifier_bit("ControlLeft"), Some(2));
+        assert_eq!(key_modifier_bit("Meta"), Some(4));
+        assert_eq!(key_modifier_bit("MetaRight"), Some(4));
+        assert_eq!(key_modifier_bit("Shift"), Some(8));
+        assert_eq!(key_modifier_bit("ShiftRight"), Some(8));
+        assert_eq!(key_modifier_bit("KeyW"), None);
+        assert_eq!(with_own_modifier_bit("Shift", None), Some(8));
+        assert_eq!(with_own_modifier_bit("Control", Some(8)), Some(10));
+        assert_eq!(with_own_modifier_bit("w", Some(2)), Some(2));
+        assert_eq!(modifier_key_names(2 | 8), vec!["Control", "Shift"]);
+        assert_eq!(
+            modifier_key_names(1 | 2 | 4 | 8),
+            vec!["Control", "Alt", "Shift", "Meta"]
+        );
+        assert_eq!(
+            parse_key_chord("ShiftRight+KeyA"),
+            ("KeyA".to_string(), Some(8))
+        );
+        assert_eq!(parse_key_chord("ControlLeft+l"), ("l".to_string(), Some(2)));
     }
 }

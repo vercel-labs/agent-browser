@@ -469,23 +469,11 @@ pub const STATE_NOT_VERIFIED: &str = "page navigated after the action; state not
 
 /// Whether an error says the document a ref points into is gone: the stale-ref
 /// guard, or the browser reporting a destroyed context.
-fn document_gone(error: &str) -> bool {
+pub(crate) fn document_gone(error: &str) -> bool {
     error.contains(STALE_DOCUMENT_MARKER)
         || error.contains("Cannot find context with specified id")
         || error.contains("Inspected target navigated or closed")
         || error.contains("Execution context was destroyed")
-}
-
-/// Run a read that confirms an action that already happened. A document that
-/// is gone by then is not a failure of the action: the read yields `None`.
-pub async fn read_after_action<T>(
-    read: impl std::future::Future<Output = Result<T, String>>,
-) -> Result<Option<T>, String> {
-    match read.await {
-        Ok(value) => Ok(Some(value)),
-        Err(error) if document_gone(&error) => Ok(None),
-        Err(error) => Err(error),
-    }
 }
 
 /// Fail a ref whose document has been replaced since it was issued: the page
@@ -950,13 +938,15 @@ pub async fn resolve_element_object_id(
     Ok((object_id, session_id.to_string()))
 }
 
+pub(crate) const IS_CONNECTED_JS: &str = "function() { return this.isConnected; }";
+
 /// Reports whether a resolved node has been removed from its document, releasing it if so.
 async fn is_detached(client: &CdpClient, session_id: &str, object_id: &str) -> bool {
     let result: Result<EvaluateResult, String> = client
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return this.isConnected; }".to_string(),
+                function_declaration: IS_CONNECTED_JS.to_string(),
                 object_id: Some(object_id.to_string()),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1097,7 +1087,7 @@ pub(super) fn extract_ax_string(value: &Option<AXValue>) -> String {
 }
 
 /// Build a JS expression that finds a DOM element by CSS selector or XPath.
-fn build_find_element_js(selector: &str) -> String {
+pub(crate) fn build_find_element_js(selector: &str) -> String {
     build_find_element_js_in("document", selector)
 }
 
@@ -1118,7 +1108,7 @@ fn build_find_element_js_in(root: &str, selector: &str) -> String {
 }
 
 /// Build a JS expression that counts matching DOM elements by CSS selector or XPath.
-fn build_count_elements_js(selector: &str) -> String {
+pub(crate) fn build_count_elements_js(selector: &str) -> String {
     if let Some(xpath) = selector.strip_prefix("xpath=") {
         format!(
             "document.evaluate({}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength",
@@ -1139,7 +1129,9 @@ fn build_count_elements_js(selector: &str) -> String {
 /// on el": shadow-including ancestors/descendants in either direction, and
 /// label/control association (custom checkboxes hide the input under a styled
 /// sibling inside the same label).
-const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
+/// Returns a CSS-like description of the element blocking `(x, y)` for `el`, or `null` if clear.
+/// When `rejectInteractiveDescendant` is true, an interactive control strictly inside `el` also blocks.
+pub(crate) const BLOCKER_AT_JS: &str = r#"(doc, el, x, y, rejectInteractiveDescendant) => {
     // Descend from the given document through same-origin iframes so a point
     // over a frame resolves to the element inside it, in that frame's space.
     let d = doc, lx = x, ly = y;
@@ -1178,13 +1170,41 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
         hit = d.elementFromPoint(lx, ly);
     }
     if (!hit || hit === el) return null;
+    const interactiveSel = 'button, a[href], area[href], input, select, textarea, summary, details, iframe, embed, object, [role], [onclick], [tabindex]:not([tabindex="-1"]), [contenteditable=""], [contenteditable="true"]';
+    const isInteractive = (n) => !!n && ((n.matches && n.matches(interactiveSel)) || typeof n.onclick === 'function');
     const up = (n) => n.parentNode || n.host || (n.getRootNode && n.getRootNode().host) || null;
-    for (let n = hit; n; n = up(n)) { if (n === el) return null; }
+    for (let n = hit; n; n = up(n)) {
+        if (n === el) {
+            if (rejectInteractiveDescendant) {
+                let interactiveHit = null;
+                for (let cur = hit; cur && cur !== el; cur = up(cur)) {
+                    if (isInteractive(cur)) {
+                        interactiveHit = cur;
+                        break;
+                    }
+                }
+                if (interactiveHit) {
+                    hit = interactiveHit;
+                    break;
+                }
+            }
+            return null;
+        }
+    }
     for (let n = el; n; n = up(n)) { if (n === hit) return null; }
     const hitLabel = hit.closest ? hit.closest('label') : null;
-    if (hitLabel && (hitLabel.control === el || hitLabel.contains(el))) return null;
+    let hitInteractiveInsideLabel = false;
+    if (hitLabel) {
+        for (let cur = hit; cur && cur !== hitLabel; cur = up(cur)) {
+            if (isInteractive(cur)) {
+                hitInteractiveInsideLabel = true;
+                break;
+            }
+        }
+    }
+    if (!hitInteractiveInsideLabel && hitLabel && (hitLabel.control === el || hitLabel.contains(el))) return null;
     const elLabel = el.closest ? el.closest('label') : null;
-    if (elLabel && elLabel.contains(hit)) return null;
+    if (!hitInteractiveInsideLabel && elLabel && elLabel.contains(hit)) return null;
     let desc = hit.tagName.toLowerCase();
     if (hit.id) desc += '#' + hit.id;
     else if (typeof hit.className === 'string' && hit.className.trim())
@@ -1274,7 +1294,7 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
 
 /// Returns why a click at (x, y) cannot reach `el`, or null when it can.
 /// It fails open when the engine lacks an API it needs.
-const ACTIONABILITY_JS: &str = r#"(el, inView) => {
+pub(crate) const ACTIONABILITY_JS: &str = r#"(el, inView) => {
     try {
         const rect = el.getBoundingClientRect();
         if ((rect.width <= 0 && rect.height <= 0) || ['hidden', 'collapse'].includes(el.ownerDocument.defaultView.getComputedStyle(el).visibility)) return 'not visible';
@@ -1338,19 +1358,22 @@ async fn resolve_by_selector(
     }
 }
 
-pub(super) fn intercepted_error(target: &str, blocker: &str) -> String {
+pub(crate) fn intercepted_error(target: &str, blocker: &str) -> String {
     format!(
         "Element '{}' is covered by <{}> at its click point, so the input would land on that element instead. Dismiss or interact with the covering element first (it is often a dialog, banner, or sticky header).",
         target, blocker
     )
 }
 
-fn not_actionable_error(target: &str, reason: &str) -> String {
+pub(crate) fn not_actionable_error(target: &str, reason: &str) -> String {
     format!(
         "Element '{}' is {}, so the click would not reach it",
         target, reason
     )
 }
+
+pub(crate) const ELEMENT_TEXT_JS: &str =
+    "function() { return this.innerText || this.textContent || ''; }";
 
 pub async fn get_element_text(
     client: &CdpClient,
@@ -1372,8 +1395,7 @@ pub async fn get_element_text(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration:
-                    "function() { return this.innerText || this.textContent || ''; }".to_string(),
+                function_declaration: ELEMENT_TEXT_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1426,6 +1448,15 @@ pub async fn get_element_attribute(
 
     Ok(result.result.value.unwrap_or(Value::Null))
 }
+
+pub(crate) const ELEMENT_VISIBLE_JS: &str = r#"function() {
+                    const rect = this.getBoundingClientRect();
+                    const style = window.getComputedStyle(this);
+                    return rect.width > 0 && rect.height > 0 &&
+                           style.visibility !== 'hidden' &&
+                           style.display !== 'none' &&
+                           parseFloat(style.opacity) > 0;
+                }"#;
 
 /// What a field says about itself, so a recording can tell a credential
 /// from other input even when the field has no label.
@@ -1491,15 +1522,7 @@ pub async fn is_element_visible(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    const rect = this.getBoundingClientRect();
-                    const style = window.getComputedStyle(this);
-                    return rect.width > 0 && rect.height > 0 &&
-                           style.visibility !== 'hidden' &&
-                           style.display !== 'none' &&
-                           parseFloat(style.opacity) > 0;
-                }"#
-                .to_string(),
+                function_declaration: ELEMENT_VISIBLE_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1515,6 +1538,9 @@ pub async fn is_element_visible(
         .and_then(|v| v.as_bool())
         .unwrap_or(false))
 }
+
+pub(crate) const ELEMENT_ENABLED_JS: &str =
+    "function() { return !this.disabled && !(this.matches && this.matches(':disabled')); }";
 
 pub async fn is_element_enabled(
     client: &CdpClient,
@@ -1536,7 +1562,7 @@ pub async fn is_element_enabled(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return !this.disabled && !(this.matches && this.matches(':disabled')); }".to_string(),
+                function_declaration: ELEMENT_ENABLED_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1553,32 +1579,9 @@ pub async fn is_element_enabled(
         .unwrap_or(true))
 }
 
-pub async fn is_element_checked(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<bool, String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
-
-    // Mirrors Playwright's getChecked() with follow-label retargeting:
-    // 1. If element is a native checkbox/radio input, return .checked
-    // 2. If element has an ARIA checked role, return aria-checked
-    // 3. Follow label → input association (label.control)
-    // 4. Check for nested checkbox/radio input as last resort
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: r#"function() {
+/// Reads whether `this` is checked: a checkbox or radio, an element with a
+/// checkbox-like role, a label's control, or a nested checkbox or radio.
+pub(crate) const ELEMENT_CHECKED_JS: &str = r#"function() {
                     var el = this;
                     // Native checkbox/radio input
                     var tag = el.tagName && el.tagName.toUpperCase();
@@ -1586,9 +1589,12 @@ pub async fn is_element_checked(
                         return el.checked;
                     }
                     // ARIA role-based checked state
-                    var role = el.getAttribute && el.getAttribute('role');
                     var ariaCheckedRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'];
-                    if (role && ariaCheckedRoles.indexOf(role) !== -1) {
+                    var role = ((el.getAttribute && el.getAttribute('role')) || '').split(/\s+/).filter(function(r) { return ariaCheckedRoles.indexOf(r) !== -1; })[0];
+                    if (role) {
+                        if ((role === 'option' || role === 'treeitem') && !el.hasAttribute('aria-checked')) {
+                            return el.getAttribute('aria-selected') === 'true';
+                        }
                         return el.getAttribute('aria-checked') === 'true';
                     }
                     // Follow label association (Playwright follow-label retarget)
@@ -1606,7 +1612,29 @@ pub async fn is_element_checked(
                     var input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
                     if (input) return input.checked;
                     return false;
-                }"#.to_string(),
+                }"#;
+
+pub async fn is_element_checked(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<bool, String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: ELEMENT_CHECKED_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1622,6 +1650,54 @@ pub async fn is_element_checked(
         .and_then(|v| v.as_bool())
         .unwrap_or(false))
 }
+
+/// Scrolls the element in and returns the point to press, refusing one that
+/// another element covers there; an element inside the target counts as
+/// covering it too.
+pub(crate) async fn unblocked_point(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    target: &str,
+) -> Result<(f64, f64), String> {
+    let js = format!(
+        r#"async function() {{
+            const doc = this.ownerDocument || document;
+            const clickPoint = {CLICK_POINT_JS};
+            const point = await clickPoint(this, doc);
+            const blockerAt = {BLOCKER_AT_JS};
+            const topDoc = (point.view && point.view.document) || doc;
+            const blocker = blockerAt(doc, this, point.lx, point.ly, true) || blockerAt(topDoc, this, point.x, point.y, true);
+            return {{ blocker, x: point.x, y: point.y }};
+        }}"#
+    );
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: js,
+                object_id: Some(object_id.to_string()),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(true),
+            },
+            Some(session_id),
+        )
+        .await?;
+    let value = result.result.value.unwrap_or(Value::Null);
+    if let Some(blocker) = value.get("blocker").and_then(Value::as_str) {
+        return Err(intercepted_error(target, blocker));
+    }
+    match (
+        value.get("x").and_then(Value::as_f64),
+        value.get("y").and_then(Value::as_f64),
+    ) {
+        (Some(x), Some(y)) => Ok((x, y)),
+        _ => Err(format!("Element not found: {target}")),
+    }
+}
+
+pub(crate) const ELEMENT_INNER_TEXT_JS: &str = "function() { return this.innerText || ''; }";
 
 pub async fn get_element_inner_text(
     client: &CdpClient,
@@ -1643,7 +1719,7 @@ pub async fn get_element_inner_text(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return this.innerText || ''; }".to_string(),
+                function_declaration: ELEMENT_INNER_TEXT_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1659,6 +1735,8 @@ pub async fn get_element_inner_text(
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_default())
 }
+
+pub(crate) const ELEMENT_INNER_HTML_JS: &str = "function() { return this.innerHTML || ''; }";
 
 pub async fn get_element_inner_html(
     client: &CdpClient,
@@ -1680,7 +1758,7 @@ pub async fn get_element_inner_html(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return this.innerHTML || ''; }".to_string(),
+                function_declaration: ELEMENT_INNER_HTML_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1696,6 +1774,9 @@ pub async fn get_element_inner_html(
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_default())
 }
+
+pub(crate) const ELEMENT_INPUT_VALUE_JS: &str =
+    "function() { return typeof this.value === 'string' ? this.value : ''; }";
 
 pub async fn get_element_input_value(
     client: &CdpClient,
@@ -1717,9 +1798,7 @@ pub async fn get_element_input_value(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration:
-                    "function() { return typeof this.value === 'string' ? this.value : ''; }"
-                        .to_string(),
+                function_declaration: ELEMENT_INPUT_VALUE_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1775,6 +1854,11 @@ pub async fn set_element_value(
     Ok(())
 }
 
+pub(crate) const ELEMENT_BOUNDING_BOX_JS: &str = r#"function() {
+                    const r = this.getBoundingClientRect();
+                    return { x: r.x, y: r.y, width: r.width, height: r.height };
+                }"#;
+
 pub async fn get_element_bounding_box(
     client: &CdpClient,
     session_id: &str,
@@ -1795,11 +1879,7 @@ pub async fn get_element_bounding_box(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    const r = this.getBoundingClientRect();
-                    return { x: r.x, y: r.y, width: r.width, height: r.height };
-                }"#
-                .to_string(),
+                function_declaration: ELEMENT_BOUNDING_BOX_JS.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1837,6 +1917,31 @@ pub async fn get_element_count(
     Ok(result.result.value.and_then(|v| v.as_i64()).unwrap_or(0))
 }
 
+pub(crate) const ELEMENT_STYLES_ALL_JS: &str = r#"function() {
+                    const s = window.getComputedStyle(this);
+                    const result = {};
+                    for (let i = 0; i < s.length; i++) {
+                        const p = s[i];
+                        result[p] = s.getPropertyValue(p);
+                    }
+                    return result;
+                }"#;
+
+/// Builds a function that returns the computed values of the given CSS properties.
+pub(crate) fn styles_js(properties: &[String]) -> String {
+    let props_json = serde_json::to_string(properties).unwrap_or("[]".to_string());
+    format!(
+        r#"function() {{
+                    const s = window.getComputedStyle(this);
+                    const props = {};
+                    const result = {{}};
+                    for (const p of props) result[p] = s.getPropertyValue(p);
+                    return result;
+                }}"#,
+        props_json
+    )
+}
+
 pub async fn get_element_styles(
     client: &CdpClient,
     session_id: &str,
@@ -1855,29 +1960,8 @@ pub async fn get_element_styles(
     .await?;
 
     let js = match properties {
-        Some(props) => {
-            let props_json = serde_json::to_string(&props).unwrap_or("[]".to_string());
-            format!(
-                r#"function() {{
-                    const s = window.getComputedStyle(this);
-                    const props = {};
-                    const result = {{}};
-                    for (const p of props) result[p] = s.getPropertyValue(p);
-                    return result;
-                }}"#,
-                props_json
-            )
-        }
-        None => r#"function() {
-                    const s = window.getComputedStyle(this);
-                    const result = {};
-                    for (let i = 0; i < s.length; i++) {
-                        const p = s[i];
-                        result[p] = s.getPropertyValue(p);
-                    }
-                    return result;
-                }"#
-        .to_string(),
+        Some(props) => styles_js(&props),
+        None => ELEMENT_STYLES_ALL_JS.to_string(),
     };
 
     let result: EvaluateResult = client
@@ -2023,33 +2107,6 @@ mod tests {
 
         assert!(map.get("e1").is_none());
         assert_eq!(map.next_ref_num(), 2);
-    }
-
-    #[tokio::test]
-    async fn read_after_action_tolerates_only_a_gone_document() {
-        let gone = format!("Ref @e1 {STALE_DOCUMENT_MARKER} (x)");
-        assert_eq!(
-            read_after_action(async { Ok::<_, String>(true) }).await,
-            Ok(Some(true))
-        );
-        assert_eq!(
-            read_after_action(async { Err::<bool, _>(gone) }).await,
-            Ok(None)
-        );
-        assert_eq!(
-            read_after_action(async {
-                Err::<bool, _>(
-                    "CDP error (Runtime.callFunctionOn): Cannot find context with specified id"
-                        .to_string(),
-                )
-            })
-            .await,
-            Ok(None)
-        );
-        assert_eq!(
-            read_after_action(async { Err::<bool, _>("Element not found: @e1".to_string()) }).await,
-            Err("Element not found: @e1".to_string())
-        );
     }
 
     #[test]
