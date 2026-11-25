@@ -643,6 +643,83 @@ fn keyboard_params(parsed: &Value) -> Value {
     Value::Object(params)
 }
 
+/// Validate and build `Input.dispatchMouseEvent` params from a client
+/// `input_mouse` message. Returns `None` for unrecognized event types so
+/// malformed input cannot be forwarded to CDP.
+fn mouse_event_params(parsed: &Value) -> Option<Value> {
+    let event_type = parsed
+        .get("eventType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mouseMoved");
+    if !matches!(
+        event_type,
+        "mousePressed" | "mouseReleased" | "mouseMoved" | "mouseWheel"
+    ) {
+        return None;
+    }
+    let finite = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.0)
+    };
+    let button = parsed
+        .get("button")
+        .and_then(|v| v.as_str())
+        .filter(|b| {
+            matches!(
+                *b,
+                "none" | "left" | "middle" | "right" | "back" | "forward"
+            )
+        })
+        .unwrap_or("none");
+    let buttons = mouse_buttons_param(parsed, event_type, button);
+    let click_count = parsed
+        .get("clickCount")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        .clamp(0, 3);
+    let modifiers = parsed
+        .get("modifiers")
+        .and_then(|v| v.as_i64())
+        .filter(|m| *m >= 0)
+        .map(|m| m & 0x0f)
+        .unwrap_or(0);
+    Some(json!({
+        "type": event_type,
+        "x": finite("x"),
+        "y": finite("y"),
+        "button": button,
+        "buttons": buttons,
+        "clickCount": click_count,
+        "deltaX": finite("deltaX"),
+        "deltaY": finite("deltaY"),
+        "modifiers": modifiers,
+    }))
+}
+
+fn mouse_buttons_param(parsed: &Value, event_type: &str, button: &str) -> i64 {
+    if let Some(buttons) = parsed
+        .get("buttons")
+        .and_then(|v| v.as_i64())
+        .filter(|b| *b >= 0)
+    {
+        return buttons & 0x1f;
+    }
+    if !matches!(event_type, "mousePressed" | "mouseReleased") {
+        return 0;
+    }
+    match button {
+        "left" => 1,
+        "right" => 2,
+        "middle" => 4,
+        "back" => 8,
+        "forward" => 16,
+        _ => 0,
+    }
+}
+
 /// Dispatches one client input event to CDP.
 ///
 /// Invariant: sends without awaiting Chrome's reply. The reply carries nothing
@@ -658,22 +735,11 @@ async fn dispatch_input(
 ) {
     match msg_type {
         "input_mouse" => {
-            let _ = client
-                .send_command_no_wait(
-                    "Input.dispatchMouseEvent",
-                    Some(json!({
-                        "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("mouseMoved"),
-                        "x": parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "y": parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "button": parsed.get("button").and_then(|v| v.as_str()).unwrap_or("none"),
-                        "clickCount": parsed.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0),
-                        "deltaX": parsed.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "deltaY": parsed.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
-                    })),
-                    session_id,
-                )
-                .await;
+            if let Some(params) = mouse_event_params(parsed) {
+                let _ = client
+                    .send_command_no_wait("Input.dispatchMouseEvent", Some(params), session_id)
+                    .await;
+            }
         }
         "input_keyboard" => {
             let _ = client
@@ -1037,5 +1103,44 @@ mod tests {
             deadline_from(Some(now), 10),
             now + Duration::from_millis(100)
         );
+    }
+
+    #[test]
+    fn mouse_event_params_validates_type_buttons_and_bounds() {
+        assert!(mouse_event_params(&json!({ "eventType": "bogus" })).is_none());
+
+        let drag = mouse_event_params(&json!({
+            "eventType": "mouseMoved",
+            "x": 120.5,
+            "y": 80.0,
+            "button": "left",
+            "buttons": 1,
+            "modifiers": 2,
+        }))
+        .unwrap();
+        assert_eq!(drag["type"], "mouseMoved");
+        assert_eq!(drag["button"], "left");
+        assert_eq!(drag["buttons"], 1);
+        assert_eq!(drag["modifiers"], 2);
+
+        let fallback_press = mouse_event_params(&json!({
+            "eventType": "mousePressed",
+            "button": "right",
+            "clickCount": 99,
+            "modifiers": 0xff,
+        }))
+        .unwrap();
+        assert_eq!(fallback_press["buttons"], 2);
+        assert_eq!(fallback_press["clickCount"], 3);
+        assert_eq!(fallback_press["modifiers"], 15);
+
+        let bad_button = mouse_event_params(&json!({
+            "eventType": "mouseMoved",
+            "button": "invalid",
+            "buttons": -5,
+        }))
+        .unwrap();
+        assert_eq!(bad_button["button"], "none");
+        assert_eq!(bad_button["buttons"], 0);
     }
 }

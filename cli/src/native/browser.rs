@@ -2984,7 +2984,8 @@ impl BrowserManager {
         update_page_target_info_in_pages(&mut self.pages, target)
     }
 
-    pub fn remove_page_by_target_id(&mut self, target_id: &str) {
+    /// Remove a page by target id. Returns `true` when a tracked page was removed.
+    pub fn remove_page_by_target_id(&mut self, target_id: &str) -> bool {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
             let page = self.pages.remove(pos);
             self.tab_keep.remove(target_id);
@@ -2993,7 +2994,9 @@ impl BrowserManager {
             // e.g. by another session sharing this browser), fail loudly
             // under pin-tab instead of silently pointing at a neighbor.
             self.handle_bound_target_removed(&page.target_id, &page.url);
+            return true;
         }
+        false
     }
 
     pub fn has_target(&self, target_id: &str) -> bool {

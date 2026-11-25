@@ -13716,18 +13716,6 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
             serde_json::from_str(message.to_text().expect("text message should be readable"))
                 .expect("stream payload should be valid JSON");
         if parsed.get("type") == Some(&json!("frame")) {
-            let meta = &parsed["metadata"];
-            assert_eq!(
-                meta["deviceWidth"], 800,
-                "frame metadata deviceWidth should match custom viewport, got: {}",
-                meta
-            );
-            assert_eq!(
-                meta["deviceHeight"], 600,
-                "frame metadata deviceHeight should match custom viewport, got: {}",
-                meta
-            );
-
             let data_str = parsed
                 .get("data")
                 .and_then(|v| v.as_str())
@@ -13741,6 +13729,20 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
             if img_w != 800 || img_h != 600 {
                 continue;
             }
+
+            let meta = &parsed["metadata"];
+            assert_eq!(
+                meta["deviceWidth"].as_f64(),
+                Some(800.0),
+                "frame metadata deviceWidth should match custom viewport, got: {}",
+                meta
+            );
+            assert_eq!(
+                meta["deviceHeight"].as_f64(),
+                Some(600.0),
+                "frame metadata deviceHeight should match custom viewport, got: {}",
+                meta
+            );
 
             found_frame = true;
             break;
@@ -13761,6 +13763,329 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_frame_metadata_matches_real_page_size() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-real-size-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-stream-real-size");
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"].as_u64().unwrap();
+
+    let resp = execute_command(
+        &json!({ "id": "launch", "action": "launch", "headless": true, "args": ["--window-size=1000,500"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Real Size</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "[innerWidth, innerHeight]" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let page_w = get_data(&resp)["result"][0].as_f64().unwrap();
+    let page_h = get_data(&resp)["result"][1].as_f64().unwrap();
+    assert_ne!(
+        (page_w, page_h),
+        (1280.0, 720.0),
+        "real page size must differ from default 1280x720"
+    );
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut matched = false;
+    while tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        if parsed.get("type") == Some(&json!("frame")) {
+            let meta = &parsed["metadata"];
+            if meta["deviceWidth"].as_f64() == Some(page_w)
+                && meta["deviceHeight"].as_f64() == Some(page_h)
+            {
+                matched = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        matched,
+        "expected stream frame metadata matching real page size {page_w}x{page_h}"
+    );
+
+    let _ = execute_command(
+        &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_mouse_drag_and_contextmenu() {
+    use futures_util::SinkExt;
+
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-drag-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-stream-drag");
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"].as_u64().unwrap();
+
+    let html = concat!(
+        "data:text/html,",
+        "<body style='margin:0'>",
+        "<div id='drag' draggable='true' style='position:absolute;left:40px;top:40px;width:80px;height:40px;background:blue'>D</div>",
+        "<div id='drop' style='position:absolute;left:200px;top:40px;width:80px;height:40px;background:green'>T</div>",
+        "<script>",
+        "window.__r={dragstart:0,drop:0,ctx:0,moves:[]};",
+        "document.addEventListener('mousemove',e=>window.__r.moves.push(e.buttons));",
+        "document.addEventListener('contextmenu',e=>{e.preventDefault();window.__r.ctx++;});",
+        "drag.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/plain','x');window.__r.dragstart++;});",
+        "drop.addEventListener('dragover',e=>e.preventDefault());",
+        "drop.addEventListener('drop',e=>{e.preventDefault();window.__r.drop++;});",
+        "</script></body>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    // Hover without buttons, then drag #drag -> #drop with buttons=1, then synthetic right-click.
+    for msg in [
+        json!({ "type": "input_mouse", "eventType": "mouseMoved", "x": 10, "y": 10, "button": "none", "buttons": 0 }),
+        json!({ "type": "input_mouse", "eventType": "mouseMoved", "x": 80, "y": 60, "button": "none", "buttons": 0 }),
+        json!({ "type": "input_mouse", "eventType": "mousePressed", "x": 80, "y": 60, "button": "left", "buttons": 1, "clickCount": 1 }),
+        json!({ "type": "input_mouse", "eventType": "mouseMoved", "x": 140, "y": 60, "button": "left", "buttons": 1 }),
+        json!({ "type": "input_mouse", "eventType": "mouseMoved", "x": 235, "y": 60, "button": "left", "buttons": 1 }),
+        json!({ "type": "input_mouse", "eventType": "mouseMoved", "x": 245, "y": 60, "button": "left", "buttons": 1 }),
+        json!({ "type": "input_mouse", "eventType": "mouseReleased", "x": 245, "y": 60, "button": "left", "buttons": 0, "clickCount": 0 }),
+        json!({ "type": "input_mouse", "eventType": "mousePressed", "x": 240, "y": 60, "button": "right", "buttons": 2, "clickCount": 1 }),
+        json!({ "type": "input_mouse", "eventType": "mouseReleased", "x": 240, "y": 60, "button": "right", "buttons": 0, "clickCount": 0 }),
+    ] {
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            msg.to_string(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "window.__r" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let r = &get_data(&resp)["result"];
+    assert_eq!(r["dragstart"], 1, "expected dragstart: {r}");
+    assert_eq!(r["drop"], 1, "expected drop: {r}");
+    assert_eq!(r["ctx"], 1, "expected contextmenu: {r}");
+    let moves = r["moves"].as_array().unwrap();
+    assert!(
+        moves.contains(&json!(0)),
+        "hover move must have buttons=0: {moves:?}"
+    );
+    assert!(
+        moves.contains(&json!(1)),
+        "drag move must have buttons=1: {moves:?}"
+    );
+
+    let _ = execute_command(
+        &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_self_closed_tab_resyncs_stream() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-selfclose-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-stream-selfclose");
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"].as_u64().unwrap();
+
+    let animated = "data:text/html,<script>setInterval(()=>{document.body.style.background='%23'+Math.floor(Math.random()*16777215).toString(16)},150)</script>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": animated }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "data:text/html,<h1>closing</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    // Wait for initial frame on tab 2.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut flowing = false;
+    while tokio::time::Instant::now() < deadline && !flowing {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next()).await;
+        if let Some(Ok(m)) = msg.ok().flatten() {
+            if m.is_text() {
+                let parsed: Value = serde_json::from_str(m.to_text().unwrap()).unwrap();
+                flowing = parsed.get("type") == Some(&json!("frame"));
+            }
+        }
+    }
+    assert!(flowing, "screencast should be flowing before self-close");
+
+    // Close the active tab directly via CDP Target.closeTarget (bypasses daemon tab_close).
+    let closing_target = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_target_id()
+        .unwrap()
+        .to_string();
+    let _ = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .client
+        .send_command(
+            "Target.closeTarget",
+            Some(json!({ "targetId": closing_target })),
+            None,
+        )
+        .await;
+
+    // Drain events in the daemon (as the daemon loop does) and verify stream broadcasts 1 tab + new frame.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut saw_one_tab = false;
+    let mut saw_recovered_frame = false;
+    while tokio::time::Instant::now() < deadline && !(saw_one_tab && saw_recovered_frame) {
+        let _ = state.drain_cdp_events_background().await;
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(200), ws.next()).await;
+        if let Some(Ok(m)) = msg.ok().flatten() {
+            if m.is_text() {
+                let parsed: Value = serde_json::from_str(m.to_text().unwrap()).unwrap();
+                match parsed.get("type").and_then(Value::as_str) {
+                    Some("tabs") => {
+                        if parsed["tabs"].as_array().is_some_and(|t| t.len() == 1) {
+                            saw_one_tab = true;
+                        }
+                    }
+                    Some("frame") if saw_one_tab => {
+                        saw_recovered_frame = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(
+        saw_one_tab,
+        "stream must broadcast updated 1-tab list after self-close"
+    );
+    assert!(
+        saw_recovered_frame,
+        "stream must resume sending frames from remaining tab"
+    );
+
+    let _ = execute_command(
+        &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     let _ = std::fs::remove_dir_all(&socket_dir);
 }
 

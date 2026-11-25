@@ -18,13 +18,21 @@ const MAX_EVENTS = 500;
 // Primitive atoms
 // ---------------------------------------------------------------------------
 
+export interface StreamFrame {
+  data: string;
+  deviceWidth: number;
+  deviceHeight: number;
+  offsetTop: number;
+  pageScaleFactor: number;
+}
+
 export const streamConnectedAtom = atom(false);
 export const browserConnectedAtom = atom(false);
 export const screencastingAtom = atom(false);
 export const recordingAtom = atom(false);
 export const viewportWidthAtom = atom(1280);
 export const viewportHeightAtom = atom(720);
-export const currentFrameAtom = atom<string | null>(null);
+export const currentFrameAtom = atom<StreamFrame | null>(null);
 export const streamEventsAtom = atom<ActivityEvent[]>([]);
 export const consoleLogsAtom = atom<ConsoleEntry[]>([]);
 export const streamTabsAtom = atom<TabInfo[]>([]);
@@ -152,7 +160,13 @@ export function useStreamSync(port: number) {
 
       switch (msg.type) {
         case "frame":
-          setFrame(msg.data);
+          setFrame({
+            data: msg.data,
+            deviceWidth: msg.metadata?.deviceWidth ?? 0,
+            deviceHeight: msg.metadata?.deviceHeight ?? 0,
+            offsetTop: msg.metadata?.offsetTop ?? 0,
+            pageScaleFactor: msg.metadata?.pageScaleFactor ?? 1,
+          });
           break;
 
         case "frame_clear":
