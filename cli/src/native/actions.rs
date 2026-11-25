@@ -277,6 +277,10 @@ struct DrainedEvents {
     /// while HAR recording; bodies are fetched for these in
     /// `apply_drained_events` before Chrome evicts them (e.g. on navigation).
     har_finished_requests: Vec<(String, Option<String>)>,
+    /// Console/exception events emitted by an iframe session that was just
+    /// attached in this same drain (for example when `fetch_handler_task`
+    /// enabled Runtime before `active_iframe_sessions` was refreshed).
+    early_iframe_console_events: Vec<(String, String, Value)>,
 }
 
 fn is_active_iframe_network_event(
@@ -288,6 +292,17 @@ fn is_active_iframe_network_event(
     tracking_enabled
         && method.starts_with("Network.")
         && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
+}
+
+pub(super) fn is_active_iframe_console_event(
+    method: &str,
+    session_id: Option<&str>,
+    active_iframe_sessions: &HashSet<String>,
+) -> bool {
+    matches!(
+        method,
+        "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+    ) && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
 }
 
 fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
@@ -771,9 +786,12 @@ pub struct DaemonState {
     /// second attachment event when returning to an already-attached tab.
     /// Target.detachedFromTarget events remove stale sessions.
     pub iframe_sessions: HashMap<String, String>,
+    /// (session_id, frame_id) -> default execution context id from
+    /// `Runtime.executionContextCreated`.
+    pub frame_contexts: HashMap<(String, String), i64>,
     /// Dedicated iframe sessions reachable from the currently active page.
-    /// Network tracking uses this subset so background-tab iframe traffic is
-    /// not mixed into the active tab's request list or HAR capture.
+    /// Network tracking and console/exception capture use this subset so
+    /// background-tab iframe events are not mixed into the active tab.
     pub active_iframe_sessions: HashSet<String>,
     /// Origin-scoped extra HTTP headers set via `--headers` on navigate.
     /// Key is the origin (scheme + host + port), value is the headers map.
@@ -1045,6 +1063,7 @@ impl DaemonState {
             request_tracking: false,
             active_frame_id: None,
             iframe_sessions: HashMap::new(),
+            frame_contexts: HashMap::new(),
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             blocked_documents: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -1240,6 +1259,12 @@ impl DaemonState {
                             .get("waitingForDebugger")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
+                        let is_storage_session = target_info.as_ref().is_some_and(|target| {
+                            state::owns_storage_attachment(&target.target_id, waiting_for_debugger)
+                        });
+                        if is_storage_session {
+                            continue;
+                        }
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
@@ -1286,6 +1311,9 @@ impl DaemonState {
                             .unwrap_or("")
                             .to_string();
                         let sid = event.session_id.clone().unwrap_or_default();
+                        if state::owns_storage_session(&sid) {
+                            continue;
+                        }
 
                         let paused = FetchPausedRequest {
                             request_id,
@@ -1708,6 +1736,62 @@ impl DaemonState {
         false
     }
 
+    /// Drain pending CDP events while discarding `Runtime.consoleAPICalled` and
+    /// `Runtime.exceptionThrown` events replayed for `session_id` by a
+    /// `Runtime.disable` -> `Runtime.enable` cycle. All other events (targets,
+    /// network, page lifecycle, execution contexts, and console events from
+    /// other sessions) are dispatched normally in order.
+    async fn drain_discarding_replayed_runtime_events(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let drained = self.drain_cdp_events_filtered(Some(session_id));
+        self.apply_drained_events(drained).await
+    }
+
+    fn record_runtime_console_or_exception(&mut self, method: &str, params: &Value) {
+        match method {
+            "Runtime.consoleAPICalled" => {
+                let level = params.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                let raw_args: Vec<Value> = params
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let text = network::format_console_args(&raw_args);
+                if let Some(ref server) = self.stream_server {
+                    server.broadcast_console(level, &text, &raw_args);
+                }
+                self.event_tracker.add_console(level, &text, &raw_args);
+            }
+            "Runtime.exceptionThrown" => {
+                if let Ok(ex_event) = serde_json::from_value::<ExceptionThrownEvent>(params.clone())
+                {
+                    let details = &ex_event.exception_details;
+                    let text = details
+                        .exception
+                        .as_ref()
+                        .and_then(|e| e.description.as_deref())
+                        .unwrap_or(&details.text);
+                    self.event_tracker.add_error(
+                        text,
+                        None,
+                        details.line_number,
+                        details.column_number,
+                    );
+                    if let Some(ref server) = self.stream_server {
+                        server.broadcast_page_error(
+                            text,
+                            details.line_number,
+                            details.column_number,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     async fn refresh_active_iframe_sessions(&mut self) {
         let Some(ref browser) = self.browser else {
             self.active_iframe_sessions.clear();
@@ -1731,6 +1815,11 @@ impl DaemonState {
     }
 
     async fn apply_drained_events(&mut self, drained: DrainedEvents) -> Result<(), String> {
+        let previous_active_session = self
+            .browser
+            .as_ref()
+            .and_then(|browser| browser.active_session_id().ok())
+            .map(ToString::to_string);
         // Popups and externally closed pages can change the active top-level
         // target without changing iframe topology. Refresh after either kind
         // of event so network capture stays scoped to the active page.
@@ -1808,6 +1897,7 @@ impl DaemonState {
                     log_detached_during_setup("iframe", &error);
                     self.iframe_sessions.retain(|_, sid| sid != iframe_sid);
                     self.active_iframe_sessions.remove(iframe_sid);
+                    self.frame_contexts.retain(|(s, _), _| s != iframe_sid);
                 }
                 Err(error) if controls_active => {
                     return close_after_network_control_failure(self, error).await;
@@ -1875,15 +1965,31 @@ impl DaemonState {
                     // never activates a discovered target (that would steal
                     // the active tab and overwrite its binding); a legacy
                     // session follows it.
-                    mgr.register_discovered_page(
-                        &target_info.target_id,
-                        page_sid,
-                        page_url,
-                        target_info.title.clone(),
-                        target_info.target_type.clone(),
-                    );
+                    let pinned_by_other =
+                        tab_binding::pinned_owner(&target_info.target_id, &self.session_id)
+                            .is_some();
+                    if !pinned_by_other {
+                        mgr.register_discovered_page(
+                            &target_info.target_id,
+                            page_sid,
+                            page_url,
+                            target_info.title.clone(),
+                            target_info.target_type.clone(),
+                        );
+                    }
 
-                    mgr.resume_if_waiting_pub(page_sid).await
+                    let resumed = mgr.resume_if_waiting_pub(page_sid).await;
+                    if pinned_by_other && !controls_active {
+                        let _ = mgr
+                            .client
+                            .send_command(
+                                "Target.detachFromTarget",
+                                Some(json!({ "sessionId": page_sid })),
+                                None,
+                            )
+                            .await;
+                    }
+                    resumed
                 })
                 .await
             } else {
@@ -1965,10 +2071,14 @@ impl DaemonState {
         for sid in &drained.detached_iframe_sessions {
             self.iframe_sessions.retain(|_, v| v != sid);
             self.active_iframe_sessions.remove(sid);
+            self.frame_contexts.retain(|(s, _), _| s != sid);
         }
 
         // Attach and register new targets
         for te in &drained.new_targets {
+            if tab_binding::pinned_owner(&te.target_info.target_id, &self.session_id).is_some() {
+                continue;
+            }
             let filter = self.domain_filter.read().await.clone();
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
@@ -2046,6 +2156,16 @@ impl DaemonState {
                     eprintln!("Warning: failed to prepare new page session: {}", error);
                 }
             }
+        }
+
+        let current_active_session = self
+            .browser
+            .as_ref()
+            .and_then(|browser| browser.active_session_id().ok())
+            .map(ToString::to_string);
+        if current_active_session != previous_active_session {
+            self.active_frame_id = None;
+            self.active_iframe_sessions.clear();
         }
 
         // Update changed targets
@@ -2132,6 +2252,11 @@ impl DaemonState {
 
         if active_frame_scope_changed {
             self.refresh_active_iframe_sessions().await;
+            for (sid, method, params) in &drained.early_iframe_console_events {
+                if self.active_iframe_sessions.contains(sid) {
+                    self.record_runtime_console_or_exception(method, params);
+                }
+            }
             if self.recording_state.active && self.recording_state.cursor {
                 let capture = self
                     .recording_state
@@ -2162,6 +2287,13 @@ impl DaemonState {
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
+        self.drain_cdp_events_filtered(None)
+    }
+
+    fn drain_cdp_events_filtered(
+        &mut self,
+        suppress_runtime_console_session: Option<&str>,
+    ) -> DrainedEvents {
         let rx = match self.event_rx.as_mut() {
             Some(rx) => rx,
             None => return DrainedEvents::default(),
@@ -2179,6 +2311,7 @@ impl DaemonState {
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
         let mut har_finished_requests: Vec<(String, Option<String>)> = Vec::new();
+        let mut early_iframe_console_events: Vec<(String, String, Value)> = Vec::new();
 
         loop {
             match rx.try_recv() {
@@ -2258,8 +2391,10 @@ impl DaemonState {
                                 if let Some(session) = self.browser.as_ref().and_then(|browser| {
                                     browser.session_id_for_target(&te.target_id)
                                 }) {
-                                    self.webmcp.observations.remove(session);
-                                    self.touch_sessions.remove(session);
+                                    let session = session.to_string();
+                                    self.webmcp.observations.remove(&session);
+                                    self.touch_sessions.remove(&session);
+                                    self.frame_contexts.retain(|(s, _), _| s != &session);
                                 }
                                 new_targets
                                     .retain(|entry| entry.target_info.target_id != te.target_id);
@@ -2353,6 +2488,17 @@ impl DaemonState {
                         _ => {}
                     }
 
+                    if let Some(suppressed_sid) = suppress_runtime_console_session {
+                        if event.session_id.as_deref().unwrap_or_default() == suppressed_sid
+                            && matches!(
+                                event.method.as_str(),
+                                "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+                            )
+                        {
+                            continue;
+                        }
+                    }
+
                     let session_matches = session_matches(
                         self.browser
                             .as_ref()
@@ -2367,6 +2513,13 @@ impl DaemonState {
                             &event.method,
                             event.session_id.as_deref(),
                             self.har_recording || self.request_tracking,
+                            &self.active_iframe_sessions,
+                        );
+
+                    let iframe_console_event = !session_matches
+                        && is_active_iframe_console_event(
+                            &event.method,
+                            event.session_id.as_deref(),
                             &self.active_iframe_sessions,
                         );
 
@@ -2387,7 +2540,64 @@ impl DaemonState {
                                     || self.iframe_sessions.values().any(|known| known == sid)))
                     });
 
-                    if !session_matches && !iframe_network_event && !webmcp_event {
+                    match event.method.as_str() {
+                        "Runtime.executionContextCreated" => {
+                            let sid = event.session_id.as_deref().unwrap_or_default();
+                            if let Some((frame_id, id)) =
+                                super::browser::parse_default_execution_context(&event.params)
+                            {
+                                self.frame_contexts.insert((sid.to_string(), frame_id), id);
+                            }
+                        }
+                        "Runtime.executionContextDestroyed" => {
+                            let sid = event.session_id.as_deref().unwrap_or_default();
+                            if let Some(destroyed_id) = event
+                                .params
+                                .get("executionContextId")
+                                .and_then(Value::as_i64)
+                            {
+                                self.frame_contexts
+                                    .retain(|(s, _), id| !(s == sid && *id == destroyed_id));
+                            }
+                        }
+                        "Runtime.executionContextsCleared" => {
+                            let sid = event.session_id.as_deref().unwrap_or_default();
+                            self.frame_contexts.retain(|(s, _), _| s != sid);
+                        }
+                        "Page.frameDetached" => {
+                            if let Some(frame_id) =
+                                event.params.get("frameId").and_then(Value::as_str)
+                            {
+                                let sid = event.session_id.as_deref().unwrap_or_default();
+                                self.frame_contexts
+                                    .remove(&(sid.to_string(), frame_id.to_string()));
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    if !session_matches
+                        && !iframe_network_event
+                        && !iframe_console_event
+                        && !webmcp_event
+                    {
+                        if matches!(
+                            event.method.as_str(),
+                            "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+                        ) {
+                            if let Some(sid) = event.session_id.as_deref() {
+                                if attached_iframe_sessions
+                                    .iter()
+                                    .any(|(_, attached_sid)| attached_sid == sid)
+                                {
+                                    early_iframe_console_events.push((
+                                        sid.to_string(),
+                                        event.method.clone(),
+                                        event.params.clone(),
+                                    ));
+                                }
+                            }
+                        }
                         continue;
                     }
 
@@ -2409,6 +2619,7 @@ impl DaemonState {
                                 let session_id = event.session_id.as_deref().unwrap_or_default();
                                 if frame.get("parentId").is_none() {
                                     if session_matches {
+                                        self.active_frame_id = None;
                                         self.webmcp.clear_page_scope(session_id);
                                     } else {
                                         self.webmcp.clear_page_tools(session_id);
@@ -2740,6 +2951,7 @@ impl DaemonState {
                 Err(broadcast::error::TryRecvError::Empty) => break,
                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
                     eprintln!("[agent-browser] Warning: CDP event buffer overflowed, {} events dropped. Network requests may be missing from HAR output.", n);
+                    self.frame_contexts.clear();
                     continue;
                 }
                 Err(broadcast::error::TryRecvError::Closed) => {
@@ -2770,6 +2982,7 @@ impl DaemonState {
             attached_other_sessions,
             detached_iframe_sessions,
             har_finished_requests,
+            early_iframe_console_events,
         }
     }
 }
@@ -3046,8 +3259,10 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.launch_identity = None;
     state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
+    state.active_frame_id = None;
     state.iframe_sessions.clear();
     state.active_iframe_sessions.clear();
+    state.frame_contexts.clear();
     state.webmcp.clear_all();
     state.screencasting = false;
     state.pending_dialog = None;
@@ -5133,6 +5348,7 @@ async fn adopt_replacement_tab(
 ) -> Result<(), String> {
     state.webmcp.clear_page_scope(old_session_id);
     state.webmcp.observations.remove(old_session_id);
+    state.frame_contexts.retain(|(s, _), _| s != old_session_id);
     state.ref_map.begin_snapshot();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
@@ -6096,9 +6312,17 @@ async fn load_state_path_for_engine(
     if state.firefox.is_some() {
         return Some(bidi::storage::load_state_path(state, path).await);
     }
-    if let Some(mgr) = state.browser.as_ref() {
-        if let Ok(session_id) = mgr.active_session_id() {
-            return Some(state::load_state(&mgr.client, session_id, path).await);
+    if let Some(mgr) = state.browser.as_mut() {
+        if let Ok(session_id) = mgr.active_session_id().map(ToString::to_string) {
+            return Some(
+                match state::load_state_with_origins(&mgr.client, &session_id, path).await {
+                    Ok((skipped, restored)) => {
+                        mgr.record_visited_origins(restored);
+                        Ok(skipped)
+                    }
+                    Err(err) => Err(err),
+                },
+            );
         }
     }
     None
@@ -6349,12 +6573,18 @@ pub(crate) async fn auto_save_restore_state(
     };
     let active_session_id = mgr.active_session_id()?.to_string();
 
+    let target_scope = state::TargetOriginScope {
+        tracked_target_ids: mgr.tracked_target_ids(),
+        include_unpinned_browser_targets: mgr.owns_browser() && !mgr.is_pin_tab(),
+    };
+
     match state::save_auto_state_transactional(
         &mgr.client,
         &active_session_id,
         &session_name,
         &state.session_id,
         mgr.visited_origins(),
+        &target_scope,
     )
     .await
     {
@@ -8155,7 +8385,7 @@ async fn handle_content(state: &mut DaemonState) -> Result<Value, String> {
     Ok(json!({ "html": html, "origin": url }))
 }
 
-async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let script = cmd
@@ -8167,23 +8397,120 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
             return Ok(json!({ "result": result, "origin": url }));
         }
     }
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let script = cmd
         .get("script")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let result = mgr.evaluate_remote_object(script).await?;
+    let frame_id = state
+        .active_frame_id
+        .clone()
+        .filter(|_| state.engine == "chrome");
+    let (result, origin) = match frame_id {
+        Some(frame_id) => {
+            let (session_id, host) = {
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                let session_id = mgr.active_session_id()?.to_string();
+                let host = super::a11y::frame_host_info(
+                    &mgr.client,
+                    &session_id,
+                    &state.iframe_sessions,
+                    &frame_id,
+                )
+                .await?
+                .ok_or_else(|| "Could not locate the selected frame".to_string())?;
+                (session_id, host)
+            };
+            let result = if host.is_dedicated_session {
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                mgr.evaluate_remote_object_in(script, &host.session_id)
+                    .await?
+            } else {
+                let known = state
+                    .frame_contexts
+                    .get(&(host.session_id.clone(), frame_id.clone()))
+                    .copied();
+                let fast = match known {
+                    Some(id) => {
+                        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                        match mgr
+                            .eval_remote_object_in_context(&host.session_id, script, id)
+                            .await
+                        {
+                            Ok(obj) => Some(obj),
+                            Err(err) if err.contains("Cannot find context") => None,
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    None => None,
+                };
+                match fast {
+                    Some(obj) => obj,
+                    None => {
+                        // Drain pending events before cycling Runtime so legitimate
+                        // prior console/error logs are kept, then discard only the
+                        // replayed console/exception burst emitted by Runtime.enable.
+                        let _ = state.drain_cdp_events_background().await;
+                        let fresh_id = {
+                            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                            mgr.frame_execution_context(&host.session_id, &frame_id)
+                                .await?
+                        };
+                        let _ = state
+                            .drain_discarding_replayed_runtime_events(&host.session_id)
+                            .await;
+                        state
+                            .frame_contexts
+                            .insert((host.session_id.clone(), frame_id.clone()), fresh_id);
+                        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                        mgr.eval_remote_object_in_context(&host.session_id, script, fresh_id)
+                            .await?
+                    }
+                }
+            };
+            // Refresh the frame URL after eval so in-frame pushState/navigations
+            // are reflected, and omit `origin` when empty so content boundaries
+            // fail closed to `origin=unknown`.
+            let post_url = {
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                super::a11y::frame_host_info(
+                    &mgr.client,
+                    &session_id,
+                    &state.iframe_sessions,
+                    &frame_id,
+                )
+                .await
+                .ok()
+                .flatten()
+                .map(|h| h.url)
+                .unwrap_or(host.url)
+            };
+            let origin = (!post_url.is_empty()).then_some(post_url);
+            (result, origin)
+        }
+        None => {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            let result = mgr.evaluate_remote_object(script).await?;
+            let url = mgr.get_url().await.unwrap_or_default();
+            (result, Some(url))
+        }
+    };
     let unserializable = result
         .unserializable_value
         .clone()
         .or_else(|| (result.object_type == "undefined").then(|| "undefined".to_string()));
-    let url = mgr.get_url().await.unwrap_or_default();
-    Ok(eval_data(
-        result.value.unwrap_or(Value::Null),
-        url,
-        unserializable,
-    ))
+    let value = result.value.unwrap_or(Value::Null);
+    let data = match origin {
+        Some(url) => eval_data(value, url, unserializable),
+        None => {
+            let mut data = json!({ "result": value });
+            if let Some(token) = unserializable {
+                data["unserializable"] = json!(token);
+            }
+            data
+        }
+    };
+    Ok(data)
 }
 
 /// Builds the `evaluate` reply, carrying the JavaScript token for a value JSON cannot represent.
@@ -9846,6 +10173,11 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
     let session_id = mgr.active_session_id()?.to_string();
     let path = cmd.get("path").and_then(|v| v.as_str());
 
+    let target_scope = state::TargetOriginScope {
+        tracked_target_ids: mgr.tracked_target_ids(),
+        include_unpinned_browser_targets: mgr.owns_browser() && !mgr.is_pin_tab(),
+    };
+
     let saved_path = state::save_state(
         &mgr.client,
         &session_id,
@@ -9853,6 +10185,7 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
         state.session_name.as_deref(),
         &state.session_id,
         mgr.visited_origins(),
+        &target_scope,
     )
     .await?;
 
@@ -9860,15 +10193,20 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
 }
 
 async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let path = cmd
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' parameter")?;
 
     ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    let skipped = state::load_state(&mgr.client, &session_id, path).await?;
+    let skipped = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let session_id = mgr.active_session_id()?.to_string();
+        let (skipped, restored) =
+            state::load_state_with_origins(&mgr.client, &session_id, path).await?;
+        mgr.record_visited_origins(restored);
+        skipped
+    };
     mark_explicit_storage_state_loaded(state, path);
     Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
 }
@@ -14437,11 +14775,16 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         (tab_id, attach.session_id)
     };
 
+    state.active_frame_id = None;
+    state.active_iframe_sessions.clear();
+    state.webmcp.clear_invocations();
+
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     apply_session_setup(state, &session_id).await?;
     install_network_controls_or_resume_prepared_session(state, has_proxy_creds, &session_id)
         .await?;
     state.drain_cdp_events_background().await?;
+    state.refresh_active_iframe_sessions().await;
 
     if let Some(viewport) = cmd.get("viewport") {
         let width = viewport
@@ -20701,6 +21044,81 @@ mod tests {
                 "{name}: a detached session is not resumed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pinned_tab_owned_by_another_session_is_not_reattached_on_info_change() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let sock_dir = tempfile::tempdir().unwrap();
+        let env = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR"]);
+        env.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            sock_dir.path().to_str().unwrap(),
+        );
+        std::fs::write(
+            sock_dir.path().join("other-pinned.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        super::super::tab_binding::save(
+            "other-pinned",
+            &super::super::tab_binding::TabBinding {
+                target_id: "T-PINNED".to_string(),
+                url: "https://pinned.test/".to_string(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let methods = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let methods_srv = std::sync::Arc::clone(&methods);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let method = cmd["method"].as_str().unwrap_or("").to_string();
+                methods_srv.lock().unwrap().push(method.clone());
+                let reply = if method == "Target.attachToTarget" {
+                    json!({ "id": cmd["id"], "result": { "sessionId": "S-LEAK" } })
+                } else {
+                    json!({ "id": cmd["id"], "result": {} })
+                };
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
+            }
+        });
+
+        let mut state = DaemonState::new();
+        state.session_id = "host-a".to_string();
+        let client = CdpClient::connect(&url).await.unwrap();
+        state.browser = Some(BrowserManager::for_test(client, url.clone()));
+
+        let drained = DrainedEvents {
+            new_targets: vec![TargetCreatedEvent {
+                target_info: setup_test_target("T-PINNED", "page"),
+            }],
+            attached_page_sessions: vec![(
+                setup_test_target("T-PINNED", "page"),
+                "S-AUTO".to_string(),
+            )],
+            ..DrainedEvents::default()
+        };
+        assert_eq!(state.apply_drained_events(drained).await, Ok(()));
+        let recorded = methods.lock().unwrap().clone();
+        assert!(
+            !recorded.iter().any(|m| m == "Target.attachToTarget"),
+            "must not attach to another session's pinned tab: {recorded:?}"
+        );
+        assert!(
+            recorded.iter().any(|m| m == "Target.detachFromTarget"),
+            "auto-attached session on another session's pinned tab should detach: {recorded:?}"
+        );
+        assert!(state.browser.as_ref().unwrap().pages_list().is_empty());
+        server.abort();
     }
 
     /// Every child session the drain prepares is bounded, so one that never
@@ -29525,6 +29943,279 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
         assert!(elsewhere.domain_filter.read().await.is_none());
         assert!(sibling.domain_filter.read().await.is_none());
+    }
+
+    #[test]
+    fn test_is_active_iframe_console_event_filters_methods_and_sessions() {
+        let active = HashSet::from(["iframe-active".to_string()]);
+        assert!(is_active_iframe_console_event(
+            "Runtime.consoleAPICalled",
+            Some("iframe-active"),
+            &active,
+        ));
+        assert!(is_active_iframe_console_event(
+            "Runtime.exceptionThrown",
+            Some("iframe-active"),
+            &active,
+        ));
+        assert!(!is_active_iframe_console_event(
+            "Runtime.consoleAPICalled",
+            Some("iframe-background"),
+            &active,
+        ));
+        assert!(!is_active_iframe_console_event(
+            "Runtime.consoleAPICalled",
+            None,
+            &active,
+        ));
+        assert!(!is_active_iframe_console_event(
+            "Network.requestWillBeSent",
+            Some("iframe-active"),
+            &active,
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_close_current_browser_clears_active_frame_and_contexts() {
+        let mut state = DaemonState::new();
+        state.active_frame_id = Some("frame-1".to_string());
+        state
+            .frame_contexts
+            .insert(("session-1".to_string(), "frame-1".to_string()), 42);
+
+        close_current_browser(&mut state).await.unwrap();
+
+        assert!(state.active_frame_id.is_none());
+        assert!(state.frame_contexts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_drain_cdp_events_prunes_frame_contexts_clears_active_frame_and_buffers_early_oopif_console(
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ws = tokio_tungstenite::accept_async(stream).await;
+                std::future::pending::<()>().await;
+            }
+        });
+        let ws_url = format!("ws://{addr}/devtools/browser/test");
+        let client = crate::native::cdp::client::CdpClient::connect(&ws_url)
+            .await
+            .unwrap();
+        let mut mgr = crate::native::browser::BrowserManager::for_test(client, ws_url);
+        mgr.add_page(crate::native::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "t1".to_string(),
+            session_id: "s1".to_string(),
+            url: "https://example.com/".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let mut state = DaemonState::new();
+        state.browser = Some(mgr);
+        let (tx, rx) = broadcast::channel::<crate::native::cdp::types::CdpEvent>(64);
+        state.event_rx = Some(rx);
+        state.active_frame_id = Some("child-1".to_string());
+
+        let send = |session_id: Option<&str>, method: &str, params: Value| {
+            let _ = tx.send(crate::native::cdp::types::CdpEvent {
+                method: method.to_string(),
+                params,
+                session_id: session_id.map(ToString::to_string),
+            });
+        };
+
+        // Context created -> tracked, then executionContextDestroyed prunes it.
+        send(
+            Some("s1"),
+            "Runtime.executionContextCreated",
+            json!({ "context": { "id": 10, "auxData": { "frameId": "f1", "isDefault": true } } }),
+        );
+        send(
+            Some("s1"),
+            "Runtime.executionContextCreated",
+            json!({ "context": { "id": 11, "auxData": { "frameId": "f2", "isDefault": true } } }),
+        );
+        let _ = state.drain_cdp_events();
+        assert_eq!(
+            state.frame_contexts.get(&("s1".into(), "f1".into())),
+            Some(&10)
+        );
+        assert_eq!(
+            state.frame_contexts.get(&("s1".into(), "f2".into())),
+            Some(&11)
+        );
+
+        send(
+            Some("s1"),
+            "Runtime.executionContextDestroyed",
+            json!({ "executionContextId": 10 }),
+        );
+        let _ = state.drain_cdp_events();
+        assert!(!state
+            .frame_contexts
+            .contains_key(&("s1".into(), "f1".into())));
+        assert_eq!(
+            state.frame_contexts.get(&("s1".into(), "f2".into())),
+            Some(&11)
+        );
+
+        // Page.frameDetached removes that frame's context.
+        send(Some("s1"), "Page.frameDetached", json!({ "frameId": "f2" }));
+        let _ = state.drain_cdp_events();
+        assert!(state.frame_contexts.is_empty());
+
+        // Runtime.executionContextsCleared wipes all contexts for that session.
+        send(
+            Some("s1"),
+            "Runtime.executionContextCreated",
+            json!({ "context": { "id": 12, "auxData": { "frameId": "f3", "isDefault": true } } }),
+        );
+        send(Some("s1"), "Runtime.executionContextsCleared", json!({}));
+        let _ = state.drain_cdp_events();
+        assert!(state.frame_contexts.is_empty());
+
+        // Top-level Page.frameNavigated on active session clears active_frame_id.
+        send(
+            Some("s1"),
+            "Page.frameNavigated",
+            json!({ "frame": { "id": "top", "url": "https://example.com/" } }),
+        );
+        let _ = state.drain_cdp_events();
+        assert!(state.active_frame_id.is_none());
+
+        // Early console/exception events arriving right behind Target.attachedToTarget for an iframe are buffered.
+        send(
+            None,
+            "Target.attachedToTarget",
+            json!({
+                "sessionId": "oopif-s1",
+                "targetInfo": { "targetId": "oopif-f1", "type": "iframe", "title": "", "url": "https://other.test/", "attached": true }
+            }),
+        );
+        send(
+            Some("oopif-s1"),
+            "Runtime.consoleAPICalled",
+            json!({ "type": "log", "args": [{ "type": "string", "value": "early-log" }] }),
+        );
+        let drained = state.drain_cdp_events();
+        assert_eq!(drained.early_iframe_console_events.len(), 1);
+        assert_eq!(drained.early_iframe_console_events[0].0, "oopif-s1");
+        assert_eq!(
+            drained.early_iframe_console_events[0].1,
+            "Runtime.consoleAPICalled"
+        );
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn test_drain_cdp_events_filtered_preserves_unrelated_events_while_suppressing_replay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ws = tokio_tungstenite::accept_async(stream).await;
+                std::future::pending::<()>().await;
+            }
+        });
+        let ws_url = format!("ws://{addr}/devtools/browser/test");
+        let client = crate::native::cdp::client::CdpClient::connect(&ws_url)
+            .await
+            .unwrap();
+        let mut mgr = crate::native::browser::BrowserManager::for_test(client, ws_url);
+        mgr.add_page(crate::native::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "t1".to_string(),
+            session_id: "s1".to_string(),
+            url: "https://example.com/".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let mut state = DaemonState::new();
+        state.browser = Some(mgr);
+        state.request_tracking = true;
+        state.active_iframe_sessions.insert("oopif-s1".to_string());
+        let (tx, rx) = broadcast::channel::<crate::native::cdp::types::CdpEvent>(64);
+        state.event_rx = Some(rx);
+
+        let send = |session_id: Option<&str>, method: &str, params: Value| {
+            let _ = tx.send(crate::native::cdp::types::CdpEvent {
+                method: method.to_string(),
+                params,
+                session_id: session_id.map(ToString::to_string),
+            });
+        };
+
+        // Interleave replayed console/exception events for `s1` with unrelated events:
+        // Target.attachedToTarget, Network.requestWillBeSent, Runtime.executionContextCreated,
+        // and console output from another active OOPIF session.
+        send(
+            Some("s1"),
+            "Runtime.consoleAPICalled",
+            json!({ "type": "log", "args": [{ "type": "string", "value": "replayed-s1-log" }] }),
+        );
+        send(
+            Some("s1"),
+            "Runtime.exceptionThrown",
+            json!({ "exceptionDetails": { "text": "replayed-s1-err", "lineNumber": 0, "columnNumber": 0 } }),
+        );
+        send(
+            None,
+            "Target.attachedToTarget",
+            json!({
+                "sessionId": "oopif-s2",
+                "targetInfo": { "targetId": "oopif-f2", "type": "iframe", "title": "", "url": "https://other.test/", "attached": true }
+            }),
+        );
+        send(
+            Some("s1"),
+            "Network.requestWillBeSent",
+            json!({ "requestId": "r1", "request": { "method": "GET", "url": "https://example.com/api" } }),
+        );
+        send(
+            Some("s1"),
+            "Runtime.executionContextCreated",
+            json!({ "context": { "id": 55, "auxData": { "frameId": "f-same", "isDefault": true } } }),
+        );
+        send(
+            Some("oopif-s1"),
+            "Runtime.consoleAPICalled",
+            json!({ "type": "log", "args": [{ "type": "string", "value": "other-oopif-log" }] }),
+        );
+
+        let drained = state.drain_cdp_events_filtered(Some("s1"));
+
+        // Replayed s1 console/exception were suppressed; other-oopif console was kept.
+        let console = state.event_tracker.get_console_json();
+        let logs: Vec<String> = console["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["text"].as_str().map(ToString::to_string))
+            .collect();
+        assert_eq!(logs, vec!["other-oopif-log"]);
+        let errors = state.event_tracker.get_errors_json();
+        assert!(errors["errors"].as_array().unwrap().is_empty());
+
+        // Target attach, network request, and execution context were all preserved.
+        assert_eq!(
+            drained.attached_iframe_sessions,
+            vec![("oopif-f2".to_string(), "oopif-s2".to_string())]
+        );
+        assert_eq!(state.tracked_requests.len(), 1);
+        assert_eq!(
+            state.tracked_requests.entries()[0].url,
+            "https://example.com/api"
+        );
+        assert_eq!(
+            state.frame_contexts.get(&("s1".into(), "f-same".into())),
+            Some(&55)
+        );
+        srv.abort();
     }
 
     async fn bidi_only_server() -> (

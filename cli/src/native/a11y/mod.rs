@@ -382,6 +382,14 @@ struct FrameTarget {
     frame_id: String,
     session_id: String,
     parent_id: Option<String>,
+    url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameHost {
+    pub session_id: String,
+    pub url: String,
+    pub is_dedicated_session: bool,
 }
 
 fn collect_frame_targets(
@@ -408,18 +416,35 @@ fn collect_frame_targets(
                 .get("parentId")
                 .and_then(|id| id.as_str())
                 .map(ToString::to_string),
+            url: frame
+                .get("url")
+                .and_then(|u| u.as_str())
+                .unwrap_or_default()
+                .to_string(),
         };
         targets
             .entry(frame_id.to_string())
             .and_modify(|existing| {
-                // A tree queried through the frame's dedicated target is the
-                // authoritative source for its execution session and children.
-                if iframe_sessions.get(frame_id) == Some(&session_id) {
+                // Only a tree queried directly on the frame's dedicated session
+                // (`parent_session_id == session_id`) is authoritative for its
+                // live URL and execution session. A parent OOPIF's tree queried
+                // later must not overwrite a nested child OOPIF's live URL.
+                if parent_session_id == session_id {
                     let mut authoritative = target.clone();
                     if authoritative.parent_id.is_none() {
                         authoritative.parent_id.clone_from(&existing.parent_id);
                     }
+                    if authoritative.url.is_empty() {
+                        authoritative.url.clone_from(&existing.url);
+                    }
                     *existing = authoritative;
+                } else {
+                    if existing.parent_id.is_none() {
+                        existing.parent_id.clone_from(&target.parent_id);
+                    }
+                    if existing.url.is_empty() {
+                        existing.url.clone_from(&target.url);
+                    }
                 }
             })
             .or_insert(target);
@@ -516,6 +541,7 @@ fn frame_target(frame_id: &str, session_id: &str, parent_id: Option<&str>) -> Fr
         frame_id: frame_id.to_string(),
         session_id: session_id.to_string(),
         parent_id: parent_id.map(ToString::to_string),
+        url: String::new(),
     }
 }
 
@@ -534,10 +560,87 @@ pub async fn active_frame_sessions(
         .collect())
 }
 
+/// Resolve the CDP session and URL for `frame_id` within `top_session_id`'s
+/// active frame tree. Returns `Ok(None)` if `frame_id` does not belong to the
+/// active page, and propagates CDP transport/timeout errors as `Err`.
+pub async fn frame_host_info(
+    client: &CdpClient,
+    top_session_id: &str,
+    iframe_sessions: &HashMap<String, String>,
+    frame_id: &str,
+) -> Result<Option<FrameHost>, String> {
+    let top_tree = client
+        .send_command_no_params("Page.getFrameTree", Some(top_session_id))
+        .await?;
+    let top_frame_id = top_tree
+        .get("frameTree")
+        .and_then(|tree| tree.get("frame"))
+        .and_then(|frame| frame.get("id"))
+        .and_then(|id| id.as_str())
+        .ok_or("Could not determine top-level frame ID")?
+        .to_string();
+
+    let mut top_targets = HashMap::new();
+    if let Some(tree) = top_tree.get("frameTree") {
+        collect_frame_targets(tree, top_session_id, iframe_sessions, &mut top_targets);
+    }
+
+    if let Some(target) = top_targets.get(frame_id) {
+        if frame_reaches_top(frame_id, &top_frame_id, &top_targets) {
+            if let Some(oopif_sid) = iframe_sessions.get(frame_id) {
+                // Direct OOPIF: query only its dedicated session for its live URL
+                // without fanning out across unrelated background tab sessions.
+                let live_url = client
+                    .send_command_no_params("Page.getFrameTree", Some(oopif_sid))
+                    .await
+                    .ok()
+                    .and_then(|res| {
+                        res.get("frameTree")
+                            .and_then(|t| t.get("frame"))
+                            .and_then(|f| f.get("url"))
+                            .and_then(|u| u.as_str())
+                            .map(ToString::to_string)
+                    })
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or_else(|| target.url.clone());
+                return Ok(Some(FrameHost {
+                    session_id: oopif_sid.clone(),
+                    url: live_url,
+                    is_dedicated_session: true,
+                }));
+            }
+            return Ok(Some(FrameHost {
+                session_id: target.session_id.clone(),
+                url: target.url.clone(),
+                is_dedicated_session: false,
+            }));
+        }
+    }
+
+    if iframe_sessions.is_empty() {
+        return Ok(None);
+    }
+
+    // Nested frame below an OOPIF: fall back to the full active-page tree walk.
+    let (_, targets) = collect_frame_sessions(client, top_session_id, iframe_sessions).await?;
+    let Some(target) = targets.into_iter().find(|t| t.frame_id == frame_id) else {
+        return Ok(None);
+    };
+    let is_dedicated_session = iframe_sessions
+        .get(frame_id)
+        .is_some_and(|sid| sid == &target.session_id);
+    Ok(Some(FrameHost {
+        session_id: target.session_id,
+        url: target.url,
+        is_dedicated_session,
+    }))
+}
+
 /// Return the dedicated target sessions that belong to the active page's
 /// frame tree. The daemon keeps iframe sessions from background tabs so an
-/// audit can recover them after a tab switch, while network capture uses this
-/// active subset to avoid mixing traffic from different tabs.
+/// audit can recover them after a tab switch, while network tracking and
+/// console/exception capture use this active subset to avoid mixing events
+/// from different tabs.
 pub async fn active_iframe_session_ids(
     client: &CdpClient,
     top_session_id: &str,
@@ -918,6 +1021,38 @@ mod tests {
     }
 
     #[test]
+    fn test_collect_frame_targets_preserves_frame_url() {
+        let top_tree = json!({
+            "frame": { "id": "top", "url": "https://top.example/" },
+            "childFrames": [
+                {
+                    "frame": { "id": "child-same", "parentId": "top", "url": "https://top.example/same" }
+                },
+                {
+                    "frame": { "id": "child-oopif", "parentId": "top", "url": "https://other.example/embed" }
+                }
+            ]
+        });
+        let oopif_tree = json!({
+            "frame": { "id": "child-oopif", "url": "https://other.example/embed/live" }
+        });
+        let iframe_sessions =
+            HashMap::from([("child-oopif".to_string(), "oopif-session".to_string())]);
+        let mut targets = HashMap::new();
+        collect_frame_targets(&top_tree, "top-session", &iframe_sessions, &mut targets);
+        collect_frame_targets(&oopif_tree, "oopif-session", &iframe_sessions, &mut targets);
+
+        assert_eq!(targets["child-same"].session_id, "top-session");
+        assert_eq!(targets["child-same"].url, "https://top.example/same");
+        assert_eq!(targets["child-oopif"].session_id, "oopif-session");
+        assert_eq!(targets["child-oopif"].parent_id.as_deref(), Some("top"));
+        assert_eq!(
+            targets["child-oopif"].url,
+            "https://other.example/embed/live"
+        );
+    }
+
+    #[test]
     fn test_frame_owner_expression_preserves_axe_selector_paths() {
         let expression = frame_owner_expression(&json!({
             "selector": ["#ancestor", ["#shadow-host", "iframe[data-name=\"quoted\"]"]]
@@ -928,5 +1063,133 @@ mod tests {
             r##"const selectorPath = ["#ancestor",["#shadow-host","iframe[data-name=\"quoted\"]"]]"##
         ));
         assert!(expression.contains("root = element.shadowRoot"));
+    }
+
+    #[test]
+    fn test_collect_frame_targets_keeps_nested_oopif_live_url_regardless_of_session_order() {
+        let iframe_sessions = HashMap::from([
+            ("parent-oopif".to_string(), "S-z".to_string()),
+            ("nested-oopif".to_string(), "S-a".to_string()),
+        ]);
+        let top_tree = json!({
+            "frame": { "id": "top", "url": "https://top.example/" },
+            "childFrames": [{
+                "frame": { "id": "parent-oopif", "parentId": "top", "url": "https://parent.example/" }
+            }]
+        });
+        let nested_tree = json!({
+            "frame": { "id": "nested-oopif", "url": "https://nested.example/live-navigated" }
+        });
+        let parent_tree = json!({
+            "frame": { "id": "parent-oopif", "url": "https://parent.example/live" },
+            "childFrames": [{
+                "frame": { "id": "nested-oopif", "parentId": "parent-oopif", "url": "https://nested.example/stale-initial" }
+            }]
+        });
+        let mut targets = HashMap::new();
+        collect_frame_targets(&top_tree, "top-session", &iframe_sessions, &mut targets);
+        // S-a sorts before S-z, so nested's own tree is collected before parent's tree.
+        collect_frame_targets(&nested_tree, "S-a", &iframe_sessions, &mut targets);
+        collect_frame_targets(&parent_tree, "S-z", &iframe_sessions, &mut targets);
+
+        assert_eq!(
+            targets["nested-oopif"].url,
+            "https://nested.example/live-navigated"
+        );
+        assert_eq!(
+            targets["nested-oopif"].parent_id.as_deref(),
+            Some("parent-oopif")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_frame_host_info_fast_paths_and_propagates_cdp_errors() {
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::{Arc, Mutex};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let queried: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let queried_srv = Arc::clone(&queried);
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                let id = req["id"].as_u64().unwrap();
+                let sid = req["sessionId"].as_str().unwrap_or("").to_string();
+                queried_srv.lock().unwrap().push(sid.clone());
+                let reply = match sid.as_str() {
+                    "top-ok" => json!({
+                        "id": id,
+                        "result": {
+                            "frameTree": {
+                                "frame": { "id": "top", "url": "https://top.example/" },
+                                "childFrames": [
+                                    { "frame": { "id": "same", "parentId": "top", "url": "https://top.example/same" } },
+                                    { "frame": { "id": "direct-oopif", "parentId": "top", "url": "https://oopif.example/initial" } }
+                                ]
+                            }
+                        }
+                    }),
+                    "oopif-sid" => json!({
+                        "id": id,
+                        "result": {
+                            "frameTree": {
+                                "frame": { "id": "direct-oopif", "url": "https://oopif.example/live" }
+                            }
+                        }
+                    }),
+                    "top-err" => json!({
+                        "id": id,
+                        "error": { "code": -32000, "message": "Target closed" }
+                    }),
+                    _ => json!({ "id": id, "result": {} }),
+                };
+                ws.send(Message::Text(reply.to_string())).await.unwrap();
+            }
+        });
+
+        let client = CdpClient::connect(&format!("ws://{addr}/devtools/browser/test"))
+            .await
+            .unwrap();
+        let iframe_sessions = HashMap::from([
+            ("direct-oopif".to_string(), "oopif-sid".to_string()),
+            ("bg-1".to_string(), "bg-s1".to_string()),
+            ("bg-2".to_string(), "bg-s2".to_string()),
+        ]);
+
+        // Same-process child: 1 RPC only (never queries background sessions).
+        queried.lock().unwrap().clear();
+        let same = frame_host_info(&client, "top-ok", &iframe_sessions, "same")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(same.session_id, "top-ok");
+        assert_eq!(same.url, "https://top.example/same");
+        assert!(!same.is_dedicated_session);
+        assert_eq!(*queried.lock().unwrap(), vec!["top-ok"]);
+
+        // Direct OOPIF: 2 RPCs only (top + own session, never background sessions).
+        queried.lock().unwrap().clear();
+        let oopif = frame_host_info(&client, "top-ok", &iframe_sessions, "direct-oopif")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(oopif.session_id, "oopif-sid");
+        assert_eq!(oopif.url, "https://oopif.example/live");
+        assert!(oopif.is_dedicated_session);
+        assert_eq!(*queried.lock().unwrap(), vec!["top-ok", "oopif-sid"]);
+
+        // Transport/CDP error propagates as Err rather than Ok(None).
+        let err = frame_host_info(&client, "top-err", &iframe_sessions, "same")
+            .await
+            .unwrap_err();
+        assert!(err.contains("Target closed"), "{err}");
+
+        server.abort();
     }
 }
