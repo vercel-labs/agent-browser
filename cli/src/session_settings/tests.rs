@@ -52,7 +52,7 @@ pub(crate) fn full_flags() -> Flags {
     f.enable = vec!["react-devtools".to_string()];
     f.profile = Some("/profile".to_string());
     f.state = Some("/state.json".to_string());
-    f.proxy = Some("http://user:pw@proxy.example:8080".to_string());
+    f.proxy = Some(parse_proxy("http://user:pw@proxy.example:8080"));
     f.proxy_bypass = Some("localhost".to_string());
     f.args = Some("--no-first-run,--window-size=1280,720".to_string());
     f.user_agent = Some("ua/1".to_string());
@@ -199,7 +199,7 @@ fn every_value_has_the_shape_its_row_declares() {
 fn patch_carries_every_daemon_options_field() {
     let f = full_flags();
     let p = Patch::from_flags(&f);
-    let parsed = parse_proxy(f.proxy.as_deref().unwrap());
+    let parsed = f.proxy.as_ref().unwrap();
 
     assert_eq!(set(&p, Key::Headed), json!(true)); // headed
     assert_eq!(set(&p, Key::Debug), json!(true)); // debug
@@ -212,10 +212,16 @@ fn patch_carries_every_daemon_options_field() {
         json!(split_launch_args(f.args.as_deref().unwrap()))
     ); // args
     assert_eq!(set(&p, Key::UserAgent), json!("ua/1")); // user_agent
-    assert_eq!(set(&p, Key::Proxy), json!(parsed.server)); // proxy
+    assert_eq!(set(&p, Key::Proxy), json!(parsed.server.as_str()));
     assert_eq!(set(&p, Key::ProxyBypass), json!("localhost")); // proxy_bypass
-    assert_eq!(set(&p, Key::ProxyUsername), json!("user")); // proxy_username
-    assert_eq!(set(&p, Key::ProxyPassword), json!("pw")); // proxy_password
+    assert_eq!(
+        set(&p, Key::ProxyUsername),
+        json!(parsed.username.as_ref().unwrap().as_str())
+    );
+    assert_eq!(
+        set(&p, Key::ProxyPassword),
+        json!(parsed.password.as_ref().unwrap().as_str())
+    );
     assert_eq!(set(&p, Key::IgnoreHttpsErrors), json!(true)); // ignore_https_errors
     assert_eq!(set(&p, Key::AllowFileAccess), json!(true)); // allow_file_access
     assert_eq!(set(&p, Key::HideScrollbars), json!(false)); // hide_scrollbars
@@ -305,11 +311,76 @@ fn patch_carries_every_launch_envelope_field() {
 #[test]
 fn proxy_without_credentials_sets_no_credentials() {
     let mut f = blank_flags();
-    f.proxy = Some("socks5://proxy.example:1080".to_string());
+    f.proxy = Some(parse_proxy("socks5://proxy.example:1080"));
     let p = Patch::from_flags(&f);
     assert_eq!(set(&p, Key::Proxy), json!("socks5://proxy.example:1080"));
-    assert!(p.get(Key::ProxyUsername).is_none());
-    assert!(p.get(Key::ProxyPassword).is_none());
+    assert_eq!(p.get(Key::ProxyUsername), Some(&Requested::Default));
+    assert_eq!(p.get(Key::ProxyPassword), Some(&Requested::Default));
+}
+
+#[test]
+fn proxy_credentials_follow_the_effective_proxy_source() {
+    let keys = [
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_USERNAME",
+        "AGENT_BROWSER_PROXY_PASSWORD",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    let env = EnvGuard::new(&keys);
+    for key in keys {
+        env.remove(key);
+    }
+    env.set("AGENT_BROWSER_PROXY_USERNAME", "ambient-user");
+    env.set("AGENT_BROWSER_PROXY_PASSWORD", "ambient-password");
+    env.set("HTTP_PROXY", "http://standard:8080");
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("proxy.json");
+    let parsed = |args: &[&str]| {
+        let mut argv = vec![
+            "--config".to_string(),
+            config.to_string_lossy().into_owned(),
+        ];
+        argv.extend(args.iter().map(|arg| arg.to_string()));
+        let flags = try_parse_flags(&argv).unwrap();
+        let patch = Patch::from_flags(&flags);
+        let wire = patch.to_wire().unwrap();
+        let wire = Patch::from_wire(Some(&wire)).unwrap();
+        Running::defaults().plan(&wire).next.launch_options()
+    };
+    let check = |options: crate::native::cdp::chrome::LaunchOptions, server, username, password| {
+        assert_eq!(options.proxy.as_deref(), Some(server));
+        assert_eq!(options.proxy_username.as_deref(), username);
+        assert_eq!(options.proxy_password.as_deref(), password);
+    };
+    std::fs::write(&config, "{}").unwrap();
+    check(parsed(&[]), "http://standard:8080", None, None);
+    std::fs::write(&config, r#"{"proxy":"http://configured:8080"}"#).unwrap();
+    check(
+        parsed(&[]),
+        "http://configured:8080",
+        Some("ambient-user"),
+        Some("ambient-password"),
+    );
+    env.set("AGENT_BROWSER_PROXY", "http://env:8080");
+    check(
+        parsed(&[]),
+        "http://env:8080",
+        Some("ambient-user"),
+        Some("ambient-password"),
+    );
+    check(
+        parsed(&["--proxy", "http://different:8080"]),
+        "http://different:8080",
+        None,
+        None,
+    );
+    env.set("AGENT_BROWSER_PROXY", "http://inline-user@env:8080");
+    check(parsed(&[]), "http://env:8080", Some("inline-user"), None);
 }
 
 #[test]
@@ -827,7 +898,7 @@ fn debug_output_never_contains_secrets() {
     assert!(out.contains("proxy.example"));
 
     let mut f = full_flags();
-    f.proxy = Some("http://user:hunter2@proxy.example:8080".to_string());
+    f.proxy = Some(parse_proxy("http://user:hunter2@proxy.example:8080"));
     f.cdp_headers = Some(r#"{"Authorization":"Bearer s3cret"}"#.to_string());
     let patch = format!("{:?}", Patch::from_flags(&f));
     for secret in ["hunter2", "s3cret"] {
@@ -1055,6 +1126,8 @@ fn plan_is_pure_and_next_holds_the_requested_values() {
             key: Key::Profile,
             requested: Requested::Set(json!("/b")),
             running: Some(json!("/a")),
+            effect: super::spec::Effect::Launch,
+            in_place: false,
         }
     );
 }
@@ -1074,6 +1147,40 @@ fn a_forced_relaunch_needs_no_change() {
     let wire = patch.to_wire().unwrap();
     assert_eq!(wire, json!({"relaunch": true}));
     assert_eq!(Patch::from_wire(Some(&wire)).unwrap(), patch);
+}
+
+#[test]
+fn changing_proxy_drops_only_inherited_credentials() {
+    let running = running_with(&[
+        (Key::Proxy, json!("http://old-proxy:8080")),
+        (Key::ProxyUsername, json!("old-user")),
+        (Key::ProxyPassword, json!("old-password")),
+    ]);
+    assert_eq!(running.plan(&Patch::default()).next, running);
+
+    let mut flags = blank_flags();
+    for (proxy, username, password) in [
+        ("http://new-proxy:8080", None, None),
+        ("http://new-user@new-proxy:8080", Some("new-user"), None),
+        (
+            "http://new-user:new-password@new-proxy:8080",
+            Some("new-user"),
+            Some("new-password"),
+        ),
+    ] {
+        flags.proxy = Some(parse_proxy(proxy));
+        let patch = Patch::from_flags(&flags);
+        let wire = patch.to_wire().unwrap();
+        let patch = Patch::from_wire(Some(&wire)).unwrap();
+        let plan = running.plan(&patch);
+        let options = plan.next.launch_options();
+        assert!(plan.relaunch);
+        assert!(plan.ignored.is_empty());
+        assert_eq!(options.proxy.as_deref(), Some("http://new-proxy:8080"));
+        assert_eq!(options.proxy_username.as_deref(), username);
+        assert_eq!(options.proxy_password.as_deref(), password);
+        assert!(plan.next.plan(&patch).is_empty());
+    }
 }
 
 #[test]
@@ -1313,6 +1420,148 @@ fn a_patch_without_launch_settings_keeps_only_live_ones() {
 }
 
 #[test]
+fn attached_browser_settings_follow_the_placement_table() {
+    let attached_firefox = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let plan = attached_firefox.plan(&patch_of(&[
+        is(Key::UserAgent, json!("AttachedUA/1")),
+        is(Key::Profile, json!("/profile")),
+    ]));
+    assert_eq!(changed_keys(&plan), vec![Key::UserAgent]);
+    assert_eq!(plan.changes[0].effect, super::spec::Effect::Live);
+    assert!(!plan.relaunch, "an in-place change needs no new browser");
+    assert_eq!(plan.next.user_agent().as_deref(), Some("AttachedUA/1"));
+    assert_eq!(
+        plan.ignored.iter().map(|c| c.key).collect::<Vec<_>>(),
+        vec![Key::Profile]
+    );
+
+    let cleared = plan
+        .next
+        .plan(&patch_of(&[(Key::UserAgent, Requested::Default)]));
+    assert_eq!(changed_keys(&cleared), vec![Key::UserAgent]);
+    assert_eq!(cleared.changes[0].effect, super::spec::Effect::Live);
+    assert_eq!(cleared.next.user_agent(), None);
+
+    let launch_only = attached_firefox.plan(&patch_of(&[is(Key::Args, json!(["--x"]))]));
+    assert!(launch_only.is_empty());
+    assert_eq!(launch_only.ignored[0].key, Key::Args);
+
+    // A browser attached over CDP is unchanged: the same request is ignored.
+    let attached_chrome =
+        running_with(&[(Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x"))]);
+    let plan = attached_chrome.plan(&patch_of(&[is(Key::UserAgent, json!("AttachedUA/1"))]));
+    assert!(plan.is_empty());
+    assert_eq!(plan.ignored[0].key, Key::UserAgent);
+    assert_eq!(plan.next, attached_chrome);
+}
+
+#[test]
+fn a_user_agent_for_a_new_target_waits_for_the_attach_to_name_its_engine() {
+    let plan = Running::defaults().plan(&patch_of(&[
+        is(Key::Cdp, json!("9550")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    assert!(plan.relaunch);
+    assert_eq!(changed_keys(&plan), vec![Key::Cdp, Key::UserAgent]);
+    assert!(plan.ignored.is_empty());
+    assert_eq!(
+        plan.awaiting_engine
+            .iter()
+            .map(|change| change.key)
+            .collect::<Vec<_>>(),
+        vec![Key::UserAgent]
+    );
+    assert_eq!(plan.next.user_agent().as_deref(), Some("ProbeUA/5"));
+
+    let attached = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let effect = |plan: &super::plan::Plan, key: Key| {
+        plan.changes
+            .iter()
+            .find(|change| change.key == key)
+            .map(|change| change.effect)
+    };
+
+    let moved = attached.plan(&patch_of(&[
+        is(Key::Cdp, json!("http://127.0.0.1:9444")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    assert_eq!(effect(&moved, Key::UserAgent), Some(Effect::Launch));
+    assert_eq!(
+        moved
+            .awaiting_engine
+            .iter()
+            .map(|change| change.key)
+            .collect::<Vec<_>>(),
+        vec![Key::UserAgent]
+    );
+
+    let named = attached.plan(&patch_of(&[
+        is(Key::Cdp, json!("http://127.0.0.1:9444")),
+        is(Key::Engine, json!("firefox")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    assert_eq!(effect(&named, Key::UserAgent), Some(Effect::Live));
+    assert!(named.awaiting_engine.is_empty());
+}
+
+#[test]
+fn only_a_cdp_target_waits_for_its_engine() {
+    for target in [
+        is(Key::Provider, json!("browserbase")),
+        is(Key::AutoConnect, json!(true)),
+    ] {
+        let plan =
+            Running::defaults().plan(&patch_of(&[target, is(Key::UserAgent, json!("ProbeUA/5"))]));
+        assert!(plan.awaiting_engine.is_empty());
+        assert_eq!(
+            plan.ignored.iter().map(|c| c.key).collect::<Vec<_>>(),
+            vec![Key::UserAgent]
+        );
+        assert_eq!(plan.next.user_agent(), None, "nothing reaches the provider");
+    }
+}
+
+#[test]
+fn a_patch_for_an_attached_firefox_splits_into_session_and_in_place_changes() {
+    let attached_firefox = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let plan = attached_firefox.plan(&patch_of(&[
+        is(Key::UserAgent, json!("AttachedUA/1")),
+        is(Key::DownloadPath, json!("/tmp/downloads")),
+        is(Key::ColorScheme, json!("dark")),
+        is(Key::DefaultTimeout, json!(5000)),
+    ]));
+
+    let live = plan.live_only(&attached_firefox);
+    assert_eq!(changed_keys(&live), vec![Key::DefaultTimeout]);
+    assert_eq!(live.next.user_agent(), None);
+    assert_eq!(live.next.launch_options().download_path, None);
+    assert_eq!(live.next.color_scheme(), None);
+    assert_eq!(live.next.default_timeout_ms(), 5000);
+    assert!(!live.relaunch);
+
+    let in_place = plan.in_place_only(&attached_firefox);
+    assert_eq!(
+        changed_keys(&in_place),
+        vec![Key::UserAgent, Key::DownloadPath]
+    );
+    assert_eq!(in_place.next.user_agent().as_deref(), Some("AttachedUA/1"));
+    assert_eq!(
+        in_place.next.launch_options().download_path.as_deref(),
+        Some("/tmp/downloads")
+    );
+    assert!(!in_place.relaunch);
+}
+
+#[test]
 fn a_non_launch_patch_keeps_restore_policy_only_for_the_running_key() {
     let unit = |key: Option<&str>| {
         let mut entries = vec![
@@ -1385,6 +1634,122 @@ fn local_only_settings_are_ignored_for_external_sessions() {
         );
         assert!(only_local.is_empty());
     }
+}
+
+#[test]
+fn external_connections_drop_inherited_engines_and_preserve_explicit_firefox() {
+    let targets = [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::AutoConnect, json!(true)),
+        (Key::Provider, json!("browserbase")),
+    ];
+
+    for (key, target) in targets {
+        let plan = Running::defaults().plan(&patch_of(&[
+            is(key, target.clone()),
+            is(Key::Engine, json!("firefox")),
+        ]));
+        assert_eq!(plan.next.get(Key::Engine), Some(&json!("firefox")));
+        assert!(!plan.ignored.iter().any(|change| change.key == Key::Engine));
+
+        let inherited = running_with(&[(Key::Engine, json!("firefox"))]);
+        let plan = inherited.plan(&patch_of(&[is(key, target.clone())]));
+        assert_eq!(plan.next.get(Key::Engine), None);
+        assert!(plan
+            .ignored
+            .iter()
+            .any(|change| { change.key == Key::Engine && change.requested == Requested::Default }));
+
+        let attached = running_with(&[(key, target.clone()), (Key::Engine, json!("firefox"))]);
+        let plan = attached.plan(&Patch::default());
+        assert_eq!(plan.next, attached);
+
+        let plan = attached.plan(&patch_of(&[is(key, target.clone())]));
+        assert_eq!(plan.next, attached);
+
+        let (changed_key, changed_target) = match key {
+            Key::Cdp | Key::AutoConnect => {
+                (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/y"))
+            }
+            Key::Provider => (Key::Provider, json!("lambdatest")),
+            _ => unreachable!(),
+        };
+        let plan = attached.plan(&patch_of(&[is(changed_key, changed_target.clone())]));
+        assert_eq!(plan.next.get(Key::Engine), None);
+        assert!(plan
+            .ignored
+            .iter()
+            .any(|change| { change.key == Key::Engine && change.requested == Requested::Default }));
+
+        let plan = attached.plan(&patch_of(&[
+            is(changed_key, changed_target),
+            is(Key::Engine, json!("firefox")),
+        ]));
+        assert_eq!(plan.next.get(Key::Engine), Some(&json!("firefox")));
+        assert!(!plan.ignored.iter().any(|change| change.key == Key::Engine));
+    }
+
+    for requested in [
+        Requested::Set(json!("chrome")),
+        Requested::Set(json!("lightpanda")),
+        Requested::Default,
+    ] {
+        let inherited = running_with(&[(Key::Engine, json!("firefox"))]);
+        let plan = inherited.plan(&patch_of(&[
+            is(Key::Provider, json!("browserbase")),
+            (Key::Engine, requested),
+        ]));
+        assert_ne!(plan.next.engine().as_deref(), Some("firefox"));
+    }
+
+    for key in [Key::Cdp, Key::AutoConnect] {
+        let target = match key {
+            Key::Cdp => json!("ws://127.0.0.1:9999/devtools/browser/x"),
+            Key::AutoConnect => json!(true),
+            _ => unreachable!(),
+        };
+        for engine in ["chrome", "lightpanda"] {
+            let running = running_with(&[(Key::Engine, json!(engine))]);
+            let plan = running.plan(&patch_of(&[is(key, target.clone())]));
+            assert_eq!(plan.next.get(Key::Engine), None, "{key:?} {engine}");
+            assert!(
+                plan.ignored.iter().any(|change| {
+                    change.key == Key::Engine && change.requested == Requested::Default
+                }),
+                "{key:?} {engine}"
+            );
+        }
+    }
+}
+
+#[test]
+fn external_firefox_can_switch_to_the_default_engine() {
+    let endpoint = "http://127.0.0.1:9333";
+    let running = running_with(&[(Key::Cdp, json!(endpoint)), (Key::Engine, json!("firefox"))]);
+    for requested in [Requested::Set(json!("chrome")), Requested::Default] {
+        for target in [endpoint, "http://127.0.0.1:9444"] {
+            let patch = patch_of(&[
+                is(Key::Cdp, json!(target)),
+                (Key::Engine, requested.clone()),
+            ]);
+            let plan = running.plan(&patch);
+            assert!(plan.relaunch);
+            assert_eq!(plan.next.engine(), None);
+            assert_eq!(plan.next.connection(), Connection::Cdp(target.to_string()));
+            assert!(plan.changes.iter().any(|change| change.key == Key::Engine));
+            assert!(plan.next.plan(&patch).is_empty());
+        }
+    }
+    let same = running.plan(&patch_of(&[is(Key::Engine, json!("firefox"))]));
+    assert!(same.is_empty());
+    assert_eq!(same.next, running);
+
+    let generic = running_with(&[(Key::Cdp, json!(endpoint))]);
+    let plan = generic.plan(&patch_of(&[is(Key::Engine, json!("chrome"))]));
+    assert!(plan.is_empty());
+    assert_eq!(plan.next, generic);
+    assert_eq!(plan.ignored.len(), 1);
+    assert_eq!(plan.ignored[0].key, Key::Engine);
 }
 
 #[test]
@@ -1881,4 +2246,196 @@ fn parsed_flags_and_environment_reach_the_wire_as_explicit_and_ambient() {
         .unwrap();
     assert_eq!(wire["provider"], "ios");
     assert!(wire.get("cdp").is_none() && wire.get("ambient").is_none());
+}
+
+#[test]
+fn a_replaced_target_receives_an_equal_in_place_setting_again() {
+    let attached = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+        (Key::UserAgent, json!("ProbeUA/5")),
+        (Key::DownloadPath, json!("/tmp/downloads")),
+    ]);
+    let plan = attached.plan(&patch_of(&[
+        is(Key::Cdp, json!("http://127.0.0.1:9444")),
+        is(Key::Engine, json!("firefox")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+        is(Key::DownloadPath, json!("/tmp/downloads")),
+    ]));
+    assert_eq!(
+        changed_keys(&plan),
+        vec![Key::Cdp, Key::UserAgent, Key::DownloadPath]
+    );
+    assert!(plan.changes[1..].iter().all(|change| change.in_place));
+
+    let reused = attached.plan(&patch_of(&[
+        is(Key::Engine, json!("firefox")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+        is(Key::DownloadPath, json!("/tmp/downloads")),
+    ]));
+    assert!(reused.is_empty());
+    assert_eq!(reused.next, attached);
+
+    let same_target = patch_of(&[is(Key::UserAgent, json!("ProbeUA/5"))]);
+    assert_eq!(
+        attached.destination(&same_target).transition,
+        Transition::Reuse
+    );
+    let recovered =
+        attached.plan_with_transition(&same_target, Engine::Firefox, Transition::Replace);
+    assert_eq!(changed_keys(&recovered), vec![Key::UserAgent]);
+    assert!(recovered.changes[0].in_place);
+
+    let mut flags = blank_flags();
+    flags.relaunch = true;
+    let forced = Patch::from_flags(&flags).with_envelope(&patch_of(&[
+        is(Key::Engine, json!("firefox")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]));
+    let replaced = attached.plan(&forced);
+    assert_eq!(changed_keys(&replaced), vec![Key::UserAgent]);
+    assert!(replaced.changes[0].in_place);
+    assert!(replaced.relaunch);
+}
+
+#[test]
+fn a_probed_firefox_takes_a_setting_a_target_it_has_not_attached_to_cannot() {
+    let attached = running_with(&[
+        (Key::Cdp, json!("http://127.0.0.1:9333")),
+        (Key::Engine, json!("firefox")),
+    ]);
+    let patch = patch_of(&[
+        is(Key::Cdp, json!("http://127.0.0.1:9444")),
+        is(Key::UserAgent, json!("ProbeUA/5")),
+    ]);
+    let waiting = attached.plan(&patch);
+    assert_eq!(waiting.awaiting_engine.len(), 1);
+    assert_eq!(waiting.next.engine(), None);
+
+    let probed = attached.plan_with_engine(&patch, Engine::Firefox);
+    assert!(probed.awaiting_engine.is_empty());
+    assert_eq!(probed.next.engine().as_deref(), Some("firefox"));
+    assert!(probed.ignored.is_empty());
+    let user_agent = probed
+        .changes
+        .iter()
+        .find(|change| change.key == Key::UserAgent)
+        .expect("the user agent is planned");
+    assert!(user_agent.in_place);
+
+    let other = attached.plan_with_engine(&patch, Engine::Other);
+    assert_eq!(other.next.engine(), None);
+    assert_eq!(other.next.user_agent(), None);
+    assert!(other
+        .ignored
+        .iter()
+        .any(|change| change.key == Key::UserAgent));
+    assert!(other
+        .ignored
+        .iter()
+        .any(|change| change.key == Key::Engine && change.requested == Requested::Default));
+}
+
+#[test]
+fn launch_only_options_are_ignored_and_dropped_for_an_external_session() {
+    for target in [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::Provider, json!("browserbase")),
+        (Key::AutoConnect, json!(true)),
+    ] {
+        let plan = running_with(std::slice::from_ref(&target)).plan(&patch_of(&[
+            is(Key::AllowFileAccess, json!(true)),
+            is(Key::Webgpu, json!(true)),
+        ]));
+        let ignored: Vec<Key> = plan.ignored.iter().map(|change| change.key).collect();
+        assert_eq!(ignored, vec![Key::AllowFileAccess, Key::Webgpu]);
+        assert_eq!(plan.next.get(Key::AllowFileAccess), None);
+        assert_eq!(plan.next.get(Key::Webgpu), None);
+
+        let plan = running_with(&[
+            target.clone(),
+            (Key::AllowFileAccess, json!(true)),
+            (Key::Webgpu, json!(true)),
+        ])
+        .plan(&patch_of(&[is(Key::DefaultTimeout, json!(5000))]));
+        let ignored: Vec<Key> = plan.ignored.iter().map(|change| change.key).collect();
+        assert_eq!(ignored, vec![Key::AllowFileAccess, Key::Webgpu]);
+        assert_eq!(plan.next.get(Key::AllowFileAccess), None);
+        assert_eq!(plan.next.get(Key::Webgpu), None);
+    }
+}
+
+#[test]
+fn headed_and_no_xvfb_are_normalized_for_an_attached_browser_not_a_provider() {
+    for target in [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::Provider, json!("browserbase")),
+    ] {
+        let mut running = Running::defaults();
+        running.set(target.0, target.1.clone());
+        running.assign(Key::Headed, json!(true));
+        running.assign(Key::NoXvfb, json!(true));
+        running.assign(Key::HideScrollbars, json!(false));
+        let plan = running.plan(&patch_of(&[is(Key::DefaultTimeout, json!(5000))]));
+        let ignored: Vec<Key> = plan.ignored.iter().map(|change| change.key).collect();
+        if target.0 == Key::Provider {
+            assert!(ignored.is_empty(), "{:?}", ignored);
+            assert_eq!(plan.next.get(Key::Headed), Some(&json!(true)));
+            assert_eq!(plan.next.get(Key::NoXvfb), Some(&json!(true)));
+            assert_eq!(plan.next.get(Key::HideScrollbars), Some(&json!(false)));
+            assert!(plan.next.plugin_provider_headed());
+        } else {
+            assert_eq!(ignored, vec![Key::Headed, Key::NoXvfb, Key::HideScrollbars]);
+            assert_eq!(plan.next.get(Key::Headed), None);
+            assert_eq!(plan.next.get(Key::NoXvfb), None);
+            assert_eq!(plan.next.get(Key::HideScrollbars), None);
+            assert!(!plan.next.plugin_provider_headed());
+        }
+    }
+}
+
+#[test]
+fn an_envelope_target_wins_and_is_never_ambient() {
+    let mut flags = ambient_flags(Some("9222"), None, None);
+    flags.relaunch = true;
+    let wire = Patch::from_flags(&flags);
+    assert!(wire.is_ambient(Key::Cdp));
+    let merged = wire.with_envelope(&patch_of(&[
+        is(Key::Cdp, json!("9333")),
+        is(Key::DownloadPath, json!("/d")),
+    ]));
+    assert!(!merged.is_ambient(Key::Cdp));
+    assert_eq!(merged.value(Key::Cdp), Some(&json!("9333")));
+    assert!(merged.forces_relaunch());
+    let plan = Running::defaults().plan(&merged);
+    assert_eq!(changed_keys(&plan), vec![Key::Cdp, Key::DownloadPath]);
+    assert_eq!(plan.next.connection(), Connection::Cdp("9333".to_string()));
+}
+
+#[test]
+fn an_envelope_target_displaces_the_other_connection_keys() {
+    let wire = patch_of(&[
+        is(Key::Provider, json!("browserbox")),
+        is(Key::AutoConnect, json!(true)),
+        is(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer x"}"#)),
+    ]);
+    let merged = wire.with_envelope(&patch_of(&[is(Key::Cdp, json!("9333"))]));
+    assert_eq!(merged.value(Key::Provider), None);
+    assert_eq!(merged.value(Key::AutoConnect), None);
+    assert!(merged.get(Key::CdpHeaders).is_some());
+    let plan = Running::defaults().plan(&merged);
+    assert_eq!(plan.next.connection(), Connection::Cdp("9333".to_string()));
+
+    let wire = patch_of(&[
+        is(Key::Cdp, json!("9333")),
+        is(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer x"}"#)),
+    ]);
+    let merged = wire.with_envelope(&patch_of(&[is(Key::Provider, json!("browserbox"))]));
+    assert_eq!(merged.value(Key::Cdp), None);
+    assert_eq!(merged.get(Key::CdpHeaders), None);
+    let plan = Running::defaults().plan(&merged);
+    assert_eq!(
+        plan.next.connection(),
+        Connection::Provider("browserbox".to_string())
+    );
 }

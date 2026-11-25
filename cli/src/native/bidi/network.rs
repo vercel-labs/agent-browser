@@ -1,0 +1,2389 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use tokio::sync::{Mutex, RwLock};
+
+use super::client::BidiClient;
+use super::daemon::session;
+use super::session::{DataCollectorMode, DataCollectorState, FirefoxSession};
+use super::target::resolve_target;
+use crate::native::actions::{self as chrome, DaemonState, HarContentMode, HarEntry, RouteEntry};
+use crate::native::downloads::{DownloadLedger, DownloadState};
+use crate::native::network::{
+    clip, clip_bidi_header_object, clip_bidi_headers, decode_bidi_body_bounded, DomainFilter,
+    MAX_REQUEST_BODY_BYTES, MAX_REQUEST_LABEL_BYTES, MAX_REQUEST_URL_BYTES,
+};
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NetworkDecision {
+    Fail,
+    Fulfill {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    },
+    Continue {
+        headers: Option<Vec<(String, String)>>,
+    },
+}
+
+fn is_blocked(url: &str, resource_type: &str, filter: Option<&DomainFilter>) -> bool {
+    let Some(filter) = filter else {
+        return false;
+    };
+    if url == "about:blank" {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if resource_type == "Document" && !matches!(parsed.scheme(), "http" | "https") {
+        return true;
+    }
+    if !matches!(parsed.scheme(), "http" | "https" | "ws" | "wss") {
+        return false;
+    }
+    parsed
+        .host_str()
+        .is_some_and(|hostname| !filter.is_allowed(hostname))
+}
+
+/// Decides how one Firefox request is handled: fail, fulfill or continue.
+pub(crate) fn decide_request(
+    url: &str,
+    resource_type: &str,
+    headers: &HashMap<String, String>,
+    domain_filter: Option<&DomainFilter>,
+    routes: &[RouteEntry],
+    origin_headers: &HashMap<String, HashMap<String, String>>,
+) -> NetworkDecision {
+    if is_blocked(url, resource_type, domain_filter) {
+        return NetworkDecision::Fail;
+    }
+
+    for route in routes {
+        if !route.matches(url, resource_type) {
+            continue;
+        }
+        if route.abort {
+            return NetworkDecision::Fail;
+        }
+        if let Some(response) = &route.response {
+            let request_headers = headers
+                .iter()
+                .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+                .collect();
+            let (status, headers, body) = chrome::mocked_response(response, Some(&request_headers));
+            return NetworkDecision::Fulfill {
+                status,
+                headers: headers
+                    .into_iter()
+                    .map(|header| {
+                        (
+                            header["name"].as_str().unwrap_or_default().to_string(),
+                            header["value"].as_str().unwrap_or_default().to_string(),
+                        )
+                    })
+                    .collect(),
+                body,
+            };
+        }
+    }
+
+    let extra_headers = url::Url::parse(url)
+        .ok()
+        .map(|u| u.origin().ascii_serialization())
+        .and_then(|origin| origin_headers.get(&origin));
+
+    let Some(extra_headers) = extra_headers else {
+        return NetworkDecision::Continue { headers: None };
+    };
+
+    let mut merged_headers: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| {
+            !extra_headers
+                .keys()
+                .any(|extra| extra.eq_ignore_ascii_case(name))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    merged_headers.extend(extra_headers.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+    NetworkDecision::Continue {
+        headers: Some(merged_headers),
+    }
+}
+
+/// BiDi events the session subscribes to for network, console and download handling.
+pub const NETWORK_EVENTS: [&str; 8] = [
+    "network.beforeRequestSent",
+    "network.responseStarted",
+    "network.responseCompleted",
+    "network.fetchError",
+    "network.authRequired",
+    "log.entryAdded",
+    "browsingContext.downloadWillBegin",
+    "browsingContext.downloadEnd",
+];
+
+const IDLE_WINDOW: Duration = Duration::from_millis(500);
+const DOWNLOAD_TIMEOUT_MS: u64 = 30_000;
+
+/// Shared state the dispatcher reads for every request; most `Arc`s are the daemon's own.
+#[derive(Clone, Default)]
+pub struct NetContext {
+    pub routes: Arc<RwLock<Vec<RouteEntry>>>,
+    pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
+    pub origin_headers: Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
+    pub proxy_credentials: Arc<RwLock<Option<(String, String)>>>,
+    /// Proxy credential attempts per request id; a request gets two before the challenge is cancelled.
+    pub proxy_auth_requests: Arc<RwLock<HashMap<String, u8>>>,
+    pub headers: Arc<RwLock<HashMap<String, String>>>,
+    /// Downloads seen on this session, so `wait --download` can claim one that
+    /// finished before the command arrived.
+    pub downloads: Arc<Mutex<DownloadLedger>>,
+    pub blank_contexts: Arc<RwLock<HashSet<String>>>,
+}
+
+impl NetContext {
+    /// Shares the daemon's routes, domain filter, origin headers and proxy credentials.
+    pub fn from_state(state: &DaemonState, headers: HashMap<String, String>) -> Self {
+        Self {
+            routes: state.routes.clone(),
+            domain_filter: state.domain_filter.clone(),
+            origin_headers: state.origin_headers.clone(),
+            proxy_credentials: state.proxy_credentials.clone(),
+            headers: Arc::new(RwLock::new(headers)),
+            ..Self::default()
+        }
+    }
+
+    pub(super) async fn needs_request_intercept(&self) -> bool {
+        self.domain_filter.read().await.is_some()
+            || self.proxy_credentials.read().await.is_some()
+            || !self.routes.read().await.is_empty()
+            || !self.origin_headers.read().await.is_empty()
+            || !self.headers.read().await.is_empty()
+    }
+}
+
+/// A background task that is aborted when dropped.
+pub struct AbortOnDrop(pub(crate) tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn header_list(headers: &Value) -> Vec<(String, String)> {
+    headers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|h| {
+            Some((
+                h["name"].as_str()?.to_string(),
+                h["value"]["value"].as_str().unwrap_or("").to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn bidi_headers(headers: Vec<(String, String)>) -> Value {
+    headers
+        .into_iter()
+        .map(|(name, value)| json!({"name": name, "value": {"type": "string", "value": value}}))
+        .collect()
+}
+
+/// Maps a BiDi request to the resource type names Chrome reports.
+fn resource_type(request: &Value) -> &'static str {
+    match (
+        request["initiatorType"].as_str(),
+        request["destination"].as_str(),
+    ) {
+        (Some("fetch"), _) => "Fetch",
+        (Some("xmlhttprequest"), _) => "XHR",
+        (Some("beacon"), _) => "Ping",
+        (_, Some("document" | "iframe" | "frame")) => "Document",
+        (_, Some("script")) => "Script",
+        (_, Some("style")) => "Stylesheet",
+        (_, Some("image")) => "Image",
+        (_, Some("font")) => "Font",
+        (_, Some("audio" | "video" | "track")) => "Media",
+        _ => "Other",
+    }
+}
+
+pub(super) fn is_websocket(url: &str) -> bool {
+    url.starts_with("ws:") || url.starts_with("wss:")
+}
+
+/// Installs the request intercept the first time it is needed. Auth challenges are intercepted
+/// from the start of the session.
+pub async fn ensure_intercept(ff: &mut FirefoxSession) -> Result<(), String> {
+    if !ff.intercepting {
+        ff.bidi
+            .send(
+                "network.addIntercept",
+                json!({"phases": ["beforeRequestSent"]}),
+            )
+            .await?;
+        ff.intercepting = true;
+    }
+    Ok(())
+}
+
+type LegacyDownloadKey = (Option<String>, Option<String>, Option<String>);
+
+/// Tracks downloads from Firefox builds that report no download id, so each
+/// start keeps its own id until the matching end event arrives.
+#[derive(Default)]
+struct LegacyDownloadIds {
+    pending: HashMap<LegacyDownloadKey, VecDeque<String>>,
+}
+
+impl LegacyDownloadIds {
+    fn key(params: &Value) -> LegacyDownloadKey {
+        (
+            params["context"].as_str().map(str::to_owned),
+            params["navigation"].as_str().map(str::to_owned),
+            params["url"].as_str().map(str::to_owned),
+        )
+    }
+
+    fn started(&mut self, params: &Value) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.pending
+            .entry(Self::key(params))
+            .or_default()
+            .push_back(id.clone());
+        id
+    }
+
+    fn ended(&mut self, params: &Value) -> Option<String> {
+        let key = Self::key(params);
+        let ids = self.pending.get_mut(&key)?;
+        let id = ids.pop_front();
+        if ids.is_empty() {
+            self.pending.remove(&key);
+        }
+        id
+    }
+}
+
+pub struct DispatchEvents {
+    control: super::client::Events,
+    completed: super::client::Events,
+}
+
+pub fn subscribe_dispatcher(bidi: &BidiClient) -> DispatchEvents {
+    DispatchEvents {
+        control: bidi.subscribe_matching_lossless(|event| {
+            let method = event["method"].as_str();
+            match method {
+                Some("browsingContext.contextCreated") => event["params"]["parent"].is_null(),
+                Some("browsingContext.downloadWillBegin" | "browsingContext.downloadEnd") => true,
+                Some("network.beforeRequestSent" | "network.authRequired") => {
+                    event["params"]["isBlocked"] == true
+                }
+                _ => false,
+            }
+        }),
+        completed: bidi.subscribe_matching(request_completed),
+    }
+}
+
+fn request_completed(event: &Value) -> bool {
+    matches!(
+        event["method"].as_str(),
+        Some("network.responseCompleted" | "network.fetchError")
+    )
+}
+
+/// Resolves intercepted requests, tracks downloads, and replays emulation on new tabs.
+pub fn spawn_dispatcher(
+    bidi: Arc<BidiClient>,
+    net: NetContext,
+    mut events: DispatchEvents,
+    emulation: Arc<super::emulation::Emulation>,
+    permissions: Arc<Mutex<super::permissions::Grants>>,
+) -> AbortOnDrop {
+    AbortOnDrop(tokio::spawn(async move {
+        let mut legacy_downloads = LegacyDownloadIds::default();
+        let mut completions_open = true;
+        loop {
+            let mut e = tokio::select! {
+                biased;
+                event = events.control.recv() => {
+                    let Some(event) = event else { break };
+                    event
+                }
+                event = events.completed.recv(), if completions_open => {
+                    match event {
+                        Some(event) => {
+                            if let Some(id) = event["params"]["request"]["request"].as_str() {
+                                net.proxy_auth_requests.write().await.remove(id);
+                            }
+                        }
+                        None if events.completed.has_lost_events() => {
+                            events.completed = bidi.subscribe_matching(request_completed);
+                        }
+                        None => completions_open = false,
+                    }
+                    continue;
+                }
+            };
+            if e["method"] == "browsingContext.contextCreated" && e["params"]["parent"].is_null() {
+                if let Some(context) = e["params"]["context"].as_str() {
+                    let jar = e["params"]["userContext"].as_str().unwrap_or("default");
+                    if let Err(error) =
+                        super::emulation::apply_overrides(&bidi, &emulation, context, jar).await
+                    {
+                        eprintln!(
+                            "Warning: failed to apply Firefox emulation to {context}: {error}"
+                        );
+                    }
+                }
+            }
+            let is_download = matches!(
+                e["method"].as_str(),
+                Some("browsingContext.downloadWillBegin" | "browsingContext.downloadEnd")
+            );
+            if is_download {
+                if e["params"]["download"].as_str().is_none() {
+                    let download = if e["method"] == "browsingContext.downloadWillBegin" {
+                        Some(legacy_downloads.started(&e["params"]))
+                    } else {
+                        legacy_downloads.ended(&e["params"])
+                    };
+                    if let Some(download) = download {
+                        e["params"]["download"] = json!(download);
+                    }
+                }
+                net.downloads
+                    .lock()
+                    .await
+                    .observe(e["method"].as_str().unwrap_or_default(), &e["params"]);
+            }
+            if let Some(url) = super::permissions::document_request_url(&e) {
+                if let Err(error) = permissions.lock().await.cover(&bidi, url).await {
+                    eprintln!("Warning: failed to grant Firefox permissions for {url}: {error}");
+                }
+            }
+            if e["params"]["isBlocked"] == true {
+                tokio::spawn(resolve(bidi.clone(), net.clone(), e));
+            }
+        }
+    }))
+}
+
+async fn resolve(bidi: Arc<BidiClient>, net: NetContext, event: Value) {
+    let id = event["params"]["request"]["request"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let (result, fallback, fallback_params) = match event["method"].as_str() {
+        Some("network.beforeRequestSent") => (
+            before_request(
+                &bidi,
+                &net,
+                &event["params"]["request"],
+                event["params"]["context"].as_str(),
+            )
+            .await,
+            "network.failRequest",
+            json!({"request": id}),
+        ),
+        Some("network.authRequired") => (
+            auth_required(&bidi, &net, &id, &event["params"]).await,
+            "network.continueWithAuth",
+            json!({"request": id, "action": "cancel"}),
+        ),
+        _ => return,
+    };
+    if result.is_err() {
+        let _ = bidi.send(fallback, fallback_params).await;
+    }
+}
+
+async fn before_request(
+    bidi: &BidiClient,
+    net: &NetContext,
+    request: &Value,
+    context: Option<&str>,
+) -> Result<(), String> {
+    let id = request["request"].as_str().unwrap_or("");
+    let url = request["url"].as_str().unwrap_or("");
+    let blank = match context {
+        Some(context) => net.blank_contexts.read().await.contains(context),
+        None => false,
+    };
+    let decision = if blank {
+        let filter = net.domain_filter.read().await;
+        if is_blocked(url, resource_type(request), filter.as_ref()) {
+            NetworkDecision::Fail
+        } else {
+            NetworkDecision::Fulfill {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "text/html".to_string())],
+                body: "PGh0bWw+PC9odG1sPg==".to_string(),
+            }
+        }
+    } else {
+        let mut extra = net.headers.read().await.clone();
+        let origin = url::Url::parse(url)
+            .ok()
+            .map(|u| u.origin().ascii_serialization())
+            .unwrap_or_default();
+        if let Some(scoped) = net.origin_headers.read().await.get(&origin) {
+            extra.retain(|name, _| !scoped.keys().any(|k| k.eq_ignore_ascii_case(name)));
+            extra.extend(scoped.clone());
+        }
+        let origin_headers = if extra.is_empty() {
+            HashMap::new()
+        } else {
+            HashMap::from([(origin, extra)])
+        };
+        let headers: HashMap<String, String> =
+            header_list(&request["headers"]).into_iter().collect();
+        let filter = net.domain_filter.read().await;
+        let routes = net.routes.read().await;
+        decide_request(
+            url,
+            resource_type(request),
+            &headers,
+            filter.as_ref(),
+            &routes,
+            &origin_headers,
+        )
+    };
+    match decision {
+        NetworkDecision::Fail => {
+            bidi.send("network.failRequest", json!({"request": id}))
+                .await?;
+        }
+        NetworkDecision::Fulfill {
+            status,
+            headers,
+            body,
+        } => {
+            bidi.send(
+                "network.provideResponse",
+                json!({
+                    "request": id,
+                    "statusCode": status,
+                    "headers": bidi_headers(headers),
+                    "body": {"type": "base64", "value": body},
+                }),
+            )
+            .await?;
+        }
+        NetworkDecision::Continue { headers } => {
+            let mut params = json!({"request": id});
+            if let Some(headers) = headers {
+                params["headers"] = bidi_headers(headers);
+            }
+            bidi.send("network.continueRequest", params).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Answers an auth challenge: a proxy one with the configured credentials, up to the retry
+/// limit; an origin one always by cancelling it, as the only credentials the session can send
+/// are the ones it already put on the request.
+async fn auth_required(
+    bidi: &BidiClient,
+    net: &NetContext,
+    id: &str,
+    event: &Value,
+) -> Result<(), String> {
+    let status = event["response"]["status"].as_i64().unwrap_or(0);
+    let credentials = if status == 407 {
+        net.proxy_credentials.read().await.clone()
+    } else {
+        None
+    };
+    let may_retry = if credentials.is_some() {
+        let mut tries = net.proxy_auth_requests.write().await;
+        let n = tries.entry(id.to_string()).or_insert(0);
+        *n += 1;
+        *n <= 2
+    } else {
+        false
+    };
+    let params = auth_response(id, status, credentials, may_retry);
+    bidi.send("network.continueWithAuth", params).await?;
+    Ok(())
+}
+
+fn auth_response(
+    id: &str,
+    status: i64,
+    credentials: Option<(String, String)>,
+    may_retry: bool,
+) -> Value {
+    if status != 407 {
+        return json!({"request": id, "action": "cancel"});
+    }
+    match credentials {
+        Some((username, password)) if may_retry => json!({
+            "request": id,
+            "action": "provideCredentials",
+            "credentials": {"type": "password", "username": username, "password": password},
+        }),
+        _ => json!({"request": id, "action": "cancel"}),
+    }
+}
+
+/// Updates tab and prompt state before sending the active tab's events to the recorders, returning
+/// whether the active tab changed.
+pub async fn drain(state: &mut DaemonState) -> bool {
+    let active_changed = state.drain_firefox_events();
+    if let Some(ff) = state.firefox.as_mut() {
+        let events = ff.drain_network_events();
+        apply_events(state, events).await;
+    }
+    let mode = if state.har_recording {
+        DataCollectorMode::HarAndRequests
+    } else if state.request_tracking {
+        DataCollectorMode::RequestsOnly
+    } else {
+        DataCollectorMode::Off
+    };
+    if let Some(ff) = state.firefox.as_mut() {
+        collect_bodies(ff, mode).await;
+    }
+    active_changed
+}
+
+/// Reconciles the Firefox BiDi data collector with `desired`, keeping request/response body
+/// buffering scoped to what the session is actually recording.
+async fn collect_bodies(ff: &mut FirefoxSession, desired: DataCollectorMode) {
+    if ff.data_collector.mode() == desired {
+        return;
+    }
+    if let DataCollectorState::Active { id, .. } = std::mem::take(&mut ff.data_collector) {
+        let _ = ff
+            .bidi
+            .send("network.removeDataCollector", json!({ "collector": id }))
+            .await;
+    }
+    let params = match desired {
+        DataCollectorMode::Off => return,
+        DataCollectorMode::RequestsOnly => json!({
+            "dataTypes": ["request", "response"],
+            "maxEncodedDataSize": chrome::HAR_MAX_BODY_BYTES,
+        }),
+        DataCollectorMode::HarAndRequests => json!({
+            "dataTypes": ["request", "response"],
+            "maxEncodedDataSize": 10_000_000,
+        }),
+    };
+    let reply = ff.bidi.send("network.addDataCollector", params).await.ok();
+    if let Some(id) = reply.and_then(|r| r["collector"].as_str().map(String::from)) {
+        ff.data_collector = DataCollectorState::Active { id, mode: desired };
+    }
+}
+
+/// The browsing context an event reports, when the event carries one.
+fn event_context(event: &Value) -> Option<&str> {
+    if event["method"] == "log.entryAdded" {
+        event["params"]["source"]["context"].as_str()
+    } else {
+        event["params"]["context"].as_str()
+    }
+}
+
+/// Whether an event belongs to the active tab, one of its frames, or a context the daemon
+/// cannot place, such as a worker that has no browsing context.
+fn recorded_in_active_tab(state: &DaemonState, event: &Value) -> bool {
+    event_context(event).is_none_or(|context| {
+        state
+            .firefox
+            .as_ref()
+            .is_some_and(|ff| ff.context_is_in_active_tab(context))
+    })
+}
+
+/// Records buffered BiDi events. Events from background tabs are dropped here, before any
+/// recorder sees them, so every recorder keeps the Chrome rule of one active page.
+async fn apply_events(state: &mut DaemonState, events: Vec<Value>) {
+    for e in events {
+        if !recorded_in_active_tab(state, &e) {
+            continue;
+        }
+        let p = &e["params"];
+        match e["method"].as_str() {
+            Some("network.beforeRequestSent") => request_started(state, p),
+            Some("network.responseStarted") => response_seen(state, p, true),
+            Some("network.responseCompleted") => {
+                response_seen(state, p, false);
+                request_body(state, request_id(p)).await;
+                har_body(state, request_id(p)).await;
+            }
+            Some("log.entryAdded") => log_entry(state, p),
+            _ => {}
+        }
+    }
+}
+
+fn request_id(p: &Value) -> &str {
+    p["request"]["request"].as_str().unwrap_or("")
+}
+
+fn last_har_entry<'a>(entries: &'a mut [HarEntry], id: &str) -> Option<&'a mut HarEntry> {
+    entries
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.request_id == id)
+}
+
+fn request_started(state: &mut DaemonState, p: &Value) {
+    let request = &p["request"];
+    let id = request_id(p);
+    let url = request["url"].as_str().unwrap_or("");
+    let method = request["method"].as_str().unwrap_or("GET");
+    let timestamp = p["timestamp"].as_f64();
+    let millis = timestamp.map(|t| t as u64).unwrap_or_default();
+    let resource_type = resource_type(request);
+    if let Some(timestamp) = timestamp.filter(|_| state.har_recording) {
+        state.record_har_entry(HarEntry {
+            request_id: clip(id, MAX_REQUEST_LABEL_BYTES),
+            wall_time: timestamp / 1000.0,
+            method: method.to_string(),
+            url: url.to_string(),
+            request_headers: clip_bidi_headers(&request["headers"]),
+            request_body_size: request["bodySize"].as_i64().unwrap_or(0),
+            resource_type: resource_type.to_string(),
+            http_version: "HTTP/1.1".to_string(),
+            response_body_size: -1,
+            ..Default::default()
+        });
+    }
+    if state.request_tracking {
+        state.tracked_requests.record_request(
+            id,
+            url,
+            method,
+            clip_bidi_header_object(&request["headers"]),
+            millis,
+            resource_type,
+            None,
+        );
+    }
+}
+
+fn response_seen(state: &mut DaemonState, p: &Value, started: bool) {
+    let id = request_id(p);
+    let response = &p["response"];
+    let status = response["status"].as_i64();
+    let mime = response["mimeType"].as_str().unwrap_or("");
+    if state.har_recording {
+        if let Some(entry) = last_har_entry(&mut state.har_entries, id) {
+            let headers = clip_bidi_headers(&response["headers"]);
+            entry.status = status;
+            entry.status_text = clip(
+                response["statusText"].as_str().unwrap_or(""),
+                MAX_REQUEST_LABEL_BYTES,
+            );
+            entry.mime_type = clip(mime, MAX_REQUEST_LABEL_BYTES);
+            entry.http_version = chrome::har_cdp_protocol_to_http_version(
+                response["protocol"].as_str().unwrap_or(""),
+            );
+            entry.redirect_url = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+                .map(|(_, v)| clip(v, MAX_REQUEST_URL_BYTES))
+                .unwrap_or_default();
+            entry.response_headers = headers;
+            entry.response_body_size = response["bodySize"]
+                .as_i64()
+                .or(response["content"]["size"].as_i64())
+                .unwrap_or(-1);
+            let timestamp = p["timestamp"].as_f64().map(|t| t / 1000.0);
+            if started {
+                entry.response_started_timestamp = timestamp;
+            } else {
+                entry.response_completed_timestamp = timestamp;
+            }
+        }
+    }
+    if state.request_tracking {
+        state.tracked_requests.attach_response(
+            id,
+            status,
+            Some(mime),
+            Some(clip_bidi_header_object(&response["headers"])),
+        );
+    }
+}
+
+async fn data(bidi: &BidiClient, id: &str, data_type: &str) -> Result<(String, bool), String> {
+    let r = bidi
+        .send(
+            "network.getData",
+            json!({"dataType": data_type, "request": id}),
+        )
+        .await?;
+    Ok((
+        r["bytes"]["value"].as_str().unwrap_or("").to_string(),
+        r["bytes"]["type"] == "base64",
+    ))
+}
+
+async fn request_body(state: &mut DaemonState, id: &str) {
+    let har_wanted = state.har_needs_post_data(id);
+    let tracked_wanted = state.request_tracking && state.tracked_requests.needs_post_data(id);
+    let Some(ff) = state
+        .firefox
+        .as_ref()
+        .filter(|_| har_wanted || tracked_wanted)
+    else {
+        return;
+    };
+    let Ok((raw, base64)) = data(&ff.bidi, id, "request").await else {
+        return;
+    };
+    if har_wanted {
+        if let Some(body) =
+            decode_bidi_body_bounded(&raw, base64, chrome::HAR_MAX_BODY_BYTES, false)
+        {
+            state.attach_har_post_data(id, body);
+        }
+    }
+    if tracked_wanted {
+        if let Some(body) = decode_bidi_body_bounded(&raw, base64, MAX_REQUEST_BODY_BYTES, true) {
+            state.tracked_requests.attach_post_data(id, &body);
+        }
+    }
+}
+
+async fn har_body(state: &mut DaemonState, id: &str) {
+    let wanted = state.har_recording
+        && state.har_body_total_bytes < chrome::HAR_MAX_TOTAL_BODY_BYTES
+        && state
+            .har_entries
+            .iter()
+            .rev()
+            .find(|e| e.request_id == id)
+            .is_some_and(|e| {
+                e.response_body.is_none()
+                    && match state.har_content_mode {
+                        HarContentMode::None => false,
+                        HarContentMode::Text => chrome::har_mime_is_text(&e.mime_type),
+                        HarContentMode::All => true,
+                    }
+            });
+    let Some(ff) = state.firefox.as_ref().filter(|_| wanted) else {
+        return;
+    };
+    let Ok((body, base64)) = data(&ff.bidi, id, "response").await else {
+        return;
+    };
+    state.attach_har_response_body(id, body, base64);
+}
+
+fn log_entry(state: &mut DaemonState, p: &Value) {
+    let text = p["text"].as_str().unwrap_or("");
+    match p["type"].as_str() {
+        Some("console") => {
+            let level = match p["method"].as_str().unwrap_or("log") {
+                "warn" => "warning",
+                other => other,
+            };
+            let args = p["args"].as_array().map_or(&[][..], Vec::as_slice);
+            state.event_tracker.add_console(level, text, args);
+        }
+        Some("javascript") => {
+            let frame = &p["stackTrace"]["callFrames"][0];
+            state.event_tracker.add_error(
+                text,
+                frame["url"].as_str(),
+                frame["lineNumber"].as_i64(),
+                frame["columnNumber"].as_i64(),
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Waits until the active tab and its frames have no unfinished requests for 500ms.
+pub async fn wait_idle(state: &mut DaemonState, timeout_ms: u64) -> Result<(), ()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let mut idle_since: Option<tokio::time::Instant> = None;
+    loop {
+        drain(state).await;
+        let busy = state
+            .firefox
+            .as_ref()
+            .is_some_and(FirefoxSession::has_inflight_in_active_tab);
+        let now = tokio::time::Instant::now();
+        if busy {
+            idle_since = None;
+        } else if now.duration_since(*idle_since.get_or_insert(now)) >= IDLE_WINDOW {
+            return Ok(());
+        }
+        if now >= deadline {
+            return Err(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Stores origin-scoped headers from `open --headers` and makes sure requests are intercepted.
+pub async fn set_origin_headers(
+    cmd: &Value,
+    url: &str,
+    state: &mut DaemonState,
+) -> Result<(), String> {
+    let Some(map) = cmd
+        .get("headers")
+        .and_then(Value::as_object)
+        .filter(|m| !m.is_empty())
+    else {
+        return Ok(());
+    };
+    let Ok(parsed) = url::Url::parse(url) else {
+        return Ok(());
+    };
+    let headers = map
+        .iter()
+        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+        .collect();
+    let ff = session(state)?;
+    ff.net
+        .origin_headers
+        .write()
+        .await
+        .insert(parsed.origin().ascii_serialization(), headers);
+    ensure_intercept(ff).await
+}
+
+/// `route`: adds a route to the shared list and installs the intercept if needed.
+pub async fn route(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    session(state)?;
+    let url = chrome::add_route(cmd, state).await?;
+    ensure_intercept(session(state)?).await?;
+    Ok(json!({ "routed": url }))
+}
+
+/// `unroute`: removes one route or all of them.
+pub async fn unroute(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    session(state)?;
+    Ok(json!({ "unrouted": chrome::remove_routes(cmd, state).await }))
+}
+
+async fn set_headers(
+    state: &mut DaemonState,
+    headers: HashMap<String, String>,
+) -> Result<Value, String> {
+    let ff = session(state)?;
+    let any = !headers.is_empty();
+    if any {
+        ensure_intercept(ff).await?;
+    }
+    *ff.net.headers.write().await = headers.clone();
+    state.session_setup.extra_headers = any.then_some(headers);
+    Ok(json!({ "set": true }))
+}
+
+/// `headers`: replaces the extra headers sent with every request.
+pub async fn headers(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let headers = cmd
+        .get("headers")
+        .ok_or("Missing 'headers' parameter")?
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    set_headers(state, headers).await
+}
+
+/// `credentials`: sends HTTP basic auth with every request, as Chrome does.
+pub async fn credentials(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let field = |key: &str| {
+        cmd.get(key)
+            .and_then(Value::as_str)
+            .ok_or(format!("Missing '{key}' parameter"))
+    };
+    let encoded = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        format!("{}:{}", field("username")?, field("password")?),
+    );
+    set_headers(
+        state,
+        HashMap::from([("Authorization".to_string(), format!("Basic {encoded}"))]),
+    )
+    .await
+}
+
+/// `request_detail`: the tracked request plus its response body when one was collected.
+pub async fn request_detail(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mut result = chrome::handle_request_detail(cmd, state).await?;
+    if let (Some(ff), Some(id)) = (
+        state.firefox.as_ref(),
+        cmd.get("requestId").and_then(Value::as_str),
+    ) {
+        if let Ok((body, base64)) = data(&ff.bidi, id, "response").await {
+            result["responseBody"] = if base64 {
+                json!(format!("[base64, {} chars]", body.len()))
+            } else {
+                json!(body)
+            };
+        }
+    }
+    Ok(result)
+}
+
+/// `responsebody`: waits for the next response whose URL contains the pattern and returns its body.
+pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let pattern = cmd
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'url' parameter")?;
+    let timeout_ms = cmd
+        .get("timeout")
+        .and_then(Value::as_u64)
+        .unwrap_or(state.default_timeout_ms);
+    let ff = session(state)?;
+    collect_bodies(ff, DataCollectorMode::HarAndRequests).await;
+    let mut rx = ff.bidi.subscribe_buffered();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let event = match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => return Err("Event stream closed".to_string()),
+            Err(_) => return Err(format!("Timeout waiting for response matching '{pattern}'")),
+        };
+        let p = &event["params"];
+        let matches = event["method"] == "network.responseCompleted"
+            && p["response"]["url"]
+                .as_str()
+                .is_some_and(|u| u.contains(pattern));
+        if matches
+            && ff
+                .active_tab_contains(p["context"].as_str().unwrap_or(""))
+                .await
+        {
+            let (body, _) = data(&ff.bidi, request_id(p), "response").await?;
+            return Ok(json!({
+                "body": body,
+                "status": p["response"]["status"].as_i64().unwrap_or(0),
+                "headers": clip_bidi_header_object(&p["response"]["headers"]),
+            }));
+        }
+    }
+}
+
+/// `har_start`: starts recording requests, with bodies per the `content` mode.
+pub async fn har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mode = match cmd.get("content").and_then(Value::as_str) {
+        Some(s) => HarContentMode::parse(s)?,
+        None => HarContentMode::default(),
+    };
+    session(state)?;
+    state.har_recording = true;
+    state.har_entries.clear();
+    state.har_content_mode = mode;
+    state.har_body_total_bytes = 0;
+    Ok(json!({ "started": true }))
+}
+
+/// Waits for a finished download already observed by the dispatcher.
+async fn wait_download(
+    downloads: &Arc<Mutex<DownloadLedger>>,
+    cursor: usize,
+    contexts: &[&str],
+    timeout_ms: u64,
+    timeout_error: &str,
+) -> Result<crate::native::downloads::DownloadRecord, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let record = {
+            downloads
+                .lock()
+                .await
+                .claim_finished_since(cursor, contexts)
+        };
+        if let Some(record) = record {
+            return Ok(record);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(timeout_error.to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A private directory a download stages into. Dropping it removes the
+/// directory and every file the page put there, on every exit path.
+struct DownloadStage {
+    dir: std::path::PathBuf,
+}
+
+impl DownloadStage {
+    fn create() -> Result<Self, String> {
+        let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        let dir = std::env::temp_dir().join(format!("agent-browser-download-{id}"));
+        super::firefox::create_private_dir(&dir)
+            .map_err(|e| format!("Failed to create download staging directory: {e}"))?;
+        Ok(Self { dir })
+    }
+}
+
+impl Drop for DownloadStage {
+    fn drop(&mut self) {
+        super::firefox::remove_private_dir(&self.dir);
+    }
+}
+
+/// `download`: clicks the ref or selector and saves the resulting file at `path`.
+/// Only an owned browser may name files on the daemon's filesystem.
+pub async fn download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if session(state)?.is_attached() {
+        return Err(
+            "Saving downloads from an attached Firefox is not supported; launch Firefox with --engine firefox instead"
+                .to_string(),
+        );
+    }
+    let result = download_to_path(cmd, state).await;
+    if let Some(ff) = state.firefox.as_ref() {
+        let behavior = match &ff.download_dir {
+            Some(dir) => json!({"type": "allowed", "destinationFolder": dir}),
+            None => Value::Null,
+        };
+        let _ = ff
+            .bidi
+            .send(
+                "browser.setDownloadBehavior",
+                json!({"downloadBehavior": behavior}),
+            )
+            .await;
+    }
+    result
+}
+
+async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+    let path = cmd
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'path' parameter")?;
+    chrome::resolve_download_dest(path)?;
+    let target = resolve_target(state, selector).await?;
+    let stage = DownloadStage::create()?;
+    let stage_dir = stage
+        .dir
+        .to_str()
+        .ok_or("Download staging directory path is not valid UTF-8")?;
+    let ff = session(state)?;
+    let downloads = ff.net.downloads.clone();
+    let cursor = downloads.lock().await.cursor();
+    ff.bidi
+        .send(
+            "browser.setDownloadBehavior",
+            json!({"downloadBehavior": {"type": "allowed", "destinationFolder": stage_dir}}),
+        )
+        .await?;
+    let this = json!({"sharedId": target.shared_id});
+    let clicked = ff
+        .race_prompt(
+            &target.context,
+            ff.bidi.call_function(
+                &target.context,
+                "function() { this.click(); return true; }",
+                Some(this),
+                vec![],
+            ),
+        )
+        .await?;
+    if clicked.is_none() {
+        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
+    }
+    let record = wait_download(
+        &downloads,
+        cursor,
+        &[target.context.as_str()],
+        DOWNLOAD_TIMEOUT_MS,
+        "Timeout waiting for download to complete",
+    )
+    .await?;
+    if record.state == DownloadState::Canceled {
+        downloads.lock().await.release(&record.guid);
+        return Err("Download was canceled".to_string());
+    }
+    let saved = record
+        .file_path
+        .or_else(|| {
+            record
+                .suggested_filename
+                .map(|name| stage.dir.join(name).to_string_lossy().into_owned())
+        })
+        .ok_or("Download completed but could not determine the downloaded file name")?;
+    let saved = std::path::Path::new(&saved);
+    if !chrome::wait_for_downloaded_file(saved).await {
+        return Err(format!(
+            "Download completed but no file is at {}",
+            saved.display()
+        ));
+    }
+    if !chrome::may_move_download(saved, true, Some(stage_dir)) {
+        return Err(format!(
+            "Refusing to move downloaded file from {}",
+            saved.display()
+        ));
+    }
+    chrome::move_download(saved, path)
+}
+
+/// `waitfordownload`: waits for the next finished download.
+/// Attached browsers report remote paths; never check or move those files locally.
+pub async fn waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let timeout_ms = cmd
+        .get("timeout")
+        .and_then(Value::as_u64)
+        .unwrap_or(state.default_timeout_ms);
+    let ff = session(state)?;
+    let downloads = ff.net.downloads.clone();
+    let download_dir = ff.download_dir.clone();
+    let launched_locally = !ff.is_attached();
+    let record = wait_download(
+        &downloads,
+        0,
+        &[],
+        timeout_ms,
+        "Timeout waiting for download",
+    )
+    .await?;
+    if record.state == DownloadState::Canceled {
+        return Err("Download was canceled".to_string());
+    }
+    let Some(saved) = record.file_path else {
+        return if cmd.get("path").and_then(Value::as_str).is_some() {
+            Err(
+                "Download completed but the browser did not report where it saved the file"
+                    .to_string(),
+            )
+        } else {
+            Ok(json!({"completed":true}))
+        };
+    };
+    let saved = std::path::Path::new(&saved);
+    if launched_locally && !chrome::wait_for_downloaded_file(saved).await {
+        return Err(format!(
+            "Download completed but no file is at {}",
+            saved.display()
+        ));
+    }
+    let Some(path) = cmd.get("path").and_then(Value::as_str) else {
+        return Ok(json!({"path": saved.to_string_lossy()}));
+    };
+    if !chrome::may_move_download(saved, launched_locally, download_dir.as_deref()) {
+        downloads.lock().await.release(&record.guid);
+        return Err(format!(
+            "Refusing to move downloaded file from {}",
+            saved.display()
+        ));
+    }
+    let moved = chrome::move_download(saved, path);
+    if moved.is_err() {
+        downloads.lock().await.release(&record.guid);
+    }
+    moved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native::actions::RouteResponse;
+    use crate::native::bidi::session::tests::{fake_session_with_replies, FakeReply};
+
+    fn mock_route(pattern: &str, body: &str, status: u16) -> RouteEntry {
+        RouteEntry {
+            url_pattern: pattern.to_string(),
+            response: Some(RouteResponse {
+                status: Some(status),
+                body: Some(body.to_string()),
+                content_type: None,
+                headers: None,
+                allow_origin: None,
+            }),
+            abort: false,
+            resource_types: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_download_claims_only_new_downloads_from_target_context() {
+        let mut downloads = DownloadLedger::default();
+        downloads.observe(
+            "browsingContext.downloadWillBegin",
+            &json!({"context": "mine", "download": "old", "suggestedFilename": "old.txt"}),
+        );
+        let cursor = downloads.cursor();
+        downloads.observe(
+            "browsingContext.downloadWillBegin",
+            &json!({"context": "other", "download": "d1", "suggestedFilename": "a.txt"}),
+        );
+        downloads.observe(
+            "browsingContext.downloadWillBegin",
+            &json!({"context": "mine", "download": "d2", "suggestedFilename": "b.txt"}),
+        );
+        downloads.observe(
+            "browsingContext.downloadEnd",
+            &json!({"download": "d1", "status": "canceled"}),
+        );
+        downloads.observe(
+            "browsingContext.downloadEnd",
+            &json!({"download": "d2", "status": "complete", "filepath": "downloads/b.txt"}),
+        );
+        let saved = downloads.claim_finished_since(cursor, &["mine"]).unwrap();
+        assert_eq!(saved.file_path.as_deref(), Some("downloads/b.txt"));
+        assert_eq!(saved.guid, "d2");
+    }
+
+    #[tokio::test]
+    async fn attached_waitfordownload_reports_completed_paths_without_local_files() {
+        let (ff, _tx, _) = fake_session().await;
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let saved = directory.path().join("b.txt");
+        let saved_path = saved.to_string_lossy().into_owned();
+        {
+            let mut downloads = ff.net.downloads.lock().await;
+            downloads.observe(
+                "browsingContext.downloadWillBegin",
+                &json!({"navigation": "n1", "download": "d1", "suggestedFilename": "a.txt"}),
+            );
+            downloads.observe(
+                "browsingContext.downloadEnd",
+                &json!({"navigation": "n1", "download": "d1", "status": "complete", "filepath": "downloads/a.txt"}),
+            );
+            downloads.mark_claimed("d1");
+            downloads.observe(
+                "browsingContext.downloadWillBegin",
+                &json!({"navigation": "n1", "download": "d2", "suggestedFilename": "b.txt"}),
+            );
+            downloads.observe(
+                "browsingContext.downloadEnd",
+                &json!({"navigation": "n1", "download": "d2", "status": "complete", "filepath": saved_path}),
+            );
+        }
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            waitfordownload(&json!({"timeout": 1000}), &mut state),
+        )
+        .await
+        .expect("attached downloads must not wait for a local file")
+        .unwrap();
+        assert_eq!(result["path"], json!(saved.to_string_lossy()));
+        assert!(!saved.exists());
+    }
+
+    #[tokio::test]
+    async fn attached_waitfordownload_cannot_move_local_files() {
+        for configured_directory in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let saved = directory.path().join("private.txt");
+            let destination = directory.path().join("output.txt");
+            std::fs::write(&saved, b"private data").unwrap();
+            std::fs::write(&destination, b"keep destination").unwrap();
+            let (mut ff, _tx, _) = fake_session().await;
+            assert!(ff.is_attached());
+            if configured_directory {
+                ff.download_dir = Some(directory.path().to_string_lossy().into_owned());
+            }
+            ff.net.downloads.lock().await.observe(
+                "browsingContext.downloadEnd",
+                &json!({"download": "forged", "status": "complete", "filepath": saved}),
+            );
+            let mut state = DaemonState::new();
+            state.firefox = Some(ff);
+
+            let error = waitfordownload(&json!({"path": destination, "timeout": 1000}), &mut state)
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("Refusing to move downloaded file"),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&saved).unwrap(), b"private data");
+            assert_eq!(std::fs::read(&destination).unwrap(), b"keep destination");
+
+            // Refusing a local move must not consume the remote download.
+            let result = waitfordownload(&json!({"timeout": 1000}), &mut state)
+                .await
+                .unwrap();
+            assert_eq!(result["path"], json!(saved.to_string_lossy()));
+        }
+    }
+
+    #[tokio::test]
+    async fn attached_download_fails_before_browser_or_filesystem_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("new-directory/output.txt");
+        let (mut ff, _tx, calls) = fake_session().await;
+        ff.download_dir = Some(directory.path().to_string_lossy().into_owned());
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        let error = download(
+            &json!({"selector": "#download", "path": destination}),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("attached Firefox"), "{error}");
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(!destination.parent().unwrap().exists());
+    }
+
+    fn staged_download_folder(calls: &[Value]) -> std::path::PathBuf {
+        let folder = calls
+            .iter()
+            .find(|request| request["method"] == "browser.setDownloadBehavior")
+            .map(|request| request["params"]["downloadBehavior"]["destinationFolder"].clone())
+            .expect("the download command names a destination folder");
+        std::path::PathBuf::from(folder.as_str().expect("the folder is a string"))
+    }
+
+    async fn failed_download() -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let out = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dest = out.path().join("report.bin");
+        let calls: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+        let recorded = calls.clone();
+        let (ff, _tx, _) = fake_session_with_replies(move |request| {
+            let click = request["params"]["functionDeclaration"]
+                .as_str()
+                .is_some_and(|js| js.contains("this.click"));
+            if click {
+                return FakeReply::Error {
+                    error: "unknown error",
+                    message: "click failed",
+                };
+            }
+            recorded.lock().unwrap().push(request.clone());
+            if request["method"] == "script.callFunction" {
+                FakeReply::Result(json!({"result": {"type": "node", "sharedId": "sid"}}))
+            } else {
+                FakeReply::Result(json!({}))
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        let error = download_to_path(
+            &json!({ "selector": "#dl", "path": dest.to_str().unwrap() }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        let staging = staged_download_folder(&calls.lock().unwrap());
+        (out, staging, error)
+    }
+
+    #[tokio::test]
+    async fn download_stages_outside_the_requested_directory() {
+        let (out, staging, error) = failed_download().await;
+        assert!(error.contains("click failed"), "{error}");
+        assert!(
+            !staging.starts_with(out.path()),
+            "a page-chosen name must never land in {}: {}",
+            out.path().display(),
+            staging.display()
+        );
+        assert!(
+            !staging.starts_with(std::env::current_dir().unwrap()),
+            "the staging directory sits outside the working directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_leaves_the_requested_directory_empty() {
+        let (out, staging, _) = failed_download().await;
+        assert_eq!(
+            std::fs::read_dir(out.path()).unwrap().count(),
+            0,
+            "the requested directory holds no file"
+        );
+        assert!(!staging.exists(), "the staging directory is gone");
+    }
+
+    #[test]
+    fn the_download_stage_removes_its_directory_on_drop() {
+        let dir = {
+            let stage = DownloadStage::create().unwrap();
+            std::fs::write(stage.dir.join("conftest.py"), b"page chosen").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&stage.dir).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o700, "the staging directory is private");
+            }
+            stage.dir.to_path_buf()
+        };
+        assert!(
+            !dir.exists(),
+            "the staging directory and its contents are gone"
+        );
+    }
+
+    #[test]
+    fn legacy_download_end_matches_only_the_same_key() {
+        let mut ids = LegacyDownloadIds::default();
+        let start = json!({
+            "context": "c",
+            "navigation": "n1",
+            "url": "https://example.com/file.bin",
+        });
+        let other = json!({
+            "context": "c",
+            "navigation": "n2",
+            "url": "https://example.com/file.bin",
+        });
+        let id = ids.started(&start);
+        assert_eq!(ids.ended(&other), None);
+        assert_eq!(ids.ended(&start), Some(id));
+    }
+
+    #[test]
+    fn origin_auth_is_always_cancelled() {
+        let response = auth_response(
+            "request",
+            401,
+            Some(("proxy-user".into(), "proxy-pass".into())),
+            true,
+        );
+        assert_eq!(response["action"], "cancel");
+        assert!(response.get("credentials").is_none());
+        assert_eq!(
+            auth_response("request", 401, None, false)["action"],
+            "cancel"
+        );
+    }
+
+    #[test]
+    fn proxy_auth_still_uses_configured_credentials() {
+        let response = auth_response(
+            "request",
+            407,
+            Some(("proxy-user".into(), "proxy-pass".into())),
+            true,
+        );
+        assert_eq!(response["action"], "provideCredentials");
+        assert_eq!(response["credentials"]["username"], "proxy-user");
+        assert_eq!(response["credentials"]["password"], "proxy-pass");
+        assert_eq!(
+            auth_response(
+                "request",
+                407,
+                Some(("proxy-user".into(), "proxy-pass".into())),
+                false,
+            )["action"],
+            "cancel"
+        );
+    }
+
+    #[test]
+    fn blocked_domain_fails_even_when_route_matches() {
+        let filter = DomainFilter::new("allowed.example");
+        let routes = vec![mock_route("*", "mocked", 200)];
+
+        let decision = decide_request(
+            "https://blocked.example/page",
+            "document",
+            &HashMap::new(),
+            Some(&filter),
+            &routes,
+            &HashMap::new(),
+        );
+
+        assert_eq!(decision, NetworkDecision::Fail);
+
+        let decide = |url, resource_type| {
+            decide_request(
+                url,
+                resource_type,
+                &HashMap::new(),
+                Some(&filter),
+                &[],
+                &HashMap::new(),
+            )
+        };
+        assert_eq!(
+            decide("file:///etc/hosts", "Document"),
+            NetworkDecision::Fail
+        );
+        assert_eq!(
+            decide("about:blank", "Document"),
+            NetworkDecision::Continue { headers: None }
+        );
+    }
+
+    #[test]
+    fn first_matching_route_wins() {
+        let routes = vec![
+            mock_route("*", "first", 200),
+            mock_route("*", "second", 200),
+        ];
+
+        let decision = decide_request(
+            "https://example.com/page",
+            "document",
+            &HashMap::new(),
+            None,
+            &routes,
+            &HashMap::new(),
+        );
+
+        match decision {
+            NetworkDecision::Fulfill { body, .. } => assert_eq!(body, "Zmlyc3Q="),
+            other => panic!("expected fulfill, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mock_route_returns_status_body_and_headers() {
+        let routes = vec![RouteEntry {
+            url_pattern: "*".to_string(),
+            response: Some(RouteResponse {
+                status: Some(201),
+                body: Some("hello".to_string()),
+                content_type: Some("text/plain".to_string()),
+                headers: Some(HashMap::from([("X-Test".to_string(), "yes".to_string())])),
+                allow_origin: None,
+            }),
+            abort: false,
+            resource_types: Vec::new(),
+        }];
+
+        let decision = decide_request(
+            "https://example.com/page",
+            "document",
+            &HashMap::new(),
+            None,
+            &routes,
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            decision,
+            NetworkDecision::Fulfill {
+                status: 201,
+                headers: vec![
+                    ("Content-Type".to_string(), "text/plain".to_string()),
+                    ("X-Test".to_string(), "yes".to_string()),
+                ],
+                body: "aGVsbG8=".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_context_bypasses_abort_route() {
+        let (ff, _tx, _, messages, _) =
+            crate::native::bidi::session::tests::fake_session_with_rdp().await;
+        let net = NetContext::default();
+        net.blank_contexts
+            .write()
+            .await
+            .insert("storage-tab".into());
+        let mut route = mock_route("*", "", 200);
+        route.response = None;
+        route.abort = true;
+        net.routes.write().await.push(route);
+        before_request(
+            &ff.bidi,
+            &net,
+            &json!({"request": "r1", "url": "https://example.com/", "headers": []}),
+            Some("storage-tab"),
+        )
+        .await
+        .unwrap();
+        let sent = messages.lock().unwrap().last().unwrap().clone();
+        assert_eq!(sent["method"], "network.provideResponse");
+        assert_eq!(sent["params"]["body"]["value"], "PGh0bWw+PC9odG1sPg==");
+    }
+
+    #[tokio::test]
+    async fn mocked_responses_preserve_json_cors_and_base64_over_bidi() {
+        let (ff, _tx, _, messages, _) =
+            crate::native::bidi::session::tests::fake_session_with_rdp().await;
+        let net = NetContext::default();
+        let mut route = mock_route("*", r#"{"mock":true}"#, 201);
+        route.response.as_mut().unwrap().allow_origin = Some("https://page.example".to_string());
+        net.routes.write().await.push(route);
+
+        for (headers, preflight, allowed) in [
+            (json!({"oRiGiN": "https://page.example"}), false, true),
+            (
+                json!({
+                    "Referer": "https://page.example/form",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type,x-client"
+                }),
+                true,
+                true,
+            ),
+            (json!({"Origin": "https://other.example"}), false, false),
+            (
+                json!({
+                    "Origin": "https://other.example",
+                    "Access-Control-Request-Method": "POST"
+                }),
+                true,
+                false,
+            ),
+        ] {
+            let headers = headers
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(name, value)| (name.clone(), value.as_str().unwrap().to_string()))
+                .collect();
+            before_request(
+                &ff.bidi,
+                &net,
+                &json!({"request": "r1", "url": "https://api.example/data", "headers": bidi_headers(headers)}),
+                None,
+            )
+            .await
+            .unwrap();
+            let sent = messages.lock().unwrap().last().unwrap().clone();
+            assert_eq!(sent["method"], "network.provideResponse");
+            let params = &sent["params"];
+            assert_eq!(params["request"], "r1");
+            assert_eq!(
+                params["statusCode"],
+                if preflight && allowed { 204 } else { 201 }
+            );
+            assert_eq!(params["body"]["type"], "base64");
+            assert_eq!(
+                params["body"]["value"],
+                if preflight && allowed {
+                    ""
+                } else {
+                    "eyJtb2NrIjp0cnVlfQ=="
+                }
+            );
+            let mut expected_headers = json!({"Content-Type": "application/json"});
+            if allowed {
+                expected_headers["Access-Control-Allow-Origin"] = json!("https://page.example");
+                expected_headers["Access-Control-Allow-Credentials"] = json!("true");
+                if preflight {
+                    expected_headers["Access-Control-Allow-Methods"] = json!("POST");
+                    expected_headers["Access-Control-Allow-Headers"] =
+                        json!("content-type,x-client");
+                }
+            }
+            assert_eq!(
+                clip_bidi_header_object(&params["headers"]),
+                expected_headers
+            );
+        }
+    }
+
+    #[test]
+    fn extra_headers_are_merged_on_continue() {
+        let origin_headers = HashMap::from([(
+            "https://example.com".to_string(),
+            HashMap::from([("X-Extra".to_string(), "new".to_string())]),
+        )]);
+        let headers = HashMap::from([
+            ("Accept".to_string(), "text/html".to_string()),
+            ("x-extra".to_string(), "old".to_string()),
+        ]);
+
+        let decision = decide_request(
+            "https://example.com/page",
+            "document",
+            &headers,
+            None,
+            &[],
+            &origin_headers,
+        );
+
+        assert_eq!(
+            decision,
+            NetworkDecision::Continue {
+                headers: Some(vec![
+                    ("Accept".to_string(), "text/html".to_string()),
+                    ("X-Extra".to_string(), "new".to_string()),
+                ]),
+            }
+        );
+    }
+
+    #[test]
+    fn non_matching_allowed_request_continues_unchanged() {
+        let filter = DomainFilter::new("allowed.example");
+        let routes = vec![mock_route("*.json", "mocked", 200)];
+
+        let decision = decide_request(
+            "https://allowed.example/page",
+            "document",
+            &HashMap::new(),
+            Some(&filter),
+            &routes,
+            &HashMap::new(),
+        );
+
+        assert_eq!(decision, NetworkDecision::Continue { headers: None });
+    }
+
+    use crate::native::bidi::session::tests::fake_session;
+
+    fn request_event(method: &str, id: &str, url: &str, blocked: bool) -> Value {
+        json!({
+            "type": "event",
+            "method": method,
+            "params": {
+                "isBlocked": blocked,
+                "context": "ctx-active",
+                "timestamp": 1000,
+                "request": {"request": id, "url": url, "method": "GET", "headers": []},
+                "response": {"status": 200, "headers": []},
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn dispatcher_resolves_each_blocked_request_once() {
+        let (mut ff, tx, calls) = fake_session().await;
+        ff.contexts.record(&json!({"context": "popup"}));
+        ff.emulation.settings.write().unwrap().user_agent = Some("Popup Agent".to_string());
+        let net = NetContext::default();
+        *net.domain_filter.write().await = Some(DomainFilter::new("allowed.example"));
+        let _dispatcher = spawn_dispatcher(
+            ff.bidi.clone(),
+            net,
+            subscribe_dispatcher(&ff.bidi),
+            ff.emulation.clone(),
+            ff.permissions.clone(),
+        );
+        let blocked = "network.beforeRequestSent";
+        tx.send(request_event(
+            blocked,
+            "r1",
+            "https://blocked.example/x",
+            true,
+        ))
+        .unwrap();
+        tx.send(request_event(
+            blocked,
+            "r2",
+            "https://allowed.example/x",
+            true,
+        ))
+        .unwrap();
+        tx.send(request_event(
+            blocked,
+            "r3",
+            "https://blocked.example/y",
+            false,
+        ))
+        .unwrap();
+        tx.send(json!({
+            "type": "event",
+            "method": "browsingContext.contextCreated",
+            "params": {"context": "popup", "parent": null}
+        }))
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut seen = calls.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                "emulation.setUserAgentOverride",
+                "network.continueRequest",
+                "network.failRequest"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_separates_overlapping_downloads_with_null_navigation() {
+        let (ff, tx, _) = fake_session().await;
+        let net = NetContext::default();
+        let downloads = net.downloads.clone();
+        let _dispatcher = spawn_dispatcher(
+            ff.bidi.clone(),
+            net,
+            subscribe_dispatcher(&ff.bidi),
+            ff.emulation.clone(),
+            ff.permissions.clone(),
+        );
+        for filename in ["first.txt", "second.txt"] {
+            tx.send(json!({
+                "type": "event",
+                "method": "browsingContext.downloadWillBegin",
+                "params": {
+                    "context": "ctx-active",
+                    "navigation": null,
+                    "url": "http://example.com/download",
+                    "suggestedFilename": filename,
+                },
+            }))
+            .unwrap();
+        }
+        for filename in ["first.txt", "second.txt"] {
+            tx.send(json!({
+                "type": "event",
+                "method": "browsingContext.downloadEnd",
+                "params": {
+                    "context": "ctx-active",
+                    "navigation": null,
+                    "url": "http://example.com/download",
+                    "status": "complete",
+                    "filepath": format!("/downloads/{filename}"),
+                },
+            }))
+            .unwrap();
+        }
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut claimed = Vec::new();
+            loop {
+                let mut ledger = downloads.lock().await;
+                if let Some(record) = ledger.claim_finished_since(0, &[]) {
+                    claimed.push(record);
+                    if claimed.len() == 2 {
+                        break claimed;
+                    }
+                }
+                drop(ledger);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatcher should record both overlapping downloads");
+        assert_eq!(claimed[0].suggested_filename.as_deref(), Some("first.txt"));
+        assert_eq!(claimed[1].suggested_filename.as_deref(), Some("second.txt"));
+    }
+
+    #[tokio::test]
+    async fn har_captures_request_body_and_bidi_timestamps() {
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(|v| {
+            if v["params"]["dataType"] == "request" {
+                if v["params"]["request"] == "r2" {
+                    json!({"bytes": {"type": "string", "value": ""}})
+                } else {
+                    json!({"bytes": {"type": "base64", "value": "cGF5bG9hZD1oYXItcHJvYmU="}})
+                }
+            } else {
+                json!({"bytes": {"type": "string", "value": "har-response"}})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.har_recording = true;
+        state.request_tracking = true;
+        state.har_content_mode = HarContentMode::All;
+        let request = json!({
+            "request": "r1",
+            "url": "http://example.com/har-probe",
+            "method": "POST",
+            "headers": [{
+                "name": "Content-Type",
+                "value": {"value": "application/x-www-form-urlencoded"}
+            }],
+            "bodySize": 17,
+            "initiatorType": "fetch",
+        });
+        let response = json!({
+            "status": 200,
+            "statusText": "OK",
+            "protocol": "http/1.1",
+            "mimeType": "text/plain",
+            "headers": [],
+            "bodySize": 13,
+        });
+
+        apply_events(
+            &mut state,
+            vec![
+                json!({
+                    "method": "network.beforeRequestSent",
+                    "params": {"timestamp": 1_800_000_000_000.25, "request": request},
+                }),
+                json!({
+                    "method": "network.responseStarted",
+                    "params": {"timestamp": 1_800_000_000_400.25, "request": request, "response": response},
+                }),
+                json!({
+                    "method": "network.responseCompleted",
+                    "params": {"timestamp": 1_800_000_000_420.25, "request": request, "response": response},
+                }),
+            ],
+        )
+        .await;
+
+        let entry = &state.har_entries[0];
+        assert_eq!(entry.post_data.as_deref(), Some("payload=har-probe"));
+        assert_eq!(entry.request_body_size, 17);
+        assert!((entry.wall_time - 1_800_000_000.00025).abs() < 0.00001);
+        assert!((entry.response_started_timestamp.unwrap() - 1_800_000_000.40025).abs() < 0.00001);
+        assert!(
+            (entry.response_completed_timestamp.unwrap() - 1_800_000_000.42025).abs() < 0.00001
+        );
+        assert_eq!(entry.response_body.as_deref(), Some("har-response"));
+        assert_eq!(
+            state.tracked_requests.entries()[0].post_data.as_deref(),
+            Some("payload=har-probe")
+        );
+        assert_eq!(
+            serde_json::to_value(&state.tracked_requests.entries()[0]).unwrap()["postData"],
+            json!("payload=har-probe")
+        );
+
+        let empty = json!({
+            "request": "r2",
+            "url": "http://example.com/empty",
+            "method": "POST",
+            "headers": [],
+            "bodySize": 0,
+            "initiatorType": "fetch",
+        });
+        let empty_response = json!({"status": 200, "headers": [], "bodySize": 0});
+        apply_events(
+            &mut state,
+            vec![
+                json!({
+                    "method": "network.beforeRequestSent",
+                    "params": {"timestamp": 1_800_000_001_000.25, "request": empty},
+                }),
+                json!({
+                    "method": "network.responseCompleted",
+                    "params": {"timestamp": 1_800_000_001_100.25, "request": empty, "response": empty_response},
+                }),
+            ],
+        )
+        .await;
+        assert_eq!(state.har_entries[1].post_data, None);
+    }
+
+    #[tokio::test]
+    async fn request_recording_excludes_background_tabs() {
+        let (mut ff, _, _) = crate::native::bidi::session::tests::fake_session_with(
+            |_| json!({"bytes": {"type": "string", "value": "body"}}),
+        )
+        .await;
+        ff.contexts = crate::native::bidi::contexts::Contexts::from_tree(
+            &json!({"contexts": [{"context": "active", "children": [{"context": "frame"}]}]}),
+        )
+        .unwrap();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.request_tracking = true;
+        state.har_recording = true;
+
+        for (id, context) in [("active", "active"), ("frame", "frame"), ("other", "other")] {
+            apply_events(
+                &mut state,
+                vec![json!({
+                    "method": "network.beforeRequestSent",
+                    "params": {
+                        "context": context,
+                        "timestamp": 1000,
+                        "request": {"request": id, "url": format!("https://{context}.test/"), "method": "GET", "headers": []},
+                    },
+                })],
+            )
+            .await;
+        }
+
+        assert_eq!(state.tracked_requests.len(), 2);
+        assert_eq!(state.tracked_requests.entries()[0].request_id, "active");
+        assert_eq!(state.tracked_requests.entries()[1].request_id, "frame");
+        assert_eq!(state.har_entries.len(), 2);
+        assert_eq!(state.har_entries[0].request_id, "active");
+        assert_eq!(state.har_entries[1].request_id, "frame");
+    }
+
+    #[tokio::test]
+    async fn log_entries_exclude_background_tabs() {
+        let (mut ff, _, _) =
+            crate::native::bidi::session::tests::fake_session_with(|_| json!({})).await;
+        ff.contexts = crate::native::bidi::contexts::Contexts::from_tree(
+            &json!({"contexts": [{"context": "active", "children": [{"context": "frame"}]}]}),
+        )
+        .unwrap();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        for (context, text) in [
+            (json!("active"), "from-active"),
+            (json!("frame"), "from-frame"),
+            (json!("other"), "from-other"),
+            (Value::Null, "from-worker"),
+        ] {
+            apply_events(
+                &mut state,
+                vec![json!({
+                    "method": "log.entryAdded",
+                    "params": {
+                        "type": "console",
+                        "method": "log",
+                        "text": text,
+                        "args": [],
+                        "source": {"context": context},
+                    },
+                })],
+            )
+            .await;
+        }
+
+        let console = state.event_tracker.get_console_json();
+        let texts: Vec<&str> = console["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["from-active", "from-frame", "from-worker"]);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_control_does_not_queue_page_logs_or_unblocked_telemetry() {
+        let (ff, tx, _) = fake_session().await;
+        let mut events = subscribe_dispatcher(&ff.bidi);
+        for event in [
+            json!({"type":"event", "method":"log.entryAdded", "params":{}}),
+            request_event(
+                "network.beforeRequestSent",
+                "observed",
+                "https://example.com/",
+                false,
+            ),
+            request_event(
+                "network.responseCompleted",
+                "observed",
+                "https://example.com/",
+                false,
+            ),
+            request_event(
+                "network.beforeRequestSent",
+                "blocked",
+                "https://example.com/",
+                true,
+            ),
+            request_event("network.authRequired", "auth", "https://example.com/", true),
+        ] {
+            tx.send(event).unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for id in ["blocked", "auth"] {
+                let event = events.control.recv().await.unwrap();
+                assert_eq!(event["params"]["request"]["request"], id);
+            }
+            let completed = events.completed.recv().await.unwrap();
+            assert_eq!(completed["params"]["request"]["request"], "observed");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dispatcher_control_survives_a_burst_past_the_byte_budget() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let messages: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+        let log = messages.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let m: Value =
+                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            let event = json!({
+                "type": "event",
+                "method": "network.beforeRequestSent",
+                "params": {
+                    "isBlocked": true,
+                    "context": "ctx",
+                    "padding": "x".repeat(1 << 20),
+                    "request": {
+                        "request": "big",
+                        "url": "https://allowed.example/big",
+                        "method": "GET",
+                        "headers": []
+                    }
+                }
+            })
+            .to_string();
+            for _ in 0..65 {
+                ws.send(Message::Text(event.clone())).await.unwrap();
+            }
+            let reply = json!({"type":"success","id":m["id"],"result":{}});
+            ws.send(Message::Text(reply.to_string())).await.unwrap();
+            loop {
+                tokio::select! {
+                    message = ws.next() => {
+                        let Some(Ok(Message::Text(text))) = message else { break };
+                        let message: Value = serde_json::from_str(&text).unwrap();
+                        log.lock().unwrap().push(message.clone());
+                        let reply = json!({"type":"success","id":message["id"],"result":{}});
+                        ws.send(Message::Text(reply.to_string())).await.unwrap();
+                    }
+                    Some(event) = rx.recv() => {
+                        ws.send(Message::Text(event.to_string())).await.unwrap();
+                    }
+                }
+            }
+        });
+
+        let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+        let net = NetContext::default();
+        *net.domain_filter.write().await = Some(DomainFilter::new("allowed.example"));
+        let events = subscribe_dispatcher(&bidi);
+        bidi.send("barrier", json!({})).await.unwrap();
+        let _dispatcher =
+            spawn_dispatcher(bidi.clone(), net, events, Arc::default(), Arc::default());
+        tx.send(request_event(
+            "network.beforeRequestSent",
+            "final",
+            "https://blocked.example/final",
+            true,
+        ))
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|message| message["method"] == "network.failRequest")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn in_flight_set_ignores_websockets_and_clears_on_completion() {
+        let (mut ff, tx, _) = fake_session().await;
+        let mut received = ff.bidi.subscribe_buffered();
+        for (id, url) in [
+            ("a", "http://example.com/"),
+            ("b", "ws://example.com/socket"),
+        ] {
+            tx.send(request_event("network.beforeRequestSent", id, url, false))
+                .unwrap();
+        }
+        received.recv().await.unwrap();
+        received.recv().await.unwrap();
+        ff.drain_network_events();
+        assert_eq!(ff.inflight.len(), 1);
+        tx.send(request_event(
+            "network.responseCompleted",
+            "a",
+            "http://example.com/",
+            false,
+        ))
+        .unwrap();
+        received.recv().await.unwrap();
+        ff.drain_network_events();
+        assert!(ff.inflight.is_empty());
+    }
+
+    #[test]
+    fn log_entries_fill_console_and_errors() {
+        let mut state = DaemonState::new();
+        log_entry(
+            &mut state,
+            &json!({"type": "console", "method": "warn", "text": "careful", "args": [{"type": "string", "value": "careful"}]}),
+        );
+        log_entry(
+            &mut state,
+            &json!({"type": "javascript", "text": "Error: boom", "stackTrace": {"callFrames": [{"url": "http://x/", "lineNumber": 3, "columnNumber": 7}]}}),
+        );
+        let console = state.event_tracker.get_console_json();
+        assert_eq!(console["messages"][0]["type"], "warning");
+        assert_eq!(console["messages"][0]["args"][0]["value"], "careful");
+        let errors = state.event_tracker.get_errors_json();
+        assert_eq!(errors["errors"][0]["text"], "Error: boom");
+        assert_eq!(errors["errors"][0]["line"], 3);
+    }
+
+    #[tokio::test]
+    async fn data_collector_tracks_recording_lifetime() {
+        let (ff, _, calls) = crate::native::bidi::session::tests::fake_session_with(|v| {
+            if v["method"] == "network.addDataCollector" {
+                json!({"collector": "collector-1"})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.har_recording = true;
+
+        drain(&mut state).await;
+        state.har_recording = false;
+        drain(&mut state).await;
+
+        let waited = responsebody(&json!({"url": "nothing", "timeout": 1}), &mut state).await;
+        assert!(waited.is_err());
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                "network.addDataCollector",
+                "network.removeDataCollector",
+                "network.addDataCollector"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tracked_requests_and_har_enforce_memory_and_body_budgets() {
+        let oversized_body = "p".repeat(chrome::HAR_MAX_BODY_BYTES + 1024);
+        let body_reply = oversized_body.clone();
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(move |v| {
+            if v["method"] == "network.getData" {
+                json!({"bytes": {"type": "string", "value": body_reply}})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.request_tracking = true;
+        state.har_recording = true;
+        state.har_content_mode = HarContentMode::All;
+
+        let huge_url = format!(
+            "https://example.test/{}",
+            "u".repeat(MAX_REQUEST_URL_BYTES * 2)
+        );
+        let huge_headers = json!([
+            {"name": "X-Huge", "value": {"type": "string", "value": "h".repeat(64 * 1024)}}
+        ]);
+        apply_events(
+            &mut state,
+            vec![
+                json!({
+                    "method": "network.beforeRequestSent",
+                    "params": {
+                        "timestamp": 1_800_000_000_000.0,
+                        "request": {
+                            "request": "r-big",
+                            "url": huge_url,
+                            "method": "POST",
+                            "headers": huge_headers,
+                            "bodySize": oversized_body.len() as i64,
+                            "initiatorType": "fetch",
+                        },
+                    },
+                }),
+                json!({
+                    "method": "network.responseCompleted",
+                    "params": {
+                        "timestamp": 1_800_000_000_500.0,
+                        "request": {"request": "r-big"},
+                        "response": {
+                            "status": 200,
+                            "mimeType": "text/plain",
+                            "headers": huge_headers,
+                            "bodySize": oversized_body.len() as i64,
+                        },
+                    },
+                }),
+            ],
+        )
+        .await;
+
+        assert_eq!(state.har_entries.len(), 1);
+        assert_eq!(state.har_entries[0].post_data, None);
+        assert_eq!(state.har_entries[0].response_body, None);
+        assert_eq!(
+            state.har_entries[0].request_body_size,
+            oversized_body.len() as i64
+        );
+        assert_eq!(state.har_body_total_bytes, 0);
+
+        let tracked = &state.tracked_requests.entries()[0];
+        assert!(tracked.url.contains("...[truncated "));
+        assert!(tracked
+            .post_data
+            .as_deref()
+            .unwrap()
+            .contains("...[truncated "));
+        assert!(
+            state.tracked_requests.retained_bytes()
+                <= crate::native::network::MAX_TRACKED_REQUEST_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn data_collector_state_machine_scopes_buffering_to_recording_mode() {
+        let payloads = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let recorded = payloads.clone();
+        let (ff, _, _) = crate::native::bidi::session::tests::fake_session_with(move |v| {
+            let method = v["method"].as_str().unwrap_or("").to_string();
+            if method.contains("DataCollector") {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), v["params"].clone()));
+            }
+            if method == "network.addDataCollector" {
+                json!({"collector": "c-1"})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+
+        state.request_tracking = true;
+        drain(&mut state).await;
+        state.har_recording = true;
+        drain(&mut state).await;
+        state.har_recording = false;
+        state.request_tracking = false;
+        drain(&mut state).await;
+
+        let calls = payloads.lock().unwrap();
+        assert_eq!(calls.len(), 4, "{calls:?}");
+        assert_eq!(calls[0].0, "network.addDataCollector");
+        assert_eq!(calls[0].1["dataTypes"], json!(["request", "response"]));
+        assert_eq!(
+            calls[0].1["maxEncodedDataSize"],
+            json!(chrome::HAR_MAX_BODY_BYTES)
+        );
+        assert_eq!(calls[1].0, "network.removeDataCollector");
+        assert_eq!(calls[2].0, "network.addDataCollector");
+        assert_eq!(calls[2].1["dataTypes"], json!(["request", "response"]));
+        assert_eq!(calls[2].1["maxEncodedDataSize"], json!(10_000_000));
+        assert_eq!(calls[3].0, "network.removeDataCollector");
+    }
+}
