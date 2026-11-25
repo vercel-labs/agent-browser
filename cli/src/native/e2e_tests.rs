@@ -26063,9 +26063,7 @@ async fn e2e_firefox_stream_paste_isolates_clipboard_and_locks_devtools() {
         assert_eq!(remote["value"], json!(false));
     }
 
-    let child_url = fixture
-        .url
-        .replacen("http://127.0.0.1:", "http://localhost:", 1);
+    let child_url = format!("{}/frame.html", fixture.other);
     firefox_open(&mut state, &fixture.url).await;
     firefox_eval(
         &mut state,
