@@ -438,6 +438,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "NetworkServiceInProcess".to_string(),
     ];
     if options.webmcp {
+        enable_features.push("WebMCP".to_string());
         enable_features.push("WebMCPTesting".to_string());
         enable_features.push("DevToolsWebMCPSupport".to_string());
     }
@@ -469,6 +470,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--no-default-browser-check".to_string(),
         "--disable-background-networking".to_string(),
         "--disable-backgrounding-occluded-windows".to_string(),
+        "--disable-renderer-backgrounding".to_string(),
         "--disable-component-update".to_string(),
         "--disable-default-apps".to_string(),
         "--disable-hang-monitor".to_string(),
@@ -2585,8 +2587,10 @@ exec sleep 60
             .iter()
             .find(|arg| arg.starts_with("--enable-features="))
             .unwrap();
-        assert!(features.contains("WebMCPTesting"));
-        assert!(features.contains("DevToolsWebMCPSupport"));
+        let features: Vec<&str> = features["--enable-features=".len()..].split(',').collect();
+        for feature in ["WebMCP", "WebMCPTesting", "DevToolsWebMCPSupport"] {
+            assert!(features.contains(&feature), "{features:?}");
+        }
     }
 
     #[test]
@@ -2601,8 +2605,7 @@ exec sleep 60
             .iter()
             .find(|arg| arg.starts_with("--enable-features="))
             .unwrap();
-        assert!(!features.contains("WebMCPTesting"));
-        assert!(!features.contains("DevToolsWebMCPSupport"));
+        assert!(!features.contains("WebMCP"), "{features}");
     }
 
     #[test]
