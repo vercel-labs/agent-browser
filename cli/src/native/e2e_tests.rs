@@ -15619,6 +15619,497 @@ async fn e2e_stream_click_is_not_queued_behind_a_mouse_sweep() {
     let _ = std::fs::remove_dir_all(&socket_dir);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = tempfile::Builder::new()
+        .prefix("agent-browser-e2e-stream-kbd-")
+        .tempdir()
+        .expect("temp socket dir");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.path().to_str().expect("utf-8 socket dir"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-stream-kbd");
+
+    let page_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let page_port = page_listener.local_addr().unwrap().port();
+    let page_body = "<!doctype html><html><body>\
+        <textarea id='ta'>hello world</textarea>\
+        <textarea id='ta2'>second field</textarea>\
+        <div id='ce' contenteditable='true'>editable div</div>\
+        <form onsubmit='window.__submitted = true; return false;'><input id='form_in' value=''></form>\
+        <input id='ro' readonly value='keep-me'>\
+        <textarea id='ro_ta' readonly>keep-ta</textarea>\
+        <input id='ro_cancel' readonly value='keep-cancel' oncut='event.preventDefault()'>\
+        <input id='pw' type='password' value='secret123'>\
+        </body></html>";
+    let page_server = tokio::spawn(async move {
+        while let Ok((mut sock, _)) = page_listener.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                page_body.len(),
+                page_body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"].as_u64().unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("ws connect");
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{page_port}/") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Wait for initial frame so screencast is active.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    let mut saw_frame = false;
+    while tokio::time::Instant::now() < deadline && !saw_frame {
+        if let Ok(Some(Ok(Message::Text(txt)))) =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), ws.next()).await
+        {
+            if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                saw_frame = v.get("type") == Some(&json!("frame"));
+            }
+        }
+    }
+    assert!(saw_frame, "expected screencast frame");
+
+    // Helper to wait for a clipboard reply message from the stream socket.
+    async fn recv_clipboard(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> String {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(Ok(Message::Text(txt)))) =
+                tokio::time::timeout(tokio::time::Duration::from_secs(2), ws.next()).await
+            {
+                if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                    if v.get("type") == Some(&json!("clipboard")) {
+                        return v["text"].as_str().unwrap_or("").to_string();
+                    }
+                }
+            }
+        }
+        panic!("timed out waiting for clipboard reply");
+    }
+
+    // 1. Focus textarea with collapsed caret and send Meta+a with commands: ["selectAll"].
+    assert_evaluate(
+        &mut state,
+        "focus",
+        "(() => { const ta = document.getElementById('ta'); ta.focus(); ta.setSelectionRange(0, 0); return true; })()",
+        json!(true),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({
+            "type": "input_keyboard",
+            "eventType": "rawKeyDown",
+            "key": "a",
+            "code": "KeyA",
+            "windowsVirtualKeyCode": 65,
+            "modifiers": 4,
+            "commands": ["selectAll"]
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        json!({
+            "type": "input_keyboard",
+            "eventType": "keyUp",
+            "key": "a",
+            "code": "KeyA",
+            "windowsVirtualKeyCode": 65,
+            "modifiers": 4
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    let mut selected = false;
+    while tokio::time::Instant::now() < deadline {
+        let r = execute_command(
+            &json!({ "id": "3", "action": "evaluate", "script": "(() => { const t = document.getElementById('ta'); return [t.selectionStart, t.selectionEnd]; })()" }),
+            &mut state,
+        )
+        .await;
+        if get_data(&r)["result"] == json!([0, 11]) {
+            selected = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        selected,
+        "Meta+a with commands:['selectAll'] should select all 11 chars"
+    );
+
+    // 2. Copy bridge: input_read_clipboard returns the selection without granting clipboard-read permission.
+    ws.send(Message::Text(
+        json!({ "type": "input_read_clipboard" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv_clipboard(&mut ws).await, "hello world");
+
+    let perm = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "navigator.permissions.query({ name: 'clipboard-read' }).then(p => p.state)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&perm);
+    assert_ne!(
+        get_data(&perm)["result"],
+        json!("granted"),
+        "clipboard-read permission must not be granted globally"
+    );
+
+    // 3. Paste bridge: input_insert_text replaces the selection.
+    ws.send(Message::Text(
+        json!({ "type": "input_insert_text", "text": "pasted text" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    let mut pasted = false;
+    while tokio::time::Instant::now() < deadline {
+        let r = execute_command(
+            &json!({ "id": "5", "action": "evaluate", "script": "document.getElementById('ta').value" }),
+            &mut state,
+        )
+        .await;
+        if get_data(&r)["result"] == json!("pasted text") {
+            pasted = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        pasted,
+        "input_insert_text should replace selection with pasted text"
+    );
+
+    // 4. Cut bridge: selectAll + input_read_clipboard { cut: true } followed
+    // immediately by Tab to another textarea must cut only #ta and leave #ta2 intact.
+    ws.send(Message::Text(
+        json!({
+            "type": "input_keyboard",
+            "eventType": "rawKeyDown",
+            "key": "a",
+            "code": "KeyA",
+            "windowsVirtualKeyCode": 65,
+            "modifiers": 4,
+            "commands": ["selectAll"]
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    ws.send(Message::Text(
+        json!({ "type": "input_read_clipboard", "cut": true, "modifiers": 4 }).to_string(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        json!({
+            "type": "input_keyboard",
+            "eventType": "rawKeyDown",
+            "key": "Tab",
+            "code": "Tab",
+            "windowsVirtualKeyCode": 9,
+            "modifiers": 0
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv_clipboard(&mut ws).await, "pasted text");
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    let mut cut_cleared = false;
+    while tokio::time::Instant::now() < deadline {
+        let r = execute_command(
+            &json!({ "id": "6", "action": "evaluate", "script": "[document.getElementById('ta').value, document.getElementById('ta2').value]" }),
+            &mut state,
+        )
+        .await;
+        if get_data(&r)["result"] == json!(["", "second field"]) {
+            cut_cleared = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        cut_cleared,
+        "cut should clear only #ta and leave #ta2 untouched even when Tab follows immediately"
+    );
+
+    // 4a. Undo after cut must restore the cut text in #ta, and cut in contenteditable
+    // without prior user activation must both copy and remove the text.
+    assert_evaluate(
+        &mut state,
+        "refocus-ta",
+        "(() => { document.getElementById('ta').focus(); return true; })()",
+        json!(true),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({
+            "type": "input_keyboard",
+            "eventType": "rawKeyDown",
+            "key": "z",
+            "code": "KeyZ",
+            "windowsVirtualKeyCode": 90,
+            "modifiers": 4,
+            "commands": ["undo"]
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+    let mut undone = false;
+    while tokio::time::Instant::now() < deadline {
+        let r = execute_command(
+            &json!({ "id": "6u", "action": "evaluate", "script": "document.getElementById('ta').value" }),
+            &mut state,
+        )
+        .await;
+        if get_data(&r)["result"] == json!("pasted text") {
+            undone = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+    assert!(undone, "undo after cut should restore 'pasted text' in #ta");
+
+    assert_evaluate(
+        &mut state,
+        "select-ce",
+        "(() => { const ce = document.getElementById('ce'); ce.focus(); const range = document.createRange(); range.selectNodeContents(ce); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); return sel.toString(); })()",
+        json!("editable div"),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({ "type": "input_read_clipboard", "cut": true, "modifiers": 4 }).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv_clipboard(&mut ws).await, "editable div");
+    assert_evaluate(
+        &mut state,
+        "ce-after-cut",
+        "document.getElementById('ce').textContent",
+        json!(""),
+    )
+    .await;
+
+    // 4b. Option / AltGr character entry delivers text on keyDown.
+    assert_evaluate(
+        &mut state,
+        "focus-ta",
+        "(() => { const t = document.getElementById('ta'); t.focus(); t.value = ''; return true; })()",
+        json!(true),
+    )
+    .await;
+    for (key, code, vk, modifiers) in [("å", "KeyA", 65, 1), ("@", "KeyQ", 81, 3)] {
+        ws.send(Message::Text(
+            json!({
+                "type": "input_keyboard",
+                "eventType": "keyDown",
+                "key": key,
+                "code": code,
+                "text": key,
+                "windowsVirtualKeyCode": vk,
+                "modifiers": modifiers
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "input_keyboard",
+                "eventType": "keyUp",
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": vk,
+                "modifiers": modifiers
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    }
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    let mut alt_typed = false;
+    while tokio::time::Instant::now() < deadline {
+        let r = execute_command(
+            &json!({ "id": "6b", "action": "evaluate", "script": "document.getElementById('ta').value" }),
+            &mut state,
+        )
+        .await;
+        if get_data(&r)["result"] == json!("å@") {
+            alt_typed = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        alt_typed,
+        "Option/AltGr keyDown events with text should type å@"
+    );
+
+    // 4c. Cut and insertText on readonly inputs/textareas must not modify their value; cut still copies.
+    assert_evaluate(
+        &mut state,
+        "ro-refuse-exec",
+        "(() => { const orig = document.execCommand?.bind(document); window.__origExec = orig; document.execCommand = () => false; return true; })()",
+        json!(true),
+    )
+    .await;
+    for (id, expected) in [
+        ("ro", "keep-me"),
+        ("ro_ta", "keep-ta"),
+        ("ro_cancel", "keep-cancel"),
+    ] {
+        assert_evaluate(
+            &mut state,
+            id,
+            &format!(
+                "(() => {{ const r = document.getElementById('{id}'); r.focus(); r.select(); return true; }})()"
+            ),
+            json!(true),
+        )
+        .await;
+        ws.send(Message::Text(
+            json!({ "type": "input_read_clipboard", "cut": true, "modifiers": 4 }).to_string(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(recv_clipboard(&mut ws).await, expected);
+        assert_evaluate(
+            &mut state,
+            &format!("{id}-after-cut"),
+            &format!("document.getElementById('{id}').value"),
+            json!(expected),
+        )
+        .await;
+    }
+    assert_evaluate(
+        &mut state,
+        "ro-restore-exec",
+        "(() => { if (window.__origExec) document.execCommand = window.__origExec; return true; })()",
+        json!(true),
+    )
+    .await;
+
+    ws.send(Message::Text(
+        json!({ "type": "input_insert_text", "text": "overwrite" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    assert_evaluate(
+        &mut state,
+        "ro-after-paste",
+        "document.getElementById('ro_cancel').value",
+        json!("keep-cancel"),
+    )
+    .await;
+
+    // 5. Literal insertText with WebDriver PUA code points (\u{E007} Enter, \u{E004} Tab)
+    // and newline inside a <form> input must not submit the form or shift focus.
+    assert_evaluate(
+        &mut state,
+        "form-in",
+        "(() => { window.__submitted = false; const i = document.getElementById('form_in'); i.focus(); i.value = ''; return true; })()",
+        json!(true),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({ "type": "input_insert_text", "text": "a\u{E007}\u{E004}\nb" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    let mut form_pasted = false;
+    while tokio::time::Instant::now() < deadline {
+        let r = execute_command(
+            &json!({ "id": "7f", "action": "evaluate", "script": "({ val: document.getElementById('form_in').value, submitted: !!window.__submitted, active: document.activeElement?.id })" }),
+            &mut state,
+        )
+        .await;
+        let res = &get_data(&r)["result"];
+        if res["val"].as_str().is_some_and(|v| !v.is_empty()) {
+            assert_eq!(res["submitted"], false, "paste must not submit the form");
+            assert_eq!(res["active"], "form_in", "paste must not move focus");
+            assert!(
+                res["val"].as_str().unwrap().contains("a\u{E007}\u{E004}"),
+                "expected literal text in form input, got {:?}",
+                res["val"]
+            );
+            form_pasted = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+    assert!(form_pasted, "literal paste into form input should complete");
+
+    // 6. Password inputs must never leak their value via input_read_clipboard.
+    assert_evaluate(
+        &mut state,
+        "pw",
+        "(() => { const p = document.getElementById('pw'); p.focus(); p.select(); return true; })()",
+        json!(true),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({ "type": "input_read_clipboard" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv_clipboard(&mut ws).await, "");
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "98", "action": "stream_disable" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+    page_server.abort();
+}
+
 /// Extract width and height from a JPEG's SOF0 (0xFFC0) or SOF2 (0xFFC2) marker.
 fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     for i in 0..data.len().saturating_sub(8) {

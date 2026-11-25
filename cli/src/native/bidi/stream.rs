@@ -310,6 +310,61 @@ async fn publish_frame(shot: &Shot, server: &StreamServer) {
     );
 }
 
+/// Inserts literal clipboard text at the focused editable element in Firefox
+/// without routing through WebDriver key actions (which interpret PUA code
+/// points like U+E007/U+E004 as Enter/Tab).
+const LITERAL_INSERT_TEXT_JS: &str = r#"function(text) {
+    let doc = document;
+    let el = doc.activeElement;
+    while (el) {
+        if (el.shadowRoot && el.shadowRoot.activeElement) {
+            el = el.shadowRoot.activeElement;
+            continue;
+        }
+        if (el.tagName === 'IFRAME') {
+            try {
+                if (el.contentDocument && el.contentDocument.activeElement) {
+                    doc = el.contentDocument;
+                    el = doc.activeElement;
+                    continue;
+                }
+            } catch {}
+        }
+        break;
+    }
+    if (!el) return;
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+        if (el.readOnly || el.disabled) return;
+        if (!doc.execCommand || !doc.execCommand('insertText', false, text)) {
+            const start = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+            const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : el.value.length;
+            if (typeof el.setRangeText === 'function') {
+                el.setRangeText(text, start, end, 'end');
+            } else {
+                el.value = el.value.slice(0, start) + text + el.value.slice(end);
+            }
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+        }
+        return;
+    }
+    if (el.isContentEditable && doc.execCommand) {
+        doc.execCommand('insertText', false, text);
+    }
+}"#;
+
+fn insert_text_call_params(context: &str, text: &str) -> Option<Value> {
+    if text.is_empty() || text.len() > 1_048_576 {
+        return None;
+    }
+    Some(json!({
+        "functionDeclaration": LITERAL_INSERT_TEXT_JS,
+        "target": { "context": context },
+        "arguments": [{ "type": "string", "value": text }],
+        "awaitPromise": false,
+        "userActivation": true,
+    }))
+}
+
 fn input_actions(msg_type: &str, msg: &Value, held: u8) -> Option<(Value, u8)> {
     let text = |field: &str| msg.get(field).and_then(Value::as_str).unwrap_or("");
     let number = |field: &str| msg.get(field).and_then(Value::as_f64).unwrap_or(0.0);
@@ -326,8 +381,19 @@ fn input_actions(msg_type: &str, msg: &Value, held: u8) -> Option<(Value, u8)> {
             number("deltaX"),
             number("deltaY"),
         )),
-        ("input_keyboard", "keyDown") => Some(input::key_event_actions("keyDown", text("key"))),
+        ("input_keyboard", "keyDown" | "rawKeyDown") => {
+            Some(input::key_event_actions("keyDown", text("key")))
+        }
         ("input_keyboard", "keyUp") => Some(input::key_event_actions("keyUp", text("key"))),
+        ("input_read_clipboard", _) if msg.get("cut").and_then(Value::as_bool) == Some(true) => {
+            let mut down = input::key_event_actions("keyDown", "x");
+            let up = input::key_event_actions("keyUp", "x");
+            down[0]["actions"]
+                .as_array_mut()
+                .unwrap()
+                .push(up[0]["actions"][0].clone());
+            Some(down)
+        }
         _ => None,
     }?;
     let modifiers = [(1, "Alt"), (2, "Control"), (4, "Meta"), (8, "Shift")];
@@ -336,11 +402,11 @@ fn input_actions(msg_type: &str, msg: &Value, held: u8) -> Option<(Value, u8)> {
         .and_then(Value::as_u64)
         .map(|mask| (mask & 15) as u8)
         .unwrap_or(held);
-    let keyboard = msg_type == "input_keyboard";
+    let keyboard = msg_type == "input_keyboard" || msg_type == "input_read_clipboard";
     let mut prefix = Vec::new();
     for (bit, key) in modifiers {
-        if keyboard && text("key") == key {
-            if text("eventType") == "keyDown" {
+        if msg_type == "input_keyboard" && text("key") == key {
+            if matches!(text("eventType"), "keyDown" | "rawKeyDown") {
                 desired |= bit;
             } else {
                 desired &= !bit;
@@ -375,6 +441,16 @@ fn input_actions(msg_type: &str, msg: &Value, held: u8) -> Option<(Value, u8)> {
 /// Sends dashboard input without waiting for a reply. Cached modifiers assume Firefox accepts successfully sent actions.
 pub async fn dispatch_input(live: &FirefoxLive, msg_type: &str, msg: &Value) {
     if live.context.is_empty() {
+        return;
+    }
+    if msg_type == "input_insert_text" {
+        if let Some(params) = msg
+            .get("text")
+            .and_then(Value::as_str)
+            .and_then(|s| insert_text_call_params(&live.context, s))
+        {
+            let _ = live.bidi.send_no_wait("script.callFunction", params).await;
+        }
         return;
     }
     let mut modifiers = live.modifiers.lock().await;
@@ -831,5 +907,86 @@ mod tests {
         assert_eq!(tabs.len(), 2, "{tabs:?}");
         assert!(tabs.iter().any(|tab| tab["targetId"] == json!("ctx-popup")));
         server.shutdown().await;
+    }
+
+    #[test]
+    fn firefox_input_actions_handle_raw_key_down_and_clipboard_messages() {
+        // Navigation keys emitted as rawKeyDown must translate to BiDi keyDown.
+        let (nav, held) = input_actions(
+            "input_keyboard",
+            &json!({ "eventType": "rawKeyDown", "key": "ArrowLeft", "modifiers": 0 }),
+            0,
+        )
+        .expect("rawKeyDown ArrowLeft should map to BiDi actions");
+        assert_eq!(held, 0);
+        assert_eq!(nav[0]["actions"][0]["type"], "keyDown");
+
+        // Modifier-only rawKeyDown updates held modifier mask.
+        let (_, held_ctrl) = input_actions(
+            "input_keyboard",
+            &json!({ "eventType": "rawKeyDown", "key": "Control", "modifiers": 2 }),
+            0,
+        )
+        .expect("rawKeyDown Control should map to BiDi actions");
+        assert_eq!(held_ctrl, 2);
+
+        // Shortcut rawKeyDown (Ctrl+C) presses modifier prefix when not already held.
+        let (copy, held_copy) = input_actions(
+            "input_keyboard",
+            &json!({ "eventType": "rawKeyDown", "key": "c", "modifiers": 2 }),
+            0,
+        )
+        .expect("rawKeyDown Ctrl+C should map to BiDi actions");
+        assert_eq!(held_copy, 2);
+        assert_eq!(copy[0]["actions"].as_array().unwrap().len(), 2);
+
+        // input_insert_text must never be translated to WebDriver key actions
+        // (which treat PUA code points such as U+E007/U+E004 as Enter/Tab).
+        assert!(input_actions("input_insert_text", &json!({ "text": "hi" }), 0).is_none());
+        assert!(input_actions(
+            "input_insert_text",
+            &json!({ "text": "\u{E007}\u{E004}\n" }),
+            0
+        )
+        .is_none());
+        let params = insert_text_call_params("ctx-1", "a\u{E007}\u{E004}\nb")
+            .expect("insert_text_call_params should accept literal PUA and newline text");
+        assert_eq!(params["target"]["context"], "ctx-1");
+        assert_eq!(params["arguments"][0]["type"], "string");
+        assert_eq!(params["arguments"][0]["value"], "a\u{E007}\u{E004}\nb");
+        assert!(insert_text_call_params("ctx-1", "").is_none());
+
+        // input_read_clipboard with cut: true dispatches the cut keystroke in Firefox.
+        let (cut, held_cut) = input_actions(
+            "input_read_clipboard",
+            &json!({ "cut": true, "modifiers": 2 }),
+            0,
+        )
+        .expect("cut should map to BiDi actions");
+        assert_eq!(held_cut, 2);
+        assert!(cut[0]["actions"].as_array().unwrap().len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn firefox_dispatch_insert_text_uses_script_call_function_without_key_actions() {
+        let (ff, events, calls) = fake_session().await;
+        std::mem::forget(events);
+        let live = FirefoxLive {
+            bidi: ff.bidi,
+            context: "ctx-form".to_string(),
+            contexts: ff.contexts,
+            modifiers: Default::default(),
+        };
+        dispatch_input(
+            &live,
+            "input_insert_text",
+            &json!({ "text": "hello\u{E007}\u{E004}\nworld" }),
+        )
+        .await;
+        assert_eq!(
+            wait_for(&calls, "script.callFunction", 1, Duration::from_secs(2)).await,
+            1
+        );
+        assert_eq!(asked(&calls, "input.performActions"), 0);
     }
 }
