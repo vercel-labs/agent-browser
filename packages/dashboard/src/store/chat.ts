@@ -6,13 +6,14 @@ import { useAtomCallback } from "jotai/utils";
 import { useCallback } from "react";
 import { Chat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
+import { getDashboardApiPath } from "@/lib/dashboard-routes";
 
 function getChatStatusUrl(): string {
-  return "/api/chat/status";
+  return getDashboardApiPath("/api/chat/status");
 }
 
 export function getChatApiUrl(): string {
-  return "/api/chat";
+  return getDashboardApiPath("/api/chat");
 }
 
 export const CHAT_STORAGE_PREFIX = "dashboard-chat-";
@@ -81,7 +82,7 @@ export function disposeChat(session: string) {
 }
 
 export function getModelsApiUrl(): string {
-  return "/api/models";
+  return getDashboardApiPath("/api/models");
 }
 
 export interface ModelInfo {
