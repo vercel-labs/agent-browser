@@ -756,11 +756,8 @@ const FPS_MODE_MIN_VERSION: (u32, u32) = (5, 1);
 /// Returns `None` for builds without a release number, such as
 /// `ffmpeg version N-112345-g1234abcd`.
 fn parse_ffmpeg_version(version_output: &str) -> Option<(u32, u32)> {
-    let rest = version_output
-        .lines()
-        .next()?
-        .trim()
-        .strip_prefix("ffmpeg version ")?;
+    let banner = crate::doctor::ffmpeg::parse_version(version_output)?;
+    let rest = banner.strip_prefix("ffmpeg version ")?;
     let rest = rest.strip_prefix('n').unwrap_or(rest);
     let mut numbers = rest.split(|c: char| !c.is_ascii_digit());
     let major = numbers.next()?.parse().ok()?;
@@ -2098,7 +2095,7 @@ async fn finish_ffmpeg_after_write_error(
             let stderr = String::from_utf8_lossy(&output.stderr);
             let tail = ffmpeg_error_tail(&stderr);
             if tail.is_empty() {
-                write_error
+                format!("{write_error} (ffmpeg {})", output.status)
             } else {
                 format!("ffmpeg failed: {}", tail)
             }
@@ -3654,6 +3651,42 @@ mod tests {
             "expected ffmpeg stderr tail, got: {err}"
         );
         assert!(!err.contains("Broken pipe"), "got: {err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silent_ffmpeg_exit_includes_exit_status() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "kill -KILL $$"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let (tx, rx) = watch::channel(None);
+        let encoder = tokio::spawn(encode_stream_with_command(
+            cmd,
+            30,
+            false,
+            Arc::new(Mutex::new(RecordingCursorHistory::default())),
+            rx,
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tx.send(Some(CapturedVideoFrame {
+            sequence: 0,
+            image_data: Arc::new(vec![b'x'; 256 * 1024]),
+            elapsed: Duration::ZERO,
+            captured_at: tokio::time::Instant::now(),
+            timestamp: cursor_timestamp(),
+            device_width: 64.0,
+            device_height: 64.0,
+        }))
+        .unwrap();
+        drop(tx);
+        let err = encoder.await.unwrap().unwrap_err();
+        assert!(
+            err.contains("ffmpeg write failed:") && err.contains("(ffmpeg ") && err.contains("9"),
+            "expected write error with SIGKILL status, got: {err}"
+        );
     }
 
     #[test]
