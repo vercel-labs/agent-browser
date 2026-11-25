@@ -29965,7 +29965,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             vec![("oopif-f2".to_string(), "oopif-s2".to_string())]
         );
         assert_eq!(state.tracked_requests.len(), 1);
-        assert_eq!(state.tracked_requests[0].url, "https://example.com/api");
+        assert_eq!(
+            state.tracked_requests.entries()[0].url,
+            "https://example.com/api"
+        );
         assert_eq!(
             state.frame_contexts.get(&("s1".into(), "f-same".into())),
             Some(&55)
