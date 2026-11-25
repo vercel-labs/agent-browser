@@ -12,7 +12,7 @@ import { spawn, execSync } from 'child_process';
 import { existsSync, accessSync, chmodSync, constants } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { platform, arch } from 'os';
+import { platform, arch, constants as osConstants } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -125,6 +125,8 @@ function main() {
   child.on('close', (code, signal) => {
     // Preserve a native crash or termination for shells, CI, and MCP hosts.
     if (signal) {
+      // A signal Node ignores (such as SIGPIPE) still needs a failure status.
+      process.exitCode = 128 + (osConstants.signals[signal] ?? 0);
       process.kill(process.pid, signal);
       return;
     }

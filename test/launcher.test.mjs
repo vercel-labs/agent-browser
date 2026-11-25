@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { constants, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -143,5 +143,20 @@ test('launcher preserves a native child failure exit code', async (t) => {
   });
 
   assert.equal(result.status, 7, result.stderr);
+  assert.equal(result.signal, null);
+});
+
+test('launcher returns a failure status when Node ignores re-emitted SIGPIPE', async (t) => {
+  const result = await runLauncher(t, {
+    platform: 'darwin',
+    arch: 'arm64',
+    binaries: [{
+      name: 'agent-browser-darwin-arm64',
+      script: '#!/bin/sh\nkill -s PIPE $$\n',
+    }],
+    args: ['mcp'],
+  });
+
+  assert.equal(result.status, 128 + constants.signals.SIGPIPE, result.stderr);
   assert.equal(result.signal, null);
 });
