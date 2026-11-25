@@ -1071,7 +1071,11 @@ pub(crate) const CURSOR_DETECTION_JS: &str = r#"
             if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
         }
 
-        var text = (el.textContent || '').trim().slice(0, 100);
+        // A control's accessible name is short. When an element's text overflows the cap it is a
+        // container's concatenated descendant text, not a name, and truncating it yields a label that
+        // matches a search for every control nested inside it. Prefer no name over a misleading one.
+        var rawText = (el.textContent || '').trim();
+        var text = rawText.length > 100 ? '' : rawText;
 
         var rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
