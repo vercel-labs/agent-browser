@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{AttachToTargetParams, AttachToTargetResult};
@@ -51,8 +51,9 @@ const HIGH_FPS_ENCODER_THREADS: &str = "4";
 /// VP8 budget chosen for readable UI text and thin drawing strokes.
 const WEBM_BITRATE_KBPS: u32 = 8000;
 
-/// Captured frames may wait briefly for compositing, but overload must fail
-/// the recording instead of silently degrading it into held frames.
+/// The encoder keeps only the newest captured frame, so a busy host that stalls
+/// ffmpeg holds the last image instead of losing the take. Frames written more
+/// than `MAX_ENCODER_LAG` after their slot are reported as `lateFrames`.
 const ENCODER_FRAME_BUFFER: usize = 16;
 const MAX_ENCODER_LAG: Duration = Duration::from_millis(500);
 const ENCODER_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -524,10 +525,13 @@ pub struct RecordingState {
     pub frame_count: u64,
     /// Frames received from the screencast.
     pub captured_count: u64,
+    /// Frames written more than `MAX_ENCODER_LAG` after their slot, holding an earlier image.
+    pub late_frame_count: u64,
     pub contact_sheet_frame_count: u64,
     pub capture_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
     pub shared_frame_count: Option<Arc<AtomicU64>>,
     pub shared_captured_count: Option<Arc<AtomicU64>>,
+    pub shared_late_frame_count: Option<Arc<AtomicU64>>,
     pub shared_contact_sheet_count: Option<Arc<AtomicU64>>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
     /// Shared with the daemon's event handlers.
@@ -558,10 +562,12 @@ impl RecordingState {
             fps: DEFAULT_FPS,
             frame_count: 0,
             captured_count: 0,
+            late_frame_count: 0,
             contact_sheet_frame_count: 0,
             capture_task: None,
             shared_frame_count: None,
             shared_captured_count: None,
+            shared_late_frame_count: None,
             shared_contact_sheet_count: None,
             cancel_tx: None,
             capture_session: Arc::new(Mutex::new(None)),
@@ -653,6 +659,7 @@ pub fn recording_start(
     state.fps = fps;
     state.frame_count = 0;
     state.captured_count = 0;
+    state.late_frame_count = 0;
     state.contact_sheet_frame_count = 0;
     state.device_scale = 1.0;
     state.screenshot_capture = false;
@@ -696,6 +703,7 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
         "path": &state.output_path,
         "frames": state.frame_count,
         "capturedFrames": state.captured_count,
+        "lateFrames": state.late_frame_count,
         "fps": state.fps,
     });
     if let Some(ref path) = state.contact_sheet_path {
@@ -739,7 +747,58 @@ fn ffmpeg_command() -> tokio::process::Command {
     cmd
 }
 
-fn build_ffmpeg_command(output_path: &str, fps: u32, cursor: bool) -> tokio::process::Command {
+/// ffmpeg release that added `-fps_mode`. Older builds, such as 4.4 on
+/// Ubuntu 22.04, reject it while parsing arguments and only know `-vsync`.
+const FPS_MODE_MIN_VERSION: (u32, u32) = (5, 1);
+
+/// `(major, minor)` from the first line of `ffmpeg -version`, for example
+/// `ffmpeg version 4.4.2-0ubuntu0.22.04.1` or `ffmpeg version n5.0.1`.
+/// Returns `None` for builds without a release number, such as
+/// `ffmpeg version N-112345-g1234abcd`.
+fn parse_ffmpeg_version(version_output: &str) -> Option<(u32, u32)> {
+    let rest = version_output
+        .lines()
+        .next()?
+        .trim()
+        .strip_prefix("ffmpeg version ")?;
+    let rest = rest.strip_prefix('n').unwrap_or(rest);
+    let mut numbers = rest.split(|c: char| !c.is_ascii_digit());
+    let major = numbers.next()?.parse().ok()?;
+    let minor = numbers.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    Some((major, minor))
+}
+
+/// Option that keeps frames at their capture timestamps (variable frame
+/// rate). Builds whose version cannot be read get `-fps_mode`, the option
+/// current ffmpeg expects.
+fn vfr_option(version_output: Option<&str>) -> &'static str {
+    match version_output.and_then(parse_ffmpeg_version) {
+        Some(version) if version < FPS_MODE_MIN_VERSION => "-vsync",
+        _ => "-fps_mode",
+    }
+}
+
+/// Stdout of `ffmpeg -version`, or `None` when it cannot be read.
+async fn ffmpeg_version_output() -> Option<String> {
+    let output = ffmpeg_command()
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn build_ffmpeg_command(
+    output_path: &str,
+    fps: u32,
+    cursor: bool,
+    vfr_option: &str,
+) -> tokio::process::Command {
     let mut cmd = ffmpeg_command();
     let high_fps = fps > HIGH_FPS_THRESHOLD;
 
@@ -765,7 +824,7 @@ fn build_ffmpeg_command(output_path: &str, fps: u32, cursor: bool) -> tokio::pro
             "pipe:0",
         ])
         .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
-        .args(["-fps_mode", "vfr"]);
+        .args([vfr_option, "vfr"]);
 
     if output_extension(output_path).as_deref() == Some("webm") {
         cmd.args(["-c:v", "libvpx", "-crf", "18"])
@@ -1442,13 +1501,12 @@ struct CapturedVideoFrame {
 }
 
 async fn seed_recording_outputs(
-    frame_tx: &mpsc::Sender<CapturedVideoFrame>,
+    frame_tx: &watch::Sender<Option<CapturedVideoFrame>>,
     contact_tx: Option<&std::sync::mpsc::SyncSender<CapturedVideoFrame>>,
     frame: CapturedVideoFrame,
 ) -> Result<(), String> {
     frame_tx
-        .send(frame.clone())
-        .await
+        .send(Some(frame.clone()))
         .map_err(|_| "Recording encoder stopped unexpectedly".to_string())?;
     if let Some(contact_tx) = contact_tx {
         contact_tx.try_send(frame).map_err(|error| match error {
@@ -1485,6 +1543,7 @@ pub fn spawn_recording_task(
     fps: u32,
     shared_count: Arc<AtomicU64>,
     shared_captured: Arc<AtomicU64>,
+    shared_late: Arc<AtomicU64>,
     cursor: bool,
     shared_cursor: SharedRecordingCursor,
     cursor_overlays: SharedCursorOverlays,
@@ -1513,7 +1572,7 @@ pub fn spawn_recording_task(
             height: initial_frame.device_height,
             scale: initial_frame.device_scale,
         };
-        let (frame_tx, frame_rx) = mpsc::channel(ENCODER_FRAME_BUFFER);
+        let (frame_tx, frame_rx) = watch::channel(None);
         let (contact_tx, mut contact_worker) = if let Some(path) = contact_sheet_path.as_ref() {
             let (tx, rx) = std::sync::mpsc::sync_channel(ENCODER_FRAME_BUFFER);
             let contact_cursor = shared_cursor.clone();
@@ -1660,10 +1719,11 @@ pub fn spawn_recording_task(
             }
             return Err(error);
         }
-        let streamed = encoder
+        let encoded = encoder
             .await
             .map_err(|e| format!("Recording encoder task failed: {}", e))??;
-        shared_count.store(streamed, Ordering::Relaxed);
+        shared_count.store(encoded.frames, Ordering::Relaxed);
+        shared_late.store(encoded.late_frames, Ordering::Relaxed);
         let contact_sheet_count = match contact_worker {
             Some(worker) => worker
                 .await
@@ -1742,7 +1802,7 @@ struct PageSize {
 /// Where captured frames go: the encoder, the contact sheet, and the counters
 /// `record stop` reports.
 struct FrameOutputs<'a> {
-    frames: &'a mpsc::Sender<CapturedVideoFrame>,
+    frames: &'a watch::Sender<Option<CapturedVideoFrame>>,
     contact: Option<&'a std::sync::mpsc::SyncSender<CapturedVideoFrame>>,
     captured: &'a AtomicU64,
 }
@@ -1751,16 +1811,8 @@ impl FrameOutputs<'_> {
     fn send(&self, frame: CapturedVideoFrame) -> Result<(), String> {
         self.captured.fetch_add(1, Ordering::Relaxed);
         self.frames
-            .try_send(frame.clone())
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => format!(
-                    "Recording encoder fell behind by more than {} buffered frames",
-                    ENCODER_FRAME_BUFFER
-                ),
-                mpsc::error::TrySendError::Closed(_) => {
-                    "Recording encoder stopped unexpectedly".to_string()
-                }
-            })?;
+            .send(Some(frame.clone()))
+            .map_err(|_| "Recording encoder stopped unexpectedly".to_string())?;
         if let Some(contact) = self.contact {
             contact.try_send(frame).map_err(|error| match error {
                 std::sync::mpsc::TrySendError::Full(_) => format!(
@@ -2035,14 +2087,51 @@ fn render_cursor_frame(
     Ok(bytes)
 }
 
+async fn finish_ffmpeg_after_write_error(
+    ffmpeg: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    write_error: String,
+) -> String {
+    drop(stdin);
+    match tokio::time::timeout(TEARDOWN_TIMEOUT, ffmpeg.wait_with_output()).await {
+        Ok(Ok(output)) if !output.status.success() => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail = ffmpeg_error_tail(&stderr);
+            if tail.is_empty() {
+                write_error
+            } else {
+                format!("ffmpeg failed: {}", tail)
+            }
+        }
+        _ => write_error,
+    }
+}
+
+#[derive(Debug)]
+struct EncodedVideo {
+    frames: u64,
+    late_frames: u64,
+}
+
 async fn encode_stream(
     output_path: String,
     fps: u32,
     cursor: bool,
     shared_cursor: SharedRecordingCursor,
-    mut frames: mpsc::Receiver<CapturedVideoFrame>,
-) -> Result<u64, String> {
-    let mut command = build_ffmpeg_command(&output_path, fps, cursor);
+    frames: watch::Receiver<Option<CapturedVideoFrame>>,
+) -> Result<EncodedVideo, String> {
+    let vfr_option = vfr_option(ffmpeg_version_output().await.as_deref());
+    let command = build_ffmpeg_command(&output_path, fps, cursor, vfr_option);
+    encode_stream_with_command(command, fps, cursor, shared_cursor, frames).await
+}
+
+async fn encode_stream_with_command(
+    mut command: tokio::process::Command,
+    fps: u32,
+    cursor: bool,
+    shared_cursor: SharedRecordingCursor,
+    mut frames: watch::Receiver<Option<CapturedVideoFrame>>,
+) -> Result<EncodedVideo, String> {
     let mut ffmpeg = spawn_ffmpeg_command(&mut command)?;
     let mut stdin = ffmpeg
         .stdin
@@ -2054,37 +2143,47 @@ async fn encode_stream(
     let mut latest: Option<CapturedVideoFrame> = None;
     let mut decoded = None;
     let mut written = 0u64;
+    let mut late = 0u64;
 
     loop {
         tokio::select! {
-            frame = frames.recv() => {
-                let Some(frame) = frame else { break };
-                if frame.captured_at.elapsed() > MAX_ENCODER_LAG {
-                    return Err("Recording encoder fell more than 500 ms behind capture".to_string());
+            changed = frames.changed() => {
+                if changed.is_err() {
+                    if let Some(frame) = frames.borrow_and_update().clone() {
+                        if latest.is_none() {
+                            interval.reset_at(frame.captured_at);
+                        }
+                        latest = Some(frame);
+                    }
+                    break;
                 }
+                let Some(frame) = frames.borrow_and_update().clone() else { continue };
                 if latest.is_none() {
                     interval.reset_at(frame.captured_at);
                 }
                 latest = Some(frame);
             }
             tick = interval.tick() => {
-                if tick.elapsed() > MAX_ENCODER_LAG && latest.is_some() {
-                    return Err("Recording encoder fell more than 500 ms behind capture".to_string());
-                }
                 let Some(frame) = latest.as_ref() else { continue };
                 let output_timestamp = cursor_timestamp();
                 let history = shared_cursor
                     .lock()
                     .map(|history| history.clone())
                     .unwrap_or_default();
-                if cursor {
+                let write_result = if cursor {
                     let bytes =
                         render_cursor_frame(frame, &history, output_timestamp, &mut decoded)?;
-                    write_encoder_bytes(&mut stdin, &bytes).await?;
+                    write_encoder_bytes(&mut stdin, &bytes).await
                 } else {
-                    write_encoder_bytes(&mut stdin, &frame.image_data).await?;
+                    write_encoder_bytes(&mut stdin, &frame.image_data).await
+                };
+                if let Err(error) = write_result {
+                    return Err(finish_ffmpeg_after_write_error(ffmpeg, stdin, error).await);
                 }
                 written += 1;
+                if tick.elapsed() > MAX_ENCODER_LAG {
+                    late += 1;
+                }
             }
         }
     }
@@ -2103,7 +2202,9 @@ async fn encode_stream(
         frame.image_data.as_ref().clone()
     };
     // Include the final image even when the take stops before its first tick.
-    write_encoder_bytes(&mut stdin, &final_image).await?;
+    if let Err(error) = write_encoder_bytes(&mut stdin, &final_image).await {
+        return Err(finish_ffmpeg_after_write_error(ffmpeg, stdin, error).await);
+    }
     written += 1;
     drop(stdin);
 
@@ -2115,7 +2216,10 @@ async fn encode_stream(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ffmpeg failed: {}", ffmpeg_error_tail(&stderr)));
     }
-    Ok(written)
+    Ok(EncodedVideo {
+        frames: written,
+        late_frames: late,
+    })
 }
 
 fn scale_cursor_dimensions(
@@ -2185,6 +2289,7 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
 
     let counter = state.shared_frame_count.take();
     let captured = state.shared_captured_count.take();
+    let late = state.shared_late_frame_count.take();
     let contact_sheet = state.shared_contact_sheet_count.take();
     let screenshot_capture = state.shared_screenshot_capture.take();
     let handle = state.capture_task.take();
@@ -2204,6 +2309,9 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
     }
     if let Some(c) = captured {
         state.captured_count = c.load(Ordering::Relaxed);
+    }
+    if let Some(c) = late {
+        state.late_frame_count = c.load(Ordering::Relaxed);
     }
     if let Some(c) = contact_sheet {
         state.contact_sheet_frame_count = c.load(Ordering::Relaxed);
@@ -2515,7 +2623,7 @@ mod tests {
         let mut png = std::io::Cursor::new(Vec::new());
         image.write_to(&mut png, image::ImageFormat::Png).unwrap();
         let image_data = Arc::new(png.into_inner());
-        let (frame_tx, mut frame_rx) = mpsc::channel(1);
+        let (frame_tx, mut frame_rx) = watch::channel(None);
         let (contact_tx, contact_rx) = std::sync::mpsc::sync_channel(1);
 
         seed_recording_outputs(
@@ -2534,7 +2642,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(frame_rx.recv().await.unwrap().image_data, image_data);
+        frame_rx.changed().await.unwrap();
+        assert_eq!(
+            frame_rx.borrow_and_update().as_ref().unwrap().image_data,
+            image_data
+        );
         drop(contact_tx);
         let cursor = Arc::new(Mutex::new(RecordingCursorHistory::default()));
         let frames =
@@ -2560,7 +2672,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join(format!("sparse.{extension}"));
-            let (tx, rx) = mpsc::channel(4);
+            let (tx, rx) = watch::channel(None);
             let encoder = tokio::spawn(encode_stream(
                 path.to_string_lossy().into_owned(),
                 30,
@@ -2572,7 +2684,7 @@ mod tests {
                 let image = image::RgbImage::from_pixel(64, 64, image::Rgb(color));
                 let mut png = std::io::Cursor::new(Vec::new());
                 image.write_to(&mut png, image::ImageFormat::Png).unwrap();
-                tx.send(CapturedVideoFrame {
+                tx.send(Some(CapturedVideoFrame {
                     sequence: sequence as u64,
                     image_data: Arc::new(png.into_inner()),
                     elapsed: Duration::ZERO,
@@ -2580,13 +2692,12 @@ mod tests {
                     timestamp: cursor_timestamp(),
                     device_width: 64.0,
                     device_height: 64.0,
-                })
-                .await
+                }))
                 .unwrap();
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
             drop(tx);
-            let count = encoder.await.unwrap().unwrap();
+            let count = encoder.await.unwrap().unwrap().frames;
             assert!(count >= 24, "expected repeated frames, got {count}");
             let probe = std::process::Command::new("ffprobe")
                 .args([
@@ -2677,7 +2788,7 @@ mod tests {
                 }
             }
         }
-        let cmd = build_ffmpeg_command("/tmp/out.webm", 30, true);
+        let cmd = build_ffmpeg_command("/tmp/out.webm", 30, true, "-fps_mode");
         assert!(cmd.as_std().get_args().any(|arg| arg == "ppm"));
     }
 
@@ -3117,7 +3228,7 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_matches_extension_case_insensitively() {
-        let cmd = build_ffmpeg_command("/tmp/OUT.WEBM", DEFAULT_FPS, false);
+        let cmd = build_ffmpeg_command("/tmp/OUT.WEBM", DEFAULT_FPS, false, "-fps_mode");
         let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
         let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
         assert!(args_str.contains(&"libvpx"));
@@ -3126,9 +3237,67 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_hides_banner() {
-        let cmd = build_ffmpeg_command("/tmp/out.webm", DEFAULT_FPS, false);
+        let cmd = build_ffmpeg_command("/tmp/out.webm", DEFAULT_FPS, false, "-fps_mode");
         let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
         assert!(args.contains(&std::ffi::OsStr::new("-hide_banner")));
+    }
+
+    #[test]
+    fn test_parse_ffmpeg_version_reads_release_numbers() {
+        let cases = [
+            (
+                "ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright (c) 2000-2021",
+                Some((4, 4)),
+            ),
+            (
+                "ffmpeg version n5.0.1 Copyright (c) 2000-2022",
+                Some((5, 0)),
+            ),
+            ("ffmpeg version 5.1.2 Copyright (c) 2000-2022", Some((5, 1))),
+            (
+                "ffmpeg version 8.1.1-full_build-www.gyan.dev Copyright",
+                Some((8, 1)),
+            ),
+            ("ffmpeg version 7 Copyright", Some((7, 0))),
+            ("ffmpeg version N-112345-g1234abcd Copyright", None),
+            ("not ffmpeg output", None),
+            ("", None),
+        ];
+        for (output, expected) in cases {
+            assert_eq!(parse_ffmpeg_version(output), expected, "{:?}", output);
+        }
+    }
+
+    #[test]
+    fn test_vfr_option_uses_vsync_before_ffmpeg_5_1() {
+        assert_eq!(
+            vfr_option(Some("ffmpeg version 4.4.2-0ubuntu0.22.04.1")),
+            "-vsync"
+        );
+        assert_eq!(vfr_option(Some("ffmpeg version n5.0.1")), "-vsync");
+        assert_eq!(vfr_option(Some("ffmpeg version 5.1")), "-fps_mode");
+        assert_eq!(
+            vfr_option(Some("ffmpeg version 8.1.1-full_build")),
+            "-fps_mode"
+        );
+        assert_eq!(
+            vfr_option(Some("ffmpeg version N-112345-g1234abcd")),
+            "-fps_mode"
+        );
+        assert_eq!(vfr_option(None), "-fps_mode");
+    }
+
+    #[test]
+    fn test_build_ffmpeg_command_passes_vfr_option() {
+        for option in ["-vsync", "-fps_mode"] {
+            let cmd = build_ffmpeg_command("/tmp/out.webm", DEFAULT_FPS, false, option);
+            let args: Vec<&str> = cmd.as_std().get_args().filter_map(|a| a.to_str()).collect();
+            let at = args
+                .iter()
+                .position(|a| *a == option)
+                .expect("vfr option present");
+            assert_eq!(args.get(at + 1), Some(&"vfr"));
+        }
     }
 
     #[test]
@@ -3322,7 +3491,7 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_webm() {
-        let cmd = build_ffmpeg_command("/tmp/out.webm", DEFAULT_FPS, false);
+        let cmd = build_ffmpeg_command("/tmp/out.webm", DEFAULT_FPS, false, "-fps_mode");
         let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
         let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
         assert!(args_str.contains(&"libvpx"));
@@ -3337,7 +3506,7 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_mp4() {
-        let cmd = build_ffmpeg_command("/tmp/out.mp4", DEFAULT_FPS, false);
+        let cmd = build_ffmpeg_command("/tmp/out.mp4", DEFAULT_FPS, false, "-fps_mode");
         let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
         let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
         assert!(args_str.contains(&"libx264"));
@@ -3346,7 +3515,7 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_passes_framerate() {
-        let cmd = build_ffmpeg_command("/tmp/out.webm", 60, false);
+        let cmd = build_ffmpeg_command("/tmp/out.webm", 60, false, "-fps_mode");
         let args: Vec<String> = cmd
             .as_std()
             .get_args()
@@ -3366,7 +3535,7 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_single_thread_at_default_fps() {
-        let cmd = build_ffmpeg_command("/tmp/out.mp4", DEFAULT_FPS, false);
+        let cmd = build_ffmpeg_command("/tmp/out.mp4", DEFAULT_FPS, false, "-fps_mode");
         let args: Vec<String> = cmd
             .as_std()
             .get_args()
@@ -3378,5 +3547,125 @@ mod tests {
             .and_then(|i| args.get(i + 1))
             .map(String::as_str);
         assert_eq!(threads, Some("1"));
+    }
+
+    #[tokio::test]
+    async fn busy_encoder_holds_latest_frame_instead_of_failing() {
+        let (frame_tx, frame_rx) = watch::channel(None);
+        let captured = AtomicU64::new(0);
+        let outputs = FrameOutputs {
+            frames: &frame_tx,
+            contact: None,
+            captured: &captured,
+        };
+        let stalled = tokio::time::Instant::now() - Duration::from_secs(1);
+        for sequence in 0..20 {
+            outputs
+                .send(CapturedVideoFrame {
+                    sequence,
+                    image_data: Arc::new(Vec::new()),
+                    elapsed: Duration::ZERO,
+                    captured_at: stalled,
+                    timestamp: cursor_timestamp(),
+                    device_width: 64.0,
+                    device_height: 64.0,
+                })
+                .expect("busy encoder must not fail the recording");
+        }
+        assert_eq!(frame_rx.borrow().as_ref().unwrap().sequence, 19);
+        assert_eq!(captured.load(Ordering::Relaxed), 20);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_encoder_keeps_take_and_reports_late_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stalled.webm");
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "cat > \"$1\"", "sh", path.to_str().unwrap()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let (tx, rx) = watch::channel(None);
+        let encoder = tokio::spawn(encode_stream_with_command(
+            cmd,
+            10,
+            false,
+            Arc::new(Mutex::new(RecordingCursorHistory::default())),
+            rx,
+        ));
+        tx.send(Some(CapturedVideoFrame {
+            sequence: 0,
+            image_data: Arc::new(b"\x89PNG".repeat(32)),
+            elapsed: Duration::ZERO,
+            captured_at: tokio::time::Instant::now() - Duration::from_secs(1),
+            timestamp: cursor_timestamp(),
+            device_width: 64.0,
+            device_height: 64.0,
+        }))
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        drop(tx);
+        let encoded = encoder
+            .await
+            .unwrap()
+            .expect("a stall must not lose the take");
+        assert!(encoded.frames >= 10, "frames {}", encoded.frames);
+        assert!(encoded.late_frames >= 4, "late {}", encoded.late_frames);
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn early_ffmpeg_exit_surfaces_stderr_tail() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf \"Unrecognized option 'fps_mode'.\\nError splitting the argument list: Option not found\\n\" >&2; exit 1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+        let (tx, rx) = watch::channel(None);
+        let encoder = tokio::spawn(encode_stream_with_command(
+            cmd,
+            30,
+            false,
+            Arc::new(Mutex::new(RecordingCursorHistory::default())),
+            rx,
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tx.send(Some(CapturedVideoFrame {
+            sequence: 0,
+            image_data: Arc::new(vec![b'x'; 256 * 1024]),
+            elapsed: Duration::ZERO,
+            captured_at: tokio::time::Instant::now(),
+            timestamp: cursor_timestamp(),
+            device_width: 64.0,
+            device_height: 64.0,
+        }))
+        .unwrap();
+        drop(tx);
+        let err = encoder.await.unwrap().unwrap_err();
+        assert!(
+            err.contains("ffmpeg failed:") && err.contains("Unrecognized option 'fps_mode'"),
+            "expected ffmpeg stderr tail, got: {err}"
+        );
+        assert!(!err.contains("Broken pipe"), "got: {err}");
+    }
+
+    #[test]
+    fn test_recording_stop_reports_late_frames() {
+        let mut state = RecordingState::new();
+        recording_start(&mut state, "take.webm", RecordingOptions::default()).unwrap();
+        state.frame_count = 30;
+        state.captured_count = 12;
+        state.late_frame_count = 5;
+        let result = recording_stop(&mut state).unwrap();
+        assert_eq!(result["frames"], json!(30));
+        assert_eq!(result["capturedFrames"], json!(12));
+        assert_eq!(result["lateFrames"], json!(5));
     }
 }

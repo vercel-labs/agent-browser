@@ -89,7 +89,7 @@ agent-browser record stop
 agent-browser record start ./soak.webm --fps 5
 ```
 
-The video uses the requested frame rate and holds the latest Chrome frame between repaints. `record stop --json` reports `frames` (written) and `capturedFrames` (distinct frames from Chrome).
+The video uses the requested frame rate and holds the latest Chrome frame between repaints. `record stop --json` reports `frames` (written), `capturedFrames` (distinct frames from Chrome), and `lateFrames`. When a busy machine stalls the encoder, the video holds the last image through the stall instead of failing the take, and `lateFrames` counts the frames written more than 500 ms after their slot.
 
 ## Visible Cursor
 
