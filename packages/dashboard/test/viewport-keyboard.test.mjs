@@ -93,3 +93,33 @@ test("input queue holds subsequent Tab and mouse events behind an async paste re
     ],
   );
 });
+
+test("input queue reset discards an in-flight paste and queued events on session or tab switch", async () => {
+  const sent = [];
+  const queue = createInputQueue((msg) => sent.push(msg));
+
+  let resolveClipboard;
+  const clipboardPromise = new Promise((resolve) => {
+    resolveClipboard = resolve;
+  });
+
+  const pasteDone = queue.enqueueAsync(async () => {
+    const text = await clipboardPromise;
+    return { type: "input_insert_text", text };
+  });
+  queue.enqueue({ type: "input_keyboard", eventType: "rawKeyDown", key: "Tab" });
+
+  // Simulate switching active session/tab or reconnecting the socket while readText() is pending.
+  queue.reset();
+
+  resolveClipboard("STALE_CLIPBOARD");
+  await pasteDone;
+  await Promise.resolve();
+
+  assert.equal(sent.length, 0, "stale paste and queued input must not reach the new session");
+
+  // Subsequent input on the new session flows immediately.
+  queue.enqueue({ type: "input_keyboard", eventType: "keyDown", key: "a", text: "a" });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].key, "a");
+});

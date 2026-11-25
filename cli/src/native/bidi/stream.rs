@@ -317,6 +317,15 @@ fn input_actions(msg_type: &str, msg: &Value, held: u8) -> Option<(Value, u8)> {
         x: number("x"),
         y: number("y"),
     };
+    if msg_type == "input_insert_text" {
+        let s = msg.get("text").and_then(Value::as_str)?;
+        if s.is_empty() || s.len() > 1_048_576 {
+            return None;
+        }
+        let mut actions = input::key_text_actions(s);
+        actions[0]["id"] = json!("dashboard-key");
+        return Some((actions, held));
+    }
     let mut actions = match (msg_type, text("eventType")) {
         ("input_mouse", "mouseMoved") => Some(input::pointer_hover(&origin)),
         ("input_mouse", "mousePressed") => Some(input::pointer_down(&origin, text("button"))),
@@ -326,8 +335,19 @@ fn input_actions(msg_type: &str, msg: &Value, held: u8) -> Option<(Value, u8)> {
             number("deltaX"),
             number("deltaY"),
         )),
-        ("input_keyboard", "keyDown") => Some(input::key_event_actions("keyDown", text("key"))),
+        ("input_keyboard", "keyDown" | "rawKeyDown") => {
+            Some(input::key_event_actions("keyDown", text("key")))
+        }
         ("input_keyboard", "keyUp") => Some(input::key_event_actions("keyUp", text("key"))),
+        ("input_read_clipboard", _) if msg.get("cut").and_then(Value::as_bool) == Some(true) => {
+            let mut down = input::key_event_actions("keyDown", "x");
+            let up = input::key_event_actions("keyUp", "x");
+            down[0]["actions"]
+                .as_array_mut()
+                .unwrap()
+                .push(up[0]["actions"][0].clone());
+            Some(down)
+        }
         _ => None,
     }?;
     let modifiers = [(1, "Alt"), (2, "Control"), (4, "Meta"), (8, "Shift")];
@@ -336,11 +356,11 @@ fn input_actions(msg_type: &str, msg: &Value, held: u8) -> Option<(Value, u8)> {
         .and_then(Value::as_u64)
         .map(|mask| (mask & 15) as u8)
         .unwrap_or(held);
-    let keyboard = msg_type == "input_keyboard";
+    let keyboard = msg_type == "input_keyboard" || msg_type == "input_read_clipboard";
     let mut prefix = Vec::new();
     for (bit, key) in modifiers {
-        if keyboard && text("key") == key {
-            if text("eventType") == "keyDown" {
+        if msg_type == "input_keyboard" && text("key") == key {
+            if matches!(text("eventType"), "keyDown" | "rawKeyDown") {
                 desired |= bit;
             } else {
                 desired &= !bit;
@@ -831,5 +851,55 @@ mod tests {
         assert_eq!(tabs.len(), 2, "{tabs:?}");
         assert!(tabs.iter().any(|tab| tab["targetId"] == json!("ctx-popup")));
         server.shutdown().await;
+    }
+
+    #[test]
+    fn firefox_input_actions_handle_raw_key_down_and_clipboard_messages() {
+        // Navigation keys emitted as rawKeyDown must translate to BiDi keyDown.
+        let (nav, held) = input_actions(
+            "input_keyboard",
+            &json!({ "eventType": "rawKeyDown", "key": "ArrowLeft", "modifiers": 0 }),
+            0,
+        )
+        .expect("rawKeyDown ArrowLeft should map to BiDi actions");
+        assert_eq!(held, 0);
+        assert_eq!(nav[0]["actions"][0]["type"], "keyDown");
+
+        // Modifier-only rawKeyDown updates held modifier mask.
+        let (_, held_ctrl) = input_actions(
+            "input_keyboard",
+            &json!({ "eventType": "rawKeyDown", "key": "Control", "modifiers": 2 }),
+            0,
+        )
+        .expect("rawKeyDown Control should map to BiDi actions");
+        assert_eq!(held_ctrl, 2);
+
+        // Shortcut rawKeyDown (Ctrl+C) presses modifier prefix when not already held.
+        let (copy, held_copy) = input_actions(
+            "input_keyboard",
+            &json!({ "eventType": "rawKeyDown", "key": "c", "modifiers": 2 }),
+            0,
+        )
+        .expect("rawKeyDown Ctrl+C should map to BiDi actions");
+        assert_eq!(held_copy, 2);
+        assert_eq!(copy[0]["actions"].as_array().unwrap().len(), 2);
+
+        // input_insert_text types each character as keyDown/keyUp pairs.
+        let (inserted, held_after) =
+            input_actions("input_insert_text", &json!({ "text": "hi" }), 0)
+                .expect("input_insert_text should map to BiDi key text actions");
+        assert_eq!(held_after, 0);
+        assert_eq!(inserted[0]["actions"].as_array().unwrap().len(), 4);
+        assert!(input_actions("input_insert_text", &json!({ "text": "" }), 0).is_none());
+
+        // input_read_clipboard with cut: true dispatches the cut keystroke in Firefox.
+        let (cut, held_cut) = input_actions(
+            "input_read_clipboard",
+            &json!({ "cut": true, "modifiers": 2 }),
+            0,
+        )
+        .expect("cut should map to BiDi actions");
+        assert_eq!(held_cut, 2);
+        assert!(cut[0]["actions"].as_array().unwrap().len() >= 3);
     }
 }

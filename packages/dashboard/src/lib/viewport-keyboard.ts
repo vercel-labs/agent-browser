@@ -220,6 +220,7 @@ export function shouldWriteClipboardText(text: string | undefined): text is stri
 export interface InputQueue {
   enqueue(msg: Record<string, unknown>): void;
   enqueueAsync(task: () => Promise<Record<string, unknown> | null>): Promise<void>;
+  reset(): void;
 }
 
 type QueueItem =
@@ -232,33 +233,41 @@ type QueueItem =
 
 /**
  * Serializes stream input around async operations (such as clipboard readText
- * on paste) so subsequent keystrokes or clicks do not overtake an in-flight paste.
+ * on paste) so subsequent keystrokes or clicks do not overtake an in-flight
+ * paste. Calling `reset()` cancels queued input and discards any in-flight
+ * async result so clipboard text never lands in a different session or tab.
  */
 export function createInputQueue(
   send: (msg: Record<string, unknown>) => void,
 ): InputQueue {
   let inFlight = false;
+  let epoch = 0;
   const pending: QueueItem[] = [];
 
   const drain = async () => {
     if (inFlight) return;
     inFlight = true;
+    const drainEpoch = epoch;
     try {
-      while (pending.length > 0) {
+      while (pending.length > 0 && epoch === drainEpoch) {
         const next = pending.shift()!;
         if (next.kind === "sync") {
           send(next.msg);
         } else {
           try {
             const msg = await next.task();
-            if (msg) send(msg);
+            if (epoch === drainEpoch && msg) {
+              send(msg);
+            }
           } finally {
             next.resolveDone();
           }
         }
       }
     } finally {
-      inFlight = false;
+      if (epoch === drainEpoch) {
+        inFlight = false;
+      }
     }
   };
 
@@ -279,6 +288,16 @@ export function createInputQueue(
       pending.push({ kind: "async", task, resolveDone });
       void drain();
       return done;
+    },
+    reset() {
+      epoch++;
+      inFlight = false;
+      while (pending.length > 0) {
+        const item = pending.shift()!;
+        if (item.kind === "async") {
+          item.resolveDone();
+        }
+      }
     },
   };
 }

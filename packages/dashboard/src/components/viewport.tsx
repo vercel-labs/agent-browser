@@ -45,6 +45,8 @@ import {
   screencastingAtom,
   recordingAtom,
   streamEngineAtom,
+  streamTabsAtom,
+  wsRefAtom,
   activeUrlAtom,
   sendInputAtom,
   type StreamFrame,
@@ -127,10 +129,13 @@ export function Viewport() {
   const screencasting = useAtomValue(screencastingAtom);
   const recording = useAtomValue(recordingAtom);
   const engine = useAtomValue(streamEngineAtom);
+  const tabs = useAtomValue(streamTabsAtom);
+  const ws = useAtomValue(wsRefAtom);
   const url = useAtomValue(activeUrlAtom);
   const sessionName = useAtomValue(activeSessionNameAtom);
   const streamPort = useAtomValue(activePortAtom);
   const sendInput = useSetAtom(sendInputAtom);
+  const activeTabId = tabs.find((t) => t.active)?.tabId ?? "";
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rightClickGuardRef = useRef(createRightClickGuardState());
@@ -342,10 +347,15 @@ export function Viewport() {
 
   const sendInputRef = useRef(sendInput);
   sendInputRef.current = sendInput;
+  const targetContextRef = useRef({ sessionName, streamPort, activeTabId, ws });
+  targetContextRef.current = { sessionName, streamPort, activeTabId, ws };
   const inputQueueRef = useRef<InputQueue | null>(null);
   if (!inputQueueRef.current) {
     inputQueueRef.current = createInputQueue((msg) => sendInputRef.current(msg));
   }
+  useEffect(() => {
+    inputQueueRef.current?.reset();
+  }, [sessionName, streamPort, activeTabId, ws]);
   const enqueueInput = useCallback((msg: Record<string, unknown>) => {
     inputQueueRef.current?.enqueue(msg);
   }, []);
@@ -458,12 +468,24 @@ export function Viewport() {
         enqueueInput(fallback);
         return;
       }
+      const origin = { ...targetContextRef.current };
+      const isSameTarget = () => {
+        const cur = targetContextRef.current;
+        return (
+          cur.sessionName === origin.sessionName &&
+          cur.streamPort === origin.streamPort &&
+          cur.activeTabId === origin.activeTabId &&
+          cur.ws === origin.ws &&
+          cur.ws?.readyState === WebSocket.OPEN
+        );
+      };
       void inputQueueRef.current?.enqueueAsync(async () => {
         try {
           const text = await readText();
+          if (!isSameTarget()) return null;
           return text ? { type: "input_insert_text", text } : fallback;
         } catch {
-          return fallback;
+          return isSameTarget() ? fallback : null;
         }
       });
     };
@@ -482,15 +504,21 @@ export function Viewport() {
         }
         if (key === "c") {
           dispatchKey(e, "rawKeyDown");
-          enqueueInput({ type: "input_read_clipboard" });
+          if (engine !== "firefox") {
+            enqueueInput({ type: "input_read_clipboard" });
+          }
           return;
         }
         if (key === "x") {
-          enqueueInput({
-            type: "input_read_clipboard",
-            cut: true,
-            modifiers: keyModifiers(e),
-          });
+          if (engine === "firefox") {
+            dispatchKey(e, "rawKeyDown");
+          } else {
+            enqueueInput({
+              type: "input_read_clipboard",
+              cut: true,
+              modifiers: keyModifiers(e),
+            });
+          }
           return;
         }
       }
@@ -502,7 +530,7 @@ export function Viewport() {
       window.removeEventListener("keydown", handler, true);
       window.removeEventListener("keyup", handler, true);
     };
-  }, [dispatchKey, enqueueInput]);
+  }, [dispatchKey, enqueueInput, engine]);
 
   return (
     <div ref={containerRef} className="flex h-full flex-col">
