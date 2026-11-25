@@ -102,11 +102,12 @@ Global options can be set in a trusted config file using their camelCase equival
     <tr><td><code>downloadPath</code></td><td><code>--download-path</code></td><td>string</td></tr>
     <tr><td><code>contentBoundaries</code></td><td><code>--content-boundaries</code></td><td>boolean</td></tr>
     <tr><td><code>maxOutput</code></td><td><code>--max-output</code></td><td>number</td></tr>
-    <tr><td><code>allowedDomains</code></td><td><code>--allowed-domains</code></td><td>string[]; also disables WebRTC in supported Chromium sessions and requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins</td></tr>
+    <tr><td><code>allowedDomains</code></td><td><code>--allowed-domains</code></td><td>string[]; must list at least one domain (an empty array is rejected); also disables WebRTC in supported Chromium sessions and requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins</td></tr>
+    <tr><td><code>capture</code></td><td><code>--capture</code></td><td>string[]; only <code>flow</code> is supported. A launch setting: passing it to a running session without it relaunches the browser with capture on. Ignored in project config</td></tr>
     <tr><td><code>actionPolicy</code></td><td><code>--action-policy</code></td><td>string</td></tr>
     <tr><td><code>confirmActions</code></td><td><code>--confirm-actions</code></td><td>string</td></tr>
     <tr><td><code>confirmInteractive</code></td><td><code>--confirm-interactive</code></td><td>boolean</td></tr>
-    <tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>obscura</code>)</td></tr>
+    <tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code>)</td></tr>
     <tr><td><code>screenshotDir</code></td><td><code>--screenshot-dir</code></td><td>string</td></tr>
     <tr><td><code>screenshotQuality</code></td><td><code>--screenshot-quality</code></td><td>number (0-100)</td></tr>
     <tr><td><code>screenshotFormat</code></td><td><code>--screenshot-format</code></td><td>string (<code>png</code>, <code>jpeg</code>)</td></tr>
@@ -258,6 +259,8 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 
 ## Environment Variables
 
+A connection target set in the config file (`cdp`, `provider`, `autoConnect`) or in the environment (`AGENT_BROWSER_CDP`, `AGENT_BROWSER_PROVIDER`, `AGENT_BROWSER_AUTO_CONNECT`) is a session default. It applies only to a session that has no target yet. The same target as a command-line flag is explicit and replaces the session target.
+
 These environment variables configure additional daemon and runtime behavior:
 
 <table>
@@ -267,7 +270,7 @@ These environment variables configure additional daemon and runtime behavior:
   <tbody>
     <tr><td><code>AGENT_BROWSER_CONFIG</code></td><td>Path to an explicit config file.</td><td>(default discovery)</td></tr>
     <tr><td><code>AGENT_BROWSER_SESSION</code></td><td>Isolated browser session name.</td><td><code>default</code></td></tr>
-    <tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance. <code>0</code>, <code>false</code>, <code>no</code> or an empty value leave it off.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ALLOW_FILE_ACCESS</code></td><td>Allow <code>file://</code> URLs to access local files.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_EXECUTABLE_PATH</code></td><td>Custom browser executable path.</td><td>(auto-discover)</td></tr>
     <tr><td><code>AGENT_BROWSER_PROFILE</code></td><td>Chrome profile name or persistent profile directory.</td><td>(none)</td></tr>
@@ -319,11 +322,11 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_DEBUG</code></td><td>Enable debug output (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONTENT_BOUNDARIES</code></td><td>Wrap page output in boundary markers for LLM safety.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_MAX_OUTPUT</code></td><td>Max characters for page output (truncates beyond limit).</td><td>(unlimited)</td></tr>
-    <tr><td><code>AGENT_BROWSER_ALLOWED_DOMAINS</code></td><td>Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). Requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins.</td><td>(unrestricted)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ALLOWED_DOMAINS</code></td><td>Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). An empty value is rejected; unset the variable to run unrestricted. Requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins.</td><td>(unrestricted)</td></tr>
     <tr><td><code>AGENT_BROWSER_ACTION_POLICY</code></td><td>Path to action policy JSON file.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_ACTIONS</code></td><td>Comma-separated action categories requiring confirmation.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts (auto-denies if stdin is not a TTY).</td><td>(disabled)</td></tr>
-    <tr><td><code>AGENT_BROWSER_ENGINE</code></td><td>Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>, <code>obscura</code> (experimental).</td><td><code>chrome</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_ENGINE</code></td><td>Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code> (experimental).</td><td><code>chrome</code></td></tr>
     <tr><td><code>AGENT_BROWSER_NO_AUTO_DIALOG</code></td><td>Disable automatic dismissal of <code>alert</code>/<code>beforeunload</code> dialogs.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_PLUGINS</code></td><td>JSON plugin registry override.</td><td>(config discovery)</td></tr>
     <tr><td><code>AGENT_BROWSER_SCREENSHOT_DIR</code></td><td>Default screenshot output directory.</td><td>(temp directory)</td></tr>
@@ -335,7 +338,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>NO_COLOR</code></td><td>Disable colored output when present.</td><td>(not set)</td></tr>
     <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
     <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the Vercel AI Gateway. Required to enable AI chat.</td><td>(none)</td></tr>
-    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for dashboard chat.</td><td><code>anthropic/claude-sonnet-4.6</code></td></tr>
+    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for dashboard chat.</td><td><code>openai/gpt-6-luna-fast</code></td></tr>
   </tbody>
 </table>
 

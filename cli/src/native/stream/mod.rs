@@ -3,7 +3,10 @@ pub(crate) mod chat;
 mod dashboard;
 mod discovery;
 mod http;
+pub(crate) mod origin;
 mod websocket;
+
+use crate::native::bidi::stream::FirefoxLive;
 
 pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
 pub use dashboard::{
@@ -11,13 +14,15 @@ pub use dashboard::{
 };
 
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify, RwLock};
 
 use super::cdp::client::CdpClient;
+use crate::session_settings::IdleTimeout;
 
 /// Screencast encoding for the live stream, from `AGENT_BROWSER_STREAM_*`.
 ///
@@ -126,6 +131,9 @@ fn seq_in_serialized_frame(frame: &str) -> Option<u64> {
 pub(crate) struct IdleActivity {
     last: std::sync::Mutex<Instant>,
     notify: Notify,
+    /// The idle timeout in effect. A session setting can change it while the
+    /// daemon runs, so the shutdown loop reads it on every pass.
+    timeout: std::sync::Mutex<Option<IdleTimeout>>,
 }
 
 impl IdleActivity {
@@ -133,7 +141,16 @@ impl IdleActivity {
         Self {
             last: std::sync::Mutex::new(Instant::now()),
             notify: Notify::new(),
+            timeout: std::sync::Mutex::new(None),
         }
+    }
+
+    pub(crate) fn timeout(&self) -> Option<IdleTimeout> {
+        *self.timeout.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    pub(crate) fn set_timeout(&self, timeout: Option<IdleTimeout>) {
+        *self.timeout.lock().unwrap_or_else(|err| err.into_inner()) = timeout;
     }
 
     pub(crate) fn mark(&self) {
@@ -179,16 +196,71 @@ impl Default for FrameMetadata {
     }
 }
 
+/// How long `/api/tabs` waits for a Firefox list before answering from the cache.
+const TAB_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Asks the poller that owns a Firefox session for a fresh tab list.
+#[derive(Clone)]
+pub(crate) struct TabRefresh {
+    id: u64,
+    tx: mpsc::UnboundedSender<oneshot::Sender<Option<Vec<Value>>>>,
+}
+
+impl TabRefresh {
+    /// Reads the tabs from the poller, or `None` when it cannot answer in time.
+    pub(crate) async fn request(&self) -> Option<Vec<Value>> {
+        let (reply, answer) = oneshot::channel();
+        self.tx.send(reply).ok()?;
+        match tokio::time::timeout(TAB_REFRESH_TIMEOUT, answer).await {
+            Ok(Ok(tabs)) => tabs,
+            _ => None,
+        }
+    }
+}
+
+/// The Firefox poller that answers `/api/tabs`, if one is running. Every registration carries an
+/// id, so a poller that is replaced only ever unregisters itself.
+#[derive(Default)]
+pub(crate) struct FirefoxTabs {
+    next_id: AtomicU64,
+    current: std::sync::Mutex<Option<TabRefresh>>,
+}
+
+impl FirefoxTabs {
+    /// Registers the poller that answers tab reads from now on.
+    pub(crate) fn attach(
+        &self,
+        tx: mpsc::UnboundedSender<oneshot::Sender<Option<Vec<Value>>>>,
+    ) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        *self.current.lock().unwrap() = Some(TabRefresh { id, tx });
+        id
+    }
+
+    /// Drops the registration while it still belongs to `id`.
+    pub(crate) fn detach(&self, id: u64) {
+        let mut current = self.current.lock().unwrap();
+        if current.as_ref().is_some_and(|refresh| refresh.id == id) {
+            *current = None;
+        }
+    }
+
+    pub(crate) fn refresher(&self) -> Option<TabRefresh> {
+        self.current.lock().unwrap().clone()
+    }
+}
+
 pub struct StreamServer {
     port: u16,
     session_name: String,
     frame_tx: broadcast::Sender<String>,
-    screencast_config: Arc<ScreencastConfig>,
+    pub(crate) screencast_config: Arc<ScreencastConfig>,
     /// Latest-value channel for screencast frames. Slow clients skip straight
     /// to the newest frame instead of draining a stale ordered backlog.
     frame_watch: watch::Sender<Option<Arc<StreamFrame>>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
+    firefox_live: Arc<RwLock<Option<FirefoxLive>>>,
     /// The active CDP page session ID (from Target.attachToTarget).
     cdp_session_id: Arc<RwLock<Option<String>>>,
     client_notify: Arc<Notify>,
@@ -198,6 +270,7 @@ pub struct StreamServer {
     viewport_width: Arc<Mutex<u32>>,
     viewport_height: Arc<Mutex<u32>>,
     last_tabs: Arc<RwLock<Vec<Value>>>,
+    firefox_tabs: Arc<FirefoxTabs>,
     last_engine: Arc<RwLock<String>>,
     recording: Arc<Mutex<bool>>,
     shutdown_tx: watch::Sender<bool>,
@@ -245,6 +318,67 @@ impl StreamServer {
     /// Notify the background CDP listener that the client has changed (browser launched/closed).
     pub fn notify_client_changed(&self) {
         self.client_notify.notify_one();
+    }
+
+    /// Point dashboard input at a Firefox tab, or clear it with `None`.
+    pub async fn set_firefox_live(&self, mut live: Option<FirefoxLive>) {
+        let mut current = self.firefox_live.write().await;
+        if let (Some(current), Some(next)) = (current.as_ref(), live.as_mut()) {
+            if Arc::ptr_eq(&current.bidi, &next.bidi) {
+                next.modifiers = Arc::clone(&current.modifiers);
+            }
+        }
+        let same_session = match (current.as_ref(), live.as_ref()) {
+            (Some(current), Some(next)) => Arc::ptr_eq(&current.bidi, &next.bidi),
+            _ => false,
+        };
+        if !same_session {
+            self.last_tabs.write().await.clear();
+        }
+        if current.as_ref().map(|live| &live.context) != live.as_ref().map(|live| &live.context) {
+            self.frame_watch.send_replace(None);
+            let _ = self
+                .frame_tx
+                .send(json!({"type": "frame_clear"}).to_string());
+        }
+        *current = live;
+    }
+
+    /// Context id the dashboard frames and input are currently pointed at.
+    pub async fn firefox_live_context(&self) -> Option<String> {
+        self.firefox_live
+            .read()
+            .await
+            .as_ref()
+            .map(|live| live.context.clone())
+    }
+
+    /// True when the dashboard already points at `context` on `bidi`.
+    pub async fn firefox_live_serves(
+        &self,
+        bidi: &Arc<crate::native::bidi::client::BidiClient>,
+        context: &str,
+    ) -> bool {
+        self.firefox_live
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|live| Arc::ptr_eq(&live.bidi, bidi) && live.context == context)
+    }
+
+    /// True while at least one dashboard client is connected.
+    pub async fn has_clients(&self) -> bool {
+        *self.client_count.lock().await > 0
+    }
+
+    /// The registration slot a Firefox poller answers tab reads through.
+    pub(crate) fn firefox_tabs(&self) -> Arc<FirefoxTabs> {
+        Arc::clone(&self.firefox_tabs)
+    }
+
+    /// The tab list `/api/tabs` last published.
+    pub async fn cached_tabs(&self) -> Vec<Value> {
+        self.last_tabs.read().await.clone()
     }
 
     /// Check whether the server currently has active screencast running.
@@ -338,8 +472,10 @@ impl StreamServer {
         let viewport_width = Arc::new(Mutex::new(1280u32));
         let viewport_height = Arc::new(Mutex::new(720u32));
         let last_tabs = Arc::new(RwLock::new(Vec::<Value>::new()));
+        let firefox_tabs = Arc::new(FirefoxTabs::default());
         let last_engine = Arc::new(RwLock::new("chrome".to_string()));
         let recording = Arc::new(Mutex::new(false));
+        let firefox_live = Arc::new(RwLock::new(None::<FirefoxLive>));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let frame_tx_clone = frame_tx.clone();
@@ -353,11 +489,13 @@ impl StreamServer {
         let vw_clone = viewport_width.clone();
         let vh_clone = viewport_height.clone();
         let last_tabs_clone = last_tabs.clone();
+        let firefox_tabs_accept = firefox_tabs.clone();
         let last_engine_clone = last_engine.clone();
         let recording_clone = recording.clone();
         let accept_shutdown_rx = shutdown_rx.clone();
         let session_name_clone = session_id.clone();
         let frame_watch_accept = frame_watch_rx.clone();
+        let firefox_live_accept = firefox_live.clone();
         let accept_task = tokio::spawn(async move {
             websocket::accept_loop(
                 listener,
@@ -365,6 +503,7 @@ impl StreamServer {
                 frame_watch_accept,
                 client_count_clone,
                 client_slot_clone,
+                firefox_live_accept,
                 notify_clone,
                 idle_activity_clone,
                 screencasting_clone,
@@ -372,6 +511,7 @@ impl StreamServer {
                 vw_clone,
                 vh_clone,
                 last_tabs_clone,
+                firefox_tabs_accept,
                 last_engine_clone,
                 recording_clone,
                 accept_shutdown_rx,
@@ -422,6 +562,7 @@ impl StreamServer {
                 screencast_config,
                 client_count,
                 client_slot: client_slot.clone(),
+                firefox_live,
                 cdp_session_id,
                 client_notify,
                 idle_activity,
@@ -429,6 +570,7 @@ impl StreamServer {
                 viewport_width,
                 viewport_height,
                 last_tabs,
+                firefox_tabs,
                 last_engine,
                 recording,
                 shutdown_tx,
@@ -621,23 +763,6 @@ pub(crate) fn timestamp_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn is_allowed_origin(origin: Option<&str>) -> bool {
-    match origin {
-        None => true,
-        Some(o) => {
-            if o.starts_with("file://") {
-                return true;
-            }
-            if let Ok(url) = url::Url::parse(o) {
-                let host = url.host_str().unwrap_or("");
-                host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
-            } else {
-                false
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,25 +824,50 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_allowed_origin_none() {
-        assert!(is_allowed_origin(None));
+    async fn try_connect_with_origin(
+        port: u16,
+        origin: &str,
+    ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://127.0.0.1:{port}/")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("origin", origin.parse().unwrap());
+        tokio_tungstenite::connect_async(request).await.map(|_| ())
     }
 
-    #[test]
-    fn test_allowed_origin_file() {
-        assert!(is_allowed_origin(Some("file:///path/to/file")));
-    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn websocket_upgrade_refuses_every_foreign_origin_and_allows_same_origin() {
+        use super::origin::invariant::{refused_origins, same_origin};
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "origin-policy".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+        let port = server.port();
 
-    #[test]
-    fn test_allowed_origin_localhost() {
-        assert!(is_allowed_origin(Some("http://localhost:3000")));
-        assert!(is_allowed_origin(Some("http://127.0.0.1:8080")));
-    }
+        for origin in refused_origins(port) {
+            let result = try_connect_with_origin(port, &origin).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(tokio_tungstenite::tungstenite::Error::Http(ref response))
+                        if response.status() == 403
+                ),
+                "{origin} must be refused with 403: {result:?}"
+            );
+        }
+        try_connect_with_origin(port, &same_origin(port))
+            .await
+            .expect("same origin connects");
+        connect_client(port).await;
 
-    #[test]
-    fn test_disallowed_origin() {
-        assert!(!is_allowed_origin(Some("http://evil.com")));
+        server.shutdown().await;
     }
 
     /// The legacy entry point reads the id out of its payload; no id means the
@@ -779,6 +929,38 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_broadcast_tabs_caches_and_sends_the_full_payload_including_empty_lists() {
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "firefox-tabs".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+        let mut receiver = server.frame_tx.subscribe();
+        *server.cdp_session_id.write().await = Some("unchanged".into());
+        server.broadcast_frame(r#"{"type":"frame","data":"unchanged"}"#);
+        let tabs = [json!({"tabId":"t1", "targetId":"ctx", "label":null,
+            "title":"Page", "url":"https://example.test/", "type":"page", "active":true})];
+
+        for expected in [&tabs[..], &[][..]] {
+            server.broadcast_tabs(expected).await;
+            let msg: Value = serde_json::from_str(&receiver.recv().await.unwrap()).unwrap();
+            assert_eq!(msg["type"], "tabs");
+            assert_eq!(msg["tabs"], json!(expected));
+            assert!(msg["timestamp"].as_u64().is_some());
+            assert_eq!(&*server.last_tabs.read().await, expected);
+        }
+        assert_eq!(
+            server.cdp_session_id.read().await.as_deref(),
+            Some("unchanged")
+        );
+        assert!(server.frame_watch.borrow().is_some());
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_new_client_receives_latest_frame_only() {
         let (server, _slot) = StreamServer::start_without_client(
             0,
@@ -796,6 +978,83 @@ mod tests {
         let frame = next_frame(&mut ws).await;
         assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("fresh"));
 
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_firefox_tab_change_does_not_seed_the_previous_frame() {
+        let (ff, _events, _) = crate::native::bidi::session::tests::fake_session().await;
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "firefox-frame".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+        let live = FirefoxLive {
+            bidi: ff.bidi.clone(),
+            context: "ctx-old".into(),
+            contexts: Default::default(),
+            modifiers: Default::default(),
+        };
+        server.set_firefox_live(Some(live.clone())).await;
+        server.broadcast_frame(r#"{"type":"frame","data":"old-tab"}"#);
+        server.set_firefox_live(Some(live.clone())).await;
+        assert!(server.frame_watch.borrow().is_some());
+        live.modifiers.lock().await.insert("ctx-old".into(), 8);
+        server
+            .set_firefox_live(Some(FirefoxLive {
+                context: "ctx-new".into(),
+                modifiers: Default::default(),
+                ..live.clone()
+            }))
+            .await;
+        let current = server.firefox_live.read().await.clone().unwrap();
+        assert!(Arc::ptr_eq(&current.modifiers, &live.modifiers));
+        assert_eq!(current.modifiers.lock().await.get("ctx-old"), Some(&8));
+        let mut ws = connect_client(server.port()).await;
+        expect_no_frame(&mut ws, 200).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_firefox_live_clear_reaches_connected_clients() {
+        let (ff, _events, _) = crate::native::bidi::session::tests::fake_session().await;
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "firefox-frame-clear".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+        server
+            .set_firefox_live(Some(FirefoxLive {
+                bidi: ff.bidi.clone(),
+                context: "ctx-old".into(),
+                contexts: Default::default(),
+                modifiers: Default::default(),
+            }))
+            .await;
+        server.broadcast_frame(r#"{"type":"frame","data":"old-tab"}"#);
+
+        let mut ws = connect_client(server.port()).await;
+        assert_eq!(next_frame(&mut ws).await["data"], "old-tab");
+
+        server.set_firefox_live(None).await;
+        let message = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for frame clear")
+            .expect("stream ended")
+            .expect("ws error");
+        let Message::Text(text) = message else {
+            panic!("expected text message");
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["type"],
+            "frame_clear"
+        );
         server.shutdown().await;
     }
 

@@ -1,24 +1,30 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  currentPages as pages,
+  fixturePages,
+  publicPages,
   currentResources,
   origin,
   hash,
   canonical,
   markdownPath,
+  docsCanonical,
+  docsMarkdownPath,
   apiPath,
   text,
   normalize,
   decode,
   tags,
   meta,
+  renderedHeadings,
   get,
   rawGet,
   responseType,
   representationHeaders,
   indexing,
+  assertContainsLines,
   assertModernMarkdown,
+  assertHomeMarkdown,
   assertLegacyMarkdown,
   absoluteDestination,
   imageSourceUrls,
@@ -33,9 +39,10 @@ assert.ok(
 const noindex = process.env.DOCS_EXPECT_NOINDEX === "1";
 const query = "?utm_source=route-test&value=a%2Fb&value=two";
 const agent = { "user-agent": "ClaudeBot/1.0", accept: "text/markdown" };
-const pageAt = (path) => pages.find((page) => page.path === path);
+const pageAt = (path) => publicPages.find((page) => page.path === path);
 const legacyPath = (path) =>
   `/api/docs-markdown?path=${encodeURIComponent(path)}`;
+const homeOgVideo = `${origin}/landing/home-og-c3c73ab9.mp4`;
 const htmlCache = new Map();
 async function htmlFor(page) {
   if (!htmlCache.has(page.path))
@@ -53,7 +60,7 @@ async function htmlFor(page) {
   return htmlCache.get(page.path);
 }
 
-for (const page of pages) {
+for (const page of publicPages) {
   test(`${page.path}: original title, description, OG and Twitter metadata plus canonical links`, async () => {
     const html = await htmlFor(page);
     assert.deepEqual(
@@ -67,6 +74,20 @@ for (const page of pages) {
       tags(html, "html").map((tag) => tag.lang),
       ["en"],
     );
+    const og =
+      page.path === "/"
+        ? {
+            image: "/landing/home-og.png",
+            width: "2400",
+            height: "1256",
+            alt: "Browser automation for any agent",
+          }
+        : {
+            image: `/og${page.path}`,
+            width: "1200",
+            height: "630",
+            alt: page.ogAlt,
+          };
     for (const [key, expected] of Object.entries({
       "og:title": page.ogTitle,
       "og:description": page.ogDescription,
@@ -74,16 +95,45 @@ for (const page of pages) {
       "og:type": "website",
       "og:site_name": "agent-browser",
       "og:locale": "en_US",
-      "og:image": `${origin}/og${page.path === "/" ? "" : page.path}`,
-      "og:image:width": "1200",
-      "og:image:height": "630",
-      "og:image:alt": page.ogAlt,
+      "og:image:width": og.width,
+      "og:image:height": og.height,
+      "og:image:alt": og.alt,
       "twitter:card": "summary_large_image",
       "twitter:title": page.twitterTitle,
       "twitter:description": page.description,
-      "twitter:image": `${origin}/og${page.path === "/" ? "" : page.path}`,
     }))
       assert.deepEqual(meta(html, key), [expected], `${page.path}: ${key}`);
+    const ogImage = new URL(meta(html, "og:image")[0], origin);
+    assert.equal(ogImage.origin, origin, `${page.path}: og:image origin`);
+    assert.equal(ogImage.pathname, og.image, `${page.path}: og:image path`);
+    assert.match(
+      ogImage.searchParams.get("v") ?? "",
+      /^[0-9a-f]{8}$/,
+      `${page.path}: og:image version`,
+    );
+    assert.deepEqual(
+      meta(html, "twitter:image"),
+      [ogImage.href],
+      `${page.path}: twitter:image`,
+    );
+    const video =
+      page.path === "/"
+        ? {
+            "og:video": [homeOgVideo],
+            "og:video:secure_url": [homeOgVideo],
+            "og:video:type": ["video/mp4"],
+            "og:video:width": ["1200"],
+            "og:video:height": ["848"],
+          }
+        : {
+            "og:video": [],
+            "og:video:secure_url": [],
+            "og:video:type": [],
+            "og:video:width": [],
+            "og:video:height": [],
+          };
+    for (const [key, expected] of Object.entries(video))
+      assert.deepEqual(meta(html, key), expected, `${page.path}: ${key}`);
     assert.deepEqual(
       tags(html, "link")
         .filter((tag) => tag.rel === "canonical")
@@ -99,9 +149,12 @@ for (const page of pages) {
       [`${origin}${markdownPath(page.path)}`],
     );
   });
+}
 
+for (const page of fixturePages) {
   test(`${page.path}: original prose, every table cell, code example and link are server rendered`, async () => {
-    const html = await htmlFor(page);
+    // The introduction lives at /introduction after the homepage split.
+    const html = page.path === "/" ? await (await get("/introduction")).text() : await htmlFor(page);
     assert.equal(tags(html, "main").length, 1);
     const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
     assert.ok(
@@ -173,7 +226,8 @@ for (const page of pages) {
         `<${canonical(page.path)}>; rel="canonical"`,
       );
       const body = await response.text();
-      assertModernMarkdown(body, page);
+      if (page.path === "/") assertHomeMarkdown(body);
+      else assertModernMarkdown(body, page);
       bodies.push(body);
     }
     assert.equal(bodies[0], bodies[1]);
@@ -187,7 +241,9 @@ for (const page of pages) {
     indexing(response);
     assertLegacyMarkdown(await response.text(), page);
   });
+}
 
+for (const page of publicPages) {
   test(`${page.path}: HEAD preserves all five representations without a response body`, async () => {
     for (const [path, headers, type] of [
       [page.path, {}, "text/html"],
@@ -209,6 +265,61 @@ for (const page of pages) {
     }
   });
 }
+
+test("docs introduction keeps its own Markdown route after the homepage split", async () => {
+  const bodies = [];
+  for (const [path, headers] of [
+    ["/api/docs-md/introduction", {}],
+    ["/introduction.md", {}],
+    ["/introduction", { accept: "text/markdown" }],
+  ]) {
+    const response = await get(path, { headers });
+    responseType(response, "text/markdown");
+    representationHeaders(response);
+    assert.equal(
+      response.headers.get("link"),
+      `<${origin}/introduction>; rel="canonical"`,
+    );
+    const body = await response.text();
+    assert.ok(
+      body.startsWith(
+        `---\ntitle: "agent-browser"\ndescription: "Browser automation CLI for AI agents"\ncanonical_url: "${origin}/introduction"\n---\n\n`,
+      ),
+      `${path}: docs canonical frontmatter`,
+    );
+    assertContainsLines(
+      body,
+      pageAt("/").modernMarkdown,
+      `${path}: docs introduction`,
+    );
+    bodies.push(body);
+  }
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(bodies[1], bodies[2]);
+
+  const html = await (await get("/introduction")).text();
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "canonical")
+      .map((tag) => tag.href),
+    [`${origin}/introduction`],
+  );
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "alternate" && tag.type === "text/markdown")
+      .map((tag) => tag.href),
+    [`${origin}/introduction.md`],
+  );
+  for (const id of [
+    "features",
+    "works-with",
+    "example",
+    "why-refs",
+    "architecture",
+    "platforms",
+  ])
+    assert.ok(html.includes(`id="${id}"`), `introduction lost #${id}`);
+});
 
 for (const [name, headers, type] of [
   [
@@ -335,7 +446,8 @@ test("alternating representations and queries never contaminate one another", as
       representationHeaders(response);
       const body = await response.text();
       if (accept === "text/markdown") {
-        assertModernMarkdown(body, page);
+        if (path === "/") assertHomeMarkdown(body);
+        else assertModernMarkdown(body, page);
         assert.ok(
           !body.includes("utm_source") && !body.includes("route-test"),
           "tracking must not leak into Markdown",
@@ -362,7 +474,7 @@ test("alternating representations and queries never contaminate one another", as
   }
 });
 
-for (const page of pages) {
+for (const page of publicPages) {
   test(`${page.path}: locale alias is a permanent query-preserving, cookie-free redirect`, async () => {
     for (const suffix of ["", ".md"]) {
       const target = suffix ? markdownPath(page.path) : page.path;
@@ -386,7 +498,7 @@ for (const page of pages) {
 }
 
 test("trailing slashes keep permanent public paths and query strings", async () => {
-  for (const page of pages.filter((page) => page.path !== "/")) {
+  for (const page of publicPages.filter((page) => page.path !== "/")) {
     const response = await get(`${page.path}/${query}`);
     assert.equal(response.status, 308, page.path);
     assert.equal(response.headers.get("set-cookie"), null);
@@ -403,7 +515,7 @@ test("trailing slashes keep permanent public paths and query strings", async () 
 for (const path of [
   "/missing-page",
   "/docs",
-  "/docs/commands",
+  "/introduction/commands",
   "/fr/commands",
   "/providers/missing",
   "/engines/missing",
@@ -537,7 +649,7 @@ test("WebMCP search results use Features without changing the public URL", async
   assert.ok(!nativeMatches[0].breadcrumbs.includes("Reference"));
 });
 
-for (const page of pages.filter(
+for (const page of fixturePages.filter(
   (page) =>
     ["Providers", "Engines"].includes(page.navigation.section) ||
     page.path === "/changelog",
@@ -641,7 +753,76 @@ test("native search empty and unmatched queries return arrays, not legacy object
   }
 });
 
-test("sitemap contains exactly the 39 canonical production URLs", async () => {
+test("Modern Web Guidance page renders its workflows, metadata and Markdown representations", async () => {
+  const path = "/modern-web-guidance";
+  const response = await get(path);
+  responseType(response, "text/html");
+  representationHeaders(response);
+  const html = await response.text();
+  indexing(response, html);
+  assert.deepEqual(
+    [...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/gi)].map((match) =>
+      text(match[1]),
+    ),
+    ["Modern Web Guidance | agent-browser"],
+  );
+  assert.deepEqual(meta(html, "og:url"), [canonical(path)]);
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "canonical")
+      .map((tag) => tag.href),
+    [canonical(path)],
+  );
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "alternate" && tag.type === "text/markdown")
+      .map((tag) => tag.href),
+    [`${origin}${markdownPath(path)}`],
+  );
+  const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
+  assert.ok(main, "content must be in main, not only Flight scripts");
+  const visible = text(main);
+  for (const sample of [
+    "Verify a layout-shift fix",
+    "Check a dialog transition with reduced motion",
+    "Check focus and inert behavior of a dialog",
+    "agent-browser vitals",
+    "prefers-reduced-motion",
+  ])
+    assert.ok(visible.includes(normalize(sample)), `SSR lost ${sample}`);
+  const internalLinks = new Set(
+    tags(main, "a")
+      .map((tag) => tag.href)
+      .filter((href) => typeof href === "string" && href.startsWith("/")),
+  );
+  for (const href of ["/react", "/snapshots", "/recording", "/debugging"])
+    assert.ok(internalLinks.has(href), `lost related link ${href}`);
+  for (const href of internalLinks) {
+    const link = await get(href);
+    assert.equal(link.status, 200, href);
+  }
+  const bodies = [];
+  for (const [markdownPathOrRoute, headers] of [
+    [apiPath(path), {}],
+    [markdownPath(path), {}],
+    [path, { accept: "text/markdown" }],
+  ]) {
+    const body = await get(markdownPathOrRoute, { headers });
+    responseType(body, "text/markdown");
+    representationHeaders(body);
+    bodies.push(await body.text());
+  }
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(bodies[1], bodies[2]);
+  assert.ok(bodies[1].includes("## Verify a layout-shift fix"));
+  for (const heading of renderedHeadings(main))
+    assert.ok(
+      bodies[1].includes(`${"#".repeat(heading.level)} ${heading.text}`),
+      `Markdown lost heading ${heading.text}`,
+    );
+});
+
+test("sitemap lists the marketing root and every docs canonical exactly once", async () => {
   const response = await get("/sitemap.xml", { headers: agent });
   responseType(response, "application/xml");
   indexing(response);
@@ -652,8 +833,12 @@ test("sitemap contains exactly the 39 canonical production URLs", async () => {
   );
   assert.deepEqual(
     locations.sort(),
-    pages.map((page) => canonical(page.path)).sort(),
+    [
+      canonical("/"),
+      ...publicPages.map((page) => docsCanonical(page.path)),
+    ].sort(),
   );
+  assert.equal(new Set(locations).size, locations.length);
   assert.ok(
     !xml.includes("/en/") &&
       !xml.includes("localhost") &&
@@ -662,7 +847,7 @@ test("sitemap contains exactly the 39 canonical production URLs", async () => {
 });
 
 for (const path of ["/llms.txt", "/sitemap.md"]) {
-  test(`${path}: agent index exposes all 39 public pages and Markdown alternatives exactly once`, async () => {
+  test(`${path}: agent index exposes all public pages and Markdown alternatives exactly once`, async () => {
     const response = await get(path, { headers: agent });
     responseType(
       response,
@@ -675,8 +860,8 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       links.sort((a, b) => a[1].localeCompare(b[1])),
-      pages
-        .map((page) => [page.markdownTitle, canonical(page.path)])
+      publicPages
+        .map((page) => [page.markdownTitle, docsCanonical(page.path)])
         .sort((a, b) => a[1].localeCompare(b[1])),
     );
     const markdownLinks = [...body.matchAll(/\[Markdown\]\(([^)]+)\)/g)].map(
@@ -684,7 +869,9 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       markdownLinks.sort(),
-      pages.map((page) => `${origin}${markdownPath(page.path)}`).sort(),
+      publicPages
+        .map((page) => `${origin}${docsMarkdownPath(page.path)}`)
+        .sort(),
     );
     assert.ok(
       !body.includes("/en/") &&
@@ -741,7 +928,7 @@ for (const resource of currentResources) {
   });
 }
 
-for (const page of pages) {
+for (const page of publicPages) {
   test(`${page.path}: original OG endpoint returns an actual 1200x630 PNG for agents`, async () => {
     const response = await get(`/og${page.path === "/" ? "" : page.path}`, {
       headers: agent,
@@ -758,6 +945,28 @@ for (const page of pages) {
     assert.equal(png.readUInt32BE(20), 630);
   });
 }
+
+test("homepage og:video is a faststart MP4 that answers byte ranges", async () => {
+  const path = new URL(homeOgVideo).pathname;
+  const response = await get(path, { headers: agent });
+  responseType(response, "video/mp4");
+  const mp4 = Buffer.from(await response.arrayBuffer());
+  assert.ok(mp4.length < 2_000_000, `${path}: ${mp4.length} bytes`);
+  assert.equal(mp4.toString("ascii", 4, 8), "ftyp");
+  const boxes = [];
+  for (let offset = 0; offset + 8 <= mp4.length && boxes.length < 4; ) {
+    boxes.push(mp4.toString("ascii", offset + 4, offset + 8));
+    offset += mp4.readUInt32BE(offset);
+  }
+  assert.ok(
+    boxes.indexOf("moov") !== -1 && boxes.indexOf("moov") < boxes.indexOf("mdat"),
+    `moov must precede mdat for progressive playback: ${boxes.join(",")}`,
+  );
+  const range = await get(path, { headers: { ...agent, range: "bytes=0-1023" } });
+  assert.equal(range.status, 206);
+  assert.equal(range.headers.get("content-range"), `bytes 0-1023/${mp4.length}`);
+  assert.equal((await range.arrayBuffer()).byteLength, 1024);
+});
 
 test("unknown OG routes retain the original JSON 404", async () => {
   const response = await get("/og/missing-page", { headers: agent });
@@ -794,4 +1003,67 @@ test("Next static CSS, JavaScript and fonts remain binary/static resources for a
     assert.ok((await resource.arrayBuffer()).byteLength > 0);
     assert.equal(resource.headers.get("set-cookie"), null);
   }
+});
+
+test('homepage introduces both tools while keeping the original introduction reachable', async () => {
+  const html = await htmlFor(pageAt('/'));
+  const headings = [...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map((match) =>
+    text(match[1])
+  );
+  assert.equal(headings.length, 1);
+  assert.equal(headings[0], 'Browser automation built for any agent');
+  for (const section of ['AgentUseCaseTabs', 'AgentTweetWall', 'AgentClosing'])
+    assert.ok(html.includes(`data-element="${section}"`), section);
+  assert.ok(!html.includes('data-element="GridSection"'));
+  assert.ok(!html.includes('data-element="FeatureSection"'));
+  assert.ok(!text(html).includes('The next step is in another app'));
+  assert.ok(!text(html).includes('From a code change to a checked result'));
+  // Real tweet bodies and attribution must be in the HTML without client fetching.
+  assert.equal([...html.matchAll(/<article\b[^>]*data-tweet-id=/g)].length, 8);
+  assert.ok(
+    text(html).includes('If you are not using agent-browser to close the loop on frontend')
+  );
+  assert.ok(
+    tags(html, 'a').some((a) => a.href === 'https://x.com/onusoz/status/2032700396955697218')
+  );
+  assert.ok(!html.includes('platform.twitter.com/widgets.js'));
+  assert.ok(text(html).includes('Add to your agent'));
+  assert.ok(tags(html, 'a').some((a) => a.href === '/introduction'));
+  assert.ok(
+    text(html).includes('Desktop')
+  );
+  const docs = await get('/introduction');
+  responseType(docs, 'text/html');
+  const intro = await docs.text();
+  assert.ok(
+    tags(intro, 'link').some((link) => link.rel === 'canonical' && link.href === `${origin}/introduction`)
+  );
+  assert.ok(text(intro).includes('Browser automation CLI designed for AI agents'));
+  const search = await get('/api/search?query=agent-browser&locale=en');
+  assert.ok(
+    (await search.json()).some((result) => result.type === 'page' && result.url === '/introduction')
+  );
+});
+
+for (const path of ['/components', '/components/hero', '/components/hero/browser', '/components/hero/desktop']) {
+  test(`${path}: removed design playground is not a public route`, async () => {
+    const response = await get(path);
+    assert.equal(response.status, 404);
+  });
+}
+
+test('marketing layout stays independent of a persisted docs chat session', async () => {
+  const response = await get('/', {
+    headers: { Cookie: 'docs-chat-open=true; docs-chat-width=600' },
+  });
+  responseType(response, 'text/html');
+  const html = await response.text();
+  assert.ok(!html.includes('body{padding-right:600px}'));
+  assert.ok(!html.includes('aria-label="Ask AI"'));
+  assert.ok(html.includes('data-geist-button'));
+  const docs = await get('/introduction', {
+    headers: { Cookie: 'docs-chat-open=true; docs-chat-width=600' },
+  });
+  responseType(docs, 'text/html');
+  assert.ok((await docs.text()).includes('body{padding-right:600px}'));
 });

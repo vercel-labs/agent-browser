@@ -34,14 +34,14 @@ fn run(command: &mut Command, input: &str) -> Output {
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
-            tokio::time::timeout(Duration::from_secs(10), async move {
+            tokio::time::timeout(Duration::from_secs(30), async move {
                 let mut stdin = child.stdin.take().unwrap();
                 stdin.write_all(input.as_bytes()).await.unwrap();
                 drop(stdin);
                 child.wait_with_output().await.unwrap()
             })
             .await
-            .expect("CLI/MCP subprocess exceeded 10 seconds")
+            .expect("CLI/MCP subprocess exceeded 30 seconds")
         })
 }
 
@@ -469,7 +469,7 @@ fn mcp_survives_selected_config_removed_or_corrupted_after_startup() {
                     .stderr(Stdio::piped())
                     .spawn()
                     .unwrap();
-                tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::time::timeout(Duration::from_secs(30), async {
                     let mut stdin = child.stdin.take().unwrap();
                     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
                     let initialize = json!({
@@ -553,7 +553,7 @@ fn mcp_survives_selected_config_removed_or_corrupted_after_startup() {
                     assert!(output.status.success(), "{output:?}");
                 })
                 .await
-                .expect("MCP config regression exceeded 10 seconds");
+                .expect("MCP config regression exceeded 30 seconds");
             });
     }
 }

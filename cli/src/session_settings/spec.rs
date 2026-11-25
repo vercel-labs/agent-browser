@@ -6,6 +6,7 @@
 use serde_json::Value;
 
 use crate::flags::Flags;
+use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::patch::Requested;
 use super::proxy::parse_proxy;
@@ -33,13 +34,24 @@ keys! {
     Engine, Headed, Profile, Args, ExecutablePath, Extensions, Proxy, ProxyBypass,
     ProxyUsername, ProxyPassword, UserAgent, IgnoreHttpsErrors, AllowFileAccess,
     HideScrollbars, Webgpu, Webmcp, NoXvfb, CaCert, ClearCaCert, InitScripts, Enable,
-    Plugins, StorageState, ColorScheme, DownloadPath,
+    Plugins, StorageState, ColorScheme, DownloadPath, Capture,
     // Security.
     AllowedDomains, ActionPolicy, ConfirmActions,
     // Lifetimes and per-session behaviour.
     IdleTimeout, DefaultTimeout, NoAutoDialog, PinTab, Debug,
     RestoreKey, RestoreSave, RestoreCheckUrl, RestoreCheckText, RestoreCheckFn,
 }
+
+/// The restore key, save policy and checks act as one unit: they apply,
+/// commit and roll back together, and only once the command that carries them
+/// has passed the policy gates.
+pub const RESTORE_UNIT: [Key; 5] = [
+    Key::RestoreKey,
+    Key::RestoreSave,
+    Key::RestoreCheckUrl,
+    Key::RestoreCheckText,
+    Key::RestoreCheckFn,
+];
 
 /// What changing a setting does to a running session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,11 +80,24 @@ pub enum Shape {
     Millis,
     /// Structured value kept as-is (plugin configs).
     Json,
+    /// A string usable as a restore key: alphanumerics, hyphens, underscores.
+    SessionName,
+    /// One of `auto`, `always`, `never`.
+    RestoreSavePolicy,
 }
+
+/// How a validation failure is classed in `--json` output.
+pub const ERROR_INVALID_SESSION_NAME: &str = "invalid_session_name";
+pub const ERROR_INVALID_VALUE: &str = "invalid_value";
 
 impl Shape {
     pub fn accepts(self, value: &Value) -> bool {
-        match self {
+        self.check(value).is_ok()
+    }
+
+    /// Why `value` does not fit, with the `--json` error type to report it as.
+    pub fn check(self, value: &Value) -> Result<(), (&'static str, String)> {
+        let fits = match self {
             Shape::Bool => value.is_boolean(),
             Shape::Str => value.is_string(),
             Shape::StrList => value
@@ -80,6 +105,29 @@ impl Shape {
                 .is_some_and(|items| items.iter().all(Value::is_string)),
             Shape::Millis => value.is_u64(),
             Shape::Json => true,
+            Shape::SessionName => match value.as_str() {
+                Some(name) if is_valid_session_name(name) => true,
+                Some(name) => return Err((ERROR_INVALID_SESSION_NAME, session_name_error(name))),
+                None => false,
+            },
+            Shape::RestoreSavePolicy => match value.as_str() {
+                Some("auto" | "always" | "never") => true,
+                Some(policy) => {
+                    return Err((
+                        ERROR_INVALID_VALUE,
+                        format!(
+                            "Invalid restore save policy '{}'. Use auto, always, or never.",
+                            policy
+                        ),
+                    ))
+                }
+                None => false,
+            },
+        };
+        if fits {
+            Ok(())
+        } else {
+            Err((ERROR_INVALID_VALUE, format!("expected {:?}", self)))
         }
     }
 }
@@ -118,7 +166,32 @@ pub(super) fn redacted(key: Key, value: &Value) -> Value {
             return Value::from(parse_proxy(raw).server);
         }
     }
+    if key == Key::Cdp {
+        if let Some(raw) = value.as_str() {
+            return Value::from(redact_url(raw));
+        }
+    }
     value.clone()
+}
+
+/// A URL without userinfo and with its query and fragment hidden, since both
+/// commonly carry tokens. A bare port or anything that is not a URL is kept.
+pub(super) fn redact_url(raw: &str) -> String {
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let (scheme, rest) = raw.split_at(scheme_end + 3);
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let (path, hidden) = match tail.find(['?', '#']) {
+        Some(at) => (&tail[..at], true),
+        None => (tail, false),
+    };
+    format!(
+        "{scheme}{host}{path}{}",
+        if hidden { "?<redacted>" } else { "" }
+    )
 }
 
 fn set(value: Value) -> Option<Requested> {
@@ -151,6 +224,9 @@ fn read_cdp_headers(f: &Flags) -> Option<Requested> {
     string(&f.cdp_headers)
 }
 fn read_auto_connect(f: &Flags) -> Option<Requested> {
+    if f.no_auto_connect {
+        return Some(Requested::Default);
+    }
     on(f.auto_connect)
 }
 fn read_provider(f: &Flags) -> Option<Requested> {
@@ -181,8 +257,8 @@ fn read_extensions(f: &Flags) -> Option<Requested> {
 }
 fn read_proxy(f: &Flags) -> Option<Requested> {
     f.proxy
-        .as_deref()
-        .map(|p| Requested::Set(Value::from(parse_proxy(p).server)))
+        .as_ref()
+        .map(|p| Requested::Set(Value::from(p.server.as_str())))
 }
 fn read_proxy_bypass(f: &Flags) -> Option<Requested> {
     match f.proxy_bypass.as_deref() {
@@ -194,16 +270,18 @@ fn read_proxy_bypass(f: &Flags) -> Option<Requested> {
     }
 }
 fn read_proxy_username(f: &Flags) -> Option<Requested> {
-    f.proxy
-        .as_deref()
-        .and_then(|p| parse_proxy(p).username)
-        .map(|u| Requested::Set(Value::from(u)))
+    let proxy = f.proxy.as_ref()?;
+    match proxy.username.as_deref() {
+        Some(u) => Some(Requested::Set(Value::from(u))),
+        None => Some(Requested::Default),
+    }
 }
 fn read_proxy_password(f: &Flags) -> Option<Requested> {
-    f.proxy
-        .as_deref()
-        .and_then(|p| parse_proxy(p).password)
-        .map(|p| Requested::Set(Value::from(p)))
+    let proxy = f.proxy.as_ref()?;
+    match proxy.password.as_deref() {
+        Some(p) => Some(Requested::Set(Value::from(p))),
+        None => Some(Requested::Default),
+    }
 }
 fn read_user_agent(f: &Flags) -> Option<Requested> {
     string(&f.user_agent)
@@ -226,7 +304,8 @@ fn read_webmcp(f: &Flags) -> Option<Requested> {
     (f.no_webmcp || f.cli_no_webmcp).then_some(Requested::Set(Value::Bool(!f.no_webmcp)))
 }
 fn read_no_xvfb(f: &Flags) -> Option<Requested> {
-    on(f.no_xvfb)
+    // An explicit off value has to reach a session that was started with it on.
+    (f.no_xvfb || f.no_xvfb_set).then_some(Requested::Set(Value::Bool(f.no_xvfb)))
 }
 fn read_ca_cert(f: &Flags) -> Option<Requested> {
     string(&f.ca_cert)
@@ -254,6 +333,11 @@ fn read_color_scheme(f: &Flags) -> Option<Requested> {
 }
 fn read_download_path(f: &Flags) -> Option<Requested> {
     string(&f.download_path)
+}
+fn read_capture(f: &Flags) -> Option<Requested> {
+    f.capture
+        .as_ref()
+        .map(|modes| Requested::Set(Value::from(modes.clone())))
 }
 fn read_allowed_domains(f: &Flags) -> Option<Requested> {
     f.allowed_domains
@@ -286,7 +370,11 @@ fn read_restore_key(f: &Flags) -> Option<Requested> {
     restore_key(f).map(|k| Requested::Set(Value::from(k)))
 }
 fn read_restore_save(f: &Flags) -> Option<Requested> {
-    restore_key(f).map(|_| Requested::Set(Value::from(f.restore_save.as_deref().unwrap_or("auto"))))
+    match (restore_key(f), f.restore_save.as_deref()) {
+        (_, Some(policy)) => Some(Requested::Set(Value::from(policy))),
+        (Some(_), None) => Some(Requested::Set(Value::from("auto"))),
+        (None, None) => None,
+    }
 }
 /// Restore checks travel with a restore key; an unset check is an explicit
 /// clear so a later check does not outlive its key.
@@ -598,6 +686,16 @@ pub static SPECS: &[Spec] = &[
         read_download_path
     ),
     row!(
+        Capture,
+        "capture",
+        "--capture",
+        Launch,
+        Memory,
+        false,
+        StrList,
+        read_capture
+    ),
+    row!(
         AllowedDomains,
         "allowed-domains",
         "--allowed-domains",
@@ -672,10 +770,10 @@ pub static SPECS: &[Spec] = &[
         RestoreKey,
         "restore-key",
         "--restore",
-        Live,
+        Launch,
         Memory,
         false,
-        Str,
+        SessionName,
         read_restore_key
     ),
     row!(
@@ -685,7 +783,7 @@ pub static SPECS: &[Spec] = &[
         Live,
         Memory,
         false,
-        Str,
+        RestoreSavePolicy,
         read_restore_save
     ),
     row!(

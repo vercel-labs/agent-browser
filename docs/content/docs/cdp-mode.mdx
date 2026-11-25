@@ -43,11 +43,32 @@ The `--cdp` flag accepts either:
 - A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
 - A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
 
-Use `--cdp-headers` (or `AGENT_BROWSER_CDP_HEADERS`) when the service authenticates the WebSocket handshake instead of the URL. It takes a JSON object with string values and is sent on HTTP discovery (`/json/version`, `/json/list`) and on the WebSocket handshake, for URLs and port numbers alike. It is separate from `--headers`, which sets HTTP headers on page requests.
+Use `--cdp-headers` (or `AGENT_BROWSER_CDP_HEADERS`) when the service authenticates the WebSocket handshake instead of the URL. It takes a JSON object with string values and is sent on HTTP discovery (`/json/version`, `/json/list`) and on the WebSocket handshake, for URLs and port numbers alike. It is separate from `--headers`, which sets HTTP headers on page requests. Headers go only to the endpoint they were given for: `AGENT_BROWSER_CDP_HEADERS` follows `AGENT_BROWSER_CDP`, so `--cdp <other>` or `connect <other>` does not send them to `<other>`. `--cdp-headers` goes with the endpoint the same command names, and alone it updates the endpoint the session is attached to. If the endpoint a command names is skipped because the session stays attached to another, its headers are dropped rather than sent to the attached endpoint.
+
+A CDP target set in the environment (`AGENT_BROWSER_CDP`) or config (`cdp`) is a session default: it does not replace a browser that `connect` attached the session to.
 
 For an `https://` CDP URL, discovery keeps the encryption of the input: requests go over `https://`/`wss://`, so credentials are never sent in plaintext, and there is no fallback to an unencrypted scheme. Only pass `--cdp-headers` with `http://`/`ws://` targets on networks you trust.
 
 Root WebSocket endpoints accept query strings with or without an explicit slash, so both `wss://browser-service.com?token=...` and `wss://browser-service.com/?token=...` work.
+
+## Attach to Firefox
+
+Firefox 150 or newer exposes WebDriver BiDi. Enable its remote debugging preferences in the profile's `user.js`, then start Firefox with both debugging ports:
+
+```js
+user_pref("devtools.debugger.remote-enabled", true);
+user_pref("devtools.chrome.enabled", true);
+user_pref("devtools.debugger.prompt-connection", false);
+```
+
+```bash
+firefox --remote-debugging-port 9222 --start-debugger-server 6000 -profile <dir>
+agent-browser connect 9222
+```
+
+A WebSocket URL whose path is `/session` is treated as Firefox BiDi. Other targets try CDP first, then probe for Firefox. Pass `--engine firefox` to skip the CDP attempt. Firefox uses DevTools port 6000 unless the URL sets `?devtools=<port>`. The session starts on the tab selected in Firefox, or on the first tab when none reports itself visible. `close` ends the BiDi session but leaves Firefox running. Firefox allows one BiDi client at a time, and `--auto-connect` does not support Firefox.
+
+The Firefox DevTools companion uses unencrypted RDP. For remote Firefox, forward both ports through an encrypted tunnel and connect to `127.0.0.1`. Firefox attach rejects `--allowed-domains`, `--pin-tab`, and `--ca-cert`, and ignores the options that describe a browser agent-browser launches (`--profile`, `--args`, `--extension`, `--allow-file-access`, `--webgpu`, `--headed`, `--executable-path`, `--no-xvfb`). `--user-agent` and `--download-path` apply to the attached Firefox in place, and `close` puts Firefox's own user agent and download location back.
 
 ## Auto-Connect
 
@@ -94,6 +115,8 @@ With `--pin-tab`:
 - `tab list`, `tab new`, and `tab <ref>` still work in that state, so an agent can recover by binding a new tab
 - Tabs opened by other sessions or the user never steal the pinned session's active tab
 - Another session cannot take a pinned tab with `tab <ref>` while the pinning session is running; the switch fails with `tab_locked` naming the owner
+
+Chrome throttles a pinned tab that is not the front tab of its window: its timers slow to about one per second and animation frames stop. Run `agent-browser tab keep live` in that session to keep the tab running while it is hidden. See [Background tab modes](/commands#background-tab-modes) for the cost, and for the Chrome flag that gives a browser you started yourself the full timer rate.
 
 The flag is sticky per session: pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit close releases it so other sessions can take the tab, and the next pinned command pins again. Pass `--no-pin-tab` to explicitly turn the pin off again. See [Sessions](/sessions) for the multi-session workflow and [Commands](/commands) for tab refs by CDP target id.
 
@@ -146,9 +169,10 @@ This enables control of:
     <tr><td><code>--name, -n</code></td><td>Locator name filter</td></tr>
     <tr><td><code>--exact</code></td><td>Exact, case-sensitive match (accessible name for role)</td></tr>
     <tr><td><code>--headed</code></td><td>Show browser window</td></tr>
-    <tr><td><code>{"--cdp <port|url>"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>
+    <tr><td><code>--cdp &lt;port|url&gt;</code></td><td>CDP or Firefox WebDriver BiDi connection (port or WebSocket URL; Firefox accepts <code>?devtools=&lt;port&gt;</code>)</td></tr>
     <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
-    <tr><td><code>--pin-tab</code></td><td>Pin the session to its bound tab (strict tab binding)</td></tr>
+    <tr><td><code>--no-auto-connect</code></td><td>Return a session attached with <code>--auto-connect</code> to a local launch; also <code>--auto-connect false</code>. Overrides <code>AGENT_BROWSER_AUTO_CONNECT</code> and config <code>autoConnect</code></td></tr>
+    <tr><td><code>--pin-tab</code></td><td>Pin the session to its bound tab (CDP only; Firefox attach rejects it)</td></tr>
     <tr><td><code>--no-pin-tab</code></td><td>Disable a sticky pin previously enabled with <code>--pin-tab</code></td></tr>
     <tr><td><code>--color-scheme &lt;scheme&gt;</code></td><td>Persistent color scheme (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>--debug</code></td><td>Debug output</td></tr>
@@ -162,5 +186,7 @@ Use the `-p` flag to connect to a cloud browser provider or configured `browser.
 ```bash
 agent-browser -p browserbase open https://example.com
 ```
+
+A `browser.provider` plugin that returns `directPage: true` connects to a page socket instead of a browser endpoint. Console messages, network requests, HAR recording, tracing, and profiling apply to that page.
 
 See the [Providers](/providers/browser-use) section for setup and configuration of each built-in provider: [Browser Use](/providers/browser-use), [Browserbase](/providers/browserbase), [Browserless](/providers/browserless), [Kernel](/providers/kernel), and [AgentCore](/providers/agentcore).

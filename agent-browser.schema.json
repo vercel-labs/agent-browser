@@ -176,10 +176,19 @@
     },
     "allowedDomains": {
       "type": "array",
+      "minItems": 1,
       "items": {
         "type": "string"
       },
       "description": "Allowed domain patterns (e.g., ['example.com', '*.example.com'])."
+    },
+    "capture": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["flow"]
+      },
+      "description": "Record the session so `flow save` can turn it into a replayable flow. Applies when the session opens."
     },
     "actionPolicy": {
       "type": "string",
@@ -195,7 +204,7 @@
     },
     "engine": {
       "type": "string",
-      "enum": ["chrome", "lightpanda", "obscura"],
+      "enum": ["chrome", "lightpanda", "firefox", "obscura"],
       "default": "chrome",
       "description": "Browser engine to use. Obscura is experimental and does not support proxy bypass rules."
     },

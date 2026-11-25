@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { PAGE_TITLES } from "./page-titles";
+import { versionedOgImage } from "./og-version";
+import { HOME_OG_TITLE, PAGE_TITLES } from "./page-titles";
 
 import { canonicalUrlFor, isPreviewDeployment, siteDescription } from "./site";
 
@@ -11,7 +12,10 @@ export function pageMetadata(slug: string): Metadata {
   const fullTitle = slug
     ? `${displayTitle} | agent-browser`
     : "agent-browser | Browser Automation for AI";
-  const ogImageUrl = slug ? `/og/${slug}` : "/og";
+  const ogImageUrl = versionedOgImage(
+    slug ? `/og/${slug}` : "/og",
+    slug ? title : HOME_OG_TITLE,
+  );
   const href = slug ? `/${slug}` : "/";
 
   return {
