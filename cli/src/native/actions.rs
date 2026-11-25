@@ -1753,7 +1753,7 @@ impl DaemonState {
                 if let Some(ref server) = self.stream_server {
                     server.broadcast_console(level, &text, &raw_args);
                 }
-                self.event_tracker.add_console(level, &text, raw_args);
+                self.event_tracker.add_console(level, &text, &raw_args);
             }
             "Runtime.exceptionThrown" => {
                 if let Ok(ex_event) = serde_json::from_value::<ExceptionThrownEvent>(params.clone())
