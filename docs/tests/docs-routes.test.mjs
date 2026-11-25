@@ -847,7 +847,7 @@ test("sitemap lists the marketing root and every docs canonical exactly once", a
 });
 
 for (const path of ["/llms.txt", "/sitemap.md"]) {
-  test(`${path}: agent index exposes all 40 public pages and Markdown alternatives exactly once`, async () => {
+  test(`${path}: agent index exposes all public pages and Markdown alternatives exactly once`, async () => {
     const response = await get(path, { headers: agent });
     responseType(
       response,

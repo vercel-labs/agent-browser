@@ -6,6 +6,13 @@ import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, Rotate
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
+import {
+  createRightClickGuardState,
+  mapCanvasPointToViewport,
+  recordRightMouseEvent,
+  shouldSynthesizeContextMenuRightClick,
+  type DrawnFrame,
+} from "@/lib/viewport-pointer";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -40,10 +47,11 @@ import {
   streamEngineAtom,
   activeUrlAtom,
   sendInputAtom,
+  type StreamFrame,
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
-const SCREENCAST_ENGINES = new Set(["chrome"]);
+const LIVE_VIEW_ENGINES = new Set(["chrome", "firefox"]);
 
 function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
   let m = 0;
@@ -272,6 +280,10 @@ export function Viewport() {
   const sendInput = useSetAtom(sendInputAtom);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rightClickGuardRef = useRef(createRightClickGuardState());
+  const drawnFrameRef = useRef<DrawnFrame | null>(null);
+  const decodeSeqRef = useRef(0);
+  const drawnSeqRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const addressRef = useRef<HTMLInputElement>(null);
@@ -308,6 +320,8 @@ export function Viewport() {
     setActiveDevice(null);
     setColorScheme("no-preference");
     setOffline(false);
+    drawnFrameRef.current = null;
+    rightClickGuardRef.current = createRightClickGuardState();
   }, [sessionName]);
 
   useEffect(() => {
@@ -347,20 +361,34 @@ export function Viewport() {
     }
   }, [addressValue, navigating, runCmd, url]);
 
-  const drawFrame = useCallback((base64: string) => {
+  const drawFrame = useCallback((next: StreamFrame) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const bin = atob(base64);
+    const seq = ++decodeSeqRef.current;
+    const bin = atob(next.data);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
     createImageBitmap(new Blob([bytes], { type: "image/jpeg" })).then((bmp) => {
+      if (seq < drawnSeqRef.current) {
+        bmp.close();
+        return;
+      }
+      drawnSeqRef.current = seq;
       canvas.width = bmp.width;
       canvas.height = bmp.height;
       const ctx = canvas.getContext("2d");
       if (ctx) ctx.drawImage(bmp, 0, 0);
       bmp.close();
+      drawnFrameRef.current =
+        next.deviceWidth > 0 && next.deviceHeight > 0
+          ? {
+              width: next.deviceWidth,
+              height: next.deviceHeight,
+              pageScaleFactor: next.pageScaleFactor > 0 ? next.pageScaleFactor : 1,
+            }
+          : null;
     });
   }, []);
 
@@ -447,13 +475,14 @@ export function Viewport() {
     (e: React.MouseEvent): { x: number; y: number } | null => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = viewportWidth / rect.width;
-      const scaleY = viewportHeight / rect.height;
-      return {
-        x: Math.round((e.clientX - rect.left) * scaleX),
-        y: Math.round((e.clientY - rect.top) * scaleY),
-      };
+      return mapCanvasPointToViewport(
+        e.clientX,
+        e.clientY,
+        canvas.getBoundingClientRect(),
+        drawnFrameRef.current,
+        viewportWidth,
+        viewportHeight,
+      );
     },
     [viewportWidth, viewportHeight],
   );
@@ -462,14 +491,71 @@ export function Viewport() {
     (e: React.MouseEvent, eventType: string) => {
       const pos = toViewport(e);
       if (!pos) return;
+      recordRightMouseEvent(
+        rightClickGuardRef.current,
+        eventType,
+        e.button,
+        Date.now(),
+      );
+      const buttons = e.buttons;
+      const button =
+        eventType === "mouseMoved"
+          ? buttons & 1
+            ? "left"
+            : buttons & 2
+              ? "right"
+              : buttons & 4
+                ? "middle"
+                : "none"
+          : cdpButton(e.button);
       sendInput({
         type: "input_mouse",
         eventType,
         x: pos.x,
         y: pos.y,
-        button: cdpButton(e.button),
+        button,
+        buttons,
         clickCount: eventType === "mousePressed" ? 1 : 0,
         modifiers: cdpModifiers(e),
+      });
+    },
+    [toViewport, sendInput],
+  );
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      if (
+        !shouldSynthesizeContextMenuRightClick(
+          rightClickGuardRef.current,
+          e.buttons,
+          Date.now(),
+        )
+      ) {
+        return;
+      }
+      const pos = toViewport(e);
+      if (!pos) return;
+      const modifiers = cdpModifiers(e);
+      sendInput({
+        type: "input_mouse",
+        eventType: "mousePressed",
+        x: pos.x,
+        y: pos.y,
+        button: "right",
+        buttons: 2,
+        clickCount: 1,
+        modifiers,
+      });
+      sendInput({
+        type: "input_mouse",
+        eventType: "mouseReleased",
+        x: pos.x,
+        y: pos.y,
+        button: "right",
+        buttons: 0,
+        clickCount: 0,
+        modifiers,
       });
     },
     [toViewport, sendInput],
@@ -698,12 +784,12 @@ export function Viewport() {
             }}
             onMouseUp={(e) => handleMouseEvent(e, "mouseReleased")}
             onWheel={handleWheel}
-            onContextMenu={(e) => e.preventDefault()}
+            onContextMenu={handleContextMenu}
           />
         ) : (
           <div className="text-center text-sm text-muted-foreground">
             {browserConnected
-              ? SCREENCAST_ENGINES.has(engine)
+              ? LIVE_VIEW_ENGINES.has(engine)
                 ? "Waiting for frames..."
                 : `Screencast not available for ${engine}`
               : "No browser connected"}

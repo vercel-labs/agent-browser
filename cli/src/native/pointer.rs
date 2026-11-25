@@ -110,6 +110,31 @@ impl Modifiers {
         (0..=15).contains(&mask).then_some(Self(mask as i32))
     }
 
+    /// Whether no modifier is held.
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The modifiers held by either mask.
+    pub fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// The WebDriver key names to hold for this mask, in a stable order.
+    pub fn key_names(self) -> Vec<&'static str> {
+        Self::NAMES
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.0 & (1 << index) != 0)
+            .map(|(_, name)| match *name {
+                "alt" => "Alt",
+                "control" => "Control",
+                "meta" => "Meta",
+                _ => "Shift",
+            })
+            .collect()
+    }
+
     pub fn mask(self) -> i32 {
         self.0
     }

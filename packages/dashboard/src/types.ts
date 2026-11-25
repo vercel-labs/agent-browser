@@ -14,6 +14,10 @@ export interface FrameMessage {
   };
 }
 
+export interface FrameClearMessage {
+  type: "frame_clear";
+}
+
 export interface StatusMessage {
   type: "status";
   connected: boolean;
@@ -93,6 +97,7 @@ export interface TabsMessage {
 
 export type StreamMessage =
   | FrameMessage
+  | FrameClearMessage
   | StatusMessage
   | CommandMessage
   | ResultMessage

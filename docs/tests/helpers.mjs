@@ -81,6 +81,16 @@ export const addedPages = [
     twitterTitle: "Modern Web Guidance | agent-browser",
   },
   {
+    path: "/engines/firefox",
+    markdownTitle: "Firefox",
+    title: "Firefox | agent-browser",
+    description: "Browser automation CLI for AI agents",
+    ogTitle: "Firefox | agent-browser",
+    ogDescription: "Browser automation CLI for AI agents",
+    ogAlt: "Firefox - agent-browser",
+    twitterTitle: "Firefox | agent-browser",
+  },
+  {
     path: "/ladybird",
     markdownTitle: "Ladybird",
     title: "Ladybird | agent-browser",
