@@ -26145,20 +26145,33 @@ async fn e2e_firefox_stream_paste_isolates_clipboard_and_locks_devtools() {
         )
         .await;
     }
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "frame-focus", "action": "frame", "selector": "#xframe"}),
+        )
+        .await,
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "wait-focus", "action": "wait", "function": "document.activeElement?.id === 'child-in'", "timeout": 5000}),
+        )
+        .await,
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "back-main-focus", "action": "mainframe"}),
+        )
+        .await,
+    );
     super::bidi::stream::dispatch_input(
         &live,
         "input_insert_text",
         &json!({"text": "cross-origin\u{E007}secret"}),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert_eq!(firefox_eval(&mut state, "window.__stolen").await, json!([]));
-    assert_eq!(
-        firefox_eval(&mut state, "document.getElementById('trap').value").await,
-        json!("")
-    );
-
     assert_success(
         &firefox_command(
             &mut state,
@@ -26166,9 +26179,28 @@ async fn e2e_firefox_stream_paste_isolates_clipboard_and_locks_devtools() {
         )
         .await,
     );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "wait-value", "action": "wait", "function": "document.getElementById('child-in').value.length > 0", "timeout": 5000}),
+        )
+        .await,
+    );
     assert_eq!(
         firefox_eval(&mut state, "document.getElementById('child-in').value").await,
         json!("cross-origin\u{E007}secret")
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "back-main-check", "action": "mainframe"}),
+        )
+        .await,
+    );
+    assert_eq!(firefox_eval(&mut state, "window.__stolen").await, json!([]));
+    assert_eq!(
+        firefox_eval(&mut state, "document.getElementById('trap').value").await,
+        json!("")
     );
     firefox_close(&mut state).await;
 }
