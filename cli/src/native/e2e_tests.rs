@@ -26137,14 +26137,6 @@ async fn e2e_firefox_stream_paste_isolates_clipboard_and_locks_devtools() {
         json!("")
     );
 
-    for event in ["mouseMoved", "mousePressed", "mouseReleased"] {
-        super::bidi::stream::dispatch_input(
-            &live,
-            "input_mouse",
-            &json!({"eventType": event, "x": 40, "y": 60, "button": "left", "modifiers": 0}),
-        )
-        .await;
-    }
     assert_success(
         &firefox_command(
             &mut state,
@@ -26152,6 +26144,7 @@ async fn e2e_firefox_stream_paste_isolates_clipboard_and_locks_devtools() {
         )
         .await,
     );
+    assert_success(&firefox_act(&mut state, "click", "#child-in", json!({})).await);
     assert_success(
         &firefox_command(
             &mut state,
