@@ -102,6 +102,8 @@ A ref keeps pointing at its DOM node while that node exists. If the node was rep
 
 If a snapshot fails because its scope matches nothing, you can still use refs from the last successful snapshot as long as the document has not changed.
 
+`back` and `forward` are the exception to that lifecycle. When Chrome restores a document you snapshotted earlier from its back/forward cache, or a step stays in the same document, the refs issued for that document stay valid, including refs inside same-origin iframes and cross-origin OOPIFs. Chrome caches up to 6 documents per tab, and the command reports `refsValid` when earlier refs survived. A restored ref is checked when an action uses it, so a node the page removed or replaced after the restore fails as stale instead of matching by role and name. Any other navigation, such as a page sent with `Cache-Control: no-store`, replaces the refs and fails with "Ref @eN is from a document that is no longer loaded".
+
 ## Annotated screenshots
 
 For visual context alongside text snapshots, use `screenshot --annotate` to overlay numbered labels on interactive elements. Each label `[N]` maps to ref `@eN`:

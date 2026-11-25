@@ -965,7 +965,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, or that a ref is from a document that is no longer loaded, take a new snapshot and use a fresh ref. A snapshot that reports the document changed while it was being captured should be taken again. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref. A capture that fails, such as a selector that matches nothing, leaves the previous refs in place while the document is unchanged.",
+            "Return an accessibility-tree snapshot with reusable element refs. A BFCache restore keeps a document's refs valid, while replaced elements in the restored document fail as stale. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, or that a ref is from a document that is no longer loaded, take a new snapshot and use a fresh ref. A snapshot that reports the document changed while it was being captured should be taken again. Controls with an empty or duplicated accessible name carry a hint=\"...\" read from the DOM after the ref. A capture that fails, such as a selector that matches nothing, leaves the previous refs in place while the document is unchanged.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text." },
@@ -1124,8 +1124,8 @@ fn tools() -> Vec<Value> {
 
 fn parity_tools() -> Vec<Value> {
     vec![
-        tool(TOOL_BACK, "Back", "Navigate back.", json!({}), &[]),
-        tool(TOOL_FORWARD, "Forward", "Navigate forward.", json!({}), &[]),
+        tool(TOOL_BACK, "Back", "Navigate back in history. Reports whether prior refs remain valid after a BFCache restore or same-document navigation.", json!({}), &[]),
+        tool(TOOL_FORWARD, "Forward", "Navigate forward in history. Reports whether prior refs remain valid after a BFCache restore or same-document navigation.", json!({}), &[]),
         tool(TOOL_RELOAD, "Reload", "Reload the page.", json!({}), &[]),
         tool(
             TOOL_DBLCLICK,

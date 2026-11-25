@@ -640,6 +640,8 @@ agent-browser pushstate <url>         # SPA client-side nav; auto-detects window
                                       # falls back to history.pushState + popstate
 ```
 
+`back` and `forward` use the browser history and return once the restore or load finishes. When Chrome restores a document you snapshotted earlier from its back/forward cache, the refs you hold stay valid, including refs inside same-origin iframes and cross-origin OOPIFs. Chrome caches up to 6 documents per tab. JSON output reports `refsValid: true`, and plain output adds `(refs valid)`, when earlier refs survived the step. A node the page replaced after the restore fails as stale instead of matching a lookalike element. Any other navigation replaces the refs. This works the same under `--cdp`.
+
 ## Pre-navigation setup
 
 Some flows need routes, cookies, or init scripts configured *before* the first navigation (SSR debug, auth on protected origins, etc.). `open` without a URL launches the browser but stays on `about:blank`, leaving room to stage state. `batch` makes it one CLI invocation:

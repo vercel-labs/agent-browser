@@ -2392,6 +2392,7 @@ impl DaemonState {
                                     browser.session_id_for_target(&te.target_id)
                                 }) {
                                     let session = session.to_string();
+                                    self.ref_map.on_page_closed(&session);
                                     self.webmcp.observations.remove(&session);
                                     self.touch_sessions.remove(&session);
                                     self.frame_contexts.retain(|(s, _), _| s != &session);
@@ -2618,6 +2619,32 @@ impl DaemonState {
                             if let Some(frame) = event.params.get("frame") {
                                 let session_id = event.session_id.as_deref().unwrap_or_default();
                                 if frame.get("parentId").is_none() {
+                                    if let (Some(frame_id), Some(loader_id)) = (
+                                        frame
+                                            .get("id")
+                                            .and_then(Value::as_str)
+                                            .filter(|id| !id.is_empty()),
+                                        frame
+                                            .get("loaderId")
+                                            .and_then(Value::as_str)
+                                            .filter(|id| !id.is_empty()),
+                                    ) {
+                                        if session_matches || !session_id.is_empty() {
+                                            let is_bfcache_restore =
+                                                event.params.get("type").and_then(Value::as_str)
+                                                    == Some("BackForwardCacheRestore");
+                                            if session_matches {
+                                                self.ref_map.on_frame_navigated(
+                                                    session_id,
+                                                    frame_id,
+                                                    loader_id,
+                                                    is_bfcache_restore,
+                                                );
+                                            } else {
+                                                self.ref_map.on_page_leave(session_id);
+                                            }
+                                        }
+                                    }
                                     if session_matches {
                                         self.active_frame_id = None;
                                         self.webmcp.clear_page_scope(session_id);
@@ -4325,7 +4352,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 .await),
             }
         }
-        "navigate" => handle_navigate(cmd, state).await,
+        "navigate" => Box::pin(handle_navigate(cmd, state)).await,
         "read" => handle_read(cmd, state).await,
         "url" => handle_url(state).await,
         "cdp_url" => handle_cdp_url(state).await,
@@ -4334,7 +4361,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "content" => handle_content(state).await,
         "evaluate" => handle_evaluate(cmd, state).await,
         "close" => handle_close(state).await,
-        "snapshot" => handle_snapshot(cmd, state).await,
+        "snapshot" => Box::pin(handle_snapshot(cmd, state)).await,
         "screenshot" => handle_screenshot(cmd, state).await,
         "click" => handle_click(cmd, state, 1).await,
         "dblclick" => handle_click(cmd, state, 2).await,
@@ -4352,8 +4379,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "isvisible" => handle_isvisible(cmd, state).await,
         "isenabled" => handle_isenabled(cmd, state).await,
         "ischecked" => handle_ischecked(cmd, state).await,
-        "back" => handle_back(state).await,
-        "forward" => handle_forward(state).await,
+        "back" => Box::pin(handle_history(state, -1)).await,
+        "forward" => Box::pin(handle_history(state, 1)).await,
         "reload" => handle_reload(state).await,
         "cookies_get" => handle_cookies_get(cmd, state).await,
         "cookies_set" => handle_cookies_set(cmd, state).await,
@@ -4382,16 +4409,16 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "recording_restart" => handle_recording_restart(cmd, state).await,
         "pdf" => handle_pdf(cmd, state).await,
         "tab_list" => handle_tab_list(state).await,
-        "tab_new" => handle_tab_new(cmd, state).await,
-        "tab_switch" => handle_tab_switch(cmd, state).await,
-        "tab_close" => handle_tab_close(cmd, state).await,
+        "tab_new" => Box::pin(handle_tab_new(cmd, state)).await,
+        "tab_switch" => Box::pin(handle_tab_switch(cmd, state)).await,
+        "tab_close" => Box::pin(handle_tab_close(cmd, state)).await,
         "tab_keep" => handle_tab_keep(cmd, state).await,
         "viewport" => handle_viewport(cmd, state).await,
         "useragent" | "user_agent" => handle_user_agent(cmd, state).await,
         "set_media" => handle_set_media(cmd, state).await,
         "download" => handle_download(cmd, state).await,
-        "diff_snapshot" => handle_diff_snapshot(cmd, state).await,
-        "diff_url" => handle_diff_url(cmd, state).await,
+        "diff_snapshot" => Box::pin(handle_diff_snapshot(cmd, state)).await,
+        "diff_url" => Box::pin(handle_diff_url(cmd, state)).await,
         "credentials_set" => handle_credentials_set(cmd).await,
         "credentials_get" => handle_credentials_get(cmd).await,
         "credentials_delete" => handle_credentials_delete(cmd).await,
@@ -8215,7 +8242,7 @@ async fn navigate_active_page(
     }
 
     if let Some(session_id) = page_session.as_deref() {
-        state.ref_map.invalidate_page(session_id);
+        state.ref_map.on_page_leave(session_id);
     } else {
         state.ref_map.begin_snapshot();
     }
@@ -8656,7 +8683,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &state.iframe_sessions,
     )
     .await?;
-    state.ref_map = refs;
+    state.ref_map.commit_snapshot(refs, &session_id);
     let url = mgr.get_url().await.unwrap_or_default();
     snapshot_response(cmd, state, session_id, &options, previous_refs, tree, url)
 }
@@ -9022,7 +9049,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let mut response = if if_changed {
         observe_screenshot(
             state,
-            session_id,
+            session_id.clone(),
             signature,
             &result.base64,
             threshold,
@@ -9036,7 +9063,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .map_err(|e| format!("Failed to serialize annotations: {}", e))?;
     }
     if let Some(refs) = staged_refs {
-        state.ref_map = refs;
+        state.ref_map.commit_snapshot(refs, &session_id);
     }
 
     Ok(response)
@@ -9702,42 +9729,298 @@ async fn handle_ischecked(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     Ok(json!({ "checked": checked, "origin": url }))
 }
 
-async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
-    if let Some(ref wb) = state.webdriver_backend {
-        if state.browser.is_none() {
-            wb.back().await?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            let url = wb.get_url().await.unwrap_or_default();
-            state.ref_map.invalidate_all_documents();
-            return Ok(json!({ "url": url }));
-        }
-    }
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-    mgr.evaluate("history.back()", None).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    let url = mgr.get_url().await.unwrap_or_default();
-    state.ref_map.invalidate_page(&session_id);
-    Ok(json!({ "url": url }))
+enum HistoryOutcome {
+    BfcacheRestored { frame_id: String, loader_id: String },
+    Navigated { frame_id: String, loader_id: String },
+    SameDocument,
+    DialogBlocked { committed: Option<(String, String)> },
+    TimedOut,
 }
 
-async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
-    if let Some(ref wb) = state.webdriver_backend {
-        if state.browser.is_none() {
+async fn handle_history(state: &mut DaemonState, delta: i64) -> Result<Value, String> {
+    if let Some(wb) = state
+        .webdriver_backend
+        .as_ref()
+        .filter(|_| state.browser.is_none())
+    {
+        if delta < 0 {
+            wb.back().await?;
+        } else {
             wb.forward().await?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            let url = wb.get_url().await.unwrap_or_default();
-            state.ref_map.invalidate_all_documents();
-            return Ok(json!({ "url": url }));
         }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let url = wb.get_url().await.unwrap_or_default();
+        state.ref_map.invalidate_all_documents();
+        return Ok(json!({ "url": url, "refsValid": false }));
     }
+
+    state.drain_cdp_events_background().await?;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    mgr.evaluate("history.forward()", None).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    let url = mgr.get_url().await.unwrap_or_default();
-    state.ref_map.invalidate_page(&session_id);
-    Ok(json!({ "url": url }))
+    let main_frame_id = state
+        .ref_map
+        .main_frame(&session_id)
+        .map(str::to_string)
+        .or_else(|| {
+            mgr.active_target_id()
+                .ok()
+                .filter(|id| *id != "provider-page")
+                .map(str::to_string)
+        });
+    let auto_dismiss_dialogs = state.dialog_handler_task.is_some();
+    let mut rx = mgr.client.subscribe();
+    let history = mgr
+        .client
+        .send_command_no_params("Page.getNavigationHistory", Some(&session_id))
+        .await;
+    let used_cdp_history = match history {
+        Ok(history) => {
+            let current_index = history
+                .get("currentIndex")
+                .and_then(Value::as_i64)
+                .ok_or("Page.getNavigationHistory returned no currentIndex")?;
+            let entries = history
+                .get("entries")
+                .and_then(Value::as_array)
+                .ok_or("Page.getNavigationHistory returned no entries")?;
+            let target_idx = current_index + delta;
+            if target_idx < 0 || target_idx >= entries.len() as i64 {
+                let url = mgr.get_url().await.unwrap_or_default();
+                let refs_valid = state.ref_map.has_active_refs(&session_id);
+                return Ok(json!({ "url": url, "refsValid": refs_valid }));
+            }
+            let entry_id = entries[target_idx as usize]
+                .get("id")
+                .and_then(Value::as_i64)
+                .ok_or("Page.getNavigationHistory returned an entry without an id")?;
+            match mgr
+                .client
+                .send_command(
+                    "Page.navigateToHistoryEntry",
+                    Some(json!({ "entryId": entry_id })),
+                    Some(&session_id),
+                )
+                .await
+            {
+                Ok(_) => true,
+                Err(error) => {
+                    let lower = error.to_ascii_lowercase();
+                    if lower.contains("method not found")
+                        || lower.contains("unknown method")
+                        || lower.contains("wasn't found")
+                        || lower.contains("was not found")
+                        || lower.contains("not supported")
+                        || lower.contains("unsupported")
+                    {
+                        false
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Err(_) => false,
+    };
+    if !used_cdp_history {
+        let expression = if delta < 0 {
+            "history.back()"
+        } else {
+            "history.forward()"
+        };
+        if let Err(error) = mgr.evaluate(expression, None).await {
+            if !error.contains("Inspected target navigated or closed") {
+                return Err(error);
+            }
+        }
+    }
+
+    let timeout = if used_cdp_history {
+        tokio::time::Duration::from_secs(10)
+    } else {
+        tokio::time::Duration::from_millis(500)
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut committed: Option<(String, String)> = None;
+    let outcome = loop {
+        let event = match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(event)) => event,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            _ => {
+                break match committed {
+                    Some((frame_id, loader_id)) => HistoryOutcome::Navigated {
+                        frame_id,
+                        loader_id,
+                    },
+                    None => HistoryOutcome::TimedOut,
+                };
+            }
+        };
+        if !session_matches(Some(&session_id), event.session_id.as_deref()) {
+            continue;
+        }
+        match event.method.as_str() {
+            "Page.javascriptDialogOpening" => {
+                let dialog_type = event
+                    .params
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if auto_dismiss_dialogs && matches!(dialog_type, "beforeunload" | "alert") {
+                    continue;
+                }
+                break HistoryOutcome::DialogBlocked {
+                    committed: committed.take(),
+                };
+            }
+            "Page.frameNavigated" => {
+                if let Some(frame) = event
+                    .params
+                    .get("frame")
+                    .filter(|frame| frame.get("parentId").is_none())
+                {
+                    if let (Some(frame_id), Some(loader_id)) = (
+                        frame
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty()),
+                        frame
+                            .get("loaderId")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty()),
+                    ) {
+                        let frame_id = frame_id.to_string();
+                        let loader_id = loader_id.to_string();
+                        if event.params.get("type").and_then(Value::as_str)
+                            == Some("BackForwardCacheRestore")
+                        {
+                            break HistoryOutcome::BfcacheRestored {
+                                frame_id,
+                                loader_id,
+                            };
+                        }
+                        committed = Some((frame_id, loader_id));
+                    }
+                }
+            }
+            "Page.navigatedWithinDocument" => {
+                let event_frame_id = event.params.get("frameId").and_then(Value::as_str);
+                if main_frame_id
+                    .as_deref()
+                    .is_none_or(|id| event_frame_id == Some(id))
+                {
+                    break HistoryOutcome::SameDocument;
+                }
+            }
+            "Page.loadEventFired" => {
+                if let Some((frame_id, loader_id)) = committed.take() {
+                    break HistoryOutcome::Navigated {
+                        frame_id,
+                        loader_id,
+                    };
+                }
+            }
+            "Page.frameStoppedLoading"
+                if committed.as_ref().is_some_and(|(frame_id, _)| {
+                    event.params.get("frameId").and_then(Value::as_str) == Some(frame_id.as_str())
+                }) =>
+            {
+                let (frame_id, loader_id) = committed.take().unwrap();
+                break HistoryOutcome::Navigated {
+                    frame_id,
+                    loader_id,
+                };
+            }
+            _ => {}
+        }
+    };
+
+    let dialog_blocked = matches!(outcome, HistoryOutcome::DialogBlocked { .. });
+    match outcome {
+        HistoryOutcome::BfcacheRestored {
+            frame_id,
+            loader_id,
+        } => {
+            state
+                .ref_map
+                .on_frame_navigated(&session_id, &frame_id, &loader_id, true);
+            state.active_frame_id = None;
+            state.drain_cdp_events_background().await?;
+            state.refresh_active_iframe_sessions().await;
+        }
+        HistoryOutcome::Navigated {
+            frame_id,
+            loader_id,
+        } => {
+            state
+                .ref_map
+                .on_frame_navigated(&session_id, &frame_id, &loader_id, false);
+            state.active_frame_id = None;
+            state.drain_cdp_events_background().await?;
+            state.refresh_active_iframe_sessions().await;
+        }
+        HistoryOutcome::SameDocument => {
+            state.drain_cdp_events_background().await?;
+        }
+        HistoryOutcome::DialogBlocked { committed } => {
+            if let Some((frame_id, loader_id)) = committed {
+                state
+                    .ref_map
+                    .on_frame_navigated(&session_id, &frame_id, &loader_id, false);
+                state.active_frame_id = None;
+            }
+            state.drain_cdp_events_background().await?;
+        }
+        HistoryOutcome::TimedOut => {
+            let current_loader = {
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                mgr.client
+                    .send_command_no_params("Page.getFrameTree", Some(&session_id))
+                    .await
+                    .ok()
+                    .and_then(|tree| {
+                        tree.get("frameTree")?
+                            .get("frame")?
+                            .get("loaderId")?
+                            .as_str()
+                            .map(str::to_string)
+                    })
+            };
+            if !current_loader
+                .as_deref()
+                .is_some_and(|loader| state.ref_map.is_active_document(&session_id, loader))
+            {
+                state.ref_map.on_page_leave(&session_id);
+            }
+        }
+    };
+    let refs_valid = state.ref_map.has_active_refs(&session_id);
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let url = if dialog_blocked {
+        mgr.client
+            .send_command_no_params("Page.getNavigationHistory", Some(&session_id))
+            .await
+            .ok()
+            .and_then(|history| {
+                let idx = history.get("currentIndex")?.as_u64()? as usize;
+                history
+                    .get("entries")?
+                    .as_array()?
+                    .get(idx)?
+                    .get("url")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| {
+                mgr.pages_list()
+                    .iter()
+                    .find(|p| p.session_id == session_id)
+                    .map(|p| p.url.clone())
+                    .unwrap_or_default()
+            })
+    } else {
+        mgr.get_url().await.unwrap_or_default()
+    };
+    Ok(json!({ "url": url, "refsValid": refs_valid }))
 }
 
 async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
@@ -10404,7 +10687,7 @@ pub(crate) fn diff_snapshot_response(
         &diff::snapshot_comparison_text(&baseline_text),
         &diff::snapshot_comparison_text(&current),
     );
-    state.ref_map = current_ref_map;
+    state.ref_map.commit_snapshot(current_ref_map, &session_id);
     state.remember_snapshot(LastSnapshot {
         session_id,
         frame_id: state.active_frame_id.clone(),
@@ -10421,7 +10704,9 @@ pub(crate) fn diff_snapshot_response(
 }
 
 async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    if state.browser.is_none() {
+        return Err("Browser not launched".to_string());
+    }
 
     let url1 = cmd
         .get("url1")
@@ -10466,59 +10751,84 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         });
 
     // Each navigation can replace the document, so invalidate refs before it starts.
-    let first_session_id = mgr.active_session_id()?.to_string();
+    let first_session_id = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        mgr.active_session_id()?.to_string()
+    };
     state.ref_map.invalidate_page(&first_session_id);
 
     // Navigate to URL1, then capture it before leaving the page.
-    mgr.navigate(url1, wait_until).await?;
-    let first_session_id = mgr.active_session_id()?.to_string();
-    let mut snap1_ref_map = state.ref_map.clone();
-    let snap1 = snapshot::take_snapshot(
-        &mgr.client,
-        &first_session_id,
-        &options,
-        &mut snap1_ref_map,
-        None,
-        &state.iframe_sessions,
-    )
-    .await?;
-    let shot1 = capture_diff_url_screenshot(
-        mgr,
-        &first_session_id,
-        &snap1_ref_map,
-        screenshot_options.as_ref(),
-        &state.iframe_sessions,
-    )
-    .await?;
+    state
+        .browser
+        .as_mut()
+        .ok_or("Browser not launched")?
+        .navigate(url1, wait_until)
+        .await?;
+    state.drain_cdp_events_background().await?;
+    let (first_session_id, snap1, shot1, mut snap1_ref_map) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let first_session_id = mgr.active_session_id()?.to_string();
+        let mut snap1_ref_map = state.ref_map.clone();
+        let snap1 = snapshot::take_snapshot(
+            &mgr.client,
+            &first_session_id,
+            &options,
+            &mut snap1_ref_map,
+            None,
+            &state.iframe_sessions,
+        )
+        .await?;
+        let shot1 = capture_diff_url_screenshot(
+            mgr,
+            &first_session_id,
+            &snap1_ref_map,
+            screenshot_options.as_ref(),
+            &state.iframe_sessions,
+        )
+        .await?;
+        (first_session_id, snap1, shot1, snap1_ref_map)
+    };
 
     // Navigate to URL2 and capture it the same way.
     snap1_ref_map.invalidate_page(&first_session_id);
-    mgr.navigate(url2, wait_until).await?;
-    let second_session_id = mgr.active_session_id()?.to_string();
-    let mut snap2_ref_map = snap1_ref_map;
-    let snap2 = snapshot::take_snapshot(
-        &mgr.client,
-        &second_session_id,
-        &options,
-        &mut snap2_ref_map,
-        None,
-        &state.iframe_sessions,
-    )
-    .await?;
-    let shot2 = capture_diff_url_screenshot(
-        mgr,
-        &second_session_id,
-        &snap2_ref_map,
-        screenshot_options.as_ref(),
-        &state.iframe_sessions,
-    )
-    .await?;
+    state
+        .browser
+        .as_mut()
+        .ok_or("Browser not launched")?
+        .navigate(url2, wait_until)
+        .await?;
+    state.drain_cdp_events_background().await?;
+    let (second_session_id, snap2, shot2, snap2_ref_map) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let second_session_id = mgr.active_session_id()?.to_string();
+        let mut snap2_ref_map = snap1_ref_map;
+        let snap2 = snapshot::take_snapshot(
+            &mgr.client,
+            &second_session_id,
+            &options,
+            &mut snap2_ref_map,
+            None,
+            &state.iframe_sessions,
+        )
+        .await?;
+        let shot2 = capture_diff_url_screenshot(
+            mgr,
+            &second_session_id,
+            &snap2_ref_map,
+            screenshot_options.as_ref(),
+            &state.iframe_sessions,
+        )
+        .await?;
+        (second_session_id, snap2, shot2, snap2_ref_map)
+    };
 
     let before = diff::snapshot_comparison_text(&snap1);
     let after = diff::snapshot_comparison_text(&snap2);
     let result = diff::diff_text(&before, &after);
     let snapshot_diff = diff::diff_snapshots(&before, &after);
-    state.ref_map = snap2_ref_map;
+    state
+        .ref_map
+        .commit_snapshot(snap2_ref_map, &second_session_id);
     let mut data = json!({
         "diff": result,
         "snapshot": {
@@ -10749,6 +11059,11 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let defer_url =
         defer_url_until_controls || (url.is_some() && session_setup_pending(state).await);
 
+    let previous_session = state
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.active_session_id().ok())
+        .map(str::to_string);
     let (mut result, new_session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         let result = mgr
@@ -10757,7 +11072,11 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         (result, mgr.active_session_id()?.to_string())
     };
 
-    state.ref_map.begin_snapshot();
+    if let Some(previous_session) = previous_session.as_deref() {
+        state.ref_map.on_page_leave(previous_session);
+    } else {
+        state.ref_map.begin_snapshot();
+    }
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     state.webmcp.clear_invocations();
@@ -10803,6 +11122,11 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .pending_dialog
         .as_ref()
         .and_then(|d| d.session_id.clone());
+    let previous_session = state
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.active_session_id().ok())
+        .map(str::to_string);
     let result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         mgr.tab_switch_by_id(tab_id, dialog_session.as_deref())
@@ -10810,7 +11134,11 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
     };
     // Clear only after the switch commits, so a failed switch does not strand
     // the user on the old tab with dead refs and frame scope.
-    state.ref_map.begin_snapshot();
+    if let Some(previous_session) = previous_session.as_deref() {
+        state.ref_map.on_page_leave(previous_session);
+    } else {
+        state.ref_map.begin_snapshot();
+    }
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     state.webmcp.clear_invocations();
@@ -10861,6 +11189,20 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .pending_dialog
         .as_ref()
         .and_then(|d| d.session_id.clone());
+    let (closed_session, closing_active) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let active_target = mgr.active_target_id().ok();
+        let target = match tab_id {
+            Some(id) => mgr.target_id_for_tab(id),
+            None => active_target,
+        };
+        (
+            target
+                .and_then(|id| mgr.session_id_for_target(id))
+                .map(str::to_string),
+            target.is_some() && target == active_target,
+        )
+    };
     let result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         mgr.tab_close_by_id(tab_id, dialog_session.as_deref())
@@ -10868,11 +11210,17 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     };
     // Clear only after the close commits; a rejected close (last tab, bad
     // index) must not wipe the caller's refs and frame scope.
-    state.ref_map.begin_snapshot();
-    state.active_iframe_sessions.clear();
-    state.webmcp.clear_invocations();
-    state.active_frame_id = None;
-    state.refresh_active_iframe_sessions().await;
+    if let Some(closed_session) = closed_session.as_deref() {
+        state.ref_map.on_page_closed(closed_session);
+    } else if closing_active {
+        state.ref_map.begin_snapshot();
+    }
+    if closing_active {
+        state.active_iframe_sessions.clear();
+        state.webmcp.clear_invocations();
+        state.active_frame_id = None;
+        state.refresh_active_iframe_sessions().await;
+    }
     Ok(result)
 }
 
@@ -13289,10 +13637,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     // fetching Page.getFrameTree up front.
     if let Some(sel) = selector {
         if let Some(ref_id) = super::element::parse_ref(sel) {
-            let entry = state
-                .ref_map
-                .get(&ref_id)
-                .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+            let entry = state.ref_map.resolve_entry(&session_id, &ref_id)?;
             super::element::ensure_ref_document_current(
                 &mgr.client,
                 &session_id,
@@ -13883,7 +14228,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     );
 
     // Read before the tree: a navigation in between is caught when the ref resolves.
-    let document = super::element::current_document(
+    let current_loader = super::element::current_document(
         &mgr.client,
         &session_id,
         state.active_frame_id.as_deref(),
@@ -13912,8 +14257,8 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
         state.active_frame_id.as_deref(),
     );
-    if let Some((session, loader)) = document {
-        state.ref_map.bind_document(&temp_ref, &session, &loader);
+    if let Some(loader) = current_loader.as_deref() {
+        state.ref_map.bind_document(&temp_ref, loader);
     }
     state.ref_map.set_next_ref_num(ref_num + 1);
 
@@ -18432,6 +18777,192 @@ mod tests {
             }
         });
         (url, calls)
+    }
+
+    #[derive(Clone, Copy)]
+    enum HistoryTestCase {
+        Restore,
+        Miss,
+        Boundary,
+        SameDocument,
+        Fallback,
+    }
+
+    async fn history_test_state(
+        case: HistoryTestCase,
+    ) -> (DaemonState, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let method = request["method"].as_str().unwrap();
+                let expression = request["params"]["expression"].as_str().unwrap_or("");
+                server_calls
+                    .lock()
+                    .unwrap()
+                    .push(if method == "Runtime.evaluate" {
+                        expression.to_string()
+                    } else {
+                        method.to_string()
+                    });
+                let mut events = Vec::new();
+                let response = match method {
+                    "Page.getNavigationHistory" if matches!(case, HistoryTestCase::Fallback) => {
+                        json!({"id": request["id"], "error": {"code": -32601, "message": "Method not found"}})
+                    }
+                    "Page.getNavigationHistory" => json!({"id": request["id"], "result": {
+                        "currentIndex": if matches!(case, HistoryTestCase::Boundary) { 0 } else { 1 },
+                        "entries": [{"id": 1}, {"id": 2}, {"id": 3}]
+                    }}),
+                    "Page.navigateToHistoryEntry" => {
+                        match case {
+                            HistoryTestCase::Restore => events.push(json!({"method": "Page.frameNavigated", "sessionId": "session", "params": {"frame": {"id": "page", "loaderId": "loader-a"}, "type": "BackForwardCacheRestore"}})),
+                            HistoryTestCase::Miss => {
+                                events.push(json!({"method": "Page.backForwardCacheNotUsed", "sessionId": "session", "params": {}}));
+                                events.push(json!({"method": "Page.frameNavigated", "sessionId": "session", "params": {"frame": {"id": "page", "loaderId": "loader-c"}, "type": "Navigation"}}));
+                                events.push(json!({"method": "Page.loadEventFired", "sessionId": "session", "params": {}}));
+                            }
+                            HistoryTestCase::SameDocument => events.push(json!({"method": "Page.navigatedWithinDocument", "sessionId": "session", "params": {"frameId": "page"}})),
+                            _ => {}
+                        }
+                        json!({"id": request["id"], "result": {}})
+                    }
+                    "Runtime.evaluate" if expression == "history.back()" => {
+                        events.push(json!({"method": "Page.navigatedWithinDocument", "sessionId": "session", "params": {"frameId": "page"}}));
+                        json!({"id": request["id"], "error": {"code": -32000, "message": "Inspected target navigated or closed"}})
+                    }
+                    "Runtime.evaluate" => {
+                        json!({"id": request["id"], "result": {"result": {"type": "string", "value": "https://example.com/"}}})
+                    }
+                    _ => json!({"id": request["id"], "result": {}}),
+                };
+                for event in events {
+                    if ws
+                        .send(Message::Text(event.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                if ws
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut browser = BrowserManager::for_test(client, url);
+        browser.add_page(super::super::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "page".to_string(),
+            session_id: "session".to_string(),
+            url: "https://example.com/".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        let mut state = DaemonState::new();
+        state.event_rx = Some(browser.client.subscribe());
+        state.browser = Some(browser);
+        state
+            .ref_map
+            .observe_document("session", None, Some("loader-a"));
+        state.ref_map.set_main_frame("session", "page");
+        state
+            .ref_map
+            .add("e1".to_string(), Some(42), "button", "Save", None);
+        state.ref_map.bind_document("e1", "loader-a");
+        if matches!(case, HistoryTestCase::Restore | HistoryTestCase::Miss) {
+            state.ref_map.on_page_leave("session");
+            state
+                .ref_map
+                .observe_document("session", None, Some("loader-b"));
+            state
+                .ref_map
+                .add("e2".to_string(), Some(43), "button", "Next", None);
+            state.ref_map.bind_document("e2", "loader-b");
+        }
+        (state, calls)
+    }
+
+    #[tokio::test]
+    async fn history_bfcache_restore_reactivates_refs_without_load_event() {
+        let (mut state, _) = history_test_state(HistoryTestCase::Restore).await;
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            handle_history(&mut state, -1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["refsValid"], true);
+        assert_eq!(
+            state
+                .ref_map
+                .resolve_entry("session", "e1")
+                .unwrap()
+                .backend_node_id,
+            Some(42)
+        );
+    }
+
+    #[tokio::test]
+    async fn history_bfcache_miss_invalidates_refs_after_load() {
+        let (mut state, _) = history_test_state(HistoryTestCase::Miss).await;
+        let result = handle_history(&mut state, -1).await.unwrap();
+        assert_eq!(result["refsValid"], false);
+        assert!(state.ref_map.resolve_entry("session", "e2").is_err());
+    }
+
+    #[tokio::test]
+    async fn history_boundary_preserves_refs_without_navigation() {
+        let (mut state, calls) = history_test_state(HistoryTestCase::Boundary).await;
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            handle_history(&mut state, -1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["refsValid"], true);
+        assert!(state.ref_map.resolve_entry("session", "e1").is_ok());
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "Page.navigateToHistoryEntry"));
+    }
+
+    #[tokio::test]
+    async fn history_same_document_forward_preserves_refs() {
+        let (mut state, _) = history_test_state(HistoryTestCase::SameDocument).await;
+        let result = handle_history(&mut state, 1).await.unwrap();
+        assert_eq!(result["refsValid"], true);
+        assert!(state.ref_map.resolve_entry("session", "e1").is_ok());
+    }
+
+    #[tokio::test]
+    async fn history_fallback_accepts_target_navigated_error() {
+        let (mut state, calls) = history_test_state(HistoryTestCase::Fallback).await;
+        let result = handle_history(&mut state, -1).await.unwrap();
+        assert_eq!(result["refsValid"], true);
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "history.back()"));
     }
 
     async fn state_with_snapshot_ref() -> DaemonState {

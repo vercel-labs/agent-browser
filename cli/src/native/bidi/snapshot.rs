@@ -863,7 +863,7 @@ pub async fn take_snapshot(
     let nodes = ax_nodes_from_snapshot(root, &mut durable_id);
     // Firefox has no CDP loaderId; the document root's sharedId scopes durable refs.
     let document_id = frame_root["abSid"].as_str();
-    let known = ref_map.observe_document(&context, None, &context, document_id);
+    let known = ref_map.observe_document(&context, None, document_id);
     Ok(snapshot_from_ax_nodes(
         &nodes,
         &urls,
@@ -905,8 +905,7 @@ pub async fn snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let options = chrome::snapshot_options(cmd);
     let ff = state.firefox.as_mut().ok_or("Browser not launched")?;
     let previous_refs = state.ref_map.ref_ids();
-    let mut staged_ref_map = state.ref_map.clone();
-    staged_ref_map.begin_snapshot();
+    let mut staged_ref_map = state.ref_map.for_snapshot();
     let checkpoint = SnapshotCheckpoint::capture(ff);
     let tree = match Box::pin(take_snapshot(ff, &options, &mut staged_ref_map)).await {
         Ok(tree) => tree,
@@ -915,9 +914,9 @@ pub async fn snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             return Err(error);
         }
     };
-    state.ref_map = staged_ref_map;
-    let url = ff.url().await.unwrap_or_default();
     let session_id = ff.contexts.active_tab().to_string();
+    state.ref_map.commit_snapshot(staged_ref_map, &session_id);
+    let url = ff.url().await.unwrap_or_default();
     chrome::snapshot_response(cmd, state, session_id, &options, previous_refs, tree, url)
 }
 
@@ -934,8 +933,7 @@ pub async fn diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let options = scope.options();
     let ff = state.firefox.as_mut().ok_or("Browser not launched")?;
     let checkpoint = SnapshotCheckpoint::capture(ff);
-    let mut current_ref_map = state.ref_map.clone();
-    current_ref_map.begin_snapshot();
+    let mut current_ref_map = state.ref_map.for_snapshot();
     let current = match Box::pin(take_snapshot(ff, &options, &mut current_ref_map)).await {
         Ok(current) => current,
         Err(error) => {
@@ -1287,7 +1285,7 @@ mod tests {
             depth: None,
             urls: false,
         };
-        let known = ref_map.observe_document("s", None, "s", Some(document_id));
+        let known = ref_map.observe_document("s", None, Some(document_id));
         snapshot_from_ax_nodes(
             &nodes,
             &HashMap::new(),

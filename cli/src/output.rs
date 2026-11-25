@@ -1302,7 +1302,13 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 println!("  {}", color::dim(url));
                 return;
             }
-            println!("{}", url);
+            if matches!(action, Some("back" | "forward"))
+                && data.get("refsValid").and_then(|value| value.as_bool()) == Some(true)
+            {
+                println!("{} (refs valid)", url);
+            } else {
+                println!("{}", url);
+            }
             return;
         }
         if let Some(cdp_url) = data.get("cdpUrl").and_then(|v| v.as_str()) {
@@ -2359,6 +2365,10 @@ Usage: agent-browser back
 Goes back one page in the browser history, equivalent to clicking
 the browser's back button.
 
+When Chrome restores a document from BFCache or navigates within the same
+document, its previous refs remain valid and are validated on use. JSON output
+reports refsValid: true when refs are available.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
@@ -2375,6 +2385,10 @@ Usage: agent-browser forward
 
 Goes forward one page in the browser history, equivalent to clicking
 the browser's forward button.
+
+When Chrome restores a document from BFCache or navigates within the same
+document, its previous refs remain valid and are validated on use. JSON output
+reports refsValid: true when refs are available.
 
 Global Options:
   --json               Output as JSON
@@ -3067,13 +3081,14 @@ Usage: agent-browser snapshot [options]
 
 Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
-Refs can be reused across snapshots. Take a fresh snapshot after navigation:
-a ref issued for a document that has since been replaced, in the page or in its
-iframe, fails with "from a document that is no longer loaded". A snapshot taken
-while the document is being replaced fails with "The document changed while the
-snapshot was being captured"; run it again.
-If a ref's element was replaced, the action uses the one element with the same
-role and name. If that is ambiguous, it fails: run snapshot again.
+Refs can be reused across snapshots. When Chrome restores a document from
+BFCache or navigates within the same document, its previous refs remain valid
+and are validated lazily on use. History commands report refsValid: true when
+refs are available. A ref from a document that is no longer loaded fails;
+take a fresh snapshot. A snapshot taken while the document is being replaced
+fails with "The document changed while the snapshot was being captured"; run it
+again. After a BFCache restore, a replaced element fails as stale. Otherwise,
+a replaced element can be recovered by role and name when the match is unique.
 Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
 A snapshot that fails to capture, such as one scoped to a selector that matches
 nothing, leaves the previous refs in place while the document is unchanged.

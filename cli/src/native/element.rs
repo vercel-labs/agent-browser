@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::click_point::{place_in_dispatch_viewport, ClickPoint};
+
+const BFCACHE_LRU_CAPACITY: usize = 6;
 
 #[derive(Debug, Clone)]
 pub struct RefEntry {
@@ -15,21 +17,35 @@ pub struct RefEntry {
     pub selector: Option<String>,
     pub frame_id: Option<String>,
     allow_role_fallback: bool,
-    /// Session and loader of the document the ref was issued in, when known.
-    document: Option<(String, String)>,
+    loader_id: Option<String>,
 }
 
 #[derive(Clone)]
 struct DocumentRefs {
-    session: String,
     loader: String,
     refs: HashMap<i64, String>,
+}
+
+#[derive(Clone)]
+struct CachedDocument {
+    main_frame_id: Option<String>,
+    main_loader: String,
+    map: HashMap<String, RefEntry>,
+    documents: HashMap<Option<String>, DocumentRefs>,
+}
+
+#[derive(Clone, Default)]
+struct PageHistory {
+    main_frames: HashMap<String, String>,
+    bfcache: HashMap<String, VecDeque<CachedDocument>>,
+    active_page: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct RefMap {
     map: HashMap<String, RefEntry>,
     documents: HashMap<(String, Option<String>), DocumentRefs>,
+    history: Box<PageHistory>,
     next_ref: usize,
 }
 
@@ -38,6 +54,7 @@ impl RefMap {
         Self {
             map: HashMap::new(),
             documents: HashMap::new(),
+            history: Box::default(),
             next_ref: 1,
         }
     }
@@ -70,16 +87,14 @@ impl RefMap {
                 name: name.to_string(),
                 nth,
                 selector: None,
-                frame_id: frame_id.map(|s| s.to_string()),
+                frame_id: frame_id.map(str::to_string),
                 allow_role_fallback: true,
-                document: None,
+                loader_id: None,
             },
         );
     }
 
-    /// Add a ref that must keep resolving to this exact backend node. This is
-    /// used for actions that select a concrete DOM node before interacting;
-    /// falling back by role/name could silently target a different element.
+    /// Add a ref that must keep resolving to this exact backend node.
     pub fn add_exact_backend_node(&mut self, ref_id: String, backend_node_id: i64) {
         self.map.insert(
             ref_id,
@@ -91,30 +106,7 @@ impl RefMap {
                 selector: None,
                 frame_id: None,
                 allow_role_fallback: false,
-                document: None,
-            },
-        );
-    }
-
-    pub fn add_selector(
-        &mut self,
-        ref_id: String,
-        selector: String,
-        role: &str,
-        name: &str,
-        nth: Option<usize>,
-    ) {
-        self.map.insert(
-            ref_id,
-            RefEntry {
-                backend_node_id: None,
-                role: role.to_string(),
-                name: name.to_string(),
-                nth,
-                selector: Some(selector),
-                frame_id: None,
-                allow_role_fallback: true,
-                document: None,
+                loader_id: None,
             },
         );
     }
@@ -126,23 +118,42 @@ impl RefMap {
         page_session: &str,
         frame: Option<&str>,
     ) {
-        let document = self
-            .document_identity(page_session, frame)
-            .map(|(session, loader)| (session.to_string(), loader.to_string()));
+        let loader = self
+            .recorded_loader(page_session, frame)
+            .map(str::to_string);
         if let Some(entry) = self.map.get_mut(ref_id) {
-            entry.document = document;
+            entry.loader_id = loader;
         }
     }
 
     /// Bind a ref to a document observed when the ref was created.
-    pub fn bind_document(&mut self, ref_id: &str, session: &str, loader: &str) {
+    pub fn bind_document(&mut self, ref_id: &str, loader: &str) {
         if let Some(entry) = self.map.get_mut(ref_id) {
-            entry.document = Some((session.to_string(), loader.to_string()));
+            entry.loader_id = Some(loader.to_string());
         }
     }
 
     pub fn get(&self, ref_id: &str) -> Option<&RefEntry> {
         self.map.get(ref_id)
+    }
+
+    pub fn resolve_entry(&self, page_session: &str, ref_id: &str) -> Result<&RefEntry, String> {
+        if let Some(entry) = self.map.get(ref_id) {
+            return Ok(entry);
+        }
+        if self
+            .history
+            .bfcache
+            .get(page_session)
+            .is_some_and(|cached| {
+                cached
+                    .iter()
+                    .any(|document| document.map.contains_key(ref_id))
+            })
+        {
+            return Err(stale_document_error(ref_id));
+        }
+        Err(format!("Unknown ref: {ref_id}"))
     }
 
     pub fn entries_sorted(&self) -> Vec<(String, RefEntry)> {
@@ -174,24 +185,38 @@ impl RefMap {
         self.map.clear();
     }
 
-    /// Starts a replacement map with the same durable identities and ref counter.
+    /// Start a replacement map while preserving durable identities and the ref counter.
     pub fn for_snapshot(&self) -> Self {
         Self {
             map: HashMap::new(),
             documents: self.documents.clone(),
+            history: self.history.clone(),
             next_ref: self.next_ref,
         }
     }
 
-    /// Observe the document behind a page/frame pair. Unknown documents never
-    /// retain refs, while a changed session or loader replaces the prior bucket.
+    pub fn commit_snapshot(&mut self, mut staged: Self, page_session: &str) {
+        if self.has_active_refs(page_session) {
+            if let Some(old_loader) = self.recorded_loader(page_session, None) {
+                if Some(old_loader) != staged.recorded_loader(page_session, None) {
+                    self.archive_document_into(page_session, &mut staged.history.bfcache);
+                }
+            }
+        }
+        staged.history.active_page = Some(page_session.to_string());
+        *self = staged;
+    }
+
+    /// Observe the loader behind a page and frame, discarding refs when it changes.
     pub fn observe_document(
         &mut self,
         page_session: &str,
         frame: Option<&str>,
-        session: &str,
         loader: Option<&str>,
     ) -> bool {
+        if frame.is_none() {
+            self.history.active_page = Some(page_session.to_string());
+        }
         let key = (page_session.to_string(), frame.map(str::to_string));
         let Some(loader) = loader.filter(|id| !id.is_empty()) else {
             self.invalidate_frame(page_session, frame);
@@ -200,7 +225,7 @@ impl RefMap {
         let changed = self
             .documents
             .get(&key)
-            .is_none_or(|document| document.session != session || document.loader != loader);
+            .is_none_or(|document| document.loader != loader);
         if changed {
             if frame.is_none() {
                 self.documents
@@ -209,7 +234,6 @@ impl RefMap {
             self.documents.insert(
                 key,
                 DocumentRefs {
-                    session: session.to_string(),
                     loader: loader.to_string(),
                     refs: HashMap::new(),
                 },
@@ -226,6 +250,27 @@ impl RefMap {
             self.documents
                 .remove(&(page_session.to_string(), frame.map(str::to_string)));
         }
+    }
+
+    fn recorded_loader(&self, page_session: &str, frame: Option<&str>) -> Option<&str> {
+        self.documents
+            .get(&(page_session.to_string(), frame.map(str::to_string)))
+            .map(|document| document.loader.as_str())
+    }
+
+    pub fn set_main_frame(&mut self, page_session: &str, frame_id: &str) {
+        if !frame_id.is_empty() {
+            self.history
+                .main_frames
+                .insert(page_session.to_string(), frame_id.to_string());
+        }
+    }
+
+    pub fn main_frame(&self, page_session: &str) -> Option<&str> {
+        self.history
+            .main_frames
+            .get(page_session)
+            .map(String::as_str)
     }
 
     pub fn durable_ref(
@@ -256,27 +301,159 @@ impl RefMap {
         }
     }
 
-    pub fn invalidate_page(&mut self, page_session: &str) {
-        self.documents
-            .retain(|(entry_page, _), _| entry_page != page_session);
-        self.map.clear();
-    }
-
-    /// Session and loader of the document refs were issued in for a page/frame.
-    pub fn document_identity(
+    fn archive_document_into(
         &self,
         page_session: &str,
-        frame: Option<&str>,
-    ) -> Option<(&str, &str)> {
+        bfcache: &mut HashMap<String, VecDeque<CachedDocument>>,
+    ) {
+        if !self.has_active_refs(page_session) {
+            return;
+        }
+        let Some(main_loader) = self.recorded_loader(page_session, None) else {
+            return;
+        };
+        let cached = CachedDocument {
+            main_frame_id: self.history.main_frames.get(page_session).cloned(),
+            main_loader: main_loader.to_string(),
+            map: self.map.clone(),
+            documents: self
+                .documents
+                .iter()
+                .filter(|((page, _), _)| page == page_session)
+                .map(|((_, frame), document)| (frame.clone(), document.clone()))
+                .collect(),
+        };
+        let entries = bfcache.entry(page_session.to_string()).or_default();
+        entries.retain(|entry| entry.main_loader != cached.main_loader);
+        entries.push_back(cached);
+        while entries.len() > BFCACHE_LRU_CAPACITY {
+            entries.pop_front();
+        }
+    }
+
+    fn archive_document(&mut self, page_session: &str) {
+        let mut bfcache = std::mem::take(&mut self.history.bfcache);
+        self.archive_document_into(page_session, &mut bfcache);
+        self.history.bfcache = bfcache;
+    }
+
+    pub fn on_frame_navigated(
+        &mut self,
+        page_session: &str,
+        frame_id: &str,
+        loader_id: &str,
+        is_bfcache_restore: bool,
+    ) -> bool {
+        if self.has_active_refs(page_session)
+            && self.recorded_loader(page_session, None) == Some(loader_id)
+        {
+            if is_bfcache_restore {
+                for entry in self.map.values_mut() {
+                    entry.allow_role_fallback = false;
+                }
+            }
+            self.set_main_frame(page_session, frame_id);
+            return true;
+        }
+        self.archive_document(page_session);
+        if self.history.active_page.as_deref() == Some(page_session) {
+            self.map.clear();
+            self.history.active_page = None;
+        }
         self.documents
-            .get(&(page_session.to_string(), frame.map(str::to_string)))
-            .map(|document| (document.session.as_str(), document.loader.as_str()))
+            .retain(|(entry_page, _), _| entry_page != page_session);
+        self.set_main_frame(page_session, frame_id);
+        if self
+            .history
+            .active_page
+            .as_deref()
+            .is_some_and(|page| page != page_session)
+        {
+            return false;
+        }
+        if is_bfcache_restore {
+            if let Some(entries) = self.history.bfcache.get_mut(page_session) {
+                if let Some(index) = entries.iter().position(|cached| {
+                    cached.main_loader == loader_id
+                        && cached
+                            .main_frame_id
+                            .as_deref()
+                            .is_none_or(|id| id == frame_id)
+                }) {
+                    let mut cached = entries.remove(index).unwrap();
+                    for entry in cached.map.values_mut() {
+                        entry.allow_role_fallback = false;
+                    }
+                    self.map = cached.map;
+                    for (frame, document) in cached.documents {
+                        self.documents
+                            .insert((page_session.to_string(), frame), document);
+                    }
+                    self.history.active_page = Some(page_session.to_string());
+                    return !self.map.is_empty();
+                }
+            }
+        }
+        false
+    }
+
+    pub fn on_page_leave(&mut self, page_session: &str) {
+        self.archive_document(page_session);
+        if self.history.active_page.is_none()
+            || self.history.active_page.as_deref() == Some(page_session)
+        {
+            self.map.clear();
+            self.history.active_page = None;
+        }
+        self.documents
+            .retain(|(entry_page, _), _| entry_page != page_session);
+    }
+
+    pub fn on_page_closed(&mut self, page_session: &str) {
+        self.history.bfcache.remove(page_session);
+        self.history.main_frames.remove(page_session);
+        self.documents
+            .retain(|(entry_page, _), _| entry_page != page_session);
+        if self.history.active_page.is_none()
+            || self.history.active_page.as_deref() == Some(page_session)
+        {
+            self.map.clear();
+            self.history.active_page = None;
+        }
+    }
+
+    pub fn has_active_refs(&self, page_session: &str) -> bool {
+        self.history.active_page.as_deref() == Some(page_session) && !self.map.is_empty()
+    }
+
+    pub fn is_active_document(&self, page_session: &str, loader_id: &str) -> bool {
+        self.has_active_refs(page_session)
+            && self.recorded_loader(page_session, None) == Some(loader_id)
+    }
+
+    pub fn invalidate_page(&mut self, page_session: &str) {
+        if let Some(active_loader) = self.recorded_loader(page_session, None).map(str::to_string) {
+            if let Some(entries) = self.history.bfcache.get_mut(page_session) {
+                entries.retain(|entry| entry.main_loader != active_loader);
+            }
+        }
+        self.documents
+            .retain(|(entry_page, _), _| entry_page != page_session);
+        if self.history.active_page.is_none()
+            || self.history.active_page.as_deref() == Some(page_session)
+        {
+            self.map.clear();
+            self.history.active_page = None;
+        }
     }
 
     /// Drop all document identities while preserving the monotonic ref counter.
     pub fn invalidate_all_documents(&mut self) {
         self.documents.clear();
         self.map.clear();
+        self.history.bfcache.clear();
+        self.history.main_frames.clear();
+        self.history.active_page = None;
     }
 
     pub fn next_ref_num(&self) -> usize {
@@ -532,6 +709,10 @@ async fn resolve_object_in_same_process_frame(
 
 const STALE_DOCUMENT_MARKER: &str = "is from a document that is no longer loaded";
 
+fn stale_document_error(ref_id: &str) -> String {
+    format!("Ref @{ref_id} {STALE_DOCUMENT_MARKER} (the page navigated or the frame was removed). Take a new snapshot and use a fresh ref.")
+}
+
 /// Reported when an action ran but the document it acted on was replaced
 /// before its effect could be read back.
 pub const STATE_NOT_VERIFIED: &str = "page navigated after the action; state not verified";
@@ -556,23 +737,16 @@ pub(super) async fn ensure_ref_document_current(
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
     let frame = entry.frame_id.as_deref();
-    let Some((issued_session, issued_loader)) = entry.document.as_ref() else {
+    let Some(issued_loader) = entry.loader_id.as_deref() else {
         return Ok(());
     };
-    let stale = || {
-        format!(
-            "Ref @{ref_id} {STALE_DOCUMENT_MARKER} (the page navigated or the frame was removed). Take a new snapshot and use a fresh ref."
-        )
-    };
+    let stale = || stale_document_error(ref_id);
     let effective_session_id = match frame {
         Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions)
             .await
             .map_err(|_| stale())?,
         None => session_id.to_string(),
     };
-    if issued_session != &effective_session_id {
-        return Err(stale());
-    }
     let Ok(tree) = client
         .send_command_no_params("Page.getFrameTree", Some(effective_session_id.as_str()))
         .await
@@ -582,18 +756,18 @@ pub(super) async fn ensure_ref_document_current(
     // A document was recorded, so one that can no longer be read (frame gone,
     // loader missing) is not the document the ref was issued in.
     match super::snapshot::frame_loader(&tree["frameTree"], frame) {
-        Some(current) if current == issued_loader.as_str() => Ok(()),
+        Some(current) if current == issued_loader => Ok(()),
         _ => Err(stale()),
     }
 }
 
-/// Session and loader of the document currently shown in a frame.
+/// Loader of the document currently shown in a frame.
 pub(super) async fn current_document(
     client: &CdpClient,
     session_id: &str,
     frame: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
-) -> Option<(String, String)> {
+) -> Option<String> {
     let effective_session_id = match frame {
         Some(fid) => find_frame_host_session(client, session_id, fid, iframe_sessions)
             .await
@@ -605,7 +779,7 @@ pub(super) async fn current_document(
         .await
         .ok()?;
     let loader = super::snapshot::frame_loader(&tree["frameTree"], frame)?;
-    Some((effective_session_id, loader.to_string()))
+    Some(loader.to_string())
 }
 
 async fn resolve_ref_center(
@@ -649,10 +823,10 @@ async fn resolve_ref_center(
                 return Ok((point.x, point.y, effective_session_id.to_string()));
             }
         }
-        if !entry.allow_role_fallback {
-            return Err(format!("Element ref {ref_id} is stale"));
-        }
         // backend_node_id is stale; re-query the accessibility tree below
+    }
+    if !entry.allow_role_fallback {
+        return Err(format!("Element ref {ref_id} is stale"));
     }
 
     // Fallback: re-query the accessibility tree to find a fresh node by role/name
@@ -699,9 +873,7 @@ pub async fn resolve_element_center(
     require_actionable: bool,
 ) -> Result<(f64, f64, String), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
-        let entry = ref_map
-            .get(&ref_id)
-            .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+        let entry = ref_map.resolve_entry(session_id, &ref_id)?;
         ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
         let point = resolve_ref_center(
             client,
@@ -925,10 +1097,10 @@ async fn resolve_ref_object_id(
                 }
             }
         }
-        if !entry.allow_role_fallback {
-            return Err(format!("Element ref {ref_id} is stale"));
-        }
         // backend_node_id is stale; re-query the accessibility tree below
+    }
+    if !entry.allow_role_fallback {
+        return Err(format!("Element ref {ref_id} is stale"));
     }
 
     // Fallback: re-query the accessibility tree to find a fresh node by role/name
@@ -968,9 +1140,7 @@ pub async fn resolve_element_object_id(
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(String, String), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
-        let entry = ref_map
-            .get(&ref_id)
-            .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+        let entry = ref_map.resolve_entry(session_id, &ref_id)?;
         ensure_ref_document_current(client, session_id, &ref_id, entry, iframe_sessions).await?;
         let object =
             resolve_ref_object_id(client, session_id, entry, &ref_id, iframe_sessions).await;
@@ -2201,60 +2371,46 @@ mod tests {
     #[test]
     fn refs_carry_the_document_they_were_issued_in() {
         let mut map = RefMap::new();
-        assert!(map.observe_document("page-a", None, "page-a", Some("loader-1")));
+        assert!(map.observe_document("page-a", None, Some("loader-1")));
         map.add("e1".to_string(), Some(1), "button", "Go", None);
         map.bind_recorded_document("e1", "page-a", None);
         // A later temp ref for another document does not rebind the first.
         map.add("e2".to_string(), Some(2), "button", "Go", None);
-        map.bind_document("e2", "page-a", "loader-2");
+        map.bind_document("e2", "loader-2");
         assert_eq!(
-            map.get("e1").unwrap().document,
-            Some(("page-a".to_string(), "loader-1".to_string()))
+            map.get("e1").unwrap().loader_id,
+            Some("loader-1".to_string())
         );
         assert_eq!(
-            map.get("e2").unwrap().document,
-            Some(("page-a".to_string(), "loader-2".to_string()))
+            map.get("e2").unwrap().loader_id,
+            Some("loader-2".to_string())
         );
         // Without a recorded document a ref carries none.
         map.add("e3".to_string(), Some(3), "button", "Go", None);
         map.bind_recorded_document("e3", "page-b", None);
-        assert_eq!(map.get("e3").unwrap().document, None);
+        assert_eq!(map.get("e3").unwrap().loader_id, None);
     }
 
     #[test]
     fn document_identity_is_per_page_and_frame() {
         let mut map = RefMap::new();
-        assert_eq!(map.document_identity("page-a", None), None);
-        assert!(map.observe_document("page-a", None, "page-a", Some("main-1")));
-        assert!(map.observe_document("page-a", Some("f"), "page-a", Some("frame-1")));
-        assert_eq!(
-            map.document_identity("page-a", None),
-            Some(("page-a", "main-1"))
-        );
-        assert_eq!(
-            map.document_identity("page-a", Some("f")),
-            Some(("page-a", "frame-1"))
-        );
+        assert_eq!(map.recorded_loader("page-a", None), None);
+        assert!(map.observe_document("page-a", None, Some("main-1")));
+        assert!(map.observe_document("page-a", Some("f"), Some("frame-1")));
+        assert_eq!(map.recorded_loader("page-a", None), Some("main-1"));
+        assert_eq!(map.recorded_loader("page-a", Some("f")), Some("frame-1"));
         // A frame-only snapshot after a navigation records the frame alone.
         map.invalidate_page("page-a");
-        assert!(map.observe_document("page-a", Some("f"), "page-a", Some("frame-2")));
-        assert_eq!(map.document_identity("page-a", None), None);
-        assert_eq!(
-            map.document_identity("page-a", Some("f")),
-            Some(("page-a", "frame-2"))
-        );
+        assert!(map.observe_document("page-a", Some("f"), Some("frame-2")));
+        assert_eq!(map.recorded_loader("page-a", None), None);
+        assert_eq!(map.recorded_loader("page-a", Some("f")), Some("frame-2"));
     }
 
     #[test]
     fn test_durable_refs_are_scoped_by_document_and_frame() {
         let mut map = RefMap::new();
-        assert!(map.observe_document("page-a", None, "session-a", Some("loader-a")));
-        assert!(map.observe_document(
-            "page-a",
-            Some("frame-a"),
-            "frame-session",
-            Some("frame-loader")
-        ));
+        assert!(map.observe_document("page-a", None, Some("loader-a")));
+        assert!(map.observe_document("page-a", Some("frame-a"), Some("frame-loader")));
         map.remember_durable_ref("page-a", None, 42, "e1");
         map.remember_durable_ref("page-a", Some("frame-a"), 42, "e2");
         assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
@@ -2269,15 +2425,227 @@ mod tests {
     #[test]
     fn invalidating_one_page_preserves_other_page_documents() {
         let mut map = RefMap::new();
-        assert!(map.observe_document("page-a", None, "session-a", Some("loader-a")));
+        assert!(map.observe_document("page-a", None, Some("loader-a")));
         map.remember_durable_ref("page-a", None, 42, "e1");
-        assert!(map.observe_document("page-b", None, "session-b", Some("loader-b")));
+        assert!(map.observe_document("page-b", None, Some("loader-b")));
         map.remember_durable_ref("page-b", None, 42, "e2");
 
         map.invalidate_page("page-b");
 
         assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
         assert_eq!(map.durable_ref("page-b", None, 42), None);
+    }
+
+    fn add_document(map: &mut RefMap, page: &str, loader: &str, ref_id: &str) {
+        map.set_main_frame(page, "main");
+        assert!(map.observe_document(page, None, Some(loader)));
+        map.add(ref_id.to_string(), Some(42), "button", "Go", None);
+        map.bind_recorded_document(ref_id, page, None);
+        map.remember_durable_ref(page, None, 42, ref_id);
+    }
+
+    #[test]
+    fn bfcache_restores_documents_archived_on_navigation_and_leave() {
+        let mut map = RefMap::new();
+        add_document(&mut map, "page", "loader-1", "e1");
+        assert!(map.observe_document("page", Some("child"), Some("child-loader")));
+        map.remember_durable_ref("page", Some("child"), 43, "e2");
+        assert!(!map.on_frame_navigated("page", "main", "loader-2", false));
+        assert!(map
+            .resolve_entry("page", "e1")
+            .unwrap_err()
+            .contains(STALE_DOCUMENT_MARKER));
+        assert_eq!(
+            map.resolve_entry("page", "missing").unwrap_err(),
+            "Unknown ref: missing"
+        );
+        add_document(&mut map, "page", "loader-2", "e3");
+        map.on_page_leave("page");
+        assert!(map.on_frame_navigated("page", "main", "loader-1", true));
+        assert!(!map.get("e1").unwrap().allow_role_fallback);
+        assert_eq!(map.durable_ref("page", None, 42), Some("e1"));
+        assert_eq!(map.durable_ref("page", Some("child"), 43), Some("e2"));
+        assert!(map.is_active_document("page", "loader-1"));
+        assert!(map.on_frame_navigated("page", "main", "loader-1", true));
+        assert!(map.on_frame_navigated("page", "main", "loader-2", true));
+        assert!(!map.get("e3").unwrap().allow_role_fallback);
+        assert!(map.get("e1").is_none());
+    }
+
+    #[test]
+    fn bfcache_is_a_per_page_lru() {
+        let mut map = RefMap::new();
+        for i in 1..=7 {
+            add_document(&mut map, "page", &format!("loader-{i}"), &format!("e{i}"));
+            map.on_page_leave("page");
+        }
+        assert_eq!(map.history.bfcache["page"].len(), BFCACHE_LRU_CAPACITY);
+        assert_eq!(
+            map.resolve_entry("page", "e1").unwrap_err(),
+            "Unknown ref: e1"
+        );
+        assert!(map
+            .resolve_entry("page", "e2")
+            .unwrap_err()
+            .contains(STALE_DOCUMENT_MARKER));
+
+        let mut refreshed = RefMap::new();
+        for i in 1..=6 {
+            add_document(
+                &mut refreshed,
+                "page",
+                &format!("loader-{i}"),
+                &format!("e{i}"),
+            );
+            refreshed.on_page_leave("page");
+        }
+        assert!(refreshed.on_frame_navigated("page", "main", "loader-1", true));
+        refreshed.on_page_leave("page");
+        add_document(&mut refreshed, "page", "loader-7", "e7");
+        refreshed.on_page_leave("page");
+        assert_eq!(
+            refreshed.resolve_entry("page", "e2").unwrap_err(),
+            "Unknown ref: e2"
+        );
+        assert!(refreshed.on_frame_navigated("page", "main", "loader-1", true));
+        assert!(refreshed.get("e1").is_some());
+    }
+
+    #[test]
+    fn non_restore_navigation_does_not_reactivate_cached_refs() {
+        let mut map = RefMap::new();
+        add_document(&mut map, "page", "loader", "e1");
+        map.on_page_leave("page");
+        assert!(!map.on_frame_navigated("page", "main", "loader", false));
+        assert!(map.get("e1").is_none());
+        assert!(map
+            .resolve_entry("page", "e1")
+            .unwrap_err()
+            .contains(STALE_DOCUMENT_MARKER));
+    }
+
+    #[test]
+    fn closing_one_page_keeps_other_pages_cache_and_active_refs() {
+        let mut map = RefMap::new();
+        add_document(&mut map, "page-a", "loader-a", "e1");
+        map.on_page_leave("page-a");
+        add_document(&mut map, "page-b", "loader-b", "e2");
+        map.on_page_leave("page-b");
+        assert!(map.on_frame_navigated("page-b", "main", "loader-b", true));
+        map.on_page_closed("page-a");
+        assert_eq!(
+            map.resolve_entry("page-a", "e1").unwrap_err(),
+            "Unknown ref: e1"
+        );
+        assert!(map.has_active_refs("page-b"));
+        map.on_page_leave("page-b");
+        assert!(map.on_frame_navigated("page-b", "main", "loader-b", true));
+    }
+
+    #[test]
+    fn background_restore_does_not_replace_active_page() {
+        let mut map = RefMap::new();
+        add_document(&mut map, "page-a", "loader-a", "e1");
+        map.on_page_leave("page-a");
+        add_document(&mut map, "page-b", "loader-b", "e2");
+        assert!(!map.on_frame_navigated("page-a", "main", "loader-a", true));
+        assert!(map.has_active_refs("page-b"));
+        assert!(map.get("e2").is_some());
+        assert!(map
+            .resolve_entry("page-a", "e1")
+            .unwrap_err()
+            .contains(STALE_DOCUMENT_MARKER));
+        map.on_page_leave("page-b");
+        assert!(map.on_frame_navigated("page-a", "main", "loader-a", true));
+        assert!(map.has_active_refs("page-a"));
+        map.on_page_leave("page-a");
+        assert!(map.on_frame_navigated("page-b", "main", "loader-b", true));
+        assert!(map.has_active_refs("page-b"));
+    }
+
+    #[test]
+    fn closing_page_clears_refs_without_active_page() {
+        let mut map = RefMap::new();
+        map.add("e1".to_string(), Some(42), "button", "Go", None);
+        map.on_page_closed("page");
+        assert!(map.get("e1").is_none());
+    }
+
+    #[test]
+    fn committing_changed_snapshot_archives_prior_document() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("other-page", None, Some("other-loader")));
+        map.remember_durable_ref("other-page", None, 43, "e3");
+        add_document(&mut map, "page", "loader-1", "e1");
+        let mut staged = map.for_snapshot();
+        add_document(&mut staged, "page", "loader-2", "e2");
+        map.commit_snapshot(staged, "page");
+        assert!(map.has_active_refs("page"));
+        assert_eq!(map.durable_ref("other-page", None, 43), Some("e3"));
+        assert!(map.on_frame_navigated("page", "main", "loader-1", true));
+        assert!(map.get("e1").is_some());
+        assert!(!map.get("e1").unwrap().allow_role_fallback);
+    }
+
+    #[tokio::test]
+    async fn document_guard_survives_oopif_session_rebinding() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::json;
+        use std::sync::{Arc, Mutex};
+
+        let loader = Arc::new(Mutex::new("loader-1".to_string()));
+        let server_loader = loader.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(text).unwrap();
+                let tree = if request["sessionId"] == "page" {
+                    json!({"frame": {"id": "main"}, "childFrames": [
+                        {"frame": {"id": "child", "parentId": "main"}}
+                    ]})
+                } else {
+                    json!({"frame": {"id": "child", "parentId": "main", "loaderId": server_loader.lock().unwrap().clone()}})
+                };
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"id": request["id"], "result": {"frameTree": tree}}).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut map = RefMap::new();
+        map.add_with_frame(
+            "e1".to_string(),
+            Some(42),
+            "button",
+            "Go",
+            None,
+            Some("child"),
+        );
+        map.bind_document("e1", "loader-1");
+        let entry = map.get("e1").unwrap();
+        for session in ["old-session", "new-session"] {
+            let sessions = HashMap::from([("child".to_string(), session.to_string())]);
+            assert!(
+                ensure_ref_document_current(&client, "page", "e1", entry, &sessions)
+                    .await
+                    .is_ok()
+            );
+        }
+        *loader.lock().unwrap() = "loader-2".to_string();
+        let sessions = HashMap::from([("child".to_string(), "new-session".to_string())]);
+        let error = ensure_ref_document_current(&client, "page", "e1", entry, &sessions)
+            .await
+            .unwrap_err();
+        assert!(error.contains(STALE_DOCUMENT_MARKER));
+        server.abort();
     }
 
     #[test]
