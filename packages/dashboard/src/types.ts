@@ -14,6 +14,10 @@ export interface FrameMessage {
   };
 }
 
+export interface FrameClearMessage {
+  type: "frame_clear";
+}
+
 export interface StatusMessage {
   type: "status";
   connected: boolean;
@@ -68,6 +72,12 @@ export interface ErrorMessage {
   message: string;
 }
 
+export interface ClipboardMessage {
+  type: "clipboard";
+  text?: string;
+  error?: string;
+}
+
 export interface TabInfo {
   /** Stable tab id like `t1`, `t2`. Never reused within a session. */
   tabId: string;
@@ -87,6 +97,7 @@ export interface TabsMessage {
 
 export type StreamMessage =
   | FrameMessage
+  | FrameClearMessage
   | StatusMessage
   | CommandMessage
   | ResultMessage
@@ -94,7 +105,8 @@ export type StreamMessage =
   | PageErrorMessage
   | ErrorMessage
   | UrlMessage
-  | TabsMessage;
+  | TabsMessage
+  | ClipboardMessage;
 
 export type ActivityEvent = CommandMessage | ResultMessage | ConsoleMessage;
 export type ConsoleEntry = ConsoleMessage | PageErrorMessage;

@@ -5,11 +5,14 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use super::{
-    build_flow, carries_secret, describe_command, dropped_name, may_become_candidate,
-    save_start_url, write_flow, HostPolicy, SaveInput,
+    build_flow, carries_secret, classify_header, describe_command, dropped_name,
+    may_become_candidate, save_start_url, write_flow, HeaderClass, HostPolicy, SaveInput,
 };
 use crate::native::actions::{HarEntry, FIND_ACTIONS};
 use crate::native::element::RefMap;
+use crate::native::interaction::{
+    is_non_printable_control_key, key_modifier_bit, modified_key_info, parse_key_chord,
+};
 
 /// Values `--capture` accepts.
 pub const CAPTURE_MODES: &[&str] = &["flow"];
@@ -58,6 +61,7 @@ pub struct StepMeta {
 #[derive(Default)]
 pub struct FlowRecorder {
     capturing: bool,
+    suspended: bool,
     pub(super) commands: Vec<(u64, Value)>,
     pub(super) meta: HashMap<u64, StepMeta>,
     /// HAR request id to the sequence number of the command that was
@@ -75,6 +79,8 @@ pub struct FlowRecorder {
     key_buffer: String,
     /// The last entry of `secrets` is the current `key_buffer`.
     key_active: bool,
+    /// Modifier bitmask held by the daemon from `keydown`.
+    held_modifiers: i32,
     /// A typed step saved as a param before its field could be read.
     pub(super) needs_traits: Option<u64>,
     /// Sequence number the command being executed was recorded under.
@@ -125,7 +131,9 @@ impl FlowRecorder {
         refs: &RefMap,
         from_url: Option<String>,
         traits: Option<&FieldTraits>,
+        held_modifiers: i32,
     ) -> Option<u64> {
+        self.held_modifiers = held_modifiers;
         if self.records(action) {
             let stable = stable_command(action, cmd, refs);
             self.begin_command(action, &stable, from_url, traits)
@@ -135,6 +143,11 @@ impl FlowRecorder {
             }
             None
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn key_buffer(&self) -> &str {
+        &self.key_buffer
     }
 
     /// What the page must be asked after a command: the focused field's
@@ -247,10 +260,18 @@ impl FlowRecorder {
             .count()
     }
 
+    /// Commands run by a replay are not part of the recording.
+    pub fn set_suspended(&mut self, suspended: bool) {
+        if suspended && !self.suspended {
+            self.windows.push((now(), None));
+        }
+        self.suspended = suspended;
+    }
+
     /// Record a command and return its sequence number. The step counts as
     /// failed until `finish_command` says otherwise.
     pub fn records(&self, action: &str) -> bool {
-        self.active() && is_recordable(action)
+        self.active() && !self.suspended && is_recordable(action)
     }
 
     pub(super) fn begin_command(
@@ -271,18 +292,20 @@ impl FlowRecorder {
         from_url: Option<String>,
         traits: Option<&FieldTraits>,
     ) -> Option<u64> {
-        if !self.active() || !is_recordable(action) {
+        if !self.active() || self.suspended || !is_recordable(action) {
             return None;
         }
         self.next_seq += 1;
         let mut recorded = cmd.clone();
         if let Some(obj) = recorded.as_object_mut() {
             obj.remove("id");
+            obj.retain(|k, _| !crate::native::actions::ENVELOPE_KEYS.contains(&k.as_str()));
         }
         let is_key = matches!(action, "press" | "keydown" | "keyup");
         if !is_key {
             self.reset_keys();
         }
+        self.secrets.extend(redact_headers(&mut recorded));
         if let Some(secret) = redact_secret(&mut recorded, traits) {
             self.secrets.push(secret);
         } else if is_key {
@@ -584,6 +607,9 @@ impl FlowRecorder {
     /// the step and joined to the keys before it, so a request carrying the
     /// whole value is dropped at save.
     fn record_key(&mut self, action: &str, cmd: &mut Value, traits: Option<&FieldTraits>) {
+        if action != "press" && cmd["key"].as_str().and_then(key_modifier_bit).is_some() {
+            return;
+        }
         if !traits.is_some_and(FieldTraits::looks_secret) {
             self.reset_keys();
             return;
@@ -591,28 +617,23 @@ impl FlowRecorder {
         let Some(key) = cmd["key"].as_str().map(String::from) else {
             return;
         };
-        let (mods, last): (Vec<String>, String) = if key == "+" {
-            (Vec::new(), key.clone())
-        } else {
-            let mut parts: Vec<&str> = key.split('+').collect();
-            let last = parts.pop().unwrap_or("").to_string();
-            (parts.iter().map(|m| m.to_ascii_lowercase()).collect(), last)
-        };
-        // Only a bare key or Shift plus a key adds a character.
-        let plain = mods.iter().all(|m| m == "shift");
-        let has = |names: &[&str]| mods.iter().any(|m| names.contains(&m.as_str()));
-        let paste = (has(&["control", "ctrl", "meta", "command", "cmd"])
-            && last.eq_ignore_ascii_case("v"))
-            || (has(&["shift"]) && last.eq_ignore_ascii_case("insert"));
-        if plain && last.chars().count() == 1 {
+        let (actual_key, chord_mods) = parse_key_chord(&key);
+        let effective_mods = chord_mods.unwrap_or(0) | self.held_modifiers;
+        let mods_opt = (effective_mods != 0).then_some(effective_mods);
+        let (resolved_key, _, _, _, _) = modified_key_info(&actual_key, mods_opt);
+        let plain = effective_mods & (1 | 2 | 4) == 0;
+        let shift = effective_mods & 8 != 0;
+        let paste = ((effective_mods & (2 | 4) != 0) && resolved_key.eq_ignore_ascii_case("v"))
+            || (shift && resolved_key.eq_ignore_ascii_case("insert"));
+        if plain && resolved_key.chars().count() == 1 {
             if action != "keyup" {
                 let mut buffer = self.key_buffer.clone();
-                buffer.push_str(&last);
+                buffer.push_str(&resolved_key);
                 self.set_key_buffer(buffer);
             }
             cmd["key"] = json!(REDACTED);
             cmd["redacted"] = json!(true);
-        } else if plain && last == "Backspace" {
+        } else if plain && resolved_key == "Backspace" {
             if action != "keyup" {
                 let mut buffer = self.key_buffer.clone();
                 buffer.pop();
@@ -628,8 +649,18 @@ impl FlowRecorder {
             }
             cmd["key"] = json!(REDACTED);
             cmd["redacted"] = json!(true);
-        } else if action != "keyup" {
-            self.reset_keys();
+        } else if is_non_printable_control_key(&resolved_key)
+            || key_modifier_bit(&actual_key).is_some()
+        {
+            if action != "keyup" {
+                self.reset_keys();
+            }
+        } else {
+            if action != "keyup" {
+                self.reset_keys();
+            }
+            cmd["key"] = json!(REDACTED);
+            cmd["redacted"] = json!(true);
         }
     }
 
@@ -721,7 +752,7 @@ fn has_secret_marker(text: &str) -> bool {
     SECRET_MARKERS.iter().any(|m| text.contains(m))
 }
 
-const SECRET_MARKERS: &[&str] = &[
+pub(super) const SECRET_MARKERS: &[&str] = &[
     "pass",
     "contraseña",
     "secret",
@@ -750,8 +781,33 @@ fn typed_field(cmd: &Value) -> Option<&'static str> {
     cmd[field].as_str().map(|_| field)
 }
 
+/// Headers a command sends, such as `navigate --headers`, are classified like
+/// a request's: a credential or cookie value is never stored. The step is
+/// marked redacted, and the values count as secrets.
+fn redact_headers(cmd: &mut Value) -> Vec<String> {
+    let mut found = Vec::new();
+    let Some(headers) = cmd.get_mut("headers").and_then(|h| h.as_object_mut()) else {
+        return found;
+    };
+    for (name, value) in headers.iter_mut() {
+        let lower = name.to_ascii_lowercase();
+        let secret = classify_header(&lower) == HeaderClass::Credential
+            || matches!(lower.as_str(), "cookie" | "set-cookie");
+        if secret {
+            if let Some(text) = value.as_str().filter(|t| !t.is_empty()) {
+                found.push(text.to_string());
+            }
+            *value = json!(REDACTED);
+        }
+    }
+    if !found.is_empty() || headers.values().any(|v| v == REDACTED) {
+        cmd["redacted"] = json!(true);
+    }
+    found
+}
+
 /// A value typed into a field that looks like a password or code is never
-/// stored; the flow keeps a marker only.
+/// stored; the flow keeps a marker and cannot be replayed through the UI.
 /// Returns the removed value. `fill` stores input in `value`, `type` in `text`.
 fn redact_secret(cmd: &mut Value, traits: Option<&FieldTraits>) -> Option<String> {
     let typed = typed_field(cmd);

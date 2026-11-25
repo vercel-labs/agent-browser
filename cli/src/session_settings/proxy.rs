@@ -1,5 +1,6 @@
 //! Proxy URL normalization: the server without its credentials, plus the credentials.
 
+#[cfg_attr(test, derive(Debug))]
 pub struct ParsedProxy {
     pub server: String,
     pub username: Option<String>,

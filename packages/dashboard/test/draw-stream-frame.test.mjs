@@ -46,3 +46,62 @@ test("a rejected decode does not draw or create an unhandled rejection", async (
   await Promise.resolve();
   assert.deepEqual(target.draws, []);
 });
+
+test("frame metadata is published only after a successful draw", async () => {
+  const target = canvas();
+  const bitmap = { width: 40, height: 30, close() {} };
+  const published = [];
+  mock.method(globalThis, "createImageBitmap", async () => bitmap);
+  drawStreamFrame(target, "AA==", () => {
+    published.push({ width: target.width, height: target.height, draws: target.draws.length });
+  });
+  await Promise.resolve();
+  assert.deepEqual(published, [{ width: 40, height: 30, draws: 1 }]);
+});
+
+test("an obsolete decode cannot replace a newer frame or its metadata", async () => {
+  const target = canvas();
+  const pending = [];
+  const closed = [];
+  const published = [];
+  mock.method(globalThis, "createImageBitmap", () => new Promise((resolve) => pending.push(resolve)));
+  const cancelOld = drawStreamFrame(target, "AA==", () => published.push("old"));
+  cancelOld();
+  drawStreamFrame(target, "AQ==", () => published.push("new"));
+  const newer = { width: 40, height: 30, close() { closed.push("new"); } };
+  pending[1](newer);
+  await Promise.resolve();
+  pending[0]({ width: 20, height: 10, close() { closed.push("old"); } });
+  await Promise.resolve();
+  assert.deepEqual(target.draws, [[newer, 0, 0]]);
+  assert.deepEqual(published, ["new"]);
+  assert.deepEqual(closed, ["new", "old"]);
+  assert.equal(target.width, 40);
+  assert.equal(target.height, 30);
+});
+
+test("a failed draw releases the bitmap without publishing metadata", async () => {
+  const target = canvas();
+  target.getContext = () => ({ drawImage() { throw new Error("canvas unavailable"); } });
+  let closes = 0;
+  let published = false;
+  mock.method(globalThis, "createImageBitmap", async () => ({ width: 20, height: 10, close() { closes++; } }));
+  drawStreamFrame(target, "AA==", () => { published = true; });
+  await Promise.resolve();
+  assert.equal(closes, 1);
+  assert.equal(published, false);
+});
+
+test("a missing context releases the bitmap without changing metadata or dimensions", async () => {
+  const target = canvas();
+  target.getContext = () => null;
+  let closes = 0;
+  let published = false;
+  mock.method(globalThis, "createImageBitmap", async () => ({ width: 20, height: 10, close() { closes++; } }));
+  drawStreamFrame(target, "AA==", () => { published = true; });
+  await Promise.resolve();
+  assert.equal(closes, 1);
+  assert.equal(published, false);
+  assert.equal(target.width, 0);
+  assert.equal(target.height, 0);
+});
