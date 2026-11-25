@@ -1004,7 +1004,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
                 "Failed to capture Chrome stderr".to_string()
             })?;
             let reader = BufReader::new(stderr);
-            match wait_for_ws_url_until(reader, deadline) {
+            match wait_for_ws_url_until(reader, deadline, sandboxed_chrome(chrome_path, &args)) {
                 Ok(url) => url,
                 Err(fallback_err) => {
                     terminate_launched_chrome(&mut child);
@@ -1084,6 +1084,7 @@ fn wait_for_devtools_active_port(
 fn wait_for_ws_url_until(
     reader: impl BufRead,
     deadline: std::time::Instant,
+    sandboxed_chrome: Option<&Path>,
 ) -> Result<String, String> {
     let prefix = "DevTools listening on ";
     let mut stderr_lines: Vec<String> = Vec::new();
@@ -1093,6 +1094,7 @@ fn wait_for_ws_url_until(
             return Err(chrome_launch_error(
                 "Timeout waiting for Chrome DevTools URL",
                 &stderr_lines,
+                sandboxed_chrome,
             ));
         }
         let line = line.map_err(|e| format!("Failed to read Chrome stderr: {}", e))?;
@@ -1105,10 +1107,34 @@ fn wait_for_ws_url_until(
     Err(chrome_launch_error(
         "Chrome exited before providing DevTools URL",
         &stderr_lines,
+        sandboxed_chrome,
     ))
 }
 
-fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
+/// Returns the Chrome binary when it was launched with its sandbox enabled,
+/// so sandbox-specific hints only apply when the sandbox could have failed.
+fn sandboxed_chrome<'a>(chrome_path: &'a Path, args: &[String]) -> Option<&'a Path> {
+    (!args.iter().any(|a| a == "--no-sandbox")).then_some(chrome_path)
+}
+
+fn chrome_launch_error(
+    message: &str,
+    stderr_lines: &[String],
+    sandboxed_chrome: Option<&Path>,
+) -> String {
+    format_chrome_launch_error(message, stderr_lines, || {
+        sandboxed_chrome.and_then(apparmor_sandbox_hint)
+    })
+}
+
+/// Builds the launch error. `sandbox_hint` is only called when the failure
+/// looks sandbox-related (no stderr at all, or stderr mentioning the sandbox
+/// or namespaces); its hint is placed before the generic `--no-sandbox` hint.
+fn format_chrome_launch_error(
+    message: &str,
+    stderr_lines: &[String],
+    sandbox_hint: impl FnOnce() -> Option<String>,
+) -> String {
     let relevant: Vec<&String> = stderr_lines
         .iter()
         .filter(|l| {
@@ -1127,8 +1153,9 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
     if relevant.is_empty() {
         if stderr_lines.is_empty() {
             return format!(
-                "{} (no stderr output from Chrome)\nHint: try passing --args \"--no-sandbox\" if Chrome crashes silently in your environment",
-                message
+                "{} (no stderr output from Chrome){}\nHint: try passing --args \"--no-sandbox\" if Chrome crashes silently in your environment",
+                message,
+                prefixed_hint(sandbox_hint())
             );
         }
         let last_lines: Vec<&String> = stderr_lines.iter().rev().take(5).collect();
@@ -1149,9 +1176,12 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
         let lower = l.to_lowercase();
         lower.contains("sandbox") || lower.contains("namespace")
     }) {
-        "\nHint: try --args \"--no-sandbox\" (required in containers, VMs, and some Linux setups)"
+        format!(
+            "{}\nHint: try --args \"--no-sandbox\" (required in containers, VMs, and some Linux setups)",
+            prefixed_hint(sandbox_hint())
+        )
     } else {
-        ""
+        String::new()
     };
 
     format!(
@@ -1164,6 +1194,97 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
             .join("\n  "),
         hint
     )
+}
+
+fn prefixed_hint(hint: Option<String>) -> String {
+    hint.map(|h| format!("\nHint: {}", h)).unwrap_or_default()
+}
+
+/// When this sysctl reads 1, AppArmor only lets binaries covered by an AppArmor
+/// profile create unprivileged user namespaces (Ubuntu 23.10+, per Chromium's
+/// apparmor-userns-restrictions notes).
+#[cfg(target_os = "linux")]
+const APPARMOR_USERNS_SYSCTL: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+
+/// Returns a hint when the AppArmor user namespace restriction is the likely
+/// reason the Chrome sandbox failed to start. Only the Chrome downloaded by
+/// `agent-browser install` is flagged: no AppArmor profile covers it, while a
+/// system-wide Google Chrome install usually is covered.
+#[cfg(target_os = "linux")]
+fn apparmor_sandbox_hint(chrome_path: &Path) -> Option<String> {
+    let restricted = std::fs::read_to_string(APPARMOR_USERNS_SYSCTL)
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false);
+    let downloaded = chrome_path.starts_with(crate::install::get_browsers_dir());
+    apparmor_sandbox_hint_for(restricted, downloaded, || {
+        // Snap Chromium is left out on purpose: it has its own launch issues.
+        find_linux_browser(
+            LINUX_BROWSER_CANDIDATES
+                .into_iter()
+                .filter(|name| name.starts_with("google-chrome")),
+        )
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apparmor_sandbox_hint(_chrome_path: &Path) -> Option<String> {
+    None
+}
+
+/// Decides the AppArmor hint from its inputs. `find_system_chrome` is only
+/// called when the hint applies.
+#[cfg(any(target_os = "linux", test))]
+fn apparmor_sandbox_hint_for(
+    restricted: bool,
+    downloaded: bool,
+    find_system_chrome: impl FnOnce() -> Option<PathBuf>,
+) -> Option<String> {
+    if !restricted || !downloaded {
+        return None;
+    }
+    let cause = "AppArmor restricts unprivileged user namespaces on this system \
+         (kernel.apparmor_restrict_unprivileged_userns=1), which likely blocks the sandbox \
+         of the Chrome downloaded by `agent-browser install`.";
+    Some(match find_system_chrome() {
+        Some(path) => format!(
+            "{} Use the system Chrome instead: --executable-path {} \
+             (or set AGENT_BROWSER_EXECUTABLE_PATH)",
+            cause,
+            path.display()
+        ),
+        None => format!(
+            "{} Install Google Chrome system-wide and pass it with --executable-path \
+             (or set AGENT_BROWSER_EXECUTABLE_PATH)",
+            cause
+        ),
+    })
+}
+
+/// Browser binaries looked up on PATH on Linux, in order of preference.
+#[cfg(target_os = "linux")]
+const LINUX_BROWSER_CANDIDATES: [&str; 6] = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium-browser",
+    "chromium",
+    "brave-browser",
+    "brave-browser-stable",
+];
+
+/// Returns the first of `names` found on PATH.
+#[cfg(target_os = "linux")]
+fn find_linux_browser<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<PathBuf> {
+    for name in names {
+        if let Ok(output) = Command::new("which").arg(name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(PathBuf::from(path));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Finds Chrome from the install cache, macOS Applications directories, or system paths.
@@ -1198,23 +1319,8 @@ pub fn find_chrome() -> Option<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        let candidates = [
-            "google-chrome",
-            "google-chrome-stable",
-            "chromium-browser",
-            "chromium",
-            "brave-browser",
-            "brave-browser-stable",
-        ];
-        for name in &candidates {
-            if let Ok(output) = Command::new("which").arg(name).output() {
-                if output.status.success() {
-                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !path.is_empty() {
-                        return Some(PathBuf::from(path));
-                    }
-                }
-            }
+        if let Some(path) = find_linux_browser(LINUX_BROWSER_CANDIDATES) {
+            return Some(path);
         }
     }
 
@@ -2184,7 +2290,7 @@ exec sleep 60
 
     #[test]
     fn test_chrome_launch_error_no_stderr() {
-        let msg = chrome_launch_error("Chrome exited", &[]);
+        let msg = chrome_launch_error("Chrome exited", &[], Some(Path::new("/nonexistent/chrome")));
         assert!(msg.contains("no stderr output"));
         assert!(msg.contains("Hint:"));
         assert!(msg.contains("--no-sandbox"));
@@ -2196,7 +2302,11 @@ exec sleep 60
             "some log line".to_string(),
             "Failed to move to new namespace: sandbox error".to_string(),
         ];
-        let msg = chrome_launch_error("Chrome exited", &lines);
+        let msg = chrome_launch_error(
+            "Chrome exited",
+            &lines,
+            Some(Path::new("/nonexistent/chrome")),
+        );
         assert!(msg.contains("sandbox error"));
         assert!(msg.contains("Hint:"));
         assert!(msg.contains("--no-sandbox"));
@@ -2205,8 +2315,93 @@ exec sleep 60
     #[test]
     fn test_chrome_launch_error_generic() {
         let lines = vec!["info line".to_string(), "another info line".to_string()];
-        let msg = chrome_launch_error("Chrome exited", &lines);
+        let msg = chrome_launch_error(
+            "Chrome exited",
+            &lines,
+            Some(Path::new("/nonexistent/chrome")),
+        );
         assert!(msg.contains("last 2 lines"));
+    }
+
+    #[test]
+    fn test_sandboxed_chrome_skips_no_sandbox_launches() {
+        let chrome = Path::new("/opt/chrome/chrome");
+        let sandboxed = vec!["--headless=new".to_string()];
+        assert_eq!(sandboxed_chrome(chrome, &sandboxed), Some(chrome));
+        let unsandboxed = vec!["--headless=new".to_string(), "--no-sandbox".to_string()];
+        assert_eq!(sandboxed_chrome(chrome, &unsandboxed), None);
+    }
+
+    fn extra_hint() -> Option<String> {
+        Some("EXTRA".to_string())
+    }
+
+    #[test]
+    fn test_launch_error_sandbox_hint_before_no_sandbox_on_sandbox_stderr() {
+        let lines = vec!["FATAL: No usable sandbox!".to_string()];
+        let msg = format_chrome_launch_error("Chrome exited", &lines, extra_hint);
+        let extra = msg.find("Hint: EXTRA").expect("extra hint should be shown");
+        let fallback = msg
+            .find("--no-sandbox")
+            .expect("fallback hint should be shown");
+        assert!(extra < fallback);
+    }
+
+    #[test]
+    fn test_launch_error_sandbox_hint_before_no_sandbox_without_stderr() {
+        let msg = format_chrome_launch_error("Chrome exited", &[], extra_hint);
+        let extra = msg.find("Hint: EXTRA").expect("extra hint should be shown");
+        let fallback = msg
+            .find("--no-sandbox")
+            .expect("fallback hint should be shown");
+        assert!(extra < fallback);
+    }
+
+    #[test]
+    fn test_launch_error_sandbox_hint_skipped_for_unrelated_errors() {
+        let not_called = || -> Option<String> { panic!("hint should not be computed") };
+        let generic = vec!["info line".to_string()];
+        let msg = format_chrome_launch_error("Chrome exited", &generic, not_called);
+        assert!(!msg.contains("Hint:"));
+
+        let other_error = vec!["ERROR: permission denied opening file".to_string()];
+        let msg = format_chrome_launch_error("Chrome exited", &other_error, not_called);
+        assert!(!msg.contains("Hint:"));
+    }
+
+    #[test]
+    fn test_launch_error_without_sandbox_hint_keeps_fallback() {
+        let lines = vec!["sandbox error".to_string()];
+        let msg = format_chrome_launch_error("Chrome exited", &lines, || None);
+        assert_eq!(msg.matches("Hint:").count(), 1);
+        assert!(msg.contains("--no-sandbox"));
+    }
+
+    #[test]
+    fn test_apparmor_hint_names_system_chrome() {
+        let hint =
+            apparmor_sandbox_hint_for(true, true, || Some(PathBuf::from("/usr/bin/google-chrome")))
+                .expect("hint should apply");
+        assert!(hint.contains("apparmor_restrict_unprivileged_userns"));
+        assert!(hint.contains("likely"));
+        assert!(hint.contains("--executable-path /usr/bin/google-chrome"));
+        assert!(hint.contains("AGENT_BROWSER_EXECUTABLE_PATH"));
+    }
+
+    #[test]
+    fn test_apparmor_hint_generic_without_system_chrome() {
+        let hint = apparmor_sandbox_hint_for(true, true, || None).expect("hint should apply");
+        assert!(hint.contains("Install Google Chrome"));
+        assert!(hint.contains("--executable-path"));
+        assert!(hint.contains("AGENT_BROWSER_EXECUTABLE_PATH"));
+    }
+
+    #[test]
+    fn test_apparmor_hint_needs_restriction_and_downloaded_chrome() {
+        let not_called = || -> Option<PathBuf> { panic!("lookup should not run") };
+        assert!(apparmor_sandbox_hint_for(false, true, not_called).is_none());
+        assert!(apparmor_sandbox_hint_for(true, false, not_called).is_none());
+        assert!(apparmor_sandbox_hint_for(false, false, not_called).is_none());
     }
 
     #[test]
