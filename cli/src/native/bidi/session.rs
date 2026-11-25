@@ -222,6 +222,27 @@ async fn check_devtools_peer(rdp: &RdpClient, root: &Value, nonce: &str) -> Resu
     Ok(())
 }
 
+/// Re-enables DevTools connection prompts and turns off remote debugging for later clients once
+/// the daemon holds its own RDP connection to an owned Firefox process.
+async fn lock_down_devtools(rdp: &RdpClient, root: &Value) -> Result<(), String> {
+    let preferences = root["preferenceActor"]
+        .as_str()
+        .ok_or("Firefox DevTools did not expose the preference actor")?;
+    rdp.request(
+        preferences,
+        "setBoolPref",
+        json!({ "name": "devtools.debugger.prompt-connection", "value": true }),
+    )
+    .await?;
+    rdp.request(
+        preferences,
+        "setBoolPref",
+        json!({ "name": "devtools.debugger.remote-enabled", "value": false }),
+    )
+    .await?;
+    Ok(())
+}
+
 impl FirefoxSession {
     /// Finds and launches Firefox, opens the BiDi session, starts the network dispatcher
     /// and enables the accessibility actor.
@@ -422,6 +443,7 @@ impl FirefoxSession {
         let root = rdp.request("root", "getRoot", json!({})).await?;
         if let Some(process) = &process {
             check_devtools_peer(&rdp, &root, &process.nonce).await?;
+            lock_down_devtools(&rdp, &root).await?;
         }
         let accessibility_actor = root["parentAccessibilityActor"]
             .as_str()
@@ -2130,6 +2152,39 @@ pub(crate) mod tests {
         let rdp = RdpClient::connect_unix(&path).await?;
         let root = rdp.request("root", "getRoot", json!({})).await?;
         check_devtools_peer(&rdp, &root, "right-nonce").await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lock_down_devtools_re_enables_prompts_and_disables_remote_debugging() {
+        use super::super::firefox_devtools::tests::{get, put};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            put(&mut s, json!({"from": "root"})).await;
+            assert_eq!(get(&mut s).await["type"], "getRoot");
+            put(&mut s, json!({"from": "root", "preferenceActor": "pref1"})).await;
+            for _ in 0..2 {
+                let req = get(&mut s).await;
+                log.lock().unwrap().push(req);
+                put(&mut s, json!({"from": "pref1"})).await;
+            }
+        });
+        let rdp = RdpClient::connect_unix(&path).await.unwrap();
+        let root = rdp.request("root", "getRoot", json!({})).await.unwrap();
+        lock_down_devtools(&rdp, &root).await.unwrap();
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["type"], "setBoolPref");
+        assert_eq!(calls[0]["name"], "devtools.debugger.prompt-connection");
+        assert_eq!(calls[0]["value"], true);
+        assert_eq!(calls[1]["type"], "setBoolPref");
+        assert_eq!(calls[1]["name"], "devtools.debugger.remote-enabled");
+        assert_eq!(calls[1]["value"], false);
     }
 
     #[cfg(unix)]
