@@ -2496,9 +2496,17 @@ async fn e2e_same_site_cross_origin_iframe_selectors_overlay_and_scale() {
     );
 
     // Parent overlay must block selector click inside the same-site cross-origin frame.
+    assert_success(&execute_command(&json!({"id": "5a", "action": "mainframe"}), &mut state).await);
     assert_success(
         &execute_command(
             &json!({"id": "5", "action": "evaluate", "script": "document.getElementById('cover').style.display='block'"}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "5b", "action": "frame", "selector": "#frame"}),
             &mut state,
         )
         .await,
@@ -2514,9 +2522,17 @@ async fn e2e_same_site_cross_origin_iframe_selectors_overlay_and_scale() {
     );
 
     // Remove overlay and click succeeds.
+    assert_success(&execute_command(&json!({"id": "7a", "action": "mainframe"}), &mut state).await);
     assert_success(
         &execute_command(
             &json!({"id": "7", "action": "evaluate", "script": "document.getElementById('cover').style.display='none'"}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "7b", "action": "frame", "selector": "#frame"}),
             &mut state,
         )
         .await,
@@ -2749,6 +2765,11 @@ async fn e2e_check_refuses_interactive_cover_and_allows_plain_label() {
                       <input type='checkbox' id='cb-plain' style='position:absolute;left:0;top:0;width:40px;height:40px;margin:0'>\
                       <label id='plain-lbl' for='cb-plain' style='position:absolute;left:0;top:0;width:40px;height:40px;display:block'><span>Accept</span></label>\
                     </div>\
+                    <div id='cb-custom' role='checkbox' aria-checked='false' tabindex='0' \
+                         style='position:relative;width:40px;height:40px' \
+                         onclick=\"this.setAttribute('aria-checked', this.getAttribute('aria-checked')==='true'?'false':'true')\">\
+                      <a id='nested-link' href='/nav' style='position:absolute;left:0;top:0;width:40px;height:40px;display:block'>Terms</a>\
+                    </div>\
                     </body>"
                 };
                 let resp = format!(
@@ -2841,6 +2862,24 @@ async fn e2e_check_refuses_interactive_cover_and_allows_plain_label() {
     .await;
     assert_success(&unchecked);
     assert_eq!(get_data(&unchecked)["checked"], false);
+
+    // (d) Custom role="checkbox" with an interactive <a href> descendant at its center
+    // must be refused and must not navigate.
+    let custom_res = execute_command(
+        &json!({"id": "11", "action": "check", "selector": "#cb-custom"}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        custom_res["success"], false,
+        "expected check on custom checkbox with nested link to fail: {custom_res}"
+    );
+    let custom_err = custom_res["error"].as_str().unwrap_or("");
+    assert!(
+        custom_err.contains("is covered by <a#nested-link>"),
+        "expected intercepted error for nested link, got: {custom_err}"
+    );
+    assert_evaluate(&mut state, "12", "location.pathname", json!("/")).await;
 
     assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
     server.abort();
@@ -2938,7 +2977,7 @@ async fn e2e_semantic_find_honors_selected_frame() {
     assert_evaluate(
         &mut state,
         "7d",
-        "document.querySelector('#f').contentWindow.__ab_injected === undefined",
+        "globalThis.__ab_injected === undefined",
         json!(true),
     )
     .await;
@@ -2970,7 +3009,7 @@ async fn e2e_semantic_find_honors_selected_frame() {
     assert_evaluate(
         &mut state,
         "11",
-        "document.querySelector('#f').contentDocument.querySelectorAll('[data-agent-browser-located]').length",
+        "document.querySelectorAll('[data-agent-browser-located]').length",
         json!(0),
     )
     .await;
