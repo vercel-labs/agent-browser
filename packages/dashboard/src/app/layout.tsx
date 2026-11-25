@@ -21,7 +21,7 @@ export default function RootLayout({
   return (
     <html lang="en" className={cn("font-sans antialiased", geist.variable)} suppressHydrationWarning>
       <body>
-        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           <JotaiProvider>
             <TooltipProvider>{children}</TooltipProvider>
           </JotaiProvider>
