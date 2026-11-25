@@ -360,7 +360,12 @@ pub struct CdpClient {
     screenshot_gate: ScreenshotGateSlot,
 }
 
-type ScreenshotGateSlot = Arc<std::sync::Mutex<Option<Arc<RwLock<()>>>>>;
+struct ScreenshotGateState {
+    gate: Option<Arc<RwLock<()>>>,
+    leases: usize,
+}
+
+type ScreenshotGateSlot = Arc<std::sync::Mutex<ScreenshotGateState>>;
 
 /// RAII lease that keeps the client's screenshot gate active for the lifetime
 /// of a screenshot-mode recording take.
@@ -371,12 +376,38 @@ pub struct ScreenshotGateLease {
 
 impl Drop for ScreenshotGateLease {
     fn drop(&mut self) {
-        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
-        if slot
+        let mut state = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        state.leases = state.leases.saturating_sub(1);
+        if state.leases > 0 {
+            return;
+        }
+        if !state
+            .gate
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, &self.gate))
         {
-            *slot = None;
+            return;
+        }
+        if self.gate.try_write().is_ok() {
+            state.gate = None;
+            return;
+        }
+        drop(state);
+        let slot = self.slot.clone();
+        let gate = self.gate.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _write = gate.clone().write_owned().await;
+                let mut state = slot.lock().unwrap_or_else(|e| e.into_inner());
+                if state.leases == 0
+                    && state
+                        .gate
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &gate))
+                {
+                    state.gate = None;
+                }
+            });
         }
     }
 }
@@ -522,7 +553,11 @@ impl CdpClient {
         let private_sessions: PrivateSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let method_taps: MethodTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
         let detached_sessions: DetachedSessionSet = Arc::default();
-        let screenshot_gate: ScreenshotGateSlot = Arc::new(std::sync::Mutex::new(None));
+        let screenshot_gate: ScreenshotGateSlot =
+            Arc::new(std::sync::Mutex::new(ScreenshotGateState {
+                gate: None,
+                leases: 0,
+            }));
 
         let pending_clone = pending.clone();
         let raw_pending_clone = raw_pending.clone();
@@ -755,13 +790,18 @@ impl CdpClient {
     }
 
     /// Enable the screenshot gate for the duration of a screenshot-mode
-    /// recording take. Dropping the returned lease disables the gate.
+    /// recording take. Dropping the returned lease disables the gate once no
+    /// lease or retained capture remains.
     pub fn enable_screenshot_gate(&self) -> ScreenshotGateLease {
-        let gate = Arc::new(RwLock::new(()));
-        *self
+        let mut state = self
             .screenshot_gate
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(gate.clone());
+            .unwrap_or_else(|e| e.into_inner());
+        let gate = state
+            .gate
+            .get_or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone();
+        state.leases += 1;
         ScreenshotGateLease {
             slot: self.screenshot_gate.clone(),
             gate,
@@ -781,6 +821,7 @@ impl CdpClient {
             .screenshot_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .gate
             .clone();
         let Some(gate) = gate else {
             return ScreenshotGateGuard::None;
@@ -1224,6 +1265,7 @@ impl CdpClient {
         self.screenshot_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .gate
             .is_some()
     }
 }
@@ -2841,5 +2883,245 @@ mod tests {
         .await
         .expect("closed transport should not leave the screenshot gate held");
         assert_eq!(input.unwrap_err(), CONNECTION_CLOSED_ERROR);
+    }
+
+    #[tokio::test]
+    async fn dropped_lease_keeps_gate_until_timed_out_screenshot_settles() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (first_seen_tx, first_seen_rx) = oneshot::channel::<()>();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let (received_tx, mut received_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut first_seen_tx = Some(first_seen_tx);
+            let mut release_rx = Some(release_rx);
+            let mut held_id: Option<u64> = None;
+
+            loop {
+                tokio::select! {
+                    msg = ws.next() => {
+                        let Some(Ok(Message::Text(text))) = msg else { break };
+                        let parsed: Value = serde_json::from_str(&text).unwrap();
+                        let id = parsed["id"].as_u64().unwrap();
+                        let method = parsed["method"].as_str().unwrap().to_string();
+                        let session_id = parsed["sessionId"].as_str().map(str::to_string);
+                        let _ = received_tx.send((method.clone(), session_id.clone()));
+
+                        if method == "Page.captureScreenshot" && first_seen_tx.is_some() {
+                            held_id = Some(id);
+                            let _ = first_seen_tx.take().unwrap().send(());
+                            continue;
+                        }
+
+                        let resp = serde_json::json!({ "id": id, "result": {} });
+                        ws.send(Message::Text(resp.to_string())).await.unwrap();
+                    }
+                    _ = async {
+                        if let Some(rx) = release_rx.as_mut() {
+                            let _ = rx.await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        release_rx = None;
+                        if let Some(id) = held_id.take() {
+                            let resp = serde_json::json!({ "id": id, "result": { "data": "" } });
+                            ws.send(Message::Text(resp.to_string())).await.unwrap();
+                        }
+                    }
+                }
+            }
+        });
+
+        let client = Arc::new(
+            CdpClient::connect(&format!("ws://127.0.0.1:{port}"))
+                .await
+                .unwrap(),
+        );
+        let lease = client.enable_screenshot_gate();
+
+        let c1 = client.clone();
+        let shot = tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_millis(120),
+                c1.send_command("Page.captureScreenshot", None, Some("S-1")),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), first_seen_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received_rx.recv().await,
+            Some((
+                "Page.captureScreenshot".to_string(),
+                Some("S-1".to_string())
+            ))
+        );
+        assert!(shot.await.unwrap().is_err());
+
+        // Recording stops and drops its lease while Chrome is still capturing.
+        drop(lease);
+        assert!(
+            client.is_screenshot_gate_active(),
+            "gate must stay installed while a timed-out screenshot is still in flight"
+        );
+
+        let c2 = client.clone();
+        let input = tokio::spawn(async move {
+            c2.send_command("Input.dispatchMouseEvent", None, Some("S-1"))
+                .await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(120), received_rx.recv())
+                .await
+                .is_err(),
+            "input after lease drop must wait until Chrome answers the timed-out screenshot"
+        );
+
+        release_tx.send(()).unwrap();
+        input.await.unwrap().unwrap();
+        assert_eq!(
+            received_rx.recv().await,
+            Some((
+                "Input.dispatchMouseEvent".to_string(),
+                Some("S-1".to_string())
+            ))
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.is_screenshot_gate_active() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("gate should clear once the retained screenshot finishes");
+
+        drop(client);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn new_lease_reuses_gate_while_timed_out_screenshot_is_pending() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (first_seen_tx, first_seen_rx) = oneshot::channel::<()>();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let (received_tx, mut received_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut first_seen_tx = Some(first_seen_tx);
+            let mut release_rx = Some(release_rx);
+            let mut held_id: Option<u64> = None;
+
+            loop {
+                tokio::select! {
+                    msg = ws.next() => {
+                        let Some(Ok(Message::Text(text))) = msg else { break };
+                        let parsed: Value = serde_json::from_str(&text).unwrap();
+                        let id = parsed["id"].as_u64().unwrap();
+                        let method = parsed["method"].as_str().unwrap().to_string();
+                        let session_id = parsed["sessionId"].as_str().map(str::to_string);
+                        let _ = received_tx.send((method.clone(), session_id.clone()));
+
+                        if method == "Page.captureScreenshot" && first_seen_tx.is_some() {
+                            held_id = Some(id);
+                            let _ = first_seen_tx.take().unwrap().send(());
+                            continue;
+                        }
+
+                        let resp = serde_json::json!({ "id": id, "result": { "data": "" } });
+                        ws.send(Message::Text(resp.to_string())).await.unwrap();
+                    }
+                    _ = async {
+                        if let Some(rx) = release_rx.as_mut() {
+                            let _ = rx.await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        release_rx = None;
+                        if let Some(id) = held_id.take() {
+                            let resp = serde_json::json!({ "id": id, "result": { "data": "" } });
+                            ws.send(Message::Text(resp.to_string())).await.unwrap();
+                        }
+                    }
+                }
+            }
+        });
+
+        let client = Arc::new(
+            CdpClient::connect(&format!("ws://127.0.0.1:{port}"))
+                .await
+                .unwrap(),
+        );
+        let lease1 = client.enable_screenshot_gate();
+
+        let c1 = client.clone();
+        let shot1 = tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_millis(120),
+                c1.send_command("Page.captureScreenshot", None, Some("S-1")),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), first_seen_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received_rx.recv().await,
+            Some((
+                "Page.captureScreenshot".to_string(),
+                Some("S-1".to_string())
+            ))
+        );
+        assert!(shot1.await.unwrap().is_err());
+
+        // First recording stops and a new recording starts before Chrome replies.
+        drop(lease1);
+        let lease2 = client.enable_screenshot_gate();
+
+        let c2 = client.clone();
+        let shot2 = tokio::spawn(async move {
+            c2.send_command("Page.captureScreenshot", None, Some("S-1"))
+                .await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(120), received_rx.recv())
+                .await
+                .is_err(),
+            "a new recording's screenshot must queue behind the pending screenshot"
+        );
+
+        release_tx.send(()).unwrap();
+        shot2.await.unwrap().unwrap();
+        assert_eq!(
+            received_rx.recv().await,
+            Some((
+                "Page.captureScreenshot".to_string(),
+                Some("S-1".to_string())
+            ))
+        );
+
+        // Second recording is still active, so the gate must stay installed until lease2 drops.
+        assert!(client.is_screenshot_gate_active());
+        drop(lease2);
+        assert!(!client.is_screenshot_gate_active());
+
+        drop(client);
+        server.abort();
     }
 }
