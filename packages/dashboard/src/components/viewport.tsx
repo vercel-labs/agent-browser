@@ -6,6 +6,13 @@ import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, Rotate
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
+import {
+  createRightClickGuardState,
+  mapCanvasPointToViewport,
+  recordRightMouseEvent,
+  shouldSynthesizeContextMenuRightClick,
+  type DrawnFrame,
+} from "@/lib/viewport-pointer";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -38,10 +45,19 @@ import {
   screencastingAtom,
   recordingAtom,
   streamEngineAtom,
+  streamTabsAtom,
+  wsRefAtom,
   activeUrlAtom,
   sendInputAtom,
+  type StreamFrame,
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
+import {
+  buildKeyboardInputMessage,
+  createInputQueue,
+  keyModifiers,
+  type InputQueue,
+} from "@/lib/viewport-keyboard";
 
 const LIVE_VIEW_ENGINES = new Set(["chrome", "firefox"]);
 
@@ -52,45 +68,6 @@ function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
   if (e.metaKey) m |= 4;
   if (e.shiftKey) m |= 8;
   return m;
-}
-
-const KEY_INFO: Record<string, { text?: string; keyCode: number }> = {
-  Enter: { text: "\r", keyCode: 13 },
-  Tab: { text: "\t", keyCode: 9 },
-  Backspace: { text: "\b", keyCode: 8 },
-  Escape: { keyCode: 27 },
-  ArrowLeft: { keyCode: 37 },
-  ArrowUp: { keyCode: 38 },
-  ArrowRight: { keyCode: 39 },
-  ArrowDown: { keyCode: 40 },
-  Delete: { keyCode: 46 },
-  Home: { keyCode: 36 },
-  End: { keyCode: 35 },
-  PageUp: { keyCode: 33 },
-  PageDown: { keyCode: 34 },
-};
-
-function printableKeyCode(key: string): number {
-  if (key.length !== 1) return 0;
-  const code = key.charCodeAt(0);
-  if (code >= 65 && code <= 90) return code;
-  if (code >= 97 && code <= 122) return code - 32;
-  if (code >= 48 && code <= 57) return code;
-  switch (key) {
-    case " ": return 32;
-    case ";": case ":": return 186;
-    case "=": case "+": return 187;
-    case ",": case "<": return 188;
-    case "-": case "_": return 189;
-    case ".": case ">": return 190;
-    case "/": case "?": return 191;
-    case "`": case "~": return 192;
-    case "[": case "{": return 219;
-    case "\\": case "|": return 220;
-    case "]": case "}": return 221;
-    case "'": case "\"": return 222;
-    default: return 0;
-  }
 }
 
 function cdpButton(btn: number): string {
@@ -152,12 +129,19 @@ export function Viewport() {
   const screencasting = useAtomValue(screencastingAtom);
   const recording = useAtomValue(recordingAtom);
   const engine = useAtomValue(streamEngineAtom);
+  const tabs = useAtomValue(streamTabsAtom);
+  const ws = useAtomValue(wsRefAtom);
   const url = useAtomValue(activeUrlAtom);
   const sessionName = useAtomValue(activeSessionNameAtom);
   const streamPort = useAtomValue(activePortAtom);
   const sendInput = useSetAtom(sendInputAtom);
+  const activeTabId = tabs.find((t) => t.active)?.tabId ?? "";
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rightClickGuardRef = useRef(createRightClickGuardState());
+  const drawnFrameRef = useRef<DrawnFrame | null>(null);
+  const decodeSeqRef = useRef(0);
+  const drawnSeqRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const addressRef = useRef<HTMLInputElement>(null);
@@ -194,6 +178,8 @@ export function Viewport() {
     setActiveDevice(null);
     setColorScheme("no-preference");
     setOffline(false);
+    drawnFrameRef.current = null;
+    rightClickGuardRef.current = createRightClickGuardState();
   }, [sessionName]);
 
   useEffect(() => {
@@ -233,20 +219,34 @@ export function Viewport() {
     }
   }, [addressValue, navigating, runCmd, url]);
 
-  const drawFrame = useCallback((base64: string) => {
+  const drawFrame = useCallback((next: StreamFrame) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const bin = atob(base64);
+    const seq = ++decodeSeqRef.current;
+    const bin = atob(next.data);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
     createImageBitmap(new Blob([bytes], { type: "image/jpeg" })).then((bmp) => {
+      if (seq < drawnSeqRef.current) {
+        bmp.close();
+        return;
+      }
+      drawnSeqRef.current = seq;
       canvas.width = bmp.width;
       canvas.height = bmp.height;
       const ctx = canvas.getContext("2d");
       if (ctx) ctx.drawImage(bmp, 0, 0);
       bmp.close();
+      drawnFrameRef.current =
+        next.deviceWidth > 0 && next.deviceHeight > 0
+          ? {
+              width: next.deviceWidth,
+              height: next.deviceHeight,
+              pageScaleFactor: next.pageScaleFactor > 0 ? next.pageScaleFactor : 1,
+            }
+          : null;
     });
   }, []);
 
@@ -333,39 +333,112 @@ export function Viewport() {
     (e: React.MouseEvent): { x: number; y: number } | null => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = viewportWidth / rect.width;
-      const scaleY = viewportHeight / rect.height;
-      return {
-        x: Math.round((e.clientX - rect.left) * scaleX),
-        y: Math.round((e.clientY - rect.top) * scaleY),
-      };
+      return mapCanvasPointToViewport(
+        e.clientX,
+        e.clientY,
+        canvas.getBoundingClientRect(),
+        drawnFrameRef.current,
+        viewportWidth,
+        viewportHeight,
+      );
     },
     [viewportWidth, viewportHeight],
   );
+
+  const sendInputRef = useRef(sendInput);
+  sendInputRef.current = sendInput;
+  const targetContextRef = useRef({ sessionName, streamPort, activeTabId, ws });
+  targetContextRef.current = { sessionName, streamPort, activeTabId, ws };
+  const inputQueueRef = useRef<InputQueue | null>(null);
+  if (!inputQueueRef.current) {
+    inputQueueRef.current = createInputQueue((msg) => sendInputRef.current(msg));
+  }
+  useEffect(() => {
+    inputQueueRef.current?.reset();
+  }, [sessionName, streamPort, activeTabId, ws]);
+  const enqueueInput = useCallback((msg: Record<string, unknown>) => {
+    inputQueueRef.current?.enqueue(msg);
+  }, []);
 
   const handleMouseEvent = useCallback(
     (e: React.MouseEvent, eventType: string) => {
       const pos = toViewport(e);
       if (!pos) return;
-      sendInput({
+      recordRightMouseEvent(
+        rightClickGuardRef.current,
+        eventType,
+        e.button,
+        Date.now(),
+      );
+      const buttons = e.buttons;
+      const button =
+        eventType === "mouseMoved"
+          ? buttons & 1
+            ? "left"
+            : buttons & 2
+              ? "right"
+              : buttons & 4
+                ? "middle"
+                : "none"
+          : cdpButton(e.button);
+      enqueueInput({
         type: "input_mouse",
         eventType,
         x: pos.x,
         y: pos.y,
-        button: cdpButton(e.button),
+        button,
+        buttons,
         clickCount: eventType === "mousePressed" ? 1 : 0,
         modifiers: cdpModifiers(e),
       });
     },
-    [toViewport, sendInput],
+    [toViewport, enqueueInput],
+  );
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      if (
+        !shouldSynthesizeContextMenuRightClick(
+          rightClickGuardRef.current,
+          e.buttons,
+          Date.now(),
+        )
+      ) {
+        return;
+      }
+      const pos = toViewport(e);
+      if (!pos) return;
+      const modifiers = cdpModifiers(e);
+      enqueueInput({
+        type: "input_mouse",
+        eventType: "mousePressed",
+        x: pos.x,
+        y: pos.y,
+        button: "right",
+        buttons: 2,
+        clickCount: 1,
+        modifiers,
+      });
+      enqueueInput({
+        type: "input_mouse",
+        eventType: "mouseReleased",
+        x: pos.x,
+        y: pos.y,
+        button: "right",
+        buttons: 0,
+        clickCount: 0,
+        modifiers,
+      });
+    },
+    [toViewport, enqueueInput],
   );
 
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       const pos = toViewport(e);
       if (!pos) return;
-      sendInput({
+      enqueueInput({
         type: "input_mouse",
         eventType: "mouseWheel",
         x: pos.x,
@@ -377,39 +450,78 @@ export function Viewport() {
         modifiers: cdpModifiers(e),
       });
     },
-    [toViewport, sendInput],
+    [toViewport, enqueueInput],
   );
 
   const dispatchKey = useCallback(
     (e: KeyboardEvent, eventType: string) => {
-      const info = KEY_INFO[e.key];
-      const text = eventType === "keyDown"
-        ? (info?.text ?? (Array.from(e.key).length === 1 ? e.key : undefined))
-        : undefined;
-      const keyCode = info?.keyCode ?? printableKeyCode(e.key);
-      let m = 0;
-      if (e.altKey) m |= 1;
-      if (e.ctrlKey) m |= 2;
-      if (e.metaKey) m |= 4;
-      if (e.shiftKey) m |= 8;
-      sendInput({
-        type: "input_keyboard",
-        eventType,
-        key: e.key,
-        code: e.code,
-        text,
-        windowsVirtualKeyCode: keyCode,
-        modifiers: m,
-      });
+      enqueueInput(buildKeyboardInputMessage(e, eventType));
     },
-    [sendInput],
+    [enqueueInput],
   );
 
   useEffect(() => {
+    const forwardPasteShortcut = (e: KeyboardEvent) => {
+      const fallback = buildKeyboardInputMessage(e, "rawKeyDown");
+      const readText = navigator.clipboard?.readText?.bind(navigator.clipboard);
+      if (!readText) {
+        enqueueInput(fallback);
+        return;
+      }
+      const origin = { ...targetContextRef.current };
+      const isSameTarget = () => {
+        const cur = targetContextRef.current;
+        return (
+          cur.sessionName === origin.sessionName &&
+          cur.streamPort === origin.streamPort &&
+          cur.activeTabId === origin.activeTabId &&
+          cur.ws === origin.ws &&
+          cur.ws?.readyState === WebSocket.OPEN
+        );
+      };
+      void inputQueueRef.current?.enqueueAsync(async () => {
+        try {
+          const text = await readText();
+          if (!isSameTarget()) return null;
+          return text ? { type: "input_insert_text", text } : fallback;
+        } catch {
+          return isSameTarget() ? fallback : null;
+        }
+      });
+    };
+
     const handler = (e: KeyboardEvent) => {
       if (document.activeElement !== canvasRef.current) return;
       e.preventDefault();
       e.stopPropagation();
+      const isShortcut =
+        (e.ctrlKey || e.metaKey) && !e.altKey && e.key.length === 1;
+      if (e.type === "keydown" && isShortcut) {
+        const key = e.key.toLowerCase();
+        if (key === "v") {
+          forwardPasteShortcut(e);
+          return;
+        }
+        if (key === "c") {
+          dispatchKey(e, "rawKeyDown");
+          if (engine !== "firefox") {
+            enqueueInput({ type: "input_read_clipboard" });
+          }
+          return;
+        }
+        if (key === "x") {
+          if (engine === "firefox") {
+            dispatchKey(e, "rawKeyDown");
+          } else {
+            enqueueInput({
+              type: "input_read_clipboard",
+              cut: true,
+              modifiers: keyModifiers(e),
+            });
+          }
+          return;
+        }
+      }
       dispatchKey(e, e.type === "keydown" ? "keyDown" : "keyUp");
     };
     window.addEventListener("keydown", handler, true);
@@ -418,7 +530,7 @@ export function Viewport() {
       window.removeEventListener("keydown", handler, true);
       window.removeEventListener("keyup", handler, true);
     };
-  }, [dispatchKey]);
+  }, [dispatchKey, enqueueInput, engine]);
 
   return (
     <div ref={containerRef} className="flex h-full flex-col">
@@ -544,7 +656,7 @@ export function Viewport() {
             }}
             onMouseUp={(e) => handleMouseEvent(e, "mouseReleased")}
             onWheel={handleWheel}
-            onContextMenu={(e) => e.preventDefault()}
+            onContextMenu={handleContextMenu}
           />
         ) : (
           <div className="text-center text-sm text-muted-foreground">

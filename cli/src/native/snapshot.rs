@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -196,6 +196,7 @@ pub struct SnapshotRefContext<'a> {
 struct TreeNode {
     role: String,
     name: String,
+    display_name: Option<String>,
     level: Option<i64>,
     checked: Option<String>,
     expanded: Option<bool>,
@@ -220,6 +221,7 @@ impl TreeNode {
         Self {
             role: String::new(),
             name: String::new(),
+            display_name: None,
             level: None,
             checked: None,
             expanded: None,
@@ -242,6 +244,7 @@ impl TreeNode {
     fn clear(&mut self) {
         self.role = String::new();
         self.name = String::new();
+        self.display_name = None;
         self.level = None;
         self.checked = None;
         self.expanded = None;
@@ -363,6 +366,8 @@ pub async fn stage_snapshot(
     Ok((tree, staged))
 }
 
+const MAX_IFRAME_SNAPSHOT_DEPTH: usize = 4;
+
 pub async fn take_snapshot(
     client: &CdpClient,
     session_id: &str,
@@ -378,10 +383,6 @@ pub async fn take_snapshot(
         .send_command_no_params("Accessibility.enable", Some(session_id))
         .await?;
 
-    // If a CSS selector is provided, resolve the set of backendNodeIds that
-    // belong to the DOM subtrees rooted at every matched element.  We use this
-    // set to pick the right AX subtree root(s) later.  Hidden matches have no
-    // AX nodes, so they drop out without failing the snapshot.
     let selector_backend_ids: Option<HashMap<i64, usize>> =
         if let Some(ref selector) = options.selector {
             let resolved = resolve_selector_backend_ids(client, session_id, selector).await;
@@ -397,8 +398,46 @@ pub async fn take_snapshot(
             None
         };
 
+    let mut visited = HashSet::new();
+    let parent_session = match frame_id {
+        Some(fid) => {
+            visited.insert(fid.to_string());
+            super::element::find_frame_host_session(client, session_id, fid, iframe_sessions)
+                .await
+                .unwrap_or_else(|_| session_id.to_string())
+        }
+        None => session_id.to_string(),
+    };
+    take_snapshot_inner(
+        client,
+        session_id,
+        &parent_session,
+        options,
+        selector_backend_ids.as_ref(),
+        ref_map,
+        frame_id,
+        iframe_sessions,
+        0,
+        &mut visited,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn take_snapshot_inner(
+    client: &CdpClient,
+    session_id: &str,
+    parent_session_id: &str,
+    options: &SnapshotOptions,
+    selector_backend_ids: Option<&HashMap<i64, usize>>,
+    ref_map: &mut RefMap,
+    frame_id: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+    depth: usize,
+    visited: &mut HashSet<String>,
+) -> Result<String, String> {
     let (ax_params, effective_session_id) =
-        resolve_ax_session(frame_id, session_id, iframe_sessions);
+        resolve_ax_session(frame_id, parent_session_id, iframe_sessions);
     // Same-origin children share a CDP session but have separate loaders;
     // out-of-process children also have their own effective session identity.
     let frame_tree = client
@@ -452,7 +491,7 @@ pub async fn take_snapshot(
 
     // When a selector is given, find AX nodes whose backendDOMNodeId falls
     // within the target DOM subtree and pick the top-level ones as roots.
-    let effective_roots = if let Some(ref id_set) = selector_backend_ids {
+    let effective_roots = if let Some(id_set) = selector_backend_ids {
         // Mark which tree_nodes belong to the target DOM subtree.
         let in_subtree: Vec<bool> = tree_nodes
             .iter()
@@ -497,11 +536,15 @@ pub async fn take_snapshot(
         root_indices
     };
 
-    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
-    let mut cursor_elements: HashMap<i64, CursorElementInfo> =
+    // Pre-collect cursor-interactive elements for the top document only;
+    // child frames don't share the top document's DOM or backendNodeIds.
+    let mut cursor_elements: HashMap<i64, CursorElementInfo> = if frame_id.is_none() {
         find_cursor_interactive_elements(client, session_id)
             .await
-            .unwrap_or_default();
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
     drop_natively_interactive(&mut cursor_elements, &tree_nodes);
 
     promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
@@ -535,44 +578,71 @@ pub async fn take_snapshot(
         }
     }
 
+    let iframe_nodes: Vec<(usize, i64, bool)> = tree_nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(node_idx, node)| {
+            (node.role == "Iframe" && node.has_ref).then_some((
+                node_idx,
+                node.backend_node_id?,
+                node.name.is_empty(),
+            ))
+        })
+        .collect();
+    let iframe_results = futures_util::future::join_all(
+        iframe_nodes
+            .iter()
+            .map(|&(_, bid, _)| resolve_iframe_frame(client, effective_session_id, bid)),
+    )
+    .await;
+    let mut iframe_metadata: Vec<(usize, IframeMetadata)> = Vec::new();
+    for ((node_idx, _, name_is_empty), result) in iframe_nodes.into_iter().zip(iframe_results) {
+        if let Ok(metadata) = result {
+            if name_is_empty {
+                tree_nodes[node_idx].display_name = metadata.name.clone();
+            }
+            iframe_metadata.push((node_idx, metadata));
+        }
+    }
+
     let mut output = String::new();
     for &root_idx in &effective_roots {
         render_tree(&tree_nodes, root_idx, 0, &mut output, options);
     }
 
-    // Recurse into child iframes: for each Iframe node with a backend_node_id,
-    // resolve the child frame ID and take a snapshot of its content.
-    // We only recurse from the main frame (frame_id == None) to avoid
-    // unbounded depth; nested iframes within iframes are not expanded.
-    if frame_id.is_none() {
+    // Recurse into child iframes up to MAX_IFRAME_SNAPSHOT_DEPTH, guarding
+    // against cycles with `visited`.
+    if depth < MAX_IFRAME_SNAPSHOT_DEPTH {
         let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
-        for node in tree_nodes.iter() {
-            if node.role != "Iframe" || !node.has_ref {
-                continue;
-            }
-            let Some(bid) = node.backend_node_id else {
+        for (node_idx, metadata) in iframe_metadata {
+            let Some(child_fid) = metadata.frame_id else {
                 continue;
             };
-            let ref_id = node.ref_id.as_deref().unwrap_or("");
-            if let Ok(child_fid) = resolve_iframe_frame_id(client, session_id, bid).await {
-                // Snapshot the child frame; errors are silently ignored
-                // (e.g. cross-origin iframes)
-                if let Ok(child_text) = Box::pin(take_snapshot(
-                    client,
-                    session_id,
-                    options,
-                    ref_map,
-                    Some(&child_fid),
-                    iframe_sessions,
-                ))
-                .await
+            if !visited.insert(child_fid.clone()) {
+                continue;
+            }
+            let ref_id = tree_nodes[node_idx].ref_id.as_deref().unwrap_or("");
+            // Snapshot the child frame; errors are silently ignored
+            // (e.g. cross-origin iframes)
+            if let Ok(child_text) = Box::pin(take_snapshot_inner(
+                client,
+                session_id,
+                effective_session_id,
+                options,
+                None,
+                ref_map,
+                Some(&child_fid),
+                iframe_sessions,
+                depth + 1,
+                visited,
+            ))
+            .await
+            {
+                if !child_text.is_empty()
+                    && child_text != "(empty page)"
+                    && child_text != "(no interactive elements)"
                 {
-                    if !child_text.is_empty()
-                        && child_text != "(empty page)"
-                        && child_text != "(no interactive elements)"
-                    {
-                        iframe_snapshots.push((ref_id.to_string(), child_text));
-                    }
+                    iframe_snapshots.push((ref_id.to_string(), child_text));
                 }
             }
         }
@@ -902,12 +972,18 @@ fn loader_replaced(recorded: &str, tree: &Value, frame_id: Option<&str>) -> bool
     frame_loader(tree, frame_id) != Some(recorded)
 }
 
-/// Resolve the child frame ID for an iframe element given its backendNodeId.
-async fn resolve_iframe_frame_id(
+struct IframeMetadata {
+    frame_id: Option<String>,
+    name: Option<String>,
+}
+
+/// Resolve the child frame ID and presentation-only label fallback for an
+/// iframe element. URLs are intentionally ignored.
+async fn resolve_iframe_frame(
     client: &CdpClient,
     session_id: &str,
     backend_node_id: i64,
-) -> Result<String, String> {
+) -> Result<IframeMetadata, String> {
     // depth: 1 ensures contentDocument is included in the response
     let describe: Value = client
         .send_command(
@@ -917,23 +993,37 @@ async fn resolve_iframe_frame_id(
         )
         .await?;
 
-    // Try contentDocument.frameId first (standard for iframes)
-    if let Some(frame_id) = describe
+    let node = describe
         .get("node")
-        .and_then(|n| n.get("contentDocument"))
+        .ok_or_else(|| "Could not resolve iframe node".to_string())?;
+
+    let frame_id = node
+        .get("contentDocument")
         .and_then(|cd| cd.get("frameId"))
         .and_then(|v| v.as_str())
-    {
-        return Ok(frame_id.to_string());
-    }
+        .or_else(|| node.get("frameId").and_then(|v| v.as_str()))
+        .map(str::to_string);
 
-    // Fallback: the node itself may have a frameId
-    describe
-        .get("node")
-        .and_then(|n| n.get("frameId"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
+    let name = dom_attribute(node, "title")
+        .or_else(|| dom_attribute(node, "name"))
+        .map(str::to_string);
+
+    Ok(IframeMetadata { frame_id, name })
+}
+
+fn dom_attribute<'a>(node: &'a Value, attribute_name: &str) -> Option<&'a str> {
+    node.get("attributes")
+        .and_then(Value::as_array)
+        .and_then(|attrs| {
+            attrs.as_chunks::<2>().0.iter().find_map(|pair| {
+                pair[0]
+                    .as_str()
+                    .filter(|name| name.eq_ignore_ascii_case(attribute_name))
+                    .and_then(|_| pair[1].as_str())
+                    .map(str::trim)
+                    .filter(|val| !val.is_empty())
+            })
+        })
 }
 
 /// Runs inside a scope root and reports the elements that behave as controls without an interactive role.
@@ -1507,6 +1597,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
         tree_nodes.push(TreeNode {
             role,
             name,
+            display_name: None,
             level,
             checked,
             expanded,
@@ -1669,11 +1760,14 @@ fn render_tree(
     let prefix = "  ".repeat(indent);
     let mut line = format!("{}- {}", prefix, role);
 
-    // Use ARIA name if available, only fall back to cursor-interactive textContent in interactive mode since their visible text in child nodes is filtered out
-    let unescaped_display_name = if options.interactive {
+    let unescaped_display_name = if !node.name.is_empty() {
+        node.name.as_str()
+    } else if node.role == "Iframe" {
+        node.display_name.as_deref().unwrap_or("")
+    } else if options.interactive {
         node.label()
     } else {
-        node.name.as_str()
+        ""
     };
     if !unescaped_display_name.is_empty() {
         if let Ok(display_name) =
@@ -2319,5 +2413,53 @@ mod tests {
         promote_hidden_inputs(&mut nodes, &cursor_elements);
 
         assert_eq!(nodes[0].role, "LabelText"); // unchanged
+    }
+
+    #[test]
+    fn test_dom_attribute_reads_name_and_title_ignoring_blank_and_src() {
+        let node = serde_json::json!({
+            "attributes": ["NAME", " results ", "title", "   ", "src", "https://example.com/?token=abc"]
+        });
+
+        assert_eq!(dom_attribute(&node, "name"), Some("results"));
+        assert_eq!(dom_attribute(&node, "title"), None);
+        assert_eq!(dom_attribute(&node, "id"), None);
+    }
+
+    #[test]
+    fn test_iframe_display_name_is_presentation_only() {
+        let mut fallback = make_node("Iframe", "", Some(1));
+        fallback.display_name = Some("results".to_string());
+        fallback.has_ref = true;
+        fallback.ref_id = Some("e1".to_string());
+
+        let mut accessible = make_node("Iframe", "Accessible frame", Some(2));
+        accessible.display_name = Some("dom-name".to_string());
+        accessible.has_ref = true;
+        accessible.ref_id = Some("e2".to_string());
+
+        let mut unnamed = make_node("Iframe", "", Some(3));
+        unnamed.has_ref = true;
+        unnamed.ref_id = Some("e3".to_string());
+
+        let nodes = vec![fallback, accessible, unnamed];
+        for interactive in [false, true] {
+            let options = SnapshotOptions {
+                interactive,
+                ..SnapshotOptions::default()
+            };
+            let mut output = String::new();
+            for idx in 0..nodes.len() {
+                render_tree(&nodes, idx, 0, &mut output, &options);
+            }
+
+            assert!(output.contains("- Iframe \"results\" [ref=e1]"), "{output}");
+            assert!(
+                output.contains("- Iframe \"Accessible frame\" [ref=e2]"),
+                "{output}"
+            );
+            assert!(output.contains("- Iframe [ref=e3]"), "{output}");
+            assert!(!output.contains("dom-name"), "{output}");
+        }
     }
 }

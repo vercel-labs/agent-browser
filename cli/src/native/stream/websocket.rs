@@ -6,13 +6,14 @@ use std::time::Duration;
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, Notify, RwLock};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use crate::native::bidi::stream::{self as firefox_stream, FirefoxLive};
 use crate::native::cdp::client::CdpClient;
+use crate::native::interaction::named_key_info;
 
 use super::http::handle_http_request;
 use super::origin::is_allowed_ws_upgrade;
@@ -21,6 +22,132 @@ use super::{timestamp_ms, IdleActivity, StreamFrame};
 
 /// Highest per-client frame rate a client may request via the `config` message.
 const MAX_CONFIGURABLE_FPS: u32 = 120;
+
+/// Maximum number of editing commands accepted in one `input_keyboard` message.
+const MAX_KEY_COMMANDS: usize = 4;
+
+/// Maximum byte length accepted for `input_insert_text`.
+const MAX_INSERT_TEXT_BYTES: usize = 1_048_576;
+
+/// Timeout for reading the remote page selection on `input_read_clipboard`.
+const CLIPBOARD_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Editing and caret-navigation commands accepted in `input_keyboard.commands`.
+const ALLOWED_KEY_COMMANDS: &[&str] = &[
+    "selectAll",
+    "copy",
+    "cut",
+    "paste",
+    "undo",
+    "redo",
+    "moveToBeginningOfLine",
+    "moveToBeginningOfLineAndModifySelection",
+    "moveToEndOfLine",
+    "moveToEndOfLineAndModifySelection",
+    "moveToBeginningOfDocument",
+    "moveToBeginningOfDocumentAndModifySelection",
+    "moveToEndOfDocument",
+    "moveToEndOfDocumentAndModifySelection",
+    "moveWordBackward",
+    "moveWordBackwardAndModifySelection",
+    "moveWordForward",
+    "moveWordForwardAndModifySelection",
+    "deleteToBeginningOfLine",
+    "deleteToEndOfLine",
+    "deleteWordBackward",
+    "deleteWordForward",
+    "deleteBackward",
+    "deleteForward",
+];
+
+const ALLOWED_KEY_EVENT_TYPES: &[&str] = &["keyDown", "keyUp", "rawKeyDown", "char"];
+
+/// Reads the current text selection in the active document (including Shadow DOM
+/// and same-origin iframes) without granting browser clipboard permissions.
+/// Password inputs always return an empty string.
+const READ_SELECTION_SCRIPT: &str = r#"(() => {
+    let doc = document;
+    let el = doc.activeElement;
+    while (el) {
+        if (el.shadowRoot && el.shadowRoot.activeElement) {
+            el = el.shadowRoot.activeElement;
+            continue;
+        }
+        if (el.tagName === 'IFRAME') {
+            try {
+                if (el.contentDocument && el.contentDocument.activeElement) {
+                    doc = el.contentDocument;
+                    el = doc.activeElement;
+                    continue;
+                }
+            } catch {}
+        }
+        break;
+    }
+    if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) {
+        if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'password') {
+            return '';
+        }
+        const start = el.selectionStart;
+        const end = el.selectionEnd;
+        if (typeof start === 'number' && typeof end === 'number' && end > start) {
+            return el.value.slice(start, end);
+        }
+    }
+    const win = doc.defaultView || window;
+    return (win.getSelection && win.getSelection().toString()) || '';
+})()"#;
+
+/// Reads the current text selection and reports whether the selection is
+/// editable so the server can follow up with a native CDP delete operation
+/// that preserves the browser undo stack and works in contenteditable without
+/// prior user activation.
+const READ_SELECTION_FOR_CUT_SCRIPT: &str = r#"(() => {
+    let doc = document;
+    let el = doc.activeElement;
+    while (el) {
+        if (el.shadowRoot && el.shadowRoot.activeElement) {
+            el = el.shadowRoot.activeElement;
+            continue;
+        }
+        if (el.tagName === 'IFRAME') {
+            try {
+                if (el.contentDocument && el.contentDocument.activeElement) {
+                    doc = el.contentDocument;
+                    el = doc.activeElement;
+                    continue;
+                }
+            } catch {}
+        }
+        break;
+    }
+    if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) {
+        if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'password') {
+            return { text: '', editable: false };
+        }
+        const start = el.selectionStart;
+        const end = el.selectionEnd;
+        if (typeof start === 'number' && typeof end === 'number' && end > start) {
+            return {
+                text: el.value.slice(start, end),
+                editable: !el.readOnly && !el.disabled,
+            };
+        }
+        return { text: '', editable: false };
+    }
+    const win = doc.defaultView || window;
+    const sel = win.getSelection && win.getSelection();
+    const text = (sel && sel.toString()) || '';
+    if (!text) {
+        return { text: '', editable: false };
+    }
+    const anchorEl =
+        sel && sel.anchorNode
+            ? (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement)
+            : null;
+    const editable = Boolean((el && el.isContentEditable) || (anchorEl && anchorEl.isContentEditable));
+    return { text, editable };
+})()"#;
 
 /// Per-connection delivery settings, set by the client's `config` message.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -359,6 +486,7 @@ async fn handle_ws_client(
     // select! below instead of leaving it asleep on a stale deadline.
     let (config_tx, mut config_rx) = watch::channel::<ClientConfig>(initial_config);
     let (ack_tx, mut ack_rx) = watch::channel::<u64>(0);
+    let (reply_tx, mut reply_rx) = mpsc::channel::<String>(16);
     // Spawned before the status, tabs and seed writes below: those are
     // unbounded sends, and a full receive queue would otherwise hold input
     // behind the whole handshake.
@@ -369,6 +497,7 @@ async fn handle_ws_client(
         cdp_session_id.clone(),
         config_tx,
         ack_tx,
+        reply_tx,
         idle_activity.clone(),
     )));
 
@@ -436,6 +565,11 @@ async fn handle_ws_client(
             }
             _ = &mut reader_task.0 => {
                 break;
+            }
+            Some(reply) = reply_rx.recv() => {
+                if ws_tx.send(Message::Text(reply)).await.is_err() {
+                    break;
+                }
             }
             msg = broadcast_rx.recv() => {
                 match msg {
@@ -523,6 +657,7 @@ async fn handle_ws_client(
 /// Reads client messages and dispatches them without waiting on frame
 /// delivery. Input reaches CDP sequentially: mouse move, press and release
 /// must not be reordered.
+#[allow(clippy::too_many_arguments)]
 async fn reader_loop(
     mut ws_rx: SplitStream<WebSocketStream<TcpStream>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
@@ -530,6 +665,7 @@ async fn reader_loop(
     cdp_session_id: Arc<RwLock<Option<String>>>,
     config: watch::Sender<ClientConfig>,
     ack: watch::Sender<u64>,
+    reply_tx: mpsc::Sender<String>,
     idle_activity: Arc<IdleActivity>,
 ) {
     while let Some(msg) = ws_rx.next().await {
@@ -584,7 +720,7 @@ async fn reader_loop(
                         idle_activity.mark();
                     }
                     let sid = cdp_session_id.read().await;
-                    dispatch_input(msg_type, &parsed, client.as_ref(), sid.as_deref()).await;
+                    dispatch_input(msg_type, &parsed, client, sid.as_deref(), &reply_tx).await;
                 }
             }
             Ok(Message::Close(_)) | Err(_) => break,
@@ -606,6 +742,49 @@ impl Drop for AbortOnDrop {
     }
 }
 
+fn validated_key_commands(parsed: &Value, event_type: &str) -> Option<Vec<&'static str>> {
+    if !matches!(event_type, "keyDown" | "rawKeyDown") {
+        return None;
+    }
+    let arr = parsed.get("commands")?.as_array()?;
+    let mut out = Vec::new();
+    for item in arr.iter().take(MAX_KEY_COMMANDS) {
+        let cmd = item.as_str()?;
+        if let Some(&allowed) = ALLOWED_KEY_COMMANDS.iter().find(|&&c| c == cmd) {
+            out.push(allowed);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn resolve_stream_vk_code(parsed: &Value) -> i64 {
+    if let Some(vk) = parsed
+        .get("windowsVirtualKeyCode")
+        .and_then(|v| v.as_i64())
+        .filter(|&v| v > 0)
+    {
+        return vk;
+    }
+    if let Some(code) = parsed.get("code").and_then(|v| v.as_str()) {
+        let (_, _, vk) = named_key_info(code);
+        if vk > 0 {
+            return i64::from(vk);
+        }
+    }
+    if let Some(key) = parsed.get("key").and_then(|v| v.as_str()) {
+        let (_, _, vk) = named_key_info(key);
+        if vk > 0 {
+            return i64::from(vk);
+        }
+    }
+    0
+}
+
+fn validated_insert_text(parsed: &Value) -> Option<&str> {
+    let text = parsed.get("text")?.as_str()?;
+    (!text.is_empty() && text.len() <= MAX_INSERT_TEXT_BYTES).then_some(text)
+}
+
 /// `Input.dispatchKeyEvent` params for a client `input_keyboard` message.
 ///
 /// Invariant: an omitted optional string is left out, never sent as `null`.
@@ -613,14 +792,13 @@ impl Drop for AbortOnDrop {
 /// error, so one null silently drops the keystroke. `""` is not a substitute:
 /// `text: ""` on a printable key inserts no character.
 fn keyboard_params(parsed: &Value) -> Value {
+    let event_type = parsed
+        .get("eventType")
+        .and_then(|v| v.as_str())
+        .filter(|t| ALLOWED_KEY_EVENT_TYPES.contains(t))
+        .unwrap_or("keyDown");
     let mut params = serde_json::Map::new();
-    params.insert(
-        "type".into(),
-        json!(parsed
-            .get("eventType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("keyDown")),
-    );
+    params.insert("type".into(), json!(event_type));
     for field in ["key", "code", "text"] {
         if let Some(value) = parsed.get(field).and_then(|v| v.as_str()) {
             params.insert(field.into(), json!(value));
@@ -628,19 +806,105 @@ fn keyboard_params(parsed: &Value) -> Value {
     }
     params.insert(
         "windowsVirtualKeyCode".into(),
-        json!(parsed
-            .get("windowsVirtualKeyCode")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)),
+        json!(resolve_stream_vk_code(parsed)),
     );
-    params.insert(
-        "modifiers".into(),
-        json!(parsed
-            .get("modifiers")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)),
-    );
+    let mut modifiers = parsed
+        .get("modifiers")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        & 0x0F;
+    // AltGr reports Ctrl+Alt (bits 1|2 = 3) alongside a printable `text` char,
+    // but Chromium ignores `text` on keyDown when the Ctrl bit is set. Strip
+    // Ctrl|Alt on text-carrying keyDown events so AltGr characters are typed.
+    let has_text = params
+        .get("text")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| !t.is_empty());
+    if event_type == "keyDown" && has_text && (modifiers & 3) == 3 {
+        modifiers &= !3;
+    }
+    params.insert("modifiers".into(), json!(modifiers));
+    if let Some(commands) = validated_key_commands(parsed, event_type) {
+        params.insert("commands".into(), json!(commands));
+    }
     Value::Object(params)
+}
+
+/// Validate and build `Input.dispatchMouseEvent` params from a client
+/// `input_mouse` message. Returns `None` for unrecognized event types so
+/// malformed input cannot be forwarded to CDP.
+fn mouse_event_params(parsed: &Value) -> Option<Value> {
+    let event_type = parsed
+        .get("eventType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mouseMoved");
+    if !matches!(
+        event_type,
+        "mousePressed" | "mouseReleased" | "mouseMoved" | "mouseWheel"
+    ) {
+        return None;
+    }
+    let finite = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.0)
+    };
+    let button = parsed
+        .get("button")
+        .and_then(|v| v.as_str())
+        .filter(|b| {
+            matches!(
+                *b,
+                "none" | "left" | "middle" | "right" | "back" | "forward"
+            )
+        })
+        .unwrap_or("none");
+    let buttons = mouse_buttons_param(parsed, event_type, button);
+    let click_count = parsed
+        .get("clickCount")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        .clamp(0, 3);
+    let modifiers = parsed
+        .get("modifiers")
+        .and_then(|v| v.as_i64())
+        .filter(|m| *m >= 0)
+        .map(|m| m & 0x0f)
+        .unwrap_or(0);
+    Some(json!({
+        "type": event_type,
+        "x": finite("x"),
+        "y": finite("y"),
+        "button": button,
+        "buttons": buttons,
+        "clickCount": click_count,
+        "deltaX": finite("deltaX"),
+        "deltaY": finite("deltaY"),
+        "modifiers": modifiers,
+    }))
+}
+
+fn mouse_buttons_param(parsed: &Value, event_type: &str, button: &str) -> i64 {
+    if let Some(buttons) = parsed
+        .get("buttons")
+        .and_then(|v| v.as_i64())
+        .filter(|b| *b >= 0)
+    {
+        return buttons & 0x1f;
+    }
+    if !matches!(event_type, "mousePressed" | "mouseReleased") {
+        return 0;
+    }
+    match button {
+        "left" => 1,
+        "right" => 2,
+        "middle" => 4,
+        "back" => 8,
+        "forward" => 16,
+        _ => 0,
+    }
 }
 
 /// Dispatches one client input event to CDP.
@@ -653,27 +917,17 @@ fn keyboard_params(parsed: &Value) -> Value {
 async fn dispatch_input(
     msg_type: &str,
     parsed: &Value,
-    client: &CdpClient,
+    client: &Arc<CdpClient>,
     session_id: Option<&str>,
+    reply_tx: &mpsc::Sender<String>,
 ) {
     match msg_type {
         "input_mouse" => {
-            let _ = client
-                .send_command_no_wait(
-                    "Input.dispatchMouseEvent",
-                    Some(json!({
-                        "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("mouseMoved"),
-                        "x": parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "y": parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "button": parsed.get("button").and_then(|v| v.as_str()).unwrap_or("none"),
-                        "clickCount": parsed.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0),
-                        "deltaX": parsed.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "deltaY": parsed.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
-                    })),
-                    session_id,
-                )
-                .await;
+            if let Some(params) = mouse_event_params(parsed) {
+                let _ = client
+                    .send_command_no_wait("Input.dispatchMouseEvent", Some(params), session_id)
+                    .await;
+            }
         }
         "input_keyboard" => {
             let _ = client
@@ -683,6 +937,35 @@ async fn dispatch_input(
                     session_id,
                 )
                 .await;
+        }
+        "input_insert_text" => {
+            if let Some(text) = validated_insert_text(parsed) {
+                let _ = client
+                    .send_command_no_wait(
+                        "Input.insertText",
+                        Some(json!({ "text": text })),
+                        session_id,
+                    )
+                    .await;
+            }
+        }
+        "input_read_clipboard" => {
+            let cut = parsed.get("cut").and_then(|v| v.as_bool()).unwrap_or(false);
+            if cut {
+                // Run cut inline and atomically so subsequent focus/selection
+                // input events cannot overtake it; frame delivery runs on its
+                // own task and stays unblocked.
+                let reply = eval_clipboard_selection(client, session_id, true).await;
+                let _ = reply_tx.try_send(reply.to_string());
+            } else {
+                let client = Arc::clone(client);
+                let sid = session_id.map(str::to_string);
+                let reply_tx = reply_tx.clone();
+                tokio::spawn(async move {
+                    let reply = eval_clipboard_selection(&client, sid.as_deref(), false).await;
+                    let _ = reply_tx.try_send(reply.to_string());
+                });
+            }
         }
         "input_touch" => {
             let _ = client
@@ -702,8 +985,117 @@ async fn dispatch_input(
     }
 }
 
+async fn eval_clipboard_selection(
+    client: &CdpClient,
+    session_id: Option<&str>,
+    cut: bool,
+) -> Value {
+    if !cut {
+        let eval = tokio::time::timeout(
+            CLIPBOARD_READ_TIMEOUT,
+            client.send_command(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": READ_SELECTION_SCRIPT,
+                    "returnByValue": true,
+                    "awaitPromise": false,
+                })),
+                session_id,
+            ),
+        )
+        .await;
+
+        return match eval {
+            Ok(Ok(val)) => {
+                let text = val
+                    .pointer("/result/value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                json!({ "type": "clipboard", "text": text })
+            }
+            Ok(Err(err)) => json!({ "type": "clipboard", "error": err }),
+            Err(_) => json!({ "type": "clipboard", "error": "Clipboard read timed out" }),
+        };
+    }
+
+    let eval = tokio::time::timeout(
+        CLIPBOARD_READ_TIMEOUT,
+        client.send_command(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": READ_SELECTION_FOR_CUT_SCRIPT,
+                "returnByValue": true,
+                "awaitPromise": false,
+            })),
+            session_id,
+        ),
+    )
+    .await;
+
+    let (text, editable) = match eval {
+        Ok(Ok(val)) => {
+            let value = val.pointer("/result/value");
+            let text = value
+                .and_then(|v| v.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let editable = value
+                .and_then(|v| v.get("editable"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            (text, editable)
+        }
+        Ok(Err(err)) => return json!({ "type": "clipboard", "error": err }),
+        Err(_) => return json!({ "type": "clipboard", "error": "Clipboard read timed out" }),
+    };
+
+    if editable && !text.is_empty() {
+        let _ = tokio::time::timeout(
+            CLIPBOARD_READ_TIMEOUT,
+            client.send_command(
+                "Input.dispatchKeyEvent",
+                Some(json!({
+                    "type": "rawKeyDown",
+                    "key": "Backspace",
+                    "code": "Backspace",
+                    "windowsVirtualKeyCode": 8,
+                    "modifiers": 0,
+                    "commands": ["deleteBackward"],
+                })),
+                session_id,
+            ),
+        )
+        .await;
+        let _ = tokio::time::timeout(
+            CLIPBOARD_READ_TIMEOUT,
+            client.send_command(
+                "Input.dispatchKeyEvent",
+                Some(json!({
+                    "type": "keyUp",
+                    "key": "Backspace",
+                    "code": "Backspace",
+                    "windowsVirtualKeyCode": 8,
+                    "modifiers": 0,
+                })),
+                session_id,
+            ),
+        )
+        .await;
+    }
+
+    json!({ "type": "clipboard", "text": text })
+}
+
 fn is_user_input_message_type(msg_type: &str) -> bool {
-    matches!(msg_type, "input_mouse" | "input_keyboard" | "input_touch")
+    matches!(
+        msg_type,
+        "input_mouse"
+            | "input_keyboard"
+            | "input_touch"
+            | "input_insert_text"
+            | "input_read_clipboard"
+    )
 }
 
 #[cfg(test)]
@@ -712,7 +1104,13 @@ mod tests {
 
     #[test]
     fn dashboard_input_messages_count_as_user_activity() {
-        for msg_type in ["input_mouse", "input_keyboard", "input_touch"] {
+        for msg_type in [
+            "input_mouse",
+            "input_keyboard",
+            "input_touch",
+            "input_insert_text",
+            "input_read_clipboard",
+        ] {
             assert!(is_user_input_message_type(msg_type));
         }
         assert!(!is_user_input_message_type("status"));
@@ -870,12 +1268,28 @@ mod tests {
     async fn test_input_dispatch_does_not_wait_for_a_cdp_reply() {
         let (url, seen) = silent_ws_server().await;
         let client = CdpClient::connect(&url).await.expect("mock cdp connect");
+        let client = Arc::new(client);
+        let (reply_tx, _reply_rx) = mpsc::channel(4);
         let mouse = |event| json!({ "eventType": event, "x": 1, "y": 1 });
         let dispatched = tokio::time::timeout(Duration::from_secs(5), async {
-            dispatch_input("input_mouse", &mouse("mouseMoved"), &client, None).await;
-            dispatch_input("input_mouse", &mouse("mousePressed"), &client, None).await;
+            dispatch_input(
+                "input_mouse",
+                &mouse("mouseMoved"),
+                &client,
+                None,
+                &reply_tx,
+            )
+            .await;
+            dispatch_input(
+                "input_mouse",
+                &mouse("mousePressed"),
+                &client,
+                None,
+                &reply_tx,
+            )
+            .await;
             let key = json!({ "eventType": "keyDown", "key": "a", "text": "a" });
-            dispatch_input("input_keyboard", &key, &client, None).await;
+            dispatch_input("input_keyboard", &key, &client, None, &reply_tx).await;
         })
         .await;
         assert!(
@@ -921,6 +1335,7 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             let (_, ws_rx) = ws.split();
+            let (reply_tx, _reply_rx) = mpsc::channel(4);
             reader_loop(
                 ws_rx,
                 Arc::new(RwLock::new(None)),
@@ -928,6 +1343,7 @@ mod tests {
                 Arc::new(RwLock::new(None)),
                 config,
                 ack,
+                reply_tx,
                 Arc::new(IdleActivity::new()),
             )
             .await;
@@ -1022,6 +1438,211 @@ mod tests {
         assert_eq!(keyboard_params(&json!({}))["type"], "keyDown");
     }
 
+    #[test]
+    fn test_keyboard_params_forwards_allowlisted_commands() {
+        let params = keyboard_params(&json!({
+            "eventType": "rawKeyDown",
+            "key": "a",
+            "code": "KeyA",
+            "windowsVirtualKeyCode": 65,
+            "modifiers": 4,
+            "commands": ["selectAll"]
+        }));
+        assert_eq!(params["type"], "rawKeyDown");
+        assert_eq!(params.get("commands"), Some(&json!(["selectAll"])));
+    }
+
+    #[test]
+    fn test_keyboard_params_rejects_disallowed_and_malformed_commands() {
+        for bad in [
+            json!(["executeArbitrary"]),
+            json!(["Page.navigate"]),
+            json!([1]),
+            json!("selectAll"),
+            json!([["selectAll"]]),
+            json!([]),
+        ] {
+            let params = keyboard_params(&json!({
+                "eventType": "keyDown",
+                "key": "a",
+                "commands": bad
+            }));
+            assert!(
+                params.get("commands").is_none(),
+                "disallowed/malformed commands must be omitted: {bad} -> {params}"
+            );
+        }
+
+        // Mixed array keeps only allowlisted entries and caps length.
+        let mixed = keyboard_params(&json!({
+            "eventType": "keyDown",
+            "key": "a",
+            "commands": ["selectAll", "unknownCmd", "copy", "undo", "redo", "cut"]
+        }));
+        assert_eq!(
+            mixed.get("commands"),
+            Some(&json!(["selectAll", "copy", "undo"]))
+        );
+
+        // Commands are never forwarded on keyUp or char events.
+        for event_type in ["keyUp", "char"] {
+            let params = keyboard_params(&json!({
+                "eventType": event_type,
+                "key": "a",
+                "commands": ["selectAll"]
+            }));
+            assert!(params.get("commands").is_none());
+        }
+    }
+
+    #[test]
+    fn test_keyboard_params_resolves_vk_code_and_validates_event_type() {
+        // Missing VK code falls back to interaction::named_key_info via code/key.
+        let from_code = keyboard_params(&json!({
+            "eventType": "rawKeyDown",
+            "key": "c",
+            "code": "KeyC",
+            "modifiers": 2
+        }));
+        assert_eq!(from_code["windowsVirtualKeyCode"], 67);
+
+        let from_key = keyboard_params(&json!({
+            "eventType": "keyDown",
+            "key": "ArrowLeft",
+            "modifiers": 4
+        }));
+        assert_eq!(from_key["windowsVirtualKeyCode"], 37);
+
+        // Unknown eventType defaults to keyDown and modifiers are masked to 4 bits.
+        let invalid = keyboard_params(&json!({
+            "eventType": "bogus",
+            "key": "a",
+            "modifiers": 0xFF
+        }));
+        assert_eq!(invalid["type"], "keyDown");
+        assert_eq!(invalid["modifiers"], 0x0F);
+
+        // AltGr sends Ctrl+Alt (modifiers=3) with printable text; strip Ctrl|Alt
+        // so Chrome does not ignore `text` on keyDown.
+        let altgr = keyboard_params(&json!({
+            "eventType": "keyDown",
+            "key": "@",
+            "code": "KeyQ",
+            "text": "@",
+            "windowsVirtualKeyCode": 81,
+            "modifiers": 3
+        }));
+        assert_eq!(altgr["text"], "@");
+        assert_eq!(altgr["modifiers"], 0);
+    }
+
+    #[test]
+    fn test_validated_insert_text_bounds() {
+        assert_eq!(
+            validated_insert_text(&json!({ "text": "hello world" })),
+            Some("hello world")
+        );
+        assert_eq!(validated_insert_text(&json!({ "text": "" })), None);
+        assert_eq!(validated_insert_text(&json!({ "text": 42 })), None);
+        assert_eq!(validated_insert_text(&json!({})), None);
+
+        let oversized = "x".repeat(MAX_INSERT_TEXT_BYTES + 1);
+        assert_eq!(validated_insert_text(&json!({ "text": oversized })), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_cut_completes_before_following_input_event() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{addr}");
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = seen.clone();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+            while let Some(Ok(Message::Text(text))) = rx.next().await {
+                if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                    let method = v
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let key = v
+                        .pointer("/params/key")
+                        .and_then(|k| k.as_str())
+                        .unwrap_or("");
+                    let label = if key.is_empty() {
+                        method.clone()
+                    } else {
+                        format!("{method}:{key}")
+                    };
+                    recorded.lock().await.push(label);
+                    if method == "Runtime.evaluate" {
+                        if let Some(id) = v.get("id").and_then(|i| i.as_i64()) {
+                            tokio::time::sleep(Duration::from_millis(40)).await;
+                            let reply = json!({
+                                "id": id,
+                                "result": {
+                                    "result": {
+                                        "type": "object",
+                                        "value": { "text": "cut-text", "editable": true }
+                                    }
+                                }
+                            });
+                            let _ = tx.send(Message::Text(reply.to_string())).await;
+                        }
+                    } else if method == "Input.dispatchKeyEvent" && key == "Backspace" {
+                        if let Some(id) = v.get("id").and_then(|i| i.as_i64()) {
+                            let reply = json!({ "id": id, "result": {} });
+                            let _ = tx.send(Message::Text(reply.to_string())).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.expect("mock cdp connect"));
+        let (reply_tx, mut reply_rx) = mpsc::channel(4);
+
+        dispatch_input(
+            "input_read_clipboard",
+            &json!({ "cut": true, "modifiers": 4 }),
+            &client,
+            None,
+            &reply_tx,
+        )
+        .await;
+        dispatch_input(
+            "input_keyboard",
+            &json!({ "eventType": "rawKeyDown", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9 }),
+            &client,
+            None,
+            &reply_tx,
+        )
+        .await;
+
+        let reply = tokio::time::timeout(Duration::from_secs(2), reply_rx.recv())
+            .await
+            .expect("clipboard reply should arrive")
+            .expect("reply channel open");
+        let parsed: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(parsed["text"], "cut-text");
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            *seen.lock().await,
+            vec![
+                "Runtime.evaluate",
+                "Input.dispatchKeyEvent:Backspace",
+                "Input.dispatchKeyEvent:Backspace",
+                "Input.dispatchKeyEvent:Tab"
+            ],
+            "cut must finish inline before any subsequent input event reaches CDP"
+        );
+    }
+
     /// A cap bounds the gap between deliveries and never postpones the first.
     #[test]
     fn test_deadline_charges_only_real_deliveries() {
@@ -1037,5 +1658,44 @@ mod tests {
             deadline_from(Some(now), 10),
             now + Duration::from_millis(100)
         );
+    }
+
+    #[test]
+    fn mouse_event_params_validates_type_buttons_and_bounds() {
+        assert!(mouse_event_params(&json!({ "eventType": "bogus" })).is_none());
+
+        let drag = mouse_event_params(&json!({
+            "eventType": "mouseMoved",
+            "x": 120.5,
+            "y": 80.0,
+            "button": "left",
+            "buttons": 1,
+            "modifiers": 2,
+        }))
+        .unwrap();
+        assert_eq!(drag["type"], "mouseMoved");
+        assert_eq!(drag["button"], "left");
+        assert_eq!(drag["buttons"], 1);
+        assert_eq!(drag["modifiers"], 2);
+
+        let fallback_press = mouse_event_params(&json!({
+            "eventType": "mousePressed",
+            "button": "right",
+            "clickCount": 99,
+            "modifiers": 0xff,
+        }))
+        .unwrap();
+        assert_eq!(fallback_press["buttons"], 2);
+        assert_eq!(fallback_press["clickCount"], 3);
+        assert_eq!(fallback_press["modifiers"], 15);
+
+        let bad_button = mouse_event_params(&json!({
+            "eventType": "mouseMoved",
+            "button": "invalid",
+            "buttons": -5,
+        }))
+        .unwrap();
+        assert_eq!(bad_button["button"], "none");
+        assert_eq!(bad_button["buttons"], 0);
     }
 }

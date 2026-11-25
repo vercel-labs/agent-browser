@@ -556,6 +556,10 @@
       {
         "from": "Re-snapshot after interactions to observe changes, and always after navigation:",
         "to": "Using a ref issued for a document that has since been replaced, in the page or in its iframe (for example by a click that loads a new page), fails with \"Ref @eN is from a document that is no longer loaded\". A snapshot taken while the document is being replaced fails with \"The document changed while the snapshot was being captured\"; run it again. Re-snapshot after interactions to observe changes, and always after navigation:"
+      },
+      {
+        "from": "Only one level of iframe nesting is expanded. Cross-origin iframes that block accessibility tree access and empty iframes are silently omitted.",
+        "to": "Nested iframes are expanded up to 4 levels deep. Cross-origin iframes that block accessibility tree access and empty iframes are silently omitted."
       }
     ],
     "/streaming": [
