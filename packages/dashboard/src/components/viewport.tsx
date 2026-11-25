@@ -50,163 +50,16 @@ import {
   type StreamFrame,
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
+import {
+  buildKeyboardInputMessage,
+  createInputQueue,
+  keyModifiers,
+  type InputQueue,
+} from "@/lib/viewport-keyboard";
 
 const LIVE_VIEW_ENGINES = new Set(["chrome", "firefox"]);
 
 function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
-  let m = 0;
-  if (e.altKey) m |= 1;
-  if (e.ctrlKey) m |= 2;
-  if (e.metaKey) m |= 4;
-  if (e.shiftKey) m |= 8;
-  return m;
-}
-
-const KEY_INFO: Record<string, { text?: string; keyCode: number }> = {
-  Enter: { text: "\r", keyCode: 13 },
-  Tab: { text: "\t", keyCode: 9 },
-  Backspace: { text: "\b", keyCode: 8 },
-  Escape: { keyCode: 27 },
-  ArrowLeft: { keyCode: 37 },
-  ArrowUp: { keyCode: 38 },
-  ArrowRight: { keyCode: 39 },
-  ArrowDown: { keyCode: 40 },
-  Delete: { keyCode: 46 },
-  Home: { keyCode: 36 },
-  End: { keyCode: 35 },
-  PageUp: { keyCode: 33 },
-  PageDown: { keyCode: 34 },
-};
-
-function printableKeyCode(key: string): number {
-  if (key.length !== 1) return 0;
-  const code = key.charCodeAt(0);
-  if (code >= 65 && code <= 90) return code;
-  if (code >= 97 && code <= 122) return code - 32;
-  if (code >= 48 && code <= 57) return code;
-  switch (key) {
-    case " ": return 32;
-    case ";": case ":": return 186;
-    case "=": case "+": return 187;
-    case ",": case "<": return 188;
-    case "-": case "_": return 189;
-    case ".": case ">": return 190;
-    case "/": case "?": return 191;
-    case "`": case "~": return 192;
-    case "[": case "{": return 219;
-    case "\\": case "|": return 220;
-    case "]": case "}": return 221;
-    case "'": case "\"": return 222;
-    default: return 0;
-  }
-}
-
-const CODE_KEY_INFO: Record<string, number> = {
-  Space: 32,
-  Minus: 189,
-  Equal: 187,
-  BracketLeft: 219,
-  BracketRight: 221,
-  Backslash: 220,
-  Semicolon: 186,
-  Quote: 222,
-  Backquote: 192,
-  Comma: 188,
-  Period: 190,
-  Slash: 191,
-  ShiftLeft: 16,
-  ShiftRight: 16,
-  ControlLeft: 17,
-  ControlRight: 17,
-  AltLeft: 18,
-  AltRight: 18,
-  MetaLeft: 91,
-  MetaRight: 92,
-  Insert: 45,
-};
-
-function vkCodeForEvent(e: KeyboardEvent): number {
-  const { code } = e;
-  if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3);
-  if (/^Digit[0-9]$/.test(code)) return 48 + Number(code[5]);
-  if (/^Numpad[0-9]$/.test(code)) return 96 + Number(code[6]);
-  if (/^F([1-9]|1[0-2])$/.test(code)) return 111 + Number(code.slice(1));
-  const fromCode = CODE_KEY_INFO[code];
-  if (fromCode !== undefined) return fromCode;
-  const info = KEY_INFO[e.key];
-  if (info) return info.keyCode;
-  return printableKeyCode(e.key);
-}
-
-function macKeyCommands(e: KeyboardEvent): string[] | undefined {
-  if (!e.metaKey) return undefined;
-  const shift = e.shiftKey;
-  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  switch (key) {
-    case "a":
-      return ["selectAll"];
-    case "c":
-      return ["copy"];
-    case "x":
-      return ["cut"];
-    case "v":
-      return ["paste"];
-    case "z":
-      return shift ? ["redo"] : ["undo"];
-    case "ArrowLeft":
-      return [
-        shift
-          ? "moveToBeginningOfLineAndModifySelection"
-          : "moveToBeginningOfLine",
-      ];
-    case "ArrowRight":
-      return [
-        shift ? "moveToEndOfLineAndModifySelection" : "moveToEndOfLine",
-      ];
-    case "ArrowUp":
-      return [
-        shift
-          ? "moveToBeginningOfDocumentAndModifySelection"
-          : "moveToBeginningOfDocument",
-      ];
-    case "ArrowDown":
-      return [
-        shift
-          ? "moveToEndOfDocumentAndModifySelection"
-          : "moveToEndOfDocument",
-      ];
-    case "Backspace":
-      return ["deleteToBeginningOfLine"];
-    default:
-      return undefined;
-  }
-}
-
-function matchesPlainCodeChar(e: KeyboardEvent): boolean {
-  if (/^Key[A-Z]$/.test(e.code)) {
-    return e.key.length === 1 && e.key.toUpperCase() === e.code[3];
-  }
-  if (/^Digit[0-9]$/.test(e.code)) {
-    return e.key === e.code[5];
-  }
-  return false;
-}
-
-function shouldSuppressKeyText(e: KeyboardEvent): boolean {
-  if (e.metaKey) return true;
-  if (e.ctrlKey && !e.altKey) return true;
-  if (e.altKey) {
-    // Allow Option/AltGr character entry (e.g. Option+A -> "å", AltGr+Q -> "@").
-    if (e.getModifierState?.("AltGraph")) return false;
-    if (e.ctrlKey) {
-      return matchesPlainCodeChar(e);
-    }
-    return matchesPlainCodeChar(e);
-  }
-  return false;
-}
-
-function keyModifiers(e: KeyboardEvent): number {
   let m = 0;
   if (e.altKey) m |= 1;
   if (e.ctrlKey) m |= 2;
@@ -487,6 +340,16 @@ export function Viewport() {
     [viewportWidth, viewportHeight],
   );
 
+  const sendInputRef = useRef(sendInput);
+  sendInputRef.current = sendInput;
+  const inputQueueRef = useRef<InputQueue | null>(null);
+  if (!inputQueueRef.current) {
+    inputQueueRef.current = createInputQueue((msg) => sendInputRef.current(msg));
+  }
+  const enqueueInput = useCallback((msg: Record<string, unknown>) => {
+    inputQueueRef.current?.enqueue(msg);
+  }, []);
+
   const handleMouseEvent = useCallback(
     (e: React.MouseEvent, eventType: string) => {
       const pos = toViewport(e);
@@ -508,7 +371,7 @@ export function Viewport() {
                 ? "middle"
                 : "none"
           : cdpButton(e.button);
-      sendInput({
+      enqueueInput({
         type: "input_mouse",
         eventType,
         x: pos.x,
@@ -519,7 +382,7 @@ export function Viewport() {
         modifiers: cdpModifiers(e),
       });
     },
-    [toViewport, sendInput],
+    [toViewport, enqueueInput],
   );
 
   const handleContextMenu = useCallback(
@@ -537,7 +400,7 @@ export function Viewport() {
       const pos = toViewport(e);
       if (!pos) return;
       const modifiers = cdpModifiers(e);
-      sendInput({
+      enqueueInput({
         type: "input_mouse",
         eventType: "mousePressed",
         x: pos.x,
@@ -547,7 +410,7 @@ export function Viewport() {
         clickCount: 1,
         modifiers,
       });
-      sendInput({
+      enqueueInput({
         type: "input_mouse",
         eventType: "mouseReleased",
         x: pos.x,
@@ -558,14 +421,14 @@ export function Viewport() {
         modifiers,
       });
     },
-    [toViewport, sendInput],
+    [toViewport, enqueueInput],
   );
 
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       const pos = toViewport(e);
       if (!pos) return;
-      sendInput({
+      enqueueInput({
         type: "input_mouse",
         eventType: "mouseWheel",
         x: pos.x,
@@ -577,51 +440,32 @@ export function Viewport() {
         modifiers: cdpModifiers(e),
       });
     },
-    [toViewport, sendInput],
+    [toViewport, enqueueInput],
   );
 
   const dispatchKey = useCallback(
     (e: KeyboardEvent, eventType: string) => {
-      const info = KEY_INFO[e.key];
-      const suppressText = shouldSuppressKeyText(e);
-      const isDown = eventType === "keyDown" || eventType === "rawKeyDown";
-      const text =
-        isDown && !suppressText
-          ? (info?.text ?? (Array.from(e.key).length === 1 ? e.key : undefined))
-          : undefined;
-      const resolvedEventType =
-        eventType === "keyDown" && text === undefined ? "rawKeyDown" : eventType;
-      const commands = isDown ? macKeyCommands(e) : undefined;
-      sendInput({
-        type: "input_keyboard",
-        eventType: resolvedEventType,
-        key: e.key,
-        code: e.code,
-        text,
-        windowsVirtualKeyCode: vkCodeForEvent(e),
-        modifiers: keyModifiers(e),
-        ...(commands ? { commands } : {}),
-      });
+      enqueueInput(buildKeyboardInputMessage(e, eventType));
     },
-    [sendInput],
+    [enqueueInput],
   );
 
   useEffect(() => {
     const forwardPasteShortcut = (e: KeyboardEvent) => {
+      const fallback = buildKeyboardInputMessage(e, "rawKeyDown");
       const readText = navigator.clipboard?.readText?.bind(navigator.clipboard);
       if (!readText) {
-        dispatchKey(e, "rawKeyDown");
+        enqueueInput(fallback);
         return;
       }
-      readText()
-        .then((text) => {
-          if (text) {
-            sendInput({ type: "input_insert_text", text });
-          } else {
-            dispatchKey(e, "rawKeyDown");
-          }
-        })
-        .catch(() => dispatchKey(e, "rawKeyDown"));
+      void inputQueueRef.current?.enqueueAsync(async () => {
+        try {
+          const text = await readText();
+          return text ? { type: "input_insert_text", text } : fallback;
+        } catch {
+          return fallback;
+        }
+      });
     };
 
     const handler = (e: KeyboardEvent) => {
@@ -638,11 +482,11 @@ export function Viewport() {
         }
         if (key === "c") {
           dispatchKey(e, "rawKeyDown");
-          sendInput({ type: "input_read_clipboard" });
+          enqueueInput({ type: "input_read_clipboard" });
           return;
         }
         if (key === "x") {
-          sendInput({
+          enqueueInput({
             type: "input_read_clipboard",
             cut: true,
             modifiers: keyModifiers(e),
@@ -658,7 +502,7 @@ export function Viewport() {
       window.removeEventListener("keydown", handler, true);
       window.removeEventListener("keyup", handler, true);
     };
-  }, [dispatchKey, sendInput]);
+  }, [dispatchKey, enqueueInput]);
 
   return (
     <div ref={containerRef} className="flex h-full flex-col">

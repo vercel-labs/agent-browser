@@ -10,6 +10,7 @@ import type {
   TabInfo,
 } from "@/types";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
+import { shouldWriteClipboardText } from "@/lib/viewport-keyboard";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 
 const MAX_EVENTS = 500;
@@ -235,7 +236,7 @@ export function useStreamSync(port: number) {
           break;
 
         case "clipboard":
-          if (msg.text != null) {
+          if (shouldWriteClipboardText(msg.text)) {
             navigator.clipboard?.writeText(msg.text).catch(() => {});
           }
           break;

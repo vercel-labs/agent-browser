@@ -14327,6 +14327,7 @@ async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
     let page_body = "<!doctype html><html><body>\
         <textarea id='ta'>hello world</textarea>\
         <textarea id='ta2'>second field</textarea>\
+        <div id='ce' contenteditable='true'>editable div</div>\
         <input id='ro' readonly value='keep-me'>\
         <textarea id='ro_ta' readonly>keep-ta</textarea>\
         <input id='ro_cancel' readonly value='keep-cancel' oncut='event.preventDefault()'>\
@@ -14555,6 +14556,66 @@ async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
         cut_cleared,
         "cut should clear only #ta and leave #ta2 untouched even when Tab follows immediately"
     );
+
+    // 4a. Undo after cut must restore the cut text in #ta, and cut in contenteditable
+    // without prior user activation must both copy and remove the text.
+    assert_evaluate(
+        &mut state,
+        "refocus-ta",
+        "(() => { document.getElementById('ta').focus(); return true; })()",
+        json!(true),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({
+            "type": "input_keyboard",
+            "eventType": "rawKeyDown",
+            "key": "z",
+            "code": "KeyZ",
+            "windowsVirtualKeyCode": 90,
+            "modifiers": 4,
+            "commands": ["undo"]
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+    let mut undone = false;
+    while tokio::time::Instant::now() < deadline {
+        let r = execute_command(
+            &json!({ "id": "6u", "action": "evaluate", "script": "document.getElementById('ta').value" }),
+            &mut state,
+        )
+        .await;
+        if get_data(&r)["result"] == json!("pasted text") {
+            undone = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+    assert!(undone, "undo after cut should restore 'pasted text' in #ta");
+
+    assert_evaluate(
+        &mut state,
+        "select-ce",
+        "(() => { const ce = document.getElementById('ce'); ce.focus(); const range = document.createRange(); range.selectNodeContents(ce); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); return sel.toString(); })()",
+        json!("editable div"),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({ "type": "input_read_clipboard", "cut": true, "modifiers": 4 }).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv_clipboard(&mut ws).await, "editable div");
+    assert_evaluate(
+        &mut state,
+        "ce-after-cut",
+        "document.getElementById('ce').textContent",
+        json!(""),
+    )
+    .await;
 
     // 4b. Option / AltGr character entry delivers text on keyDown.
     assert_evaluate(

@@ -98,9 +98,11 @@ const READ_SELECTION_SCRIPT: &str = r#"(() => {
     return (win.getSelection && win.getSelection().toString()) || '';
 })()"#;
 
-/// Atomically reads and cuts the current text selection in one synchronous JS
-/// turn so later focus or selection changes cannot overtake the cut.
-const READ_AND_CUT_SELECTION_SCRIPT: &str = r#"(() => {
+/// Reads the current text selection and reports whether the selection is
+/// editable so the server can follow up with a native CDP delete operation
+/// that preserves the browser undo stack and works in contenteditable without
+/// prior user activation.
+const READ_SELECTION_FOR_CUT_SCRIPT: &str = r#"(() => {
     let doc = document;
     let el = doc.activeElement;
     while (el) {
@@ -121,28 +123,30 @@ const READ_AND_CUT_SELECTION_SCRIPT: &str = r#"(() => {
     }
     if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) {
         if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'password') {
-            return '';
+            return { text: '', editable: false };
         }
         const start = el.selectionStart;
         const end = el.selectionEnd;
         if (typeof start === 'number' && typeof end === 'number' && end > start) {
-            const text = el.value.slice(start, end);
-            if (!el.readOnly && !el.disabled) {
-                if (!doc.execCommand || !doc.execCommand('cut')) {
-                    el.setRangeText('', start, end, 'start');
-                    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteByCut' }));
-                }
-            }
-            return text;
+            return {
+                text: el.value.slice(start, end),
+                editable: !el.readOnly && !el.disabled,
+            };
         }
-        return '';
+        return { text: '', editable: false };
     }
     const win = doc.defaultView || window;
-    const text = (win.getSelection && win.getSelection().toString()) || '';
-    if (text && el && el.isContentEditable && doc.execCommand) {
-        doc.execCommand('cut');
+    const sel = win.getSelection && win.getSelection();
+    const text = (sel && sel.toString()) || '';
+    if (!text) {
+        return { text: '', editable: false };
     }
-    return text;
+    const anchorEl =
+        sel && sel.anchorNode
+            ? (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement)
+            : null;
+    const editable = Boolean((el && el.isContentEditable) || (anchorEl && anchorEl.isContentEditable));
+    return { text, editable };
 })()"#;
 
 /// Per-connection delivery settings, set by the client's `config` message.
@@ -653,6 +657,7 @@ async fn handle_ws_client(
 /// Reads client messages and dispatches them without waiting on frame
 /// delivery. Input reaches CDP sequentially: mouse move, press and release
 /// must not be reordered.
+#[allow(clippy::too_many_arguments)]
 async fn reader_loop(
     mut ws_rx: SplitStream<WebSocketStream<TcpStream>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
@@ -803,16 +808,22 @@ fn keyboard_params(parsed: &Value) -> Value {
         "windowsVirtualKeyCode".into(),
         json!(resolve_stream_vk_code(parsed)),
     );
-    params.insert(
-        "modifiers".into(),
-        json!(
-            parsed
-                .get("modifiers")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0)
-                & 0x0F
-        ),
-    );
+    let mut modifiers = parsed
+        .get("modifiers")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        & 0x0F;
+    // AltGr reports Ctrl+Alt (bits 1|2 = 3) alongside a printable `text` char,
+    // but Chromium ignores `text` on keyDown when the Ctrl bit is set. Strip
+    // Ctrl|Alt on text-carrying keyDown events so AltGr characters are typed.
+    let has_text = params
+        .get("text")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| !t.is_empty());
+    if event_type == "keyDown" && has_text && (modifiers & 3) == 3 {
+        modifiers &= !3;
+    }
+    params.insert("modifiers".into(), json!(modifiers));
     if let Some(commands) = validated_key_commands(parsed, event_type) {
         params.insert("commands".into(), json!(commands));
     }
@@ -979,17 +990,40 @@ async fn eval_clipboard_selection(
     session_id: Option<&str>,
     cut: bool,
 ) -> Value {
-    let script = if cut {
-        READ_AND_CUT_SELECTION_SCRIPT
-    } else {
-        READ_SELECTION_SCRIPT
-    };
+    if !cut {
+        let eval = tokio::time::timeout(
+            CLIPBOARD_READ_TIMEOUT,
+            client.send_command(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": READ_SELECTION_SCRIPT,
+                    "returnByValue": true,
+                    "awaitPromise": false,
+                })),
+                session_id,
+            ),
+        )
+        .await;
+
+        return match eval {
+            Ok(Ok(val)) => {
+                let text = val
+                    .pointer("/result/value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                json!({ "type": "clipboard", "text": text })
+            }
+            Ok(Err(err)) => json!({ "type": "clipboard", "error": err }),
+            Err(_) => json!({ "type": "clipboard", "error": "Clipboard read timed out" }),
+        };
+    }
+
     let eval = tokio::time::timeout(
         CLIPBOARD_READ_TIMEOUT,
         client.send_command(
             "Runtime.evaluate",
             Some(json!({
-                "expression": script,
+                "expression": READ_SELECTION_FOR_CUT_SCRIPT,
                 "returnByValue": true,
                 "awaitPromise": false,
             })),
@@ -998,17 +1032,59 @@ async fn eval_clipboard_selection(
     )
     .await;
 
-    match eval {
+    let (text, editable) = match eval {
         Ok(Ok(val)) => {
-            let text = val
-                .pointer("/result/value")
+            let value = val.pointer("/result/value");
+            let text = value
+                .and_then(|v| v.get("text"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-            json!({ "type": "clipboard", "text": text })
+                .unwrap_or("")
+                .to_string();
+            let editable = value
+                .and_then(|v| v.get("editable"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            (text, editable)
         }
-        Ok(Err(err)) => json!({ "type": "clipboard", "error": err }),
-        Err(_) => json!({ "type": "clipboard", "error": "Clipboard read timed out" }),
+        Ok(Err(err)) => return json!({ "type": "clipboard", "error": err }),
+        Err(_) => return json!({ "type": "clipboard", "error": "Clipboard read timed out" }),
+    };
+
+    if editable && !text.is_empty() {
+        let _ = tokio::time::timeout(
+            CLIPBOARD_READ_TIMEOUT,
+            client.send_command(
+                "Input.dispatchKeyEvent",
+                Some(json!({
+                    "type": "rawKeyDown",
+                    "key": "Backspace",
+                    "code": "Backspace",
+                    "windowsVirtualKeyCode": 8,
+                    "modifiers": 0,
+                    "commands": ["deleteBackward"],
+                })),
+                session_id,
+            ),
+        )
+        .await;
+        let _ = tokio::time::timeout(
+            CLIPBOARD_READ_TIMEOUT,
+            client.send_command(
+                "Input.dispatchKeyEvent",
+                Some(json!({
+                    "type": "keyUp",
+                    "key": "Backspace",
+                    "code": "Backspace",
+                    "windowsVirtualKeyCode": 8,
+                    "modifiers": 0,
+                })),
+                session_id,
+            ),
+        )
+        .await;
     }
+
+    json!({ "type": "clipboard", "text": text })
 }
 
 fn is_user_input_message_type(msg_type: &str) -> bool {
@@ -1196,7 +1272,14 @@ mod tests {
         let (reply_tx, _reply_rx) = mpsc::channel(4);
         let mouse = |event| json!({ "eventType": event, "x": 1, "y": 1 });
         let dispatched = tokio::time::timeout(Duration::from_secs(5), async {
-            dispatch_input("input_mouse", &mouse("mouseMoved"), &client, None, &reply_tx).await;
+            dispatch_input(
+                "input_mouse",
+                &mouse("mouseMoved"),
+                &client,
+                None,
+                &reply_tx,
+            )
+            .await;
             dispatch_input(
                 "input_mouse",
                 &mouse("mousePressed"),
@@ -1438,6 +1521,19 @@ mod tests {
         }));
         assert_eq!(invalid["type"], "keyDown");
         assert_eq!(invalid["modifiers"], 0x0F);
+
+        // AltGr sends Ctrl+Alt (modifiers=3) with printable text; strip Ctrl|Alt
+        // so Chrome does not ignore `text` on keyDown.
+        let altgr = keyboard_params(&json!({
+            "eventType": "keyDown",
+            "key": "@",
+            "code": "KeyQ",
+            "text": "@",
+            "windowsVirtualKeyCode": 81,
+            "modifiers": 3
+        }));
+        assert_eq!(altgr["text"], "@");
+        assert_eq!(altgr["modifiers"], 0);
     }
 
     #[test]
@@ -1488,8 +1584,18 @@ mod tests {
                             tokio::time::sleep(Duration::from_millis(40)).await;
                             let reply = json!({
                                 "id": id,
-                                "result": { "result": { "type": "string", "value": "cut-text" } }
+                                "result": {
+                                    "result": {
+                                        "type": "object",
+                                        "value": { "text": "cut-text", "editable": true }
+                                    }
+                                }
                             });
+                            let _ = tx.send(Message::Text(reply.to_string())).await;
+                        }
+                    } else if method == "Input.dispatchKeyEvent" && key == "Backspace" {
+                        if let Some(id) = v.get("id").and_then(|i| i.as_i64()) {
+                            let reply = json!({ "id": id, "result": {} });
                             let _ = tx.send(Message::Text(reply.to_string())).await;
                         }
                     }
@@ -1527,8 +1633,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert_eq!(
             *seen.lock().await,
-            vec!["Runtime.evaluate", "Input.dispatchKeyEvent:Tab"],
-            "cut must finish atomically before any subsequent input event reaches CDP"
+            vec![
+                "Runtime.evaluate",
+                "Input.dispatchKeyEvent:Backspace",
+                "Input.dispatchKeyEvent:Backspace",
+                "Input.dispatchKeyEvent:Tab"
+            ],
+            "cut must finish inline before any subsequent input event reaches CDP"
         );
     }
 
