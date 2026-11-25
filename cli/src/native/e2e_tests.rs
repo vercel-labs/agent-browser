@@ -4457,6 +4457,99 @@ async fn e2e_storage() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_storage_bulk_preserves_special_keys() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf).await;
+            let body = "<!doctype html><title>Storage</title>";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{port}/") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    for storage_type in ["local", "session"] {
+        let pairs = [
+            ("ordinary", "control"),
+            ("__proto__", "fixture"),
+            ("constructor", "ctor"),
+            ("toString", "str"),
+        ];
+        for (i, (k, v)) in pairs.iter().enumerate() {
+            assert_success(
+                &execute_command(
+                    &json!({
+                        "id": format!("set-{storage_type}-{i}"),
+                        "action": "storage_set",
+                        "type": storage_type,
+                        "key": k,
+                        "value": v
+                    }),
+                    &mut state,
+                )
+                .await,
+            );
+        }
+
+        let bulk = execute_command(
+            &json!({ "id": format!("bulk-{storage_type}"), "action": "storage_get", "type": storage_type }),
+            &mut state,
+        )
+        .await;
+        assert_success(&bulk);
+        let map = get_data(&bulk)["data"]
+            .as_object()
+            .expect("bulk storage data should be an object");
+
+        for (i, (k, v)) in pairs.iter().enumerate() {
+            let scalar = execute_command(
+                &json!({
+                    "id": format!("get-{storage_type}-{i}"),
+                    "action": "storage_get",
+                    "type": storage_type,
+                    "key": k
+                }),
+                &mut state,
+            )
+            .await;
+            assert_success(&scalar);
+            assert_eq!(get_data(&scalar)["value"], json!(v));
+            assert_eq!(
+                map.get(*k),
+                Some(&json!(v)),
+                "{storage_type} bulk read missing key {k}: {map:?}"
+            );
+        }
+    }
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+    server.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Tab management
 // ---------------------------------------------------------------------------
