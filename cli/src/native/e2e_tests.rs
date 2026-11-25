@@ -14328,6 +14328,7 @@ async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
         <textarea id='ta'>hello world</textarea>\
         <textarea id='ta2'>second field</textarea>\
         <div id='ce' contenteditable='true'>editable div</div>\
+        <form onsubmit='window.__submitted = true; return false;'><input id='form_in' value=''></form>\
         <input id='ro' readonly value='keep-me'>\
         <textarea id='ro_ta' readonly>keep-ta</textarea>\
         <input id='ro_cancel' readonly value='keep-cancel' oncut='event.preventDefault()'>\
@@ -14731,7 +14732,45 @@ async fn e2e_stream_keyboard_commands_and_clipboard_bridge() {
     )
     .await;
 
-    // 5. Password inputs must never leak their value via input_read_clipboard.
+    // 5. Literal insertText with WebDriver PUA code points (\u{E007} Enter, \u{E004} Tab)
+    // and newline inside a <form> input must not submit the form or shift focus.
+    assert_evaluate(
+        &mut state,
+        "form-in",
+        "(() => { window.__submitted = false; const i = document.getElementById('form_in'); i.focus(); i.value = ''; return true; })()",
+        json!(true),
+    )
+    .await;
+    ws.send(Message::Text(
+        json!({ "type": "input_insert_text", "text": "a\u{E007}\u{E004}\nb" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    let mut form_pasted = false;
+    while tokio::time::Instant::now() < deadline {
+        let r = execute_command(
+            &json!({ "id": "7f", "action": "evaluate", "script": "({ val: document.getElementById('form_in').value, submitted: !!window.__submitted, active: document.activeElement?.id })" }),
+            &mut state,
+        )
+        .await;
+        let res = &get_data(&r)["result"];
+        if res["val"].as_str().is_some_and(|v| !v.is_empty()) {
+            assert_eq!(res["submitted"], false, "paste must not submit the form");
+            assert_eq!(res["active"], "form_in", "paste must not move focus");
+            assert!(
+                res["val"].as_str().unwrap().contains("a\u{E007}\u{E004}"),
+                "expected literal text in form input, got {:?}",
+                res["val"]
+            );
+            form_pasted = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+    assert!(form_pasted, "literal paste into form input should complete");
+
+    // 6. Password inputs must never leak their value via input_read_clipboard.
     assert_evaluate(
         &mut state,
         "pw",
