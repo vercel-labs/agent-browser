@@ -564,6 +564,7 @@ async fn take_snapshot_inner(
     {
         tree_nodes[idx].hint = Some(hint);
     }
+    distinguish_shared_row_hints(client, effective_session_id, &mut tree_nodes, &hint_nodes).await;
 
     if options.urls {
         let link_nodes: Vec<(usize, i64)> = tree_nodes
@@ -916,6 +917,106 @@ pub(crate) const HINT_FUNCTION: &str = r#"function() {
     return [icon && 'icon:' + icon, file && 'img:' + file, key && key + ':' + this.getAttribute(key), near && 'in:' + near]
         .filter(Boolean).map((s) => s.slice(0, 48)).join('; ');
 }"#;
+
+/// The whole text of a control's row, without the control's own text, uncut.
+const ROW_TEXT_FUNCTION: &str = r#"function() {
+    const row = this.closest('tr, li, article, [role=row], [role=listitem]');
+    return row ? row.innerText.replace(this.innerText, '').replace(/\s+/g, ' ').trim() : '';
+}"#;
+
+/// Hints are cut at 48 characters from the start of each part, so controls in
+/// rows whose text starts the same (an inbox: same sender and subject, the
+/// date at the end) all read alike and say nothing about which row is which.
+/// For each group of refs whose hints came out identical, the `in:` part is
+/// rewritten to the row text after what the rows of the group share, from the
+/// start of the word where they part: `in:…28 mins ago`. Rows whose whole text
+/// is the same keep their hint.
+async fn distinguish_shared_row_hints(
+    client: &CdpClient,
+    session_id: &str,
+    tree_nodes: &mut [TreeNode],
+    hint_nodes: &[(usize, i64)],
+) {
+    let mut groups: HashMap<String, Vec<(usize, i64)>> = HashMap::new();
+    for &(idx, bid) in hint_nodes {
+        if let Some(hint) = tree_nodes[idx]
+            .hint
+            .as_ref()
+            .filter(|h| h.split("; ").any(|p| p.starts_with("in:")))
+        {
+            groups.entry(hint.clone()).or_default().push((idx, bid));
+        }
+    }
+    let shared: Vec<(usize, i64)> = groups
+        .values()
+        .filter(|g| g.len() > 1)
+        .flatten()
+        .copied()
+        .collect();
+    if shared.is_empty() {
+        return;
+    }
+    let texts: HashMap<usize, String> =
+        call_on_nodes(client, session_id, &shared, ROW_TEXT_FUNCTION)
+            .await
+            .into_iter()
+            .collect();
+    for group in groups.values().filter(|g| g.len() > 1) {
+        let rows: Vec<&str> = group
+            .iter()
+            .filter_map(|(idx, _)| texts.get(idx).map(String::as_str))
+            .collect();
+        if rows.len() != group.len() {
+            continue;
+        }
+        for ((idx, _), part) in group.iter().zip(distinct_row_parts(&rows)) {
+            if let (Some(part), Some(hint)) = (part, tree_nodes[*idx].hint.as_ref()) {
+                let rewritten = hint
+                    .split("; ")
+                    .map(|p| {
+                        if p.starts_with("in:") {
+                            part.clone()
+                        } else {
+                            p.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                tree_nodes[*idx].hint = Some(rewritten);
+            }
+        }
+    }
+}
+
+/// For rows that share their start: each row's `in:` part from the start of
+/// the word where they part, cut at 48 characters (whole characters, so an
+/// emoji is never split). `None` for a row with nothing after the shared part.
+fn distinct_row_parts(rows: &[&str]) -> Vec<Option<String>> {
+    let chars: Vec<Vec<char>> = rows.iter().map(|r| r.chars().collect()).collect();
+    if chars.windows(2).all(|pair| pair[0] == pair[1]) {
+        // The same text in every row: nothing tells them apart.
+        return vec![None; rows.len()];
+    }
+    let mut common = chars.iter().map(Vec::len).min().unwrap_or(0);
+    for row in &chars[1..] {
+        common = common.min(chars[0].iter().zip(row).take_while(|(a, b)| a == b).count());
+    }
+    // Back to the start of the word the rows part in.
+    let first = &chars[0];
+    while common > 0 && !first[common - 1].is_whitespace() {
+        common -= 1;
+    }
+    chars
+        .iter()
+        .map(|row| {
+            let rest: String = row[common..].iter().collect::<String>().trim().to_string();
+            if rest.is_empty() || common == 0 {
+                return None;
+            }
+            Some(format!("in:\u{2026}{rest}").chars().take(48).collect())
+        })
+        .collect()
+}
 
 /// Calls `function` on each DOM node in parallel and returns the non-empty strings it produced.
 async fn call_on_nodes(
@@ -2103,6 +2204,42 @@ mod tests {
         assert!(!interactive.contains("Saved successfully"));
         assert!(interactive.contains("[ref=e1]"));
         assert!(interactive.contains("Hello"));
+    }
+
+    #[test]
+    fn rows_that_share_their_start_get_the_part_where_they_differ() {
+        let rows = [
+            "Alexander Pierce AdminLTE 3.0 Issue - Trying to find a solution 28 mins ago",
+            "Alexander Pierce AdminLTE 3.0 Issue - Trying to find a solution 11 hours ago",
+            "Alexander Pierce AdminLTE 3.0 Issue - Trying to find a solution 2 days ago",
+        ];
+        assert_eq!(
+            distinct_row_parts(&rows),
+            vec![
+                Some("in:\u{2026}28 mins ago".to_string()),
+                Some("in:\u{2026}11 hours ago".to_string()),
+                Some("in:\u{2026}2 days ago".to_string()),
+            ]
+        );
+        // Parting inside a word goes back to the word's start.
+        assert_eq!(
+            distinct_row_parts(&["Report 2024 done", "Report 2025 done"]),
+            vec![
+                Some("in:\u{2026}2024 done".to_string()),
+                Some("in:\u{2026}2025 done".to_string())
+            ]
+        );
+        // Nothing shared, or nothing after it: unchanged.
+        assert_eq!(distinct_row_parts(&["one", "two"]), vec![None, None]);
+        assert_eq!(
+            distinct_row_parts(&["same row", "same row"]),
+            vec![None, None]
+        );
+        // Cut at 48 whole characters, an emoji included.
+        let long = format!("Shared start {}", "\u{1f600}".repeat(60));
+        let other = format!("Shared start x{}", "\u{1f600}".repeat(60));
+        let parts = distinct_row_parts(&[&long, &other]);
+        assert_eq!(parts[0].as_ref().unwrap().chars().count(), 48);
     }
 
     #[test]
