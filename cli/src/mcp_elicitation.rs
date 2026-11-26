@@ -152,7 +152,6 @@ fn classify_batch_preflight(
     arguments: &Value,
 ) -> Option<PreflightMatch> {
     let commands = arguments.get("commands").and_then(Value::as_array)?;
-    let flags = crate::flags::parse_flags(&[]);
     let mut matches: Vec<(usize, ElicitCategory, String)> = Vec::new();
 
     for (index, item) in commands.iter().enumerate() {
@@ -167,7 +166,7 @@ fn classify_batch_preflight(
         if sub_args.is_empty() {
             continue;
         }
-        if let Some((cat, summary)) = classify_batch_subcommand(enabled, &sub_args, &flags) {
+        if let Some((cat, summary)) = classify_batch_subcommand(enabled, &sub_args) {
             matches.push((index + 1, cat, summary));
         }
     }
@@ -199,112 +198,203 @@ fn classify_batch_preflight(
     })
 }
 
+/// Pure, side-effect-free classification of a single `agent_browser_batch`
+/// subcommand. Never invokes the full CLI parser or touches process stdin /
+/// filesystem (for example, `eval --stdin` or `cookies set --curl <path>`).
 fn classify_batch_subcommand(
     enabled: &BTreeSet<ElicitCategory>,
     sub_args: &[String],
-    flags: &crate::flags::Flags,
 ) -> Option<(ElicitCategory, String)> {
-    // 1. Canonical CLI batch parser classification.
-    if let Ok(parsed) = crate::commands::parse_batch_command(sub_args, flags) {
-        let action = parsed.get("action").and_then(Value::as_str).unwrap_or("");
-        let matched = match action {
-            "download" | "waitfordownload" => Some((ElicitCategory::Download, action.to_string())),
-            "upload" => Some((ElicitCategory::Upload, "upload".to_string())),
-            "evaluate" | "evalhandle" | "addscript" | "addinitscript" | "addstyle" | "expose"
-            | "setcontent" => {
-                let preview = parsed
-                    .get("script")
-                    .and_then(Value::as_str)
-                    .map(|s| format!("{} `{}`", action, truncate_preview(s, 48)))
-                    .unwrap_or_else(|| action.to_string());
-                Some((ElicitCategory::Eval, preview))
-            }
-            "auth_login" | "auth_save" | "auth_delete" | "credentials" => {
-                // Never include passwords or secret fields in batch summaries.
-                let name = parsed
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(|n| format!(" '{}'", truncate_preview(n, 32)))
-                    .unwrap_or_default();
-                Some((ElicitCategory::Auth, format!("{}{}", action, name)))
-            }
-            "cookies_set" | "storage_set" | "state_load" => {
-                Some((ElicitCategory::State, action.to_string()))
-            }
-            "click" | "dblclick" | "tap" => {
-                let sel = parsed.get("selector").and_then(Value::as_str);
-                if selector_looks_like_submit(sel) {
-                    Some((
-                        ElicitCategory::Submit,
-                        format!("{} '{}'", action, truncate_preview(sel.unwrap_or(""), 48)),
-                    ))
-                } else {
-                    None
-                }
-            }
-            "press" | "key" => {
-                let is_enter = parsed.get("key").and_then(Value::as_str).is_some_and(|k| {
-                    k.eq_ignore_ascii_case("enter") || k.eq_ignore_ascii_case("return")
-                });
-                if is_enter {
-                    Some((ElicitCategory::Submit, "press Enter".to_string()))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        if let Some((cat, summary)) = matched {
-            if enabled.contains(&cat) {
-                return Some((cat, summary));
-            }
-            return None;
-        }
-        return None;
-    }
+    let cmd = sub_args.first()?.to_ascii_lowercase();
+    let rest = &sub_args[1..];
 
-    // 2. Fallback token classification for any subcommand form the static parser
-    // did not parse (e.g. missing optional flags or aliases) so nothing bypasses.
-    let first = sub_args[0].to_ascii_lowercase();
-    let second = sub_args
-        .get(1)
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    let fallback = match (first.as_str(), second.as_str()) {
-        ("download", _) => Some((ElicitCategory::Download, "download".to_string())),
-        ("wait", _) if sub_args.iter().any(|a| a == "--download") => {
+    let matched = match cmd.as_str() {
+        "download" => Some((ElicitCategory::Download, "download".to_string())),
+        "wait"
+            if rest
+                .iter()
+                .any(|a| a == "--download" || a == "-d" || a.starts_with("--download=")) =>
+        {
             Some((ElicitCategory::Download, "wait --download".to_string()))
         }
-        ("upload", _) => Some((ElicitCategory::Upload, "upload".to_string())),
-        ("eval" | "evaluate" | "evalhandle" | "addscript" | "addinitscript" | "setcontent", _) => {
-            Some((ElicitCategory::Eval, first))
+        "upload" => Some((ElicitCategory::Upload, "upload".to_string())),
+        "eval" | "evaluate" | "evalhandle" | "addscript" | "addinitscript" | "addstyle"
+        | "expose" | "setcontent" => {
+            let summary = if cmd == "eval" && rest.first().map(String::as_str) == Some("--stdin") {
+                "eval --stdin".to_string()
+            } else if cmd == "eval"
+                && matches!(rest.first().map(String::as_str), Some("-b" | "--base64"))
+            {
+                "eval --base64".to_string()
+            } else if !rest.is_empty() {
+                let preview = rest
+                    .iter()
+                    .filter(|a| a.as_str() != "--")
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{} `{}`", cmd, truncate_preview(&preview, 48))
+            } else {
+                cmd
+            };
+            Some((ElicitCategory::Eval, summary))
         }
-        ("auth", "login" | "save" | "delete") => {
-            Some((ElicitCategory::Auth, format!("auth {}", second)))
+        "auth" => {
+            let mut iter = rest.iter().map(String::as_str);
+            let mut sub = iter.next();
+            if sub == Some("--") {
+                sub = iter.next();
+            }
+            match sub.map(str::to_ascii_lowercase).as_deref() {
+                Some("login" | "save" | "delete") => {
+                    let sub_name = sub.unwrap().to_ascii_lowercase();
+                    // Extract optional profile name only; never include password values.
+                    let profile = iter
+                        .find(|t| *t != "--" && !t.starts_with('-'))
+                        .map(|n| format!(" '{}'", truncate_preview(n, 32)))
+                        .unwrap_or_default();
+                    Some((
+                        ElicitCategory::Auth,
+                        format!("auth {}{}", sub_name, profile),
+                    ))
+                }
+                _ => None,
+            }
         }
-        ("set", "credentials") => Some((ElicitCategory::Auth, "set credentials".to_string())),
-        ("cookies", "set") | ("storage", "set") | ("state", "load") => {
-            Some((ElicitCategory::State, format!("{} {}", first, second)))
+        "set" => {
+            let mut iter = rest.iter().map(String::as_str);
+            let mut sub = iter.next();
+            if sub == Some("--") {
+                sub = iter.next();
+            }
+            match sub.map(str::to_ascii_lowercase).as_deref() {
+                Some("credentials" | "auth") => {
+                    Some((ElicitCategory::Auth, "set credentials".to_string()))
+                }
+                _ => None,
+            }
         }
-        ("click" | "dblclick" | "tap", _)
-            if sub_args
+        "cookies" => {
+            let mut iter = rest.iter().map(String::as_str);
+            let mut sub = iter.next();
+            if sub == Some("--") {
+                sub = iter.next();
+            }
+            if sub.is_some_and(|s| s.eq_ignore_ascii_case("set")) {
+                Some((ElicitCategory::State, "cookies set".to_string()))
+            } else {
+                None
+            }
+        }
+        "storage" => {
+            let non_marker: Vec<&str> = rest
                 .iter()
-                .skip(1)
-                .any(|a| selector_looks_like_submit(Some(a))) =>
-        {
-            Some((ElicitCategory::Submit, first))
+                .map(String::as_str)
+                .filter(|s| *s != "--")
+                .collect();
+            let is_set = match non_marker.as_slice() {
+                [first, second, ..]
+                    if (first.eq_ignore_ascii_case("local")
+                        || first.eq_ignore_ascii_case("session"))
+                        && second.eq_ignore_ascii_case("set") =>
+                {
+                    true
+                }
+                [first, ..] if first.eq_ignore_ascii_case("set") => true,
+                _ => false,
+            };
+            if is_set {
+                Some((ElicitCategory::State, "storage set".to_string()))
+            } else {
+                None
+            }
         }
-        ("press" | "key", _)
-            if sub_args
+        "state" => {
+            let mut iter = rest.iter().map(String::as_str);
+            let mut sub = iter.next();
+            if sub == Some("--") {
+                sub = iter.next();
+            }
+            if sub.is_some_and(|s| s.eq_ignore_ascii_case("load")) {
+                Some((ElicitCategory::State, "state load".to_string()))
+            } else {
+                None
+            }
+        }
+        "click" | "dblclick" | "tap" => {
+            let selector = extract_click_selector(rest);
+            if selector_looks_like_submit(selector) {
+                Some((
+                    ElicitCategory::Submit,
+                    format!("{} '{}'", cmd, truncate_preview(selector.unwrap_or(""), 48)),
+                ))
+            } else {
+                None
+            }
+        }
+        "press" | "key" | "keydown" => {
+            let is_enter = rest
                 .iter()
-                .skip(1)
-                .any(|a| a.eq_ignore_ascii_case("enter") || a.eq_ignore_ascii_case("return")) =>
-        {
-            Some((ElicitCategory::Submit, "press Enter".to_string()))
+                .filter(|a| a.as_str() != "--")
+                .any(|a| a.eq_ignore_ascii_case("enter") || a.eq_ignore_ascii_case("return"));
+            if is_enter {
+                Some((ElicitCategory::Submit, "press Enter".to_string()))
+            } else {
+                None
+            }
+        }
+        "find" => {
+            let triggers_click = rest.iter().any(|a| {
+                a.eq_ignore_ascii_case("click")
+                    || a.eq_ignore_ascii_case("dblclick")
+                    || a.eq_ignore_ascii_case("tap")
+            });
+            let submit_target = rest
+                .iter()
+                .find(|a| selector_looks_like_submit(Some(a.as_str())));
+            if triggers_click {
+                submit_target.map(|t| {
+                    (
+                        ElicitCategory::Submit,
+                        format!("find '{}' click", truncate_preview(t, 48)),
+                    )
+                })
+            } else {
+                None
+            }
         }
         _ => None,
     };
-    fallback.filter(|(cat, _)| enabled.contains(cat))
+
+    matched.filter(|(cat, _)| enabled.contains(cat))
+}
+
+fn extract_click_selector(rest: &[String]) -> Option<&str> {
+    let mut i = 0;
+    let mut after_marker = false;
+    while i < rest.len() {
+        let token = rest[i].as_str();
+        if !after_marker {
+            if token == "--" {
+                after_marker = true;
+                i += 1;
+                continue;
+            }
+            if matches!(token, "--button" | "--modifiers") {
+                i += 2;
+                continue;
+            }
+            if matches!(token, "--new-tab" | "--human")
+                || token.starts_with("--button=")
+                || token.starts_with("--modifiers=")
+            {
+                i += 1;
+                continue;
+            }
+        }
+        return Some(token);
+    }
+    None
 }
 
 /// Determine whether a single non-batch tool call matches an enabled `--elicit` category.
@@ -1015,16 +1105,47 @@ mod tests {
         assert!(matched.message.contains("auth"));
         assert!(!matched.message.contains("SUPER_SECRET_BATCH_PW"));
 
-        // State category inside batch is classified when `state` is enabled.
+        // State category inside batch is classified when `state` is enabled,
+        // including storage local/session set and cookies --curl without touching disk.
         let state_only = ElicitCategory::parse_list("state").unwrap();
         let state_batch = json!({
             "commands": [
-                ["cookies", "set", "sid", "value"]
+                ["cookies", "set", "--curl", "/dev/stdin"],
+                ["storage", "local", "set", "token", "val"]
             ]
         });
         let state_match =
             classify_preflight_gate(&state_only, "agent_browser_batch", &state_batch).unwrap();
         assert_eq!(state_match.category, ElicitCategory::State);
+        assert!(state_match.message.contains("cookies set"));
+        assert!(state_match.message.contains("storage set"));
+
+        // eval --stdin is classified without reading process stdin.
+        let stdin_eval_batch = json!({
+            "commands": [
+                ["eval", "--stdin"]
+            ]
+        });
+        let stdin_match =
+            classify_preflight_gate(&high_risk, "agent_browser_batch", &stdin_eval_batch).unwrap();
+        assert_eq!(stdin_match.category, ElicitCategory::Eval);
+        assert!(stdin_match.message.contains("eval --stdin"));
+
+        // set auth / wait -d / find click submit are also classified without I/O.
+        let extra_batch = json!({
+            "commands": [
+                ["set", "auth", "user", "SECRET_PW"],
+                ["wait", "-d", "/tmp/out.zip"],
+                ["find", "role", "button", "--name", "Place Order", "click"]
+            ]
+        });
+        let extra_match =
+            classify_preflight_gate(&high_risk, "agent_browser_batch", &extra_batch).unwrap();
+        assert_eq!(extra_match.category, ElicitCategory::Auth);
+        assert!(extra_match.message.contains("set credentials"));
+        assert!(extra_match.message.contains("wait --download"));
+        assert!(extra_match.message.contains("Place Order"));
+        assert!(!extra_match.message.contains("SECRET_PW"));
     }
 
     #[test]

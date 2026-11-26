@@ -1653,3 +1653,62 @@ fn chained_daemon_confirmations_elicit_every_gate_in_modern_and_legacy() {
     let status = client.close();
     assert!(status.success());
 }
+
+#[test]
+fn batch_eval_stdin_and_curl_dev_stdin_never_block_mcp_protocol_reader() {
+    let mut client = McpStdioClient::spawn(&["--tools", "all", "--elicit", "high-risk,state"]);
+    let elicit_caps = json!({ "elicitation": { "form": {} } });
+
+    // Send a batch containing `eval --stdin` and `cookies set --curl /dev/stdin` while
+    // keeping MCP stdio open, followed immediately by a `ping` request. If classification
+    // ever touched process stdin or opened `/dev/stdin`, this would deadlock or swallow `ping`.
+    let started = Instant::now();
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_browser_batch",
+            "arguments": {
+                "commands": [
+                    ["eval", "--stdin"],
+                    ["cookies", "set", "--curl", "/dev/stdin"]
+                ]
+            },
+            "_meta": modern_meta(elicit_caps.clone())
+        }
+    }));
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "ping",
+        "params": { "_meta": modern_meta(elicit_caps) }
+    }));
+
+    let (ir, _) = client.recv_for_id(&json!(1), Duration::from_secs(2));
+    assert_eq!(ir["result"]["resultType"], "input_required");
+    let req_key = ir["result"]["inputRequests"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let msg = ir["result"]["inputRequests"][&req_key]["params"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(msg.contains("eval --stdin"), "unexpected prompt: {msg}");
+    assert!(msg.contains("cookies set"), "unexpected prompt: {msg}");
+
+    let (ping_resp, _) = client.recv_for_id(&json!(2), Duration::from_secs(2));
+    assert_eq!(ping_resp["id"], 2);
+    assert_eq!(ping_resp["result"]["resultType"], "complete");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "classification blocked protocol reader: {:?}",
+        started.elapsed()
+    );
+
+    let status = client.close();
+    assert!(status.success());
+}
