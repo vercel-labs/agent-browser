@@ -26025,6 +26025,179 @@ async fn e2e_firefox_stream_modifier_masks() {
     firefox_close(&mut state).await;
 }
 
+/// Dashboard paste isolates clipboard text in the BiDi sandbox across cross-origin iframes,
+/// and owned launches lock down DevTools preferences once the daemon connects.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_stream_paste_isolates_clipboard_and_locks_devtools() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+
+    {
+        let ff = state.firefox.as_ref().unwrap();
+        let root = ff.rdp.request("root", "getRoot", json!({})).await.unwrap();
+        let prefs = root["preferenceActor"].as_str().unwrap();
+        let prompt = ff
+            .rdp
+            .request(
+                prefs,
+                "getBoolPref",
+                json!({"value": "devtools.debugger.prompt-connection"}),
+            )
+            .await
+            .unwrap();
+        let remote = ff
+            .rdp
+            .request(
+                prefs,
+                "getBoolPref",
+                json!({"value": "devtools.debugger.remote-enabled"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prompt["value"], json!(true));
+        assert_eq!(remote["value"], json!(false));
+    }
+
+    let child_url = format!("{}/frame.html", fixture.other);
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        &format!(
+            r#"(async () => {{
+            document.body.innerHTML =
+                '<input id="trap" type="text" style="position:fixed;left:0;top:0;width:80px;height:20px" />' +
+                '<iframe id="xframe" style="position:fixed;left:0;top:40px;width:400px;height:260px;border:0"></iframe>';
+            const frame = document.getElementById('xframe');
+            await new Promise(resolve => {{
+                frame.addEventListener('load', resolve, {{ once: true }});
+                frame.src = "{child_url}";
+            }});
+            window.__stolen = [];
+            const trap = document.getElementById('trap');
+            Object.defineProperty(Document.prototype, 'activeElement', {{
+                configurable: true,
+                get() {{ return trap; }}
+            }});
+            document.execCommand = (cmd, ui, val) => {{ window.__stolen.push('exec:' + val); return true; }};
+            HTMLInputElement.prototype.setRangeText = function(val) {{ window.__stolen.push('range:' + val); }};
+            Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {{
+                configurable: true,
+                get() {{ window.__stolen.push('cw'); return window; }}
+            }});
+            return 'ready';
+            }})()"#
+        ),
+    )
+    .await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "frame-ready", "action": "frame", "selector": "#xframe"}),
+        )
+        .await,
+    );
+    firefox_eval(
+        &mut state,
+        r#"document.body.innerHTML = '<input id="child-in" type="text" style="position:fixed;left:0;top:0;width:240px;height:40px" />';"#,
+    )
+    .await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "back-main", "action": "mainframe"}),
+        )
+        .await,
+    );
+
+    let live = {
+        let ff = state.firefox.as_ref().unwrap();
+        super::bidi::stream::FirefoxLive {
+            bidi: Arc::clone(&ff.bidi),
+            context: ff.contexts.active_tab().to_string(),
+            contexts: ff.contexts.clone(),
+            modifiers: Default::default(),
+        }
+    };
+
+    super::bidi::stream::dispatch_input(
+        &live,
+        "input_insert_text",
+        &json!({"text": "no-focus-secret"}),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(firefox_eval(&mut state, "window.__stolen").await, json!([]));
+    assert_eq!(
+        firefox_eval(&mut state, "document.getElementById('trap').value").await,
+        json!("")
+    );
+
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "frame-focus", "action": "frame", "selector": "#xframe"}),
+        )
+        .await,
+    );
+    assert_success(&firefox_act(&mut state, "click", "#child-in", json!({})).await);
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "wait-focus", "action": "wait", "function": "document.activeElement?.id === 'child-in'", "timeout": 5000}),
+        )
+        .await,
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "back-main-focus", "action": "mainframe"}),
+        )
+        .await,
+    );
+    super::bidi::stream::dispatch_input(
+        &live,
+        "input_insert_text",
+        &json!({"text": "cross-origin\u{E007}secret"}),
+    )
+    .await;
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "frame-check", "action": "frame", "selector": "#xframe"}),
+        )
+        .await,
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "wait-value", "action": "wait", "function": "document.getElementById('child-in').value.length > 0", "timeout": 5000}),
+        )
+        .await,
+    );
+    assert_eq!(
+        firefox_eval(&mut state, "document.getElementById('child-in').value").await,
+        json!("cross-origin\u{E007}secret")
+    );
+    assert_success(
+        &firefox_command(
+            &mut state,
+            json!({"id": "back-main-check", "action": "mainframe"}),
+        )
+        .await,
+    );
+    assert_eq!(firefox_eval(&mut state, "window.__stolen").await, json!([]));
+    assert_eq!(
+        firefox_eval(&mut state, "document.getElementById('trap').value").await,
+        json!("")
+    );
+    firefox_close(&mut state).await;
+}
+
 /// Firefox publishes the same tab data to the dashboard as its tab commands return.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]

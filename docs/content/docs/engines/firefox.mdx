@@ -122,7 +122,7 @@ Not every launch option applies to Firefox. These are rejected when combined wit
 
 When it launches Firefox, the daemon enables Firefox's DevTools server only for the profile it owns. On macOS and Linux the server listens on a private unix socket inside a directory with `0700` permissions. On Windows it listens on a random loopback port.
 
-Firefox on Windows can't restrict that port to one account or authenticate DevTools clients. While a session runs, another account on the same machine can connect to the port and debug the whole browser, which includes reading and driving its open tabs. Use the Firefox engine on Windows only on machines where you trust every local account.
+Immediately after verifying the launch nonce on an owned Firefox process, the daemon sets `devtools.debugger.prompt-connection` to `true` and `devtools.debugger.remote-enabled` to `false` so later clients cannot attach without approval. Because Firefox on Windows cannot listen on a unix socket or authenticate DevTools clients during startup, another local account can still race the daemon during the brief launch handshake before that lockdown runs. Use the Firefox engine on Windows only on machines where you trust every local account.
 
 ## When to Use Firefox
 

@@ -459,6 +459,25 @@ impl BidiClient {
         .await
     }
 
+    /// Runs a function in a named sandbox with an optional `this` remote reference and arguments.
+    pub(crate) async fn call_function_in_sandbox_with_this(
+        &self,
+        context: &str,
+        sandbox: &str,
+        js: &str,
+        this: Option<Value>,
+        args: Vec<Value>,
+    ) -> Result<Value, String> {
+        self.call_function_target(
+            json!({"context": context, "sandbox": sandbox}),
+            js,
+            this,
+            args,
+            DEFAULT_TIMEOUT,
+        )
+        .await
+    }
+
     /// Runs a function in a named sandbox with `this` set to a remote object reference.
     pub(crate) async fn call_function_on_in_sandbox(
         &self,
@@ -467,14 +486,8 @@ impl BidiClient {
         js: &str,
         this: Value,
     ) -> Result<Value, String> {
-        self.call_function_target(
-            json!({"context": context, "sandbox": sandbox}),
-            js,
-            Some(this),
-            Vec::new(),
-            DEFAULT_TIMEOUT,
-        )
-        .await
+        self.call_function_in_sandbox_with_this(context, sandbox, js, Some(this), Vec::new())
+            .await
     }
 
     /// Runs a function in `context` with `this` set to a remote object

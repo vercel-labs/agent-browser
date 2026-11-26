@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::client::{BidiError, Script, SANDBOX};
+use super::client::{BidiClient, BidiError, Script, SANDBOX};
 use super::daemon::session;
 use super::input::{
     key_chord_actions, key_event_actions, key_from_raw, key_text_actions, pointer_click, Origin,
@@ -23,13 +23,16 @@ use crate::native::forms::{self, CallError, FormControl};
 use crate::native::interaction::{CLEAR_VALUE_JS, SELECT_ALL_JS};
 use crate::native::pointer::MouseButton;
 
-const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
+/// Inserts or replaces literal text in the target or active editable element inside the BiDi sandbox.
+pub(super) const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
     let el = useActive ? ((this && this.ownerDocument) || document).activeElement : this;
     while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
     if (!el || !el.isConnected || el.matches(':disabled') || el.readOnly) return 'unsupported';
-    if (useActive) try { el.focus(); } catch {}
     const doc = el.ownerDocument;
     const editable = el.isContentEditable || el.contentEditable === 'true' || el.contentEditable === 'plaintext-only';
+    const isTextInput = el.localName === 'textarea' || (el.localName === 'input' && ['text', 'search', 'url', 'tel', 'email', 'password', 'number'].includes(el.type));
+    if (!editable && !isTextInput) return 'unsupported';
+    if (useActive) try { el.focus(); } catch {}
     const nativeEdit = () => {
         let canceled = false;
         const watch = event => canceled = canceled || event.defaultPrevented;
@@ -55,7 +58,6 @@ const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
         }
         return nativeEdit() || 'unsupported';
     }
-    if (!(el instanceof HTMLTextAreaElement) && !(el instanceof HTMLInputElement && ['text', 'search', 'url', 'tel', 'email', 'password', 'number'].includes(el.type))) return 'unsupported';
     let start;
     let end;
     try {
@@ -72,7 +74,7 @@ const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
     if (hasSelection) {
         el.setRangeText(text, replace ? 0 : start, replace ? el.value.length : end, 'end');
     } else {
-        const prototype = el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        const prototype = el.localName === 'input' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
         const value = replace ? text : el.value + text;
         Object.getOwnPropertyDescriptor(prototype, 'value').set.call(el, value);
     }
@@ -82,10 +84,11 @@ const LITERAL_EDIT_JS: &str = r#"function(text, replace, useActive) {
 
 const SAME_DOCUMENT_JS: &str = "function() { return this.ownerDocument === document; }";
 
-const FOCUSED_FRAME_CONTEXT_JS: &str = r#"() => {
+pub(super) const FOCUSED_FRAME_CONTEXT_JS: &str = r#"() => {
     let el = document.activeElement;
     while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
-    return el && el.matches('iframe,frame') ? el.contentWindow : null;
+    if (!el || !el.matches('iframe,frame')) return { iframe: false, child: null };
+    return { iframe: true, child: el.contentWindow || null };
 }"#;
 
 /// Reads a node's tag name and raw `type` attribute for the file-input check.
@@ -111,25 +114,57 @@ pub(super) async fn run(
     .await
 }
 
+/// Walks focused child frames from `start` inside the BiDi sandbox and fails closed
+/// when a focused iframe cannot be resolved to a child browsing context.
+pub(super) async fn focused_context(
+    bidi: &BidiClient,
+    start: &str,
+    timeout: Option<Duration>,
+) -> Result<String, String> {
+    let mut focused = start.to_string();
+    let mut visited = HashSet::new();
+    while visited.insert(focused.clone()) {
+        let reply = match timeout {
+            Some(limit) => {
+                bidi.call_function_in_sandbox_timeout(
+                    &focused,
+                    SANDBOX,
+                    FOCUSED_FRAME_CONTEXT_JS,
+                    limit,
+                )
+                .await?
+            }
+            None => {
+                bidi.call_function_in_sandbox(&focused, SANDBOX, FOCUSED_FRAME_CONTEXT_JS, vec![])
+                    .await?
+            }
+        };
+        if reply["iframe"].as_bool() == Some(true) {
+            let child = reply["child"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "Focused iframe context could not be resolved".to_string())?;
+            if visited.contains(child) {
+                return Err("Focused iframe chain contains a cycle".to_string());
+            }
+            focused = child.to_string();
+            continue;
+        }
+        if reply["iframe"].as_bool() == Some(false) {
+            return Ok(focused);
+        }
+        return Err("Focused frame probe returned an unexpected value".to_string());
+    }
+    Err("Focused iframe chain contains a cycle".to_string())
+}
+
 /// The context an edit runs in: the target's own, or without a target the tab or the frame
 /// focused inside it.
 async fn edit_context(ff: &FirefoxSession, target: Option<&Target>) -> Result<String, String> {
     if let Some(target) = target {
         return Ok(target.context.clone());
     }
-    let mut focused = ff.contexts.active_tab().to_string();
-    let mut visited = HashSet::new();
-    while visited.insert(focused.clone()) {
-        let child = ff
-            .bidi
-            .call_function_in_sandbox(&focused, "agent-browser", FOCUSED_FRAME_CONTEXT_JS, vec![])
-            .await?;
-        let Some(child) = child.as_str() else {
-            break;
-        };
-        focused = child.to_string();
-    }
-    Ok(focused)
+    focused_context(&ff.bidi, ff.contexts.active_tab(), None).await
 }
 
 /// Replaces the target's value, or types `text` at the focused element. Typing at a target stays
@@ -144,8 +179,9 @@ async fn literal_edit_in_context(
     let result = ff
         .race_prompt(
             context,
-            ff.bidi.call_function(
+            ff.bidi.call_function_in_sandbox_with_this(
                 context,
+                SANDBOX,
                 LITERAL_EDIT_JS,
                 target.map(Target::node_ref),
                 vec![json!(text), json!(replace), json!(!replace)],
@@ -615,12 +651,22 @@ mod tests {
         }
     }
 
+    fn focused_leaf_reply() -> Value {
+        script(json!({
+            "type": "object",
+            "value": [
+                ["iframe", {"type": "boolean", "value": false}],
+                ["child", {"type": "null"}]
+            ]
+        }))
+    }
+
     fn node_responder(req: &Value) -> Value {
         match req["method"].as_str() {
             Some("script.callFunction") => {
                 let js = req["params"]["functionDeclaration"].as_str().unwrap_or("");
                 if js == FOCUSED_FRAME_CONTEXT_JS {
-                    script(json!({"type": "null"}))
+                    focused_leaf_reply()
                 } else if js.starts_with("() =>") {
                     script(json!({"type": "node", "sharedId": "node-1"}))
                 } else if js.contains("function(text, replace, useActive)") {
@@ -681,7 +727,7 @@ mod tests {
             if req["method"] == "script.callFunction" {
                 log.lock().unwrap().push(req["params"].clone());
                 if req["params"]["functionDeclaration"] == FOCUSED_FRAME_CONTEXT_JS {
-                    return json!({"type": "success", "result": {"type": "null"}});
+                    return focused_leaf_reply();
                 }
             }
             json!({"type": "success", "result": {"type": "string", "value": "ok"}})
@@ -708,6 +754,8 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(params.len(), 2);
+        assert_eq!(params[0]["target"]["sandbox"], SANDBOX);
+        assert_eq!(params[1]["target"]["sandbox"], SANDBOX);
         assert_eq!(
             params[0]["arguments"][0],
             json!({"type": "string", "value": "a\n\tb"})

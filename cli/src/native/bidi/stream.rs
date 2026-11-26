@@ -5,8 +5,9 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
-use super::client::BidiClient;
+use super::client::{BidiClient, SANDBOX};
 use super::contexts::Contexts;
+use super::forms;
 use super::input::{self, Origin};
 use super::tabs;
 use crate::native::stream::{FirefoxTabs, FrameMetadata, StreamServer};
@@ -310,58 +311,22 @@ async fn publish_frame(shot: &Shot, server: &StreamServer) {
     );
 }
 
-/// Inserts literal clipboard text at the focused editable element in Firefox
-/// without routing through WebDriver key actions (which interpret PUA code
-/// points like U+E007/U+E004 as Enter/Tab).
-const LITERAL_INSERT_TEXT_JS: &str = r#"function(text) {
-    let doc = document;
-    let el = doc.activeElement;
-    while (el) {
-        if (el.shadowRoot && el.shadowRoot.activeElement) {
-            el = el.shadowRoot.activeElement;
-            continue;
-        }
-        if (el.tagName === 'IFRAME') {
-            try {
-                if (el.contentDocument && el.contentDocument.activeElement) {
-                    doc = el.contentDocument;
-                    el = doc.activeElement;
-                    continue;
-                }
-            } catch {}
-        }
-        break;
-    }
-    if (!el) return;
-    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-        if (el.readOnly || el.disabled) return;
-        if (!doc.execCommand || !doc.execCommand('insertText', false, text)) {
-            const start = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
-            const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : el.value.length;
-            if (typeof el.setRangeText === 'function') {
-                el.setRangeText(text, start, end, 'end');
-            } else {
-                el.value = el.value.slice(0, start) + text + el.value.slice(end);
-            }
-            el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-        }
-        return;
-    }
-    if (el.isContentEditable && doc.execCommand) {
-        doc.execCommand('insertText', false, text);
-    }
-}"#;
-
+/// Builds sandboxed `script.callFunction` params that insert literal clipboard text
+/// into the active editable element without routing through WebDriver key actions or
+/// exposing the text to page-realm DOM hooks.
 fn insert_text_call_params(context: &str, text: &str) -> Option<Value> {
     if text.is_empty() || text.len() > 1_048_576 {
         return None;
     }
     Some(json!({
-        "functionDeclaration": LITERAL_INSERT_TEXT_JS,
-        "target": { "context": context },
-        "arguments": [{ "type": "string", "value": text }],
+        "functionDeclaration": forms::LITERAL_EDIT_JS,
+        "target": { "context": context, "sandbox": SANDBOX },
+        "arguments": [
+            { "type": "string", "value": text },
+            { "type": "boolean", "value": false },
+            { "type": "boolean", "value": true },
+        ],
         "awaitPromise": false,
-        "userActivation": true,
     }))
 }
 
@@ -444,12 +409,18 @@ pub async fn dispatch_input(live: &FirefoxLive, msg_type: &str, msg: &Value) {
         return;
     }
     if msg_type == "input_insert_text" {
-        if let Some(params) = msg
+        if let Some(text) = msg
             .get("text")
             .and_then(Value::as_str)
-            .and_then(|s| insert_text_call_params(&live.context, s))
+            .filter(|s| !s.is_empty() && s.len() <= 1_048_576)
         {
-            let _ = live.bidi.send_no_wait("script.callFunction", params).await;
+            if let Ok(target_ctx) =
+                forms::focused_context(&live.bidi, &live.context, Some(REQUEST_TIMEOUT)).await
+            {
+                if let Some(params) = insert_text_call_params(&target_ctx, text) {
+                    let _ = live.bidi.send_no_wait("script.callFunction", params).await;
+                }
+            }
         }
         return;
     }
@@ -500,7 +471,9 @@ mod tests {
         assert_eq!(fit_frame(frame.clone(), (None, None), 80), frame);
         assert_eq!(fit_frame(frame.clone(), (Some(1920), None), 80), frame);
     }
-    use crate::native::bidi::session::tests::{fake_session, fake_session_with_replies, FakeReply};
+    use crate::native::bidi::session::tests::{
+        fake_session, fake_session_with, fake_session_with_replies, FakeReply,
+    };
 
     async fn dashboard(
         server: &StreamServer,
@@ -952,11 +925,12 @@ mod tests {
         let params = insert_text_call_params("ctx-1", "a\u{E007}\u{E004}\nb")
             .expect("insert_text_call_params should accept literal PUA and newline text");
         assert_eq!(params["target"]["context"], "ctx-1");
+        assert_eq!(params["target"]["sandbox"], SANDBOX);
+        assert!(params.get("userActivation").is_none());
         assert_eq!(params["arguments"][0]["type"], "string");
         assert_eq!(params["arguments"][0]["value"], "a\u{E007}\u{E004}\nb");
         assert!(insert_text_call_params("ctx-1", "").is_none());
 
-        // input_read_clipboard with cut: true dispatches the cut keystroke in Firefox.
         let (cut, held_cut) = input_actions(
             "input_read_clipboard",
             &json!({ "cut": true, "modifiers": 2 }),
@@ -968,12 +942,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn firefox_dispatch_insert_text_uses_script_call_function_without_key_actions() {
-        let (ff, events, calls) = fake_session().await;
+    async fn firefox_dispatch_insert_text_routes_to_focused_iframe_in_sandbox() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let (ff, events, calls) = fake_session_with(move |req| {
+            if req["method"] == "script.callFunction" {
+                let params = req["params"].clone();
+                log.lock().unwrap().push(params.clone());
+                if params["functionDeclaration"] == forms::FOCUSED_FRAME_CONTEXT_JS {
+                    if params["target"]["context"] == "ctx-parent" {
+                        return json!({
+                            "type": "success",
+                            "result": {
+                                "type": "object",
+                                "value": [
+                                    ["iframe", {"type": "boolean", "value": true}],
+                                    ["child", {"type": "window", "value": {"context": "ctx-child"}}]
+                                ]
+                            }
+                        });
+                    }
+                    return json!({
+                        "type": "success",
+                        "result": {
+                            "type": "object",
+                            "value": [
+                                ["iframe", {"type": "boolean", "value": false}],
+                                ["child", {"type": "null"}]
+                            ]
+                        }
+                    });
+                }
+            }
+            json!({"type": "success", "result": {"type": "string", "value": "ok"}})
+        })
+        .await;
         std::mem::forget(events);
         let live = FirefoxLive {
             bidi: ff.bidi,
-            context: "ctx-form".to_string(),
+            context: "ctx-parent".to_string(),
             contexts: ff.contexts,
             modifiers: Default::default(),
         };
@@ -984,9 +991,66 @@ mod tests {
         )
         .await;
         assert_eq!(
+            wait_for(&calls, "script.callFunction", 3, Duration::from_secs(2)).await,
+            3
+        );
+        assert_eq!(asked(&calls, "input.performActions"), 0);
+        let recorded = seen.lock().unwrap();
+        assert_eq!(recorded.len(), 3);
+        for call in recorded.iter() {
+            assert_eq!(call["target"]["sandbox"], SANDBOX);
+            assert!(call.get("userActivation").is_none());
+        }
+        let insert = &recorded[2];
+        assert_eq!(insert["functionDeclaration"], forms::LITERAL_EDIT_JS);
+        assert_eq!(insert["target"]["context"], "ctx-child");
+        assert_eq!(
+            insert["arguments"][0]["value"],
+            "hello\u{E007}\u{E004}\nworld"
+        );
+    }
+
+    #[tokio::test]
+    async fn firefox_dispatch_insert_text_fails_closed_when_focused_iframe_cannot_resolve() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let (ff, events, calls) = fake_session_with(move |req| {
+            if req["method"] == "script.callFunction" {
+                let params = req["params"].clone();
+                log.lock().unwrap().push(params.clone());
+                if params["functionDeclaration"] == forms::FOCUSED_FRAME_CONTEXT_JS {
+                    return json!({
+                        "type": "success",
+                        "result": {
+                            "type": "object",
+                            "value": [
+                                ["iframe", {"type": "boolean", "value": true}],
+                                ["child", {"type": "null"}]
+                            ]
+                        }
+                    });
+                }
+            }
+            json!({"type": "success", "result": {"type": "string", "value": "ok"}})
+        })
+        .await;
+        std::mem::forget(events);
+        let live = FirefoxLive {
+            bidi: ff.bidi,
+            context: "ctx-parent".to_string(),
+            contexts: ff.contexts,
+            modifiers: Default::default(),
+        };
+        dispatch_input(&live, "input_insert_text", &json!({ "text": "secret" })).await;
+        assert_eq!(
             wait_for(&calls, "script.callFunction", 1, Duration::from_secs(2)).await,
             1
         );
-        assert_eq!(asked(&calls, "input.performActions"), 0);
+        let recorded = seen.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0]["functionDeclaration"],
+            forms::FOCUSED_FRAME_CONTEXT_JS
+        );
     }
 }

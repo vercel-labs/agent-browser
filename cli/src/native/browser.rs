@@ -3793,7 +3793,7 @@ mod tests {
     ) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use futures_util::{SinkExt, StreamExt};
         use std::sync::{Arc, Mutex};
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio_tungstenite::tungstenite::Message;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3818,6 +3818,17 @@ mod tests {
                     continue;
                 }
                 if head.starts_with(b"GET /json/version") {
+                    let mut req = Vec::with_capacity(512);
+                    let mut buf = [0u8; 512];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") && req.len() < 8192 {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        req.extend_from_slice(&buf[..n]);
+                    }
                     let body = format!(
                         r#"{{"webSocketDebuggerUrl":"ws://127.0.0.1:{}{}"}}"#,
                         port, discovered_path
@@ -3828,6 +3839,8 @@ mod tests {
                         body
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.flush().await;
+                    let _ = stream.shutdown().await;
                     continue;
                 }
                 let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
