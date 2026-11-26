@@ -11,19 +11,26 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 
+use crate::mcp_transport::{
+    current_tool_control, error_response_from, result_response, server_info_value,
+    wrap_response_result, McpServerState, ProtocolEra, ProtocolError, RequestContext, StdioWriter,
+    ToolControlGuard, ToolRunControl, CANCELLED_ERROR_SENTINEL, DISCOVER_TTL_MS,
+    LEGACY_DEFAULT_PROTOCOL_VERSION, LIST_TTL_MS, PROGRESS_INTERVAL,
+    SUPPORTED_ALL_PROTOCOL_VERSIONS, SUPPORTED_LEGACY_PROTOCOL_VERSIONS,
+};
 use crate::native::pointer::{Modifiers, MouseButton};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const PROTOCOL_VERSION: &str = "2025-11-25";
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
-    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+const PROTOCOL_VERSION: &str = LEGACY_DEFAULT_PROTOCOL_VERSION;
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = SUPPORTED_LEGACY_PROTOCOL_VERSIONS;
 const TOOL_LIST_PAGE_SIZE: usize = 64;
 const TOOL_OPEN: &str = "agent_browser_open";
 const TOOL_READ: &str = "agent_browser_read";
@@ -189,28 +196,6 @@ const TOOL_TOOLS_PROFILES: &str = "agent_browser_tools_profiles";
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const RAW_JSON_ARG: &str = "--raw-json";
-
-#[derive(Debug)]
-struct ProtocolError {
-    code: i64,
-    message: String,
-}
-
-impl ProtocolError {
-    fn invalid_params(message: impl Into<String>) -> Self {
-        Self {
-            code: -32602,
-            message: message.into(),
-        }
-    }
-
-    fn method_not_found(method: &str) -> Self {
-        Self {
-            code: -32601,
-            message: format!("Method not found: {}", method),
-        }
-    }
-}
 
 #[derive(Debug)]
 struct CliRun {
@@ -588,36 +573,254 @@ fn parse_mcp_call(args: &[String]) -> Result<(String, Value, McpConfig), String>
     Ok((name.clone(), arguments, config))
 }
 
+struct SyncToolJob {
+    id: Value,
+    params: Option<Value>,
+    ctx: RequestContext,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Run the MCP stdio server until stdin closes or a `shutdown` request is
 /// received.
 pub fn run_mcp(args: &[String]) -> Result<(), String> {
     let config = parse_mcp_config(args)?;
     let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let writer = StdioWriter::stdout();
+    run_mcp_with_io(stdin.lock(), writer, config)
+}
 
-    for line in stdin.lock().lines() {
-        let mut exit_after_response = false;
-        let response = match line {
-            Ok(line) => handle_line(&line, &config, &mut exit_after_response),
-            Err(e) => Some(error_response(
-                Value::Null,
-                -32603,
-                format!("Failed to read stdin: {}", e),
-            )),
-        };
+fn run_mcp_with_io<R: BufRead>(
+    reader: R,
+    writer: StdioWriter,
+    config: McpConfig,
+) -> Result<(), String> {
+    let config = Arc::new(config);
+    let state = Arc::new(McpServerState::new(writer));
+    let (tool_tx, tool_rx) = std::sync::mpsc::channel::<SyncToolJob>();
 
-        if let Some(response) = response {
-            if write_json_line(&mut stdout, &response).is_err() {
+    let worker_config = Arc::clone(&config);
+    let worker_state = Arc::clone(&state);
+    let worker_handle = thread::spawn(move || {
+        while let Ok(job) = tool_rx.recv() {
+            if job.cancel.load(Ordering::SeqCst) {
+                worker_state.unregister_in_flight(&job.id);
+                worker_state.worker_exit();
+                continue;
+            }
+            let tool_name = job
+                .params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_string();
+            let control = ToolRunControl {
+                cancel: job.cancel.clone(),
+                progress_token: job.ctx.progress_token.clone(),
+                writer: job
+                    .ctx
+                    .progress_token
+                    .as_ref()
+                    .map(|_| worker_state.writer.clone()),
+                tool_name,
+            };
+            let outcome = {
+                let _guard = ToolControlGuard::enter(control);
+                call_tool(job.params.as_ref(), &worker_config)
+            };
+            worker_state.unregister_in_flight(&job.id);
+            if !job.cancel.load(Ordering::SeqCst) {
+                let response = match outcome {
+                    Ok(result) => {
+                        result_response(job.id, wrap_response_result(job.ctx.era, result))
+                    }
+                    Err(err) => error_response_from(job.id, &err),
+                };
+                let _ = worker_state.writer.send_json(&response);
+            }
+            worker_state.worker_exit();
+        }
+    });
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                let _ = state.writer.send_json(&error_response(
+                    Value::Null,
+                    -32603,
+                    format!("Failed to read stdin: {}", e),
+                ));
                 break;
             }
+        };
+
+        if line.trim().is_empty() {
+            continue;
         }
 
-        if exit_after_response {
+        if dispatch_line(&line, &config, &state, &tool_tx) || state.is_shutdown() {
             break;
         }
     }
 
+    drop(tool_tx);
+    state.wait_for_workers(Duration::from_secs(DEFAULT_TIMEOUT_MS / 1000 + 5));
+    let _ = worker_handle.join();
+
     Ok(())
+}
+
+/// Process one newline-delimited JSON-RPC message. Returns `true` when the
+/// transport loop should stop (broken stdout or `shutdown`).
+fn dispatch_line(
+    line: &str,
+    config: &Arc<McpConfig>,
+    state: &Arc<McpServerState>,
+    tool_tx: &std::sync::mpsc::Sender<SyncToolJob>,
+) -> bool {
+    let message: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(e) => {
+            return state
+                .writer
+                .send_json(&error_response(
+                    Value::Null,
+                    -32700,
+                    format!("Parse error: {}", e),
+                ))
+                .is_err();
+        }
+    };
+
+    let id = message.get("id").cloned();
+    let method = message.get("method").and_then(|v| v.as_str());
+
+    // Client JSON-RPC response to a server-initiated request (has `id`, no `method`).
+    if method.is_none() {
+        if let Some(ref resp_id) = id {
+            if message.get("result").is_some() || message.get("error").is_some() {
+                state.deliver_client_response(message);
+                return false;
+            }
+            return state
+                .writer
+                .send_json(&error_response(
+                    resp_id.clone(),
+                    -32600,
+                    "Invalid request: missing method",
+                ))
+                .is_err();
+        }
+        return false;
+    }
+
+    let method = method.expect("checked above");
+    let params = message.get("params").cloned();
+
+    // Notifications have no `id` and never receive responses.
+    let Some(id) = id else {
+        handle_notification(method, params.as_ref(), state);
+        return false;
+    };
+
+    let ctx = match state.resolve_request_context(method, &id, params.as_ref()) {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            return state
+                .writer
+                .send_json(&error_response_from(id, &err))
+                .is_err();
+        }
+    };
+
+    if method == "tools/call" {
+        let cancel = state.register_in_flight(&id);
+        state.worker_enter();
+        if tool_tx
+            .send(SyncToolJob {
+                id: id.clone(),
+                params,
+                ctx,
+                cancel,
+            })
+            .is_err()
+        {
+            state.unregister_in_flight(&id);
+            state.worker_exit();
+            return true;
+        }
+        return false;
+    }
+
+    if method == "shutdown" {
+        // Let any already-queued tool calls finish before answering shutdown.
+        state.wait_for_workers(Duration::from_secs(DEFAULT_TIMEOUT_MS / 1000 + 5));
+        let response = result_response(id, wrap_response_result(ctx.era, json!({})));
+        let _ = state.writer.send_json(&response);
+        state.mark_shutdown();
+        return true;
+    }
+
+    let mut exit_after_response = false;
+    let outcome = handle_inline_request(
+        method,
+        params.as_ref(),
+        config,
+        state,
+        &ctx,
+        &mut exit_after_response,
+    );
+    let response = match outcome {
+        Ok(result) => result_response(id, wrap_response_result(ctx.era, result)),
+        Err(err) => error_response_from(id, &err),
+    };
+    let write_failed = state.writer.send_json(&response).is_err();
+    if exit_after_response {
+        state.mark_shutdown();
+        return true;
+    }
+    write_failed
+}
+
+fn handle_notification(method: &str, params: Option<&Value>, state: &McpServerState) {
+    if method == "notifications/cancelled" {
+        if let Some(request_id) = params.and_then(|p| p.get("requestId")) {
+            state.cancel_in_flight(request_id);
+        }
+    }
+}
+
+fn handle_inline_request(
+    method: &str,
+    params: Option<&Value>,
+    config: &McpConfig,
+    state: &McpServerState,
+    ctx: &RequestContext,
+    exit_after_response: &mut bool,
+) -> Result<Value, ProtocolError> {
+    match method {
+        "initialize" => {
+            let result = initialize_result(params, config);
+            let negotiated = result["protocolVersion"]
+                .as_str()
+                .unwrap_or(PROTOCOL_VERSION);
+            let client_caps = params
+                .and_then(|p| p.get("capabilities"))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            state.record_initialize(negotiated, client_caps);
+            Ok(result)
+        }
+        "server/discover" => Ok(discover_result(config)),
+        "ping" => Ok(json!({})),
+        "tools/list" => list_tools_for_era(params, config, ctx.era),
+        "shutdown" => {
+            *exit_after_response = true;
+            Ok(json!({}))
+        }
+        _ => Err(ProtocolError::method_not_found(method)),
+    }
 }
 
 fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
@@ -670,56 +873,17 @@ fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
     Ok(McpConfig::from_profiles(profiles))
 }
 
-fn handle_line(line: &str, config: &McpConfig, exit_after_response: &mut bool) -> Option<Value> {
-    let message: Value = match serde_json::from_str(line) {
-        Ok(value) => value,
-        Err(e) => {
-            return Some(error_response(
-                Value::Null,
-                -32700,
-                format!("Parse error: {}", e),
-            ));
-        }
-    };
-
-    let id = message.get("id").cloned();
-    let method = match message.get("method").and_then(|v| v.as_str()) {
-        Some(method) => method,
-        None => {
-            return id.map(|id| error_response(id, -32600, "Invalid request: missing method"));
-        }
-    };
-
-    // Notifications do not receive responses.
-    let id = id?;
-
-    match handle_request(method, message.get("params"), config, exit_after_response) {
-        Ok(result) => Some(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result,
-        })),
-        Err(err) => Some(error_response(id, err.code, err.message)),
-    }
-}
-
-fn handle_request(
-    method: &str,
+fn list_tools_for_era(
     params: Option<&Value>,
     config: &McpConfig,
-    exit_after_response: &mut bool,
+    era: ProtocolEra,
 ) -> Result<Value, ProtocolError> {
-    match method {
-        "initialize" => Ok(initialize_result(params, config)),
-        "ping" => Ok(json!({})),
-        "tools/list" => list_tools(params, config),
-        "tools/call" => call_tool(params, config),
-        "shutdown" => {
-            *exit_after_response = true;
-            Ok(json!({}))
-        }
-        _ => Err(ProtocolError::method_not_found(method)),
+    let mut result = list_tools(params, config)?;
+    if era == ProtocolEra::Modern {
+        result["ttlMs"] = json!(LIST_TTL_MS);
+        result["cacheScope"] = json!("public");
     }
+    Ok(result)
 }
 
 fn list_tools(params: Option<&Value>, config: &McpConfig) -> Result<Value, ProtocolError> {
@@ -756,6 +920,30 @@ fn tool_list_cursor(params: Option<&Value>, total: usize) -> Result<usize, Proto
     Ok(index)
 }
 
+fn server_instructions(config: &McpConfig) -> String {
+    format!(
+        "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. When a navigation result lists saved flows that match the task, call agent_browser_flow_run instead of driving the page. Use agent_browser_tools_profiles to see available startup profiles. {}",
+        config.profile_names().join(", "),
+        SHARED_ARGUMENTS_INSTRUCTIONS
+    )
+}
+
+fn discover_result(config: &McpConfig) -> Value {
+    json!({
+        "resultType": "complete",
+        "supportedVersions": SUPPORTED_ALL_PROTOCOL_VERSIONS,
+        "capabilities": {
+            "tools": {}
+        },
+        "instructions": server_instructions(config),
+        "ttlMs": DISCOVER_TTL_MS,
+        "cacheScope": "public",
+        "_meta": {
+            "io.modelcontextprotocol/serverInfo": server_info_value()
+        }
+    })
+}
+
 fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
     let requested = params
         .and_then(|p| p.get("protocolVersion"))
@@ -772,16 +960,8 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
         "capabilities": {
             "tools": {}
         },
-        "serverInfo": {
-            "name": "agent-browser",
-            "title": "agent-browser",
-            "version": env!("CARGO_PKG_VERSION")
-        },
-        "instructions": format!(
-            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. When a navigation result lists saved flows that match the task, call agent_browser_flow_run instead of driving the page. Use agent_browser_tools_profiles to see available startup profiles. {}",
-            config.profile_names().join(", "),
-            SHARED_ARGUMENTS_INSTRUCTIONS
-        )
+        "serverInfo": server_info_value(),
+        "instructions": server_instructions(config)
     })
 }
 
@@ -4957,13 +5137,33 @@ fn run_command(
     let (stdout_buf, stdout_thread) = spawn_reader(child_stdout);
     let (stderr_buf, stderr_thread) = spawn_reader(child_stderr);
 
+    let control = current_tool_control();
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
     let mut timed_out = false;
+    let mut next_progress_at = started + PROGRESS_INTERVAL;
+    let mut progress_steps: u64 = 0;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
+                if let Some(ref ctrl) = control {
+                    if ctrl.cancel.load(Ordering::SeqCst) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(CANCELLED_ERROR_SENTINEL.to_string());
+                    }
+                    if let (Some(token), Some(writer)) = (&ctrl.progress_token, &ctrl.writer) {
+                        let now = Instant::now();
+                        if now >= next_progress_at {
+                            progress_steps += 1;
+                            let elapsed_secs = started.elapsed().as_secs();
+                            let msg = format!("Running {} ({}s)", ctrl.tool_name, elapsed_secs);
+                            let _ = writer.send_progress(token, progress_steps, &msg);
+                            next_progress_at = now + PROGRESS_INTERVAL;
+                        }
+                    }
+                }
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();

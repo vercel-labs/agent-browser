@@ -8,6 +8,7 @@ mod doctor;
 mod flags;
 mod install;
 mod mcp;
+mod mcp_transport;
 mod native;
 mod output;
 mod plugins;
