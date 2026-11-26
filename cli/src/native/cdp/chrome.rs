@@ -1738,6 +1738,10 @@ fn prepare_profile_local_state(user_data_dir: &Path) -> Result<(), String> {
 
 /// Directories to exclude when copying a Chrome profile. These are large
 /// non-auth directories that are not needed for reusing login state.
+/// Extensions, IndexedDB, History and Favicons dominate a daily-driver
+/// profile by an order of magnitude over the cookies and preferences that
+/// carry a login, and copying them pushed the copy past the client read
+/// timeout before Chrome had even started (#2637).
 const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
     "Cache",
     "Code Cache",
@@ -1749,6 +1753,10 @@ const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
     "optimization_guide",
     "ShaderCache",
     "component_crx_cache",
+    "Extensions",
+    "IndexedDB",
+    "History",
+    "Favicons",
 ];
 
 /// Copies a Chrome profile subdirectory and `Local State` to a temp directory
@@ -3425,6 +3433,34 @@ exec sleep 60
                 "{} should be excluded",
                 excluded
             );
+        }
+    }
+
+    #[test]
+    fn test_copy_chrome_profile_keeps_auth_state_and_drops_bulk() {
+        let src = TempDir::new("copy-auth-only-src");
+        let profile = src.join("Default");
+        create_fake_local_state(&src, &[("Default", "Person 1")]);
+        std::fs::create_dir_all(&profile).unwrap();
+        for file in ["Cookies", "Login Data", "Web Data", "Preferences"] {
+            std::fs::write(profile.join(file), "auth").unwrap();
+        }
+        std::fs::create_dir_all(profile.join("Local Storage/leveldb")).unwrap();
+        std::fs::write(profile.join("Local Storage/leveldb/CURRENT"), "token").unwrap();
+        for dir in ["Extensions", "IndexedDB", "History", "Favicons"] {
+            std::fs::create_dir_all(profile.join(dir)).unwrap();
+            std::fs::write(profile.join(dir).join("bulk"), "bulk").unwrap();
+        }
+
+        let temp = TempDir(copy_chrome_profile(&src, "Default").unwrap());
+        let copied = temp.join("Default");
+
+        for file in ["Cookies", "Login Data", "Web Data", "Preferences"] {
+            assert!(copied.join(file).is_file(), "{} should be copied", file);
+        }
+        assert!(copied.join("Local Storage/leveldb/CURRENT").is_file());
+        for dir in ["Extensions", "IndexedDB", "History", "Favicons"] {
+            assert!(!copied.join(dir).exists(), "{} should be excluded", dir);
         }
     }
 
