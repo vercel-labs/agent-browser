@@ -2,18 +2,30 @@
 
 import { atom } from "jotai";
 import { useCallback, useEffect, useRef } from "react";
-import { useSetAtom } from "jotai/react";
+import { useAtomValue, useSetAtom } from "jotai/react";
 import type {
   ActivityEvent,
   ConsoleEntry,
+  EventSubscription,
   StreamMessage,
   TabInfo,
 } from "@/types";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
+import { execCommand, sessionArgs } from "@/lib/exec";
 import { shouldWriteClipboardText } from "@/lib/viewport-keyboard";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 
 const MAX_EVENTS = 500;
+
+/** Whether a subscription is still listening for events. */
+export function isActiveEventStatus(status: string): boolean {
+  return status === "active";
+}
+
+/** Events available past the cursor the reader last acknowledged. */
+export function unreadEventCount(sub: EventSubscription): number {
+  return Math.max(0, sub.head - sub.consumed);
+}
 
 // ---------------------------------------------------------------------------
 // Primitive atoms
@@ -36,6 +48,8 @@ export const viewportHeightAtom = atom(720);
 export const currentFrameAtom = atom<StreamFrame | null>(null);
 export const streamEventsAtom = atom<ActivityEvent[]>([]);
 export const consoleLogsAtom = atom<ConsoleEntry[]>([]);
+export const eventSubscriptionsAtom = atom<EventSubscription[]>([]);
+export const eventsNudgeVersionAtom = atom<number>(0);
 export const streamTabsAtom = atom<TabInfo[]>([]);
 export const streamEngineAtom = atom("");
 export const wsRefAtom = atom<WebSocket | null>(null);
@@ -54,6 +68,10 @@ export const hasConsoleErrorsAtom = atom((get) =>
       e.type === "page_error" ||
       (e.type === "console" && e.level === "error"),
   ),
+);
+
+export const watchingCountAtom = atom((get) =>
+  get(eventSubscriptionsAtom).filter((s) => isActiveEventStatus(s.status)).length,
 );
 
 // ---------------------------------------------------------------------------
@@ -92,6 +110,8 @@ export function useStreamSync(port: number) {
   const setFrame = useSetAtom(currentFrameAtom);
   const setEvents = useSetAtom(streamEventsAtom);
   const setConsoleLogs = useSetAtom(consoleLogsAtom);
+  const setSubscriptions = useSetAtom(eventSubscriptionsAtom);
+  const setNudgeVersion = useSetAtom(eventsNudgeVersionAtom);
   const setTabs = useSetAtom(streamTabsAtom);
   const setEngine = useSetAtom(streamEngineAtom);
   const setWsRef = useSetAtom(wsRefAtom);
@@ -120,10 +140,12 @@ export function useStreamSync(port: number) {
       setFrame(null);
       setEvents([]);
       setConsoleLogs([]);
+      setSubscriptions([]);
+      setNudgeVersion(0);
       setTabs([]);
       setEngine("");
     }
-  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine]);
+  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setSubscriptions, setNudgeVersion, setTabs, setEngine]);
 
   const connect = useCallback(() => {
     if (port <= 0) return;
@@ -207,6 +229,11 @@ export function useStreamSync(port: number) {
           break;
         }
 
+        case "events_nudge": {
+          setNudgeVersion((prev) => prev + 1);
+          break;
+        }
+
         case "result": {
           const cmdIdx = eventsRef.current.findIndex(
             (e) => e.type === "command" && e.id === msg.id,
@@ -245,7 +272,7 @@ export function useStreamSync(port: number) {
           break;
       }
     };
-  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache]);
+  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setSubscriptions, setNudgeVersion, setTabs, setEngine, setTabCache, setEngineCache]);
 
   useEffect(() => {
     connect();
@@ -259,4 +286,68 @@ export function useStreamSync(port: number) {
       setWsRef(null);
     };
   }, [connect, setConnected, setTabs, setWsRef]);
+}
+
+const EVENTS_SYNC_INTERVAL_MS = 30_000;
+
+function parseEventsList(stdout: string): EventSubscription[] | null {
+  try {
+    const parsed = JSON.parse(stdout) as { data?: { subscriptions?: unknown } };
+    const subscriptions = parsed.data?.subscriptions;
+    return Array.isArray(subscriptions) ? (subscriptions as EventSubscription[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Keep the event subscriptions of the active session in sync with the daemon. */
+export function useEventHydration(session: string) {
+  const connected = useAtomValue(streamConnectedAtom);
+  const nudgeVersion = useAtomValue(eventsNudgeVersionAtom);
+  const setSubscriptions = useSetAtom(eventSubscriptionsAtom);
+  const setNudgeVersion = useSetAtom(eventsNudgeVersionAtom);
+  const busyRef = useRef(false);
+  const pendingRef = useRef(false);
+  const requestRef = useRef(0);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+
+  const hydrate = useCallback(async () => {
+    const current = sessionRef.current;
+    if (!current) return;
+    if (busyRef.current) {
+      pendingRef.current = true;
+      return;
+    }
+    busyRef.current = true;
+    const request = ++requestRef.current;
+    try {
+      const result = await execCommand(sessionArgs(current, "events", "list"));
+      if (!result.success || requestRef.current !== request || sessionRef.current !== current) return;
+      const subscriptions = parseEventsList(result.stdout);
+      if (subscriptions) setSubscriptions(subscriptions);
+    } finally {
+      busyRef.current = false;
+      if (pendingRef.current) {
+        pendingRef.current = false;
+        void hydrate();
+      }
+    }
+  }, [setSubscriptions]);
+
+  useEffect(() => {
+    requestRef.current++;
+    setSubscriptions([]);
+    setNudgeVersion(0);
+  }, [session, setSubscriptions, setNudgeVersion]);
+
+  useEffect(() => {
+    if (connected) void hydrate();
+  }, [connected, nudgeVersion, hydrate, session]);
+
+  useEffect(() => {
+    if (!connected) return;
+    const timer = setInterval(hydrate, EVENTS_SYNC_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [connected, hydrate]);
 }
