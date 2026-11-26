@@ -1,0 +1,9 @@
+<!doctype html>
+<title>Events probe</title>
+<button id="go" onclick="setTimeout(() => {
+  const note = document.createElement('div');
+  note.id = 'done';
+  note.setAttribute('role', 'status');
+  note.textContent = 'All set';
+  document.body.append(note);
+}, 150)">Go</button>

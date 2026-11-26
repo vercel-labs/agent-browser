@@ -1,0 +1,7 @@
+<!doctype html>
+<title>Event tap probe</title>
+<button id="alert" onclick="alert('fixture dialog')">Alert</button>
+<button id="navigate" onclick="history.pushState({}, '', '/events#changed')">Navigate</button>
+<button id="console" onclick="console.log('fixture console')">Console</button>
+<button id="error" onclick="setTimeout(() => { throw new Error('fixture page error') }, 0)">Error</button>
+<a id="download" href="/download">Download</a>

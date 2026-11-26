@@ -14,6 +14,7 @@ pub use dashboard::{
 };
 
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -258,6 +259,7 @@ pub struct StreamServer {
     /// Latest-value channel for screencast frames. Slow clients skip straight
     /// to the newest frame instead of draining a stale ordered backlog.
     frame_watch: watch::Sender<Option<Arc<StreamFrame>>>,
+    pub(crate) event_nudges: watch::Sender<HashMap<String, u64>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     firefox_live: Arc<RwLock<Option<FirefoxLive>>>,
@@ -464,6 +466,7 @@ impl StreamServer {
 
         let (frame_tx, _) = broadcast::channel::<String>(64);
         let (frame_watch_tx, frame_watch_rx) = watch::channel::<Option<Arc<StreamFrame>>>(None);
+        let (event_nudges_tx, event_nudges_rx) = watch::channel(HashMap::new());
         let screencast_config = Arc::new(ScreencastConfig::from_env());
         let client_count = Arc::new(Mutex::new(0usize));
         let client_notify = Arc::new(Notify::new());
@@ -501,6 +504,7 @@ impl StreamServer {
                 listener,
                 frame_tx_clone,
                 frame_watch_accept,
+                event_nudges_rx,
                 client_count_clone,
                 client_slot_clone,
                 firefox_live_accept,
@@ -559,6 +563,7 @@ impl StreamServer {
                 session_name: session_id,
                 frame_tx,
                 frame_watch: frame_watch_tx,
+                event_nudges: event_nudges_tx,
                 screencast_config,
                 client_count,
                 client_slot: client_slot.clone(),
@@ -910,22 +915,24 @@ mod tests {
         ws
     }
 
-    /// Read until a "frame" arrives, skipping status and tabs. Timed out so a
-    /// broken server fails instead of hanging.
-    async fn next_frame(ws: &mut WsClient) -> Value {
+    async fn next_message(ws: &mut WsClient, kind: &str) -> Value {
         loop {
             let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
                 .await
-                .expect("timed out waiting for frame")
+                .unwrap_or_else(|_| panic!("timed out waiting for {kind}"))
                 .expect("stream ended")
                 .expect("ws error");
             if let Message::Text(text) = msg {
                 let parsed: Value = serde_json::from_str(&text).expect("valid json");
-                if parsed.get("type").and_then(|v| v.as_str()) == Some("frame") {
+                if parsed.get("type").and_then(|v| v.as_str()) == Some(kind) {
                     return parsed;
                 }
             }
         }
+    }
+
+    async fn next_frame(ws: &mut WsClient) -> Value {
+        next_message(ws, "frame").await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1099,6 +1106,46 @@ mod tests {
 
         let mut ws = connect_client(server.port()).await;
         expect_no_frame(&mut ws, 200).await;
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_latest_frame_and_event_nudges_survive_bursts() {
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "t1".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+
+        server.broadcast_frame(r#"{"type":"frame","data":"stale"}"#);
+        server.broadcast_frame(r#"{"type":"frame","data":"fresh"}"#);
+
+        let mut ws = connect_client(server.port()).await;
+        let frame = next_frame(&mut ws).await;
+        assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("fresh"));
+
+        for index in 0..100 {
+            server.broadcast_error(&format!("error-{index}"));
+            server.broadcast_screencast_frame("frame", &FrameMetadata::default());
+        }
+        server
+            .event_nudges
+            .send_replace(HashMap::from([("sub-1".to_string(), 1)]));
+        server
+            .event_nudges
+            .send_replace(HashMap::from([("sub-1".to_string(), 3)]));
+
+        loop {
+            let parsed = next_message(&mut ws, "events_nudge").await;
+            assert_eq!(parsed["subscriptionId"], "sub-1");
+            if parsed["head"] == 3 {
+                break;
+            }
+        }
 
         server.shutdown().await;
     }

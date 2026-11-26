@@ -2311,6 +2311,20 @@ impl BrowserManager {
             .collect()
     }
 
+    pub fn event_tab_for_target(
+        &self,
+        target_id: &str,
+    ) -> Option<super::events::envelope::EventTab> {
+        self.pages
+            .iter()
+            .find(|page| page.target_id == target_id)
+            .map(|page| super::events::envelope::EventTab {
+                id: format_tab_id(page.tab_id),
+                label: page.label.clone().unwrap_or_default(),
+                target_id: page.target_id.clone(),
+            })
+    }
+
     /// Whether `index` is the tab commands act on. No tab is while the bound
     /// tab is gone.
     fn is_active_index(&self, index: usize) -> bool {
