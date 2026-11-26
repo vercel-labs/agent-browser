@@ -11,7 +11,7 @@ use super::{Check, Status};
 pub(super) fn check(checks: &mut Vec<Check>) {
     let category = "Config";
 
-    let user_path = dirs::home_dir().map(|d| d.join(".agent-browser").join("config.json"));
+    let user_path = std::env::home_dir().map(|d| d.join(".agent-browser").join("config.json"));
     if let Some(p) = user_path {
         if p.exists() {
             match parse_json_file(&p) {

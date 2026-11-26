@@ -1,16 +1,13 @@
-import { readFile } from "fs/promises";
-import { join } from "path";
 import { convertToModelMessages, stepCountIs, streamText } from "ai";
 import type { ModelMessage, UIMessage } from "ai";
 import { createBashTool } from "bash-tool";
 import { headers } from "next/headers";
-import { allDocsPages } from "@/lib/docs-navigation";
-import { mdxToCleanMarkdown } from "@/lib/mdx-to-markdown";
+import { loadAllDocsSources } from "@/lib/docs-source";
 import { minuteRateLimit, dailyRateLimit } from "@/lib/rate-limit";
 
 export const maxDuration = 60;
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4.6";
+const DEFAULT_MODEL = "openai/gpt-6-luna-fast";
 
 const SYSTEM_PROMPT = `You are a helpful documentation assistant for agent-browser, a browser automation CLI designed for AI agents.
 
@@ -22,7 +19,7 @@ You have access to the full agent-browser documentation via the bash and readFil
 
 When answering questions:
 - Use the bash tool to list files (ls /workspace/) or search for content (grep -r "keyword" /workspace/)
-- Use the readFile tool to read specific documentation pages (e.g. readFile with path "/workspace/index.md")
+- Use the readFile tool to read specific documentation pages (e.g. readFile with path "/workspace/introduction.md")
 - Do NOT use bash to write, create, modify, or delete files (no tee, cat >, sed -i, echo >, cp, mv, rm, mkdir, touch, etc.) — you are read-only
 - Always base your answers on the actual documentation content
 - Be concise and accurate
@@ -31,29 +28,10 @@ When answering questions:
 - Do NOT use emojis in your responses`;
 
 async function loadDocsFiles(): Promise<Record<string, string>> {
-  const files: Record<string, string> = {};
-
-  const results = await Promise.allSettled(
-    allDocsPages.map(async (page) => {
-      const slug = page.href === "/" ? "" : page.href.replace(/^\//, "");
-      const filePath = slug
-        ? join(process.cwd(), "src", "app", slug, "page.mdx")
-        : join(process.cwd(), "src", "app", "page.mdx");
-
-      const raw = await readFile(filePath, "utf-8");
-      const md = mdxToCleanMarkdown(raw);
-      const fileName = slug ? `/${slug}.md` : "/index.md";
-      return { fileName, md };
-    }),
+  const sources = await loadAllDocsSources();
+  return Object.fromEntries(
+    sources.map((source) => [source.markdownHref, source.markdown]),
   );
-
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      files[result.value.fileName] = result.value.md;
-    }
-  }
-
-  return files;
 }
 
 function addCacheControl(messages: ModelMessage[]): ModelMessage[] {

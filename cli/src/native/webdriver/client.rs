@@ -1,3 +1,4 @@
+use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -47,6 +48,15 @@ impl WebDriverClient {
         self.post(&format!("/session/{}/url", sid), &json!({ "url": url }))
             .await?;
         Ok(())
+    }
+
+    pub async fn get_window_handles(&self) -> Result<Vec<String>, String> {
+        let sid = self.session_id()?;
+        let response = self
+            .get(&format!("/session/{}/window/handles", sid))
+            .await?;
+        serde_json::from_value(response["value"].clone())
+            .map_err(|e| format!("Invalid window handles response: {}", e))
     }
 
     pub async fn get_url(&self) -> Result<String, String> {
@@ -194,15 +204,20 @@ impl WebDriverClient {
     }
 
     async fn get(&self, path: &str) -> Result<Value, String> {
-        http_request("GET", &format!("{}{}", self.base_url, path), None).await
+        http_request(Method::GET, &format!("{}{}", self.base_url, path), None).await
     }
 
     async fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
-        http_request("POST", &format!("{}{}", self.base_url, path), Some(body)).await
+        http_request(
+            Method::POST,
+            &format!("{}{}", self.base_url, path),
+            Some(body),
+        )
+        .await
     }
 
     async fn delete(&self, path: &str) -> Result<Value, String> {
-        http_request("DELETE", &format!("{}{}", self.base_url, path), None).await
+        http_request(Method::DELETE, &format!("{}{}", self.base_url, path), None).await
     }
 }
 
@@ -236,73 +251,27 @@ fn element_id_from_value(
         .ok_or("No element ID in response".to_string())
 }
 
-async fn http_request(method: &str, url: &str, body: Option<&Value>) -> Result<Value, String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
-    let host = parsed.host_str().unwrap_or("127.0.0.1");
-    let port = parsed.port().unwrap_or(80);
-    let path = parsed.path();
+async fn http_request(method: Method, url: &str, body: Option<&Value>) -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
-    let addr = format!("{}:{}", host, port);
-    let stream = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::net::TcpStream::connect(&addr),
-    )
-    .await
-    .map_err(|_| format!("Connection timeout: {}", addr))?
-    .map_err(|e| format!("Connection failed: {}", e))?;
+    let mut request = client.request(method, url);
+    if let Some(body) = body {
+        request = request.json(body);
+    }
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let body_str = body
-        .map(|b| serde_json::to_string(b).unwrap_or_default())
-        .unwrap_or_default();
-
-    let request = if body.is_some() {
-        format!(
-            "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            method, path, addr, body_str.len(), body_str
-        )
-    } else {
-        format!(
-            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            method, path, addr
-        )
-    };
-
-    let mut stream = stream;
-    stream
-        .write_all(request.as_bytes())
+    let json_body = request
+        .send()
         .await
-        .map_err(|e| format!("Write failed: {}", e))?;
-
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
+        .map_err(|e| format!("Connection failed: {}", e))?
+        .text()
         .await
         .map_err(|e| format!("Read failed: {}", e))?;
 
-    let response_str = String::from_utf8_lossy(&response);
-    let body_part = response_str.split("\r\n\r\n").nth(1).unwrap_or("").trim();
-
-    // Handle chunked encoding
-    let json_body = if body_part.contains('\n')
-        && body_part
-            .chars()
-            .next()
-            .map(|c| c.is_ascii_hexdigit())
-            .unwrap_or(false)
-    {
-        // Chunked: skip chunk size lines
-        body_part
-            .lines()
-            .filter(|l| !l.chars().all(|c| c.is_ascii_hexdigit() || c == '\r'))
-            .collect::<Vec<&str>>()
-            .join("")
-    } else {
-        body_part.to_string()
-    };
-
-    if json_body.is_empty() {
+    if json_body.trim().is_empty() {
         return Ok(json!({}));
     }
 

@@ -28,7 +28,6 @@ export interface EveSandboxCommandResult {
 }
 
 export interface EveSandboxSession {
-  readonly id: string;
   run(options: { readonly abortSignal?: AbortSignal; readonly command: string }): PromiseLike<EveSandboxCommandResult>;
 }
 
@@ -174,7 +173,7 @@ export async function runAgentBrowser<TJson = unknown>(
     throw new Error("agent-browser requires an Eve sandbox. Configure agent/sandbox.ts first.");
   }
 
-  const session = options.session ?? defaultSessionName(options.sessionPrefix ?? "eve", sandbox.id);
+  const session = options.session ?? defaultSessionName(options.sessionPrefix ?? "eve", "default");
   const command = buildAgentBrowserCommand(args, { ...options, session });
   const result = await sandbox.run({ abortSignal: options.abortSignal, command });
 

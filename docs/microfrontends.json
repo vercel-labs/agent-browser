@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/microfrontends.json",
+  "applications": {
+    "agent-browser": {
+      "packageName": "docs",
+      "development": { "fallback": "https://agent-browser.dev" }
+    },
+    "agent-desktop": {
+      "development": { "local": 3001 },
+      "routing": [{ "paths": ["/desktop/:path*", "/docs/desktop/:path*"] }]
+    }
+  }
+}

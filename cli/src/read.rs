@@ -49,6 +49,8 @@ pub struct ReadOptions {
     pub allowed_domains: Vec<String>,
     /// Additional allowlists inherited from daemon state. URLs must match every non-empty allowlist.
     pub enforced_allowed_domains: Vec<Vec<String>>,
+    /// Trust roots resolved by the CLI for this request.
+    pub trust: crate::tls::TrustOptions,
 }
 
 impl Default for ReadOptions {
@@ -63,6 +65,7 @@ impl Default for ReadOptions {
             headers: HashMap::new(),
             allowed_domains: Vec::new(),
             enforced_allowed_domains: Vec::new(),
+            trust: crate::tls::TrustOptions::default(),
         }
     }
 }
@@ -105,17 +108,29 @@ pub fn options_from_command(cmd: &Value) -> Result<ReadOptions, String> {
             }
         }
     }
-    let allowed_domains = cmd
-        .get("allowedDomains")
-        .and_then(|v| v.as_array())
-        .map(|domains| {
+    // An absent key means no containment; a supplied one must list a domain.
+    let allowed_domains = match cmd.get("allowedDomains") {
+        Some(value) => {
+            let domains = value
+                .as_array()
+                .map(|domains| {
+                    domains
+                        .iter()
+                        .filter_map(|domain| domain.as_str())
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            crate::native::network::ensure_allowed_domains_not_empty(&domains)?;
             domains
-                .iter()
-                .filter_map(|domain| domain.as_str())
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        }
+        None => Vec::new(),
+    };
+    let trust = match cmd.get("tls") {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|e| format!("Invalid read TLS options: {e}"))?,
+        None => crate::tls::TrustOptions::default(),
+    };
 
     Ok(ReadOptions {
         raw: cmd.get("raw").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -136,6 +151,7 @@ pub fn options_from_command(cmd: &Value) -> Result<ReadOptions, String> {
         headers,
         allowed_domains,
         enforced_allowed_domains: Vec::new(),
+        trust,
     })
 }
 
@@ -200,7 +216,7 @@ pub async fn run_read(raw_url: &str, options: ReadOptions) -> Result<Value, Stri
             attempt.follow()
         }
     });
-    let client = Client::builder()
+    let client = crate::tls::apply_to_reqwest(Client::builder(), &options.trust)?
         .timeout(Duration::from_millis(options.timeout_ms))
         .redirect(redirect_policy)
         .build()
@@ -551,26 +567,21 @@ fn allowed_domain_sets_for_options(options: &ReadOptions) -> Vec<Vec<String>> {
     if !options.allowed_domains.is_empty() {
         sets.push(options.allowed_domains.clone());
     }
-    sets.extend(
-        options
-            .enforced_allowed_domains
-            .iter()
-            .filter(|domains| !domains.is_empty())
-            .cloned(),
-    );
+    sets.extend(options.enforced_allowed_domains.iter().cloned());
     sets
 }
 
 fn check_allowed_url_for_options(url: &Url, options: &ReadOptions) -> Result<(), String> {
     check_allowed_url(url, &options.allowed_domains)?;
-    for domains in &options.enforced_allowed_domains {
-        check_allowed_url(url, domains)?;
-    }
-    Ok(())
+    check_allowed_url_sets(url, &options.enforced_allowed_domains)
 }
 
+/// Every set here is an enforced allowlist, so an empty one allows nothing.
 fn check_allowed_url_sets(url: &Url, allowed_domain_sets: &[Vec<String>]) -> Result<(), String> {
     for domains in allowed_domain_sets {
+        if domains.is_empty() {
+            return Err(crate::native::network::EMPTY_ALLOWED_DOMAINS_ERROR.to_string());
+        }
         check_allowed_url(url, domains)?;
     }
     Ok(())
@@ -580,12 +591,7 @@ pub fn check_allowed_active_url_for_options(
     raw_url: &str,
     options: &ReadOptions,
 ) -> Result<(), String> {
-    if options.allowed_domains.is_empty()
-        && options
-            .enforced_allowed_domains
-            .iter()
-            .all(|domains| domains.is_empty())
-    {
+    if options.allowed_domains.is_empty() && options.enforced_allowed_domains.is_empty() {
         return Ok(());
     }
 
@@ -1326,6 +1332,19 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         assert!(filtered.contains("Use a component."));
         assert!(!filtered.contains("## Setup"));
         assert!(!filtered.contains("## Further reading"));
+    }
+
+    #[test]
+    fn options_from_command_allowed_domains_absent_ok_empty_rejected() {
+        let options = options_from_command(&json!({ "action": "read" })).unwrap();
+        assert!(options.allowed_domains.is_empty());
+        for value in [json!([]), json!(["", "  "]), json!("")] {
+            let cmd = json!({ "action": "read", "allowedDomains": value });
+            assert_eq!(
+                options_from_command(&cmd).unwrap_err(),
+                crate::native::network::EMPTY_ALLOWED_DOMAINS_ERROR
+            );
+        }
     }
 
     #[test]

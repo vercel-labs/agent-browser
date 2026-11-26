@@ -1,8 +1,456 @@
 # agent-browser
 
-## 0.38.1
+## 0.45.0
 
 <!-- release:start -->
+
+### New Features
+
+- Added a **Firefox engine** driven over WebDriver BiDi: pass `--engine firefox` (or set `AGENT_BROWSER_ENGINE=firefox`) with Firefox 150 or newer to drive a local Firefox install with snapshots and `@eN` refs across open and closed shadow roots and iframes, `find` locators, shared form preconditions and error codes (`fill`, `type`, `check`, `uncheck`, `select --by`), right-click, middle-click, and modifier keys (`--button`, `--modifiers`), network routes and HAR capture, `--allowed-domains`, downloads, viewport, media, geolocation, header, and offline emulation, isolated windows, `--pin-tab`, screenshots, PDF export, and dashboard live view (#2205, #2206, #2207, #2208, #2595, #2633)
+- Added **Firefox attach mode**: connect to an existing Firefox instance over WebDriver BiDi with `--cdp` or `connect` (including `ws://.../session?devtools=<port>` endpoints), apply live settings in place, and detach on `close` without closing the running browser (#2227)
+
+### Bug Fixes
+
+- Fixed **keyboard `keydown`, `keyup`, and `press` modifier handling**: `keydown` and `keyup` now send `code`, `keyCode`, `location`, and printable text and carry held modifiers across subsequent keyboard, mouse, and flow-recorder commands. `press` applies US-layout Shift mapping, suppresses printable text for Alt, Control, and Meta chords, and dispatches modifier key events for chords not already held (#2734)
+- Fixed **saved flow host rules, write consent, deadlines, and result shaping**: saved host rules now match hostnames regardless of case or a trailing DNS root dot, non-`POST` requests carrying GraphQL queries require write declarations and consent, HTTP preflight cookie and route lookups and in-page fetches stop at the run deadline, empty result lists no longer fail `--fields` or `--where`, and `--limit` shapes only retained rows (#2735)
+- Fixed **saved flow replay** finishing before late-reported first-party Chrome requests settle (#2711)
+- Fixed **iframe targeting**: `frame` resolves cross-origin, unnamed, and nested iframes by CSS selector or `@ref`, and selector commands, `find` locators, `wait`, `check`, and `uncheck` act inside the selected frame, including same-site cross-origin iframes, without reaching tabs pinned by other sessions (#2737)
+- Fixed **`eval` and `console` in iframes**: `eval` runs in the frame selected with `frame` and reports that frame's origin, and `console` and `errors` capture messages from cross-origin iframes on the active tab (#2738)
+- Fixed **iframe snapshots and annotated screenshots**: snapshots label iframes by their `title` or `name`, and `screenshot --annotate` places boxes for elements inside iframes in page coordinates, including cross-origin, scrolled, and scaled frames (#2739)
+- Fixed **dashboard live view pointer and tabs**: clicks map to the real page size, drags send held buttons, touchpad two-finger taps open the context menu, and a tab that closes itself resyncs the tab bar (#2744)
+- Fixed **dashboard live view keyboard and clipboard**: editing shortcuts such as select all, undo, and line navigation reach the page, Option and AltGr characters type, and copy, cut, and paste work through the live view without granting the browser clipboard permissions (#2745)
+- Fixed **`state save` collection**: it no longer stalls under `--allowed-domains`, sends requests to previously visited origins, runs their service workers, or brings a temporary tab to the front. It includes origins from attached sessions but not tabs pinned by other sessions, and keeps the previous autosave when collection fails (#2746)
+- Fixed **`state list`, `state show`, and bulk storage reads**: `state list` shows modified dates, `state show` reports cookie and origin counts (`cookieCount` and `originCount` in JSON, with `summary` unchanged), and `storage local` and `storage session` keep keys such as `__proto__` (#2747)
+
+### Documentation
+
+- Added the **Firefox engine guide** (`/engines/firefox`) and updated CLI help, MCP tool schemas, command references, and core skills for Firefox support and form command behavior (#2208, #2227, #2595, #2633)
+
+### Contributors
+
+- @Afloat16
+- @Bella-rab
+- @Ehsan-hash
+- @MrCoder
+- @OBOneProtocol
+- @Railly
+- @adity982
+- @cavalcanticampos
+- @ctate
+- @devxoul
+- @fitchmultz
+- @funnyjacy
+- @hanneslipusch
+- @hyunjinee
+- @kevingatera
+- @lahfir
+- @leejaew
+- @lurenjia534
+- @osrjv
+- @patrickballard
+- @pei711
+- @pqminh27
+- @shtefcs
+- @sx4im
+- @thecodeartificerX
+- @yusufgngor
+
+<!-- release:end -->
+
+## 0.44.0
+
+### New Features
+
+- Added a **Ladybird provider**: `-p ladybird` drives Ladybird over WebDriver, headless by default or with `--headed`. Safari and Ladybird share one local driver launcher, and the WebDriver client now honors `Content-Length`, so it no longer hangs on drivers that keep the connection open. Snapshots and refs stay Chrome-only, as with Safari (#2721)
+- Added **background tab controls**: `tab keep live [tab]` keeps a background tab running at full speed instead of throttled, `tab keep throttled` returns it to the default, and `tab keep frozen <tab>` pauses it until the agent switches back. The daemon unfreezes a tab before any command runs on it and when the session closes (#2624, #2627)
+- Added **right-click, middle-click, and modifier keys** to `click` and `dblclick` with `--button` and `--modifiers`. A double click now sends two full clicks (#2594)
+- **WebMCP announcements** now tell agents what the page's tools are and when to use them, list each tool as `[origin] name [frame]: description` with full descriptions for small catalogs, mark tools from other origins as cross-origin, and include a ready-to-run `webmcp invoke` command for the page's own tools. `webmcp invoke` also accepts the JSON input right after the tool name (#2606, #2591, #2720)
+- Added **feature flag overrides** to the `vercel` skill, renamed from `protected-vercel-deployments`. Agents set the Flags SDK override cookie so only their own browser sees a variant, instead of changing the flag for everyone on the environment (#2441)
+
+### Behavior Changes
+
+- **Unknown flags are rejected** across command parsers instead of being read as selectors or file paths, or ignored. Arguments after `--` stay literal in the CLI and MCP (#2665)
+- **Refs from a replaced document fail** with a "no longer loaded" error after a full page load or an iframe navigation, instead of acting on the wrong element. Take a new snapshot after each load (#2685)
+- **`fill`, `type`, `check`, `uncheck`, and `select` check the target first** and refuse with a stable `code` (`not_editable`, `read_only`, `disabled`, `not_checkable`, `option_not_found`, `ambiguous`, `not_multiple`, `malformed_value`) without changing the field. `fill` sets date, time, color, and range inputs directly, `select --by value` or `--by label` resolves an ambiguous option, and a value the page changes afterward is reported as a warning (#2687)
+- **`snapshot -s <sel>` covers every match**, not only the first. The cursor-interactive scan now refs `<summary>`, native controls with non-interactive roles, and clickables inside open shadow roots, without writing attributes to the page (#2688)
+- **`upload`, `network har stop`, `diff snapshot`, and `diff url` check their preconditions**. `upload` resolves relative paths against the CLI's working directory and fails on a missing file or a target that is not a file input, `har stop` fails when nothing is recording, `diff snapshot` without `--baseline` compares against the tab's last snapshot, and `diff url` prints its result and honors `--screenshot` and `--full` (#2689)
+- **`--restore`, `--restore-save`, and `--restore-check-*` travel only through the settings patch**, like the other session settings. A save policy without a key applies to the running key, a key change on a command that never launches closes the browser without relaunching it, and `get cdp-url` and `session info` leave the restore settings alone. A launch that fails after a key change closes the new browser without saving (#2667)
+
+### Security
+
+- **Stream server `/api` routes** now require a same-origin request and a loopback `Host`, and rejected requests carry no CORS headers (#2678)
+- **Stream WebSocket upgrades** require the `Origin` to match the `Host`, so a page on another localhost port can no longer read frames or inject input (#2682)
+- **An allowlist that lists no domain is an error** from the flag, environment, config, or MCP, instead of turning containment off. An empty `AGENT_BROWSER_ALLOWED_DOMAINS` now fails for commands that run a browser; unset it to run without containment. `chat` no longer lets the model answer `confirm` or `deny` (#2683)
+- **MCP tool arguments** can no longer be read as global CLI flags, and flag-shaped values in fields that are not passed literally are refused (#2681)
+- **Saved flow replay** sends only each command's interaction fields and runs under the current session's settings, plugins, and policy (#2607)
+- **Daemon warnings** travel out of band, so page-controlled JSON can no longer forge `postActionWarning` or `sessionSetupWarning` (#2693)
+- **Session lock files** are created owner-only on Unix (#2676)
+
+### Bug Fixes
+
+- Fixed **clicks on elements at the viewport edge or that reflow** missing while reporting success. Clicks, hover, and tap now scroll the point into view, wait for layout to settle, and press the settled point (#2587)
+- Fixed **ref clicks inside nested and cross-origin frames** landing on the parent page. The press is verified to reach the ref, an element it activates, or a frame it embeds (#2611)
+- Fixed **refs lost after a failed snapshot**. Snapshot, snapshot diff, and annotated screenshots replace refs only on success (#2666)
+- Fixed **session setup lost on relaunch**. Viewport, user agent, media, timezone, locale, geolocation, headers, offline mode, and init scripts carry across a relaunch and apply to new tabs and windows, and `set device` mobile presets enable touch emulation (#2686)
+- Fixed **`select` on custom ARIA comboboxes and listboxes** such as Radix and Headless UI, which reported success without changing anything (#2592)
+- Fixed **env and config connection targets** replacing a browser attached with `connect`. `AGENT_BROWSER_CDP`, `AGENT_BROWSER_PROVIDER`, `AGENT_BROWSER_AUTO_CONNECT`, and their config keys now apply only to a session with no target, and CDP headers are bound to their endpoint (#2642)
+- Fixed **two concurrent first commands** spawning two daemons for one session (#2648)
+- Fixed **direct-page providers** dropping page events, which left logs empty and recordings unable to finish (#2445)
+- Fixed **WebMCP on Chrome 157 and later**, and cross-origin iframes timing out under `--allowed-domains` on Chrome 157 (#2700)
+- Fixed **temporary Chrome profiles** left behind by killed daemons. Each launch removes profiles older than two hours whose Chrome is gone (#2586)
+- Fixed **installs under Volta** leaving a dangling global link, and failed fallback downloads leaving a 0-byte binary (#2675)
+- Fixed **pin-tab** taking two paths that could disagree; it now travels only through the settings patch (#2643)
+
+### Documentation
+
+- Launched the **agent-browser.dev homepage** with a Browser/Desktop switcher. The docs introduction moved to `/introduction` (#2411, #2625, #2626, #2638, #2658, #2659, #2717, #2718, #2719)
+
+### Contributors
+
+- @FredAmartey
+- @HoneyTyagii
+- @Mohammad-Maraqa
+- @Raed2180416
+- @Railly
+- @ZhYGuoL
+- @Zhao0335
+- @cavalcanticampos
+- @ctate
+- @danted4
+- @dwin-gharibi
+- @hassnalalshaikh
+- @holny
+- @hyunjinee
+- @jamesvclements
+- @jpelaez-23blocks
+- @kevingatera
+- @lahfir
+- @linzch3
+- @luxleader
+- @on101094
+- @riesvriend
+- @shtefcs
+- @swjtuhuangjunfu
+- @xunguangzlj-cloud
+- @yavorpunchev
+
+## 0.43.0
+
+### New Features
+
+- Added **snapshot hints** for controls whose accessible name is empty or shared with another ref in the same snapshot. The hint follows the ref and lists the control's icon, image file, `data-testid`, `name` or `id`, and the text of the nearest row or list item (#2578)
+- Added a **Modern Web Guidance skill** that retrieves Chrome's guidance for a task and checks the built page in agent-browser (#2577)
+
+### Bug Fixes
+
+- Fixed **commands on closed tabs** waiting for the timeout. A command whose tab closes before Chrome answers now fails with `Target closed: CDP session <id> detached` (#2576)
+- Fixed **recordings with an emulated device scale**, which now capture at full density by switching to screenshots when a screencast frame is below the page's scale (#2572)
+
+### Improvements
+
+- Native binaries now ship as **per-platform packages**, so an install downloads only the binary for the host platform, and the global command links to it when install scripts are blocked (#2150)
+- **Snapshots of large pages** parse the accessibility tree once, so they finish sooner (#2509)
+
+### Documentation
+
+- Added a **Modern Web Guidance** guide to the docs (#2546, #2573, #2575)
+
+### Contributors
+
+- @ctate
+- @lahfir
+- @shuding
+
+## 0.42.0
+
+### New Features
+
+- Added **saved flows** (experimental): record a browser task once, then replay its requests. A run tries direct HTTP first, then the same request from the page, then a replay of the recorded commands, and saves the tier that worked. Runs send requests only to public addresses, and saving waits for in-flight requests and follows redirects to the end (#2236, #2397, #2432, #2433, #2444)
+- **MCP tools** now list only the shared arguments each tool uses (#2311)
+
+### Bug Fixes
+
+- Fixed **session reuse and relaunch**, now decided in one place in the daemon. A connection target is kept only after an attach succeeds, and security settings persist across daemon restarts (#2396, #2418, #2429)
+- Fixed **Safari and iOS WebDriver sessions** being dropped (#2385)
+- Fixed **fill and type** altering literal text, and **mouse and element coordinates** losing fractional values (#2394, #2393)
+- Fixed **percent-encoded proxy credentials** not being decoded (#2389)
+- Fixed **downloads** moving local files from an attached Chrome (#2392)
+- Fixed **MCP tool results** that repeated JSON stdout (#2390)
+- Fixed **unknown commands and cookie operations**, now rejected, and **misplaced global options** in batch commands (#2383, #2386)
+- Fixed **errors output** to print page error text, and labeled `storage clear` as storage rather than the request log (#2427, #2428)
+- Fixed **macOS Chrome discovery** for apps installed in the user's Applications folder (#2388)
+- Fixed **Windows recording** opening ffmpeg console windows (#2382)
+- Skipped a repeat `Browser.getVersion` call after the outdated-browser check (#2420)
+
+### Improvements
+
+- The **core skill** now tells agents to prefer snapshots: screenshot only when asked or for content the DOM cannot represent, and wait and snapshot again when an expected element is missing (#2453, #2461)
+- The package now declares a **Node 22 minimum** and drops `engines.pnpm` (#2404)
+- Docs and dashboard chat use **openai/gpt-6-luna-fast** (#2440)
+- Upgraded the repository to **TypeScript 7**
+
+### Contributors
+
+- @Railly
+- @ctate
+- @lahfir
+
+## 0.41.2
+
+
+### New Features
+
+- Added **targeted skill references** with `skills get <name> --ref <ref>` and the MCP `agent_browser_skills_get` tool's `refs` argument, so agents can load one reference or template at a time (#2310)
+- Added **Chrome security warnings** when newer stable releases list CVE fixes, without blocking commands. Set `AGENT_BROWSER_NO_VERSION_CHECK=1` to skip the check (#2309)
+
+### Bug Fixes
+
+- Fixed **session restarts** when commands omit or change timeout settings, preserving open pages and reusing the running daemon's default timeout for waits (#2288)
+- Fixed **bare `open`** dropping configured profiles and browser arguments and relaunching Chrome with a temporary profile (#2287)
+- Fixed **browserless commands** starting a browser when launch options are set in the environment (#2309)
+- Fixed **Windows home directory detection** to respect `USERPROFILE`, and kept the MCP tool catalog's line endings consistent for Windows tests (#2305)
+
+### Improvements
+
+- Slimmed **the core agent skill** and routed detailed guidance to references, with instructions to pass `--session` on every command (#2303, #2312)
+
+### Documentation
+
+- Simplified **the README**, moved detailed guidance to the docs site, and corrected source build instructions (#2302)
+
+### Contributors
+
+- @Railly
+- @ctate
+- @fahimscirex
+- @holny
+- @lahfir
+- @zyz619963502zyz
+
+
+## 0.41.1
+
+### Bug Fixes
+
+- Fixed **cookie attributes** so `cookies set` honors `--http-only` and `--same-site`, preserves the existing aliases, and rejects unknown arguments (#2256)
+- Fixed **page error clearing** so `errors --clear` removes captured errors (#2253)
+- Fixed **MCP selector waits** so bare integer selectors return an error instead of becoming timed waits (#2254)
+- Fixed **plugin error redaction** so sensitive operations omit unsupported protocol values (#2255)
+- Fixed **invalid limit handling** so overflowing idle timeouts and invalid output limits produce warnings instead of overflowing or being silently ignored (#2250, #2258)
+- Removed **unpinned npx execution permission** from the installed agent skill (#2249)
+
+### Documentation
+
+- Documented **stdin MCP connections** that reuse one server process in Vercel Sandbox (#2248)
+- Configured **desktop documentation routes** and the desktop sitemap for the docs site (#2278)
+
+### Contributors
+
+- @Railly
+- @lahfir
+
+
+## 0.41.0
+
+### Breaking Changes
+
+- **`@agent-browser/eve` tools now come from the MCP tool catalog.** The extension exposes the CLI's MCP tools instead of 21 hand-written ones, so tool names and inputs change: `navigate` is `open`, `evaluate` is `eval`, `press_key` is `press`, `select_option` is `select`, `set_checked` is `check` and `uncheck`, `get` is `get_text`, `get_url` and the other `get_*` tools, `tabs` is the `tab_*` tools, and `wait_for` is the `wait_*` tools. The same names apply to `@agent-browser/eve/tools` overrides. The sandbox needs agent-browser 0.41, which the extension installs by default (#2241)
+
+### New Features
+
+- Added **`agent-browser mcp call <tool> '<json>'`** to run one MCP tool without a stdio session and print its result as JSON with the agent-browser version, for runtimes that cannot keep a process open between tool calls (#2238)
+- Added **`@agent-browser/sandbox/mcp-tools.json`**, every MCP tool with its title, description, input schema, annotations and profiles, generated from the CLI and checked by a test (#2240)
+
+### Improvements
+
+- **`@agent-browser/eve` runs each tool as its own short-lived process**, so no `agent-browser` process outlives a tool call. The 28 `core` tools are listed to the model and the other 14 are deferred, found with `eve__search`, which keeps the listed tool context at its previous size (#2241)
+
+### Bug Fixes
+
+- **MCP tool arguments can no longer set global flags.** The CLI reads global flags anywhere in its arguments, so a value such as a selector or `extraArgs` entry could carry its own `--allowed-domains` and override the server or caller allowlist. Tool calls that try are now rejected (#2238)
+
+### Contributors
+
+- @Railly
+- @lahfir
+
+## 0.40.0
+
+
+### Breaking Changes
+
+- **`@agent-browser/eve` now requires eve 0.84.0 or later.** eve 0.84.0 rejects extensions built by earlier releases, so the extension is now built with it. Apps on older eve should stay on `@agent-browser/eve@0.39` (#2226)
+
+### New Features
+
+- Added **one MCP server per Vercel Sandbox** with `startAgentBrowserMcp` in `@agent-browser/sandbox/vercel`, which keeps a single `agent-browser mcp` running over Sandbox stdin, and `connectAgentBrowserMcp` for any runtime that exposes stdin and stdout streams (#2228)
+- Added **`--omit-command`** to `batch` and `omitCommand` to the MCP batch tool, replacing repeated raw command arrays in JSON output with zero-based indexes (#2216)
+
+### Bug Fixes
+
+- Fixed **`state load` and launch-time storage restores** exposing saved tokens to page scripts and writing one origin's storage into another after a redirect; storage is now written through DevTools only while the page is on the saved origin, and skipped origins are reported (#2212)
+- Fixed **`<session>.config` files** piling up in the socket directory after daemons exit (#2128)
+- Fixed **mocked cross-origin responses** failing CORS: `network route --body` now takes `--allow-origin <origin>` (also in the MCP `network_route` tool) to answer preflights and send CORS headers to that origin, and sends a JSON body as `application/json` when no content type is set (#2229)
+- Fixed **Windows sessions** where a dead daemon could keep holding a pinned tab, and where two sessions with the same name in different socket directories could connect to each other's daemon (#2223)
+
+### Contributors
+
+- @OwenKephart
+- @Railly
+- @lahfir
+- @hichipli
+- @jomatsu
+
+
+## 0.39.4
+
+
+### Bug Fixes
+
+- Fixed **`wait --download`** timing out when the download finished before the wait started, and moving the file to the requested path (#2027)
+- Fixed **`--allowed-domains` launches** failing with "Cannot find default execution context" on pages that embed cross-origin iframes (#2116)
+- Fixed **full-page screenshots** on high-DPI displays being twice the page size with the page in the top-left quarter (#2125)
+- Fixed **selector screenshots** being blank for elements outside the first viewport, after scrolling, or inside iframes (#2126)
+- Fixed **unresponsive tabs** permanently breaking a session; a wedged tab now fails with `page_wedged` and, in a launched browser, is replaced after a second timeout (#2100)
+- Fixed **`--pin-tab`** so another session cannot take a pinned tab with `tab <targetId>` (#2135)
+
+### Contributors
+
+- @Railly
+- @WianBroes
+- @justjavac
+- @aamirhullur
+- @zyz619963502zyz
+
+
+## 0.39.3
+
+### Bug Fixes
+
+- Fixed **auth encryption keys** being overwritten when the configured key or existing key file is invalid, preserving access to previously saved credentials (#2178)
+- Fixed **project config trust** so auto-discovered files cannot set executable paths, browser arguments, or plugins; `plugin add` now writes the user config by default (#2180)
+- Fixed **MCP access limits** so tool arguments cannot override the server's network, file, policy, or host access settings (#2181)
+- Fixed **inspect WebSocket origins** so browser connections must come from the local Chrome DevTools origin (#2182)
+- Fixed **stale process cleanup** so daemon restarts, `close --all`, and dashboard shutdown check process identity before sending signals (#2183)
+- Fixed **copied Chrome profiles** so their saved preferences mark the copy as cleanly closed, avoiding repeated crash-restore prompts while retaining saved tabs (#2189)
+- Fixed **dashboard chat sessions** so commands stay in their thread's session, background turns remain attached to that session, and closed sessions stop their chat (#2190)
+- Fixed **Windows output capture** so detached daemons and dashboards do not hold the CLI's output pipes open, and MCP output draining is bounded after child exit (#2160)
+
+### Improvements
+
+- Improved **CDP startup attachment** so `connect` and `--cdp` wait up to two seconds for a debugging port that is still refusing connections (#2159)
+
+### Contributors
+
+- @lahfir
+- @holny
+- @pei711
+- @Muhtasham
+- @BetterAndBetterII
+- @dwin-gharibi
+
+## 0.39.2
+
+### Bug Fixes
+
+- Fixed **paused network requests** being lost when the CDP event receiver falls behind, preventing requests from remaining stalled (#2110)
+- Fixed **domain-filtered redirects** so `open` reports an error when the main document redirects to a blocked host (#2114)
+- Fixed **Eve compatibility** with the current tool contract and sandbox execution model (#2157)
+- Fixed **browser launch arguments** so commas and negative coordinates inside flag values are preserved in `--args` and `AGENT_BROWSER_ARGS` (#2141)
+- Fixed **MCP argument validation** so undeclared keys return an error instead of silently selecting default behavior (#2175)
+- Fixed **click and double-click targeting** so hidden, disabled, and off-viewport elements return an error instead of reporting success (#2173)
+- Fixed **CDP attachment persistence** so follow-up commands retain the attached browser (#2155)
+- Fixed **stale element references** so ambiguous recovery fails instead of selecting another element (#2145)
+- Fixed **target and session invalidation** when related CDP events arrive in the same batch (#2176)
+- Fixed **policy loading failures** so unreadable or invalid policy files deny actions instead of continuing without the policy (#2179)
+
+### Testing
+
+- Made **native E2E fixtures** independent of live websites and installed the required Obscura binary for engine verification (#2113)
+
+### Contributors
+
+- @Railly
+- @lahfir
+- @cmpadden
+- @holny
+- @KimHyeongRae0
+- @jin-2-kakaoent
+- @asif786ka
+- @tlq5l
+- @aniketsaurav18
+- @jerryfane
+
+## 0.39.1
+
+### Bug Fixes
+
+- Fixed **duplicate command execution after a lost daemon response** so mutating and launch commands are no longer retried after any request bytes have been sent. CLI JSON and MCP responses report `outcome_unknown` so callers can inspect the result before retrying; read-only commands and failures before sending retain their retries (#2085)
+
+### Contributors
+
+- @Railly
+- @rotemb-wond
+
+## 0.39.0
+
+### New Features
+
+- Added an experimental **Obscura engine** (`--engine obscura`), launched and cleaned up locally like Chrome with bounded startup and CLI/MCP support. Obscura still has accessibility and rendering gaps, so review the engine page before choosing it (#1876)
+- Added **private CA trust for CLI HTTPS requests** so `read`, `install`, `upgrade` and `doctor` work behind TLS inspection. `--ca-cert` now applies to them on every platform, the new `--use-system-ca` uses the operating system trust store, and `SSL_CERT_FILE` is a fallback. Certificate verification always stays on (#2006)
+
+### Bug Fixes
+
+- Fixed **selector-scoped snapshots** (`snapshot -s`) so elements under ignored wrappers are no longer printed twice and shadow root content of a selected custom element is no longer dropped (#2043)
+- Fixed **`--auto-connect`** to wait up to 30s while Chrome 144+ shows the remote-debugging prompt, so it no longer opens repeated prompts or fails with "No running Chrome instance found" (#2026)
+- Fixed **daemon responsiveness during long commands** so it keeps accepting connections, including `close`, while a command holds the state lock, and a SIGTERM sent in that window is no longer lost (#2059)
+
+### Documentation
+
+- Migrated the **docs site** to Geistdocs (#1887)
+
+### Contributors
+
+- @NamanSatish
+- @Railly
+- @SGavrl
+- @SUSINDRAREDDY
+- @godtail
+- @jadenfix
+- @niieani
+
+## 0.38.2
+
+### Bug Fixes
+
+- Fixed **auth vault login** to pick usable controls when hidden duplicates exist, and to bind credential entry to the selected field so replaced fields or redirected focus are rejected before submitting (#2014)
+- Fixed **chat mode** to allow `webmcp`, `skills`, and other top-level browser commands, so the model uses page WebMCP tools instead of falling back to `eval` (#2015)
+- Fixed **Kernel profiles** so `KERNEL_PROFILE_NAME` sessions send the profile as an object instead of failing with a 400, and added `KERNEL_PROFILE_SAVE_CHANGES` to opt into saving changes back (#2004)
+- Fixed **Chrome freezing after launch** by draining its stderr for the browser's lifetime, so a full log pipe no longer blocks the browser (#2003)
+- Fixed **Browser Use** by switching to Cloud V4, which creates, attaches to, and stops the same browser with bounded timeouts (#1879)
+- Fixed **Vercel Sandbox shared memory detection** by measuring `/dev/shm` capacity and adding `--disable-dev-shm-usage` below 256 MiB, so Chrome no longer terminates renderers on the undersized mount (#1890)
+
+### Improvements
+
+- Upgraded the **eve integration** from eve 0.47.3 to 0.57.0, so apps on eve 0.50 and later build again (#1945)
+
+### Documentation
+
+- Updated the **contact sheet example** with the loading-flash demo output (#1871)
+
+### Contributors
+
+- @Railly
+- @benjamincanac
+- @boatri
+- @luxleader
+- @petehunt
+- @robertjamesprior
+- @simonellefsen
+- @zyz619963502zyz
+
+## 0.38.1
+
 ### Bug Fixes
 
 - Fixed **recording cursor and mouse movement timing** so cursor rendering stays synchronized with page content during drags and timed mouse moves (#1869)
@@ -15,7 +463,6 @@
 
 - @ctate
 - @Railly
-<!-- release:end -->
 
 ## 0.38.0
 

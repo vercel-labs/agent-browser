@@ -96,6 +96,15 @@ pub struct CdpEvent {
     pub session_id: Option<String>,
 }
 
+/// Match direct-page events without allowing an unattached browser to consume them.
+pub fn session_matches(active_session: Option<&str>, event_session: Option<&str>) -> bool {
+    match active_session {
+        Some("") => event_session.is_none_or(str::is_empty),
+        Some(active) => event_session == Some(active),
+        None => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Target domain
 // ---------------------------------------------------------------------------
@@ -137,10 +146,14 @@ pub struct SetDiscoverTargetsParams {
     pub discover: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTargetParams {
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -406,8 +419,6 @@ pub struct BoxModel {
     pub padding: Vec<f64>,
     pub border: Vec<f64>,
     pub margin: Vec<f64>,
-    pub width: i64,
-    pub height: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -484,12 +495,16 @@ pub struct DispatchKeyEventParams {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unmodified_text: Option<String>,
+    /// There is deliberately no `nativeVirtualKeyCode`: Chrome reads it as a
+    /// platform-native code, so a Windows VK code there maps to a different
+    /// key on macOS (Escape 27 becomes Minus) and floods the page with
+    /// keydowns. `windowsVirtualKeyCode` alone works on every platform.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub windows_virtual_key_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub native_virtual_key_code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub modifiers: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -583,4 +598,31 @@ pub struct BrowserVersionInfo {
 #[allow(clippy::upper_case_acronyms)]
 pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/cdp_generated.rs"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_target_params_send_only_what_is_set() {
+        let plain = CreateTargetParams {
+            url: "about:blank".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"url":"about:blank"}"#
+        );
+
+        let hidden = CreateTargetParams {
+            url: "about:blank".to_string(),
+            background: Some(true),
+            hidden: Some(true),
+        };
+        assert_eq!(
+            serde_json::to_string(&hidden).unwrap(),
+            r#"{"url":"about:blank","background":true,"hidden":true}"#
+        );
+    }
 }

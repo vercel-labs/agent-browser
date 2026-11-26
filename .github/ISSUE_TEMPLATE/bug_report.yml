@@ -1,0 +1,48 @@
+name: Bug Report
+description: Report a reproducible bug in agent-browser
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug report. Please search existing issues first to avoid duplicates.
+        Feature requests and questions go in [Discussions](https://github.com/vercel-labs/agent-browser/discussions).
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Which version of agent-browser are you using?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps or a minimal reproduction that reliably triggers the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include error messages and logs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, runtime version (e.g. Node.js), and anything else relevant.
+    validations:
+      required: false

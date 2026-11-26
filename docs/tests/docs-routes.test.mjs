@@ -1,0 +1,1069 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  fixturePages,
+  publicPages,
+  currentResources,
+  origin,
+  hash,
+  canonical,
+  markdownPath,
+  docsCanonical,
+  docsMarkdownPath,
+  apiPath,
+  text,
+  normalize,
+  decode,
+  tags,
+  meta,
+  renderedHeadings,
+  get,
+  rawGet,
+  responseType,
+  representationHeaders,
+  indexing,
+  assertContainsLines,
+  assertModernMarkdown,
+  assertHomeMarkdown,
+  assertLegacyMarkdown,
+  absoluteDestination,
+  imageSourceUrls,
+  assertOriginalResource,
+  assertUntrackedHtml,
+} from "./helpers.mjs";
+
+assert.ok(
+  process.env.DOCS_TEST_URL,
+  "Run node scripts/test-routes.mjs after a production build",
+);
+const noindex = process.env.DOCS_EXPECT_NOINDEX === "1";
+const query = "?utm_source=route-test&value=a%2Fb&value=two";
+const agent = { "user-agent": "ClaudeBot/1.0", accept: "text/markdown" };
+const pageAt = (path) => publicPages.find((page) => page.path === path);
+const legacyPath = (path) =>
+  `/api/docs-markdown?path=${encodeURIComponent(path)}`;
+const homeOgVideo = `${origin}/landing/home-og-c3c73ab9.mp4`;
+const htmlCache = new Map();
+async function htmlFor(page) {
+  if (!htmlCache.has(page.path))
+    htmlCache.set(
+      page.path,
+      (async () => {
+        const response = await get(page.path);
+        responseType(response, "text/html");
+        representationHeaders(response);
+        const html = await response.text();
+        indexing(response, html);
+        return html;
+      })(),
+    );
+  return htmlCache.get(page.path);
+}
+
+for (const page of publicPages) {
+  test(`${page.path}: original title, description, OG and Twitter metadata plus canonical links`, async () => {
+    const html = await htmlFor(page);
+    assert.deepEqual(
+      [...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/gi)].map((match) =>
+        text(match[1]),
+      ),
+      [page.title],
+    );
+    assert.deepEqual(meta(html, "description"), [page.description]);
+    assert.deepEqual(
+      tags(html, "html").map((tag) => tag.lang),
+      ["en"],
+    );
+    const og =
+      page.path === "/"
+        ? {
+            image: "/landing/home-og.png",
+            width: "2400",
+            height: "1256",
+            alt: "Browser automation for any agent",
+          }
+        : {
+            image: `/og${page.path}`,
+            width: "1200",
+            height: "630",
+            alt: page.ogAlt,
+          };
+    for (const [key, expected] of Object.entries({
+      "og:title": page.ogTitle,
+      "og:description": page.ogDescription,
+      "og:url": canonical(page.path),
+      "og:type": "website",
+      "og:site_name": "agent-browser",
+      "og:locale": "en_US",
+      "og:image:width": og.width,
+      "og:image:height": og.height,
+      "og:image:alt": og.alt,
+      "twitter:card": "summary_large_image",
+      "twitter:title": page.twitterTitle,
+      "twitter:description": page.description,
+    }))
+      assert.deepEqual(meta(html, key), [expected], `${page.path}: ${key}`);
+    const ogImage = new URL(meta(html, "og:image")[0], origin);
+    assert.equal(ogImage.origin, origin, `${page.path}: og:image origin`);
+    assert.equal(ogImage.pathname, og.image, `${page.path}: og:image path`);
+    assert.match(
+      ogImage.searchParams.get("v") ?? "",
+      /^[0-9a-f]{8}$/,
+      `${page.path}: og:image version`,
+    );
+    assert.deepEqual(
+      meta(html, "twitter:image"),
+      [ogImage.href],
+      `${page.path}: twitter:image`,
+    );
+    const video =
+      page.path === "/"
+        ? {
+            "og:video": [homeOgVideo],
+            "og:video:secure_url": [homeOgVideo],
+            "og:video:type": ["video/mp4"],
+            "og:video:width": ["1200"],
+            "og:video:height": ["848"],
+          }
+        : {
+            "og:video": [],
+            "og:video:secure_url": [],
+            "og:video:type": [],
+            "og:video:width": [],
+            "og:video:height": [],
+          };
+    for (const [key, expected] of Object.entries(video))
+      assert.deepEqual(meta(html, key), expected, `${page.path}: ${key}`);
+    assert.deepEqual(
+      tags(html, "link")
+        .filter((tag) => tag.rel === "canonical")
+        .map((tag) => tag.href),
+      [canonical(page.path)],
+    );
+    assert.deepEqual(
+      tags(html, "link")
+        .filter(
+          (tag) => tag.rel === "alternate" && tag.type === "text/markdown",
+        )
+        .map((tag) => tag.href),
+      [`${origin}${markdownPath(page.path)}`],
+    );
+  });
+}
+
+for (const page of fixturePages) {
+  test(`${page.path}: original prose, every table cell, code example and link are server rendered`, async () => {
+    // The introduction lives at /introduction after the homepage split.
+    const html = page.path === "/" ? await (await get("/introduction")).text() : await htmlFor(page);
+    assert.equal(tags(html, "main").length, 1);
+    const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
+    assert.ok(
+      main,
+      "content must be in main, not only serialized in Flight scripts",
+    );
+    const visible = text(main);
+    for (const sample of page.content)
+      assert.ok(
+        visible.includes(normalize(sample)),
+        `${page.path}: SSR lost ${JSON.stringify(sample)}`,
+      );
+    const hrefs = new Set(
+      tags(main, "a")
+        .filter((tag) => typeof tag.href === "string")
+        .map((tag) => absoluteDestination(tag.href, page.path)),
+    );
+    for (const link of page.links.filter((link) => link.type === "link"))
+      assert.ok(
+        hrefs.has(absoluteDestination(link.url, page.path)),
+        `${page.path}: lost link destination ${link.url}`,
+      );
+    for (const image of page.links.filter((link) => link.type === "image")) {
+      const rendered = tags(main, "img").filter(
+        (tag) => tag.alt === image.text,
+      );
+      assert.equal(
+        rendered.length,
+        1,
+        `${page.path}: expected original image alt ${image.text}`,
+      );
+      const resource = currentResources.find(
+        (entry) =>
+          absoluteDestination(entry.path, page.path) ===
+          absoluteDestination(image.url, page.path),
+      );
+      assert.ok(
+        resource,
+        `${page.path}: missing original resource fixture for ${image.url}`,
+      );
+      for (const source of imageSourceUrls(rendered[0], page.path)) {
+        const url = new URL(source);
+        const response = await get(`${url.pathname}${url.search}`, {
+          headers: agent,
+        });
+        assert.equal(response.status, 200, source);
+        assert.match(response.headers.get("content-type") ?? "", /^image\//);
+        assertOriginalResource(
+          Buffer.from(await response.arrayBuffer()),
+          resource,
+        );
+      }
+    }
+  });
+
+  test(`${page.path}: API, .md and negotiated Markdown serve the original content`, async () => {
+    const bodies = [];
+    for (const [path, headers] of [
+      [apiPath(page.path), {}],
+      [markdownPath(page.path), {}],
+      [page.path, { accept: "text/markdown" }],
+    ]) {
+      const response = await get(path, { headers });
+      responseType(response, "text/markdown");
+      representationHeaders(response);
+      indexing(response);
+      assert.equal(
+        response.headers.get("link"),
+        `<${canonical(page.path)}>; rel="canonical"`,
+      );
+      const body = await response.text();
+      if (page.path === "/") assertHomeMarkdown(body);
+      else assertModernMarkdown(body, page);
+      bodies.push(body);
+    }
+    assert.equal(bodies[0], bodies[1]);
+    assert.equal(bodies[1], bodies[2]);
+  });
+
+  test(`${page.path}: legacy ?path= API serves the original bare Markdown`, async () => {
+    const response = await get(legacyPath(page.path));
+    responseType(response, "text/markdown");
+    representationHeaders(response);
+    indexing(response);
+    assertLegacyMarkdown(await response.text(), page);
+  });
+}
+
+for (const page of publicPages) {
+  test(`${page.path}: HEAD preserves all five representations without a response body`, async () => {
+    for (const [path, headers, type] of [
+      [page.path, {}, "text/html"],
+      [apiPath(page.path), {}, "text/markdown"],
+      [markdownPath(page.path), {}, "text/markdown"],
+      [page.path, { accept: "text/markdown" }, "text/markdown"],
+      [legacyPath(page.path), {}, "text/markdown"],
+    ]) {
+      const response = await get(path, { method: "HEAD", headers });
+      responseType(response, type);
+      representationHeaders(response);
+      indexing(response);
+      assert.equal(await response.text(), "");
+      if (type === "text/markdown" && !path.startsWith("/api/docs-markdown?"))
+        assert.equal(
+          response.headers.get("link"),
+          `<${canonical(page.path)}>; rel="canonical"`,
+        );
+    }
+  });
+}
+
+test("docs introduction keeps its own Markdown route after the homepage split", async () => {
+  const bodies = [];
+  for (const [path, headers] of [
+    ["/api/docs-md/introduction", {}],
+    ["/introduction.md", {}],
+    ["/introduction", { accept: "text/markdown" }],
+  ]) {
+    const response = await get(path, { headers });
+    responseType(response, "text/markdown");
+    representationHeaders(response);
+    assert.equal(
+      response.headers.get("link"),
+      `<${origin}/introduction>; rel="canonical"`,
+    );
+    const body = await response.text();
+    assert.ok(
+      body.startsWith(
+        `---\ntitle: "agent-browser"\ndescription: "Browser automation CLI for AI agents"\ncanonical_url: "${origin}/introduction"\n---\n\n`,
+      ),
+      `${path}: docs canonical frontmatter`,
+    );
+    assertContainsLines(
+      body,
+      pageAt("/").modernMarkdown,
+      `${path}: docs introduction`,
+    );
+    bodies.push(body);
+  }
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(bodies[1], bodies[2]);
+
+  const html = await (await get("/introduction")).text();
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "canonical")
+      .map((tag) => tag.href),
+    [`${origin}/introduction`],
+  );
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "alternate" && tag.type === "text/markdown")
+      .map((tag) => tag.href),
+    [`${origin}/introduction.md`],
+  );
+  for (const id of [
+    "features",
+    "works-with",
+    "example",
+    "why-refs",
+    "architecture",
+    "platforms",
+  ])
+    assert.ok(html.includes(`id="${id}"`), `introduction lost #${id}`);
+});
+
+for (const [name, headers, type] of [
+  [
+    "q=0 excludes Markdown",
+    { accept: "text/markdown;q=0, text/html" },
+    "text/html",
+  ],
+  [
+    "HTML has higher quality",
+    { accept: "text/markdown;q=0.5, text/html;q=1" },
+    "text/html",
+  ],
+  [
+    "Markdown has higher quality",
+    { accept: "text/html;q=0.5, text/markdown;q=1" },
+    "text/markdown",
+  ],
+  ["ordinary wildcard", { accept: "*/*" }, "text/html"],
+  ...[
+    "Slackbot-LinkExpanding 1.0",
+    "Discordbot/2.0",
+    "Googlebot/2.1",
+    "Twitterbot/1.0",
+  ].map((ua) => [ua, { "user-agent": ua, accept: "*/*" }, "text/html"]),
+  [
+    "ClaudeBot",
+    { "user-agent": "ClaudeBot/1.0", accept: "*/*" },
+    "text/markdown",
+  ],
+  [
+    "browser navigation beats agent detection",
+    {
+      "user-agent": "ClaudeBot/1.0",
+      accept: "*/*",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-dest": "document",
+    },
+    "text/html",
+  ],
+  [
+    "explicit Markdown still works during navigation",
+    { ...agent, "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+    "text/markdown",
+  ],
+  ...[
+    "next-router-prefetch",
+    "next-router-segment-prefetch",
+    "purpose",
+    "sec-purpose",
+  ].map((header) => [
+    `${header} bypasses Markdown`,
+    {
+      ...agent,
+      [header]:
+        header === "next-router-segment-prefetch"
+          ? "/_tree"
+          : header.startsWith("next-")
+            ? "1"
+            : "prefetch",
+    },
+    "text/html",
+  ]),
+  ["agent RSC stays Flight", { ...agent, rsc: "1" }, "text/x-component"],
+  [
+    "ordinary RSC stays Flight",
+    { accept: "text/html", rsc: "1" },
+    "text/x-component",
+  ],
+]) {
+  test(`negotiation: ${name}`, async () => {
+    const path = type === "text/x-component" ? "/commands?_rsc" : "/commands";
+    const response = await rawGet(path, headers);
+    responseType(response, type);
+    representationHeaders(response);
+    indexing(response);
+    const body = await response.text();
+    if (type === "text/html") {
+      assert.equal(tags(body, "html").length, 1);
+      assert.deepEqual(meta(body, "og:title"), [pageAt("/commands").ogTitle]);
+    }
+    if (type === "text/markdown")
+      assertModernMarkdown(body, pageAt("/commands"));
+    if (type === "text/x-component") {
+      assert.ok(body.length > 0);
+      assert.ok(!body.startsWith("---\n") && !body.includes("<!DOCTYPE html>"));
+      assert.match(body, /(?:^|\n)[0-9a-f]+:/i);
+    }
+  });
+}
+
+test("invalid RSC cachebusters redirect to the valid Flight URL without changing representation", async () => {
+  for (const headers of [
+    { ...agent, rsc: "1" },
+    { accept: "text/html", rsc: "1" },
+  ]) {
+    const response = await rawGet("/commands?_rsc=regression", headers);
+    assert.equal(response.status, 307);
+    representationHeaders(response);
+    indexing(response);
+    assert.equal(response.headers.get("location"), "/commands?_rsc");
+    assert.equal(await response.text(), "");
+    const destination = await rawGet(response.headers.get("location"), headers);
+    responseType(destination, "text/x-component");
+    representationHeaders(destination);
+    indexing(destination);
+    const body = await destination.text();
+    assert.match(body, /(?:^|\n)[0-9a-f]+:/i);
+    assert.ok(!body.startsWith("---\n") && !body.includes("<!DOCTYPE html>"));
+  }
+});
+
+test("alternating representations and queries never contaminate one another", async () => {
+  for (const path of ["/", "/commands", "/providers/browserbase"]) {
+    const page = pageAt(path);
+    const untracked = await htmlFor(page);
+    for (const accept of [
+      "text/markdown",
+      "text/html",
+      "text/markdown",
+      "text/html",
+    ]) {
+      const response = await get(`${path}${query}`, { headers: { accept } });
+      responseType(response, accept);
+      representationHeaders(response);
+      const body = await response.text();
+      if (accept === "text/markdown") {
+        if (path === "/") assertHomeMarkdown(body);
+        else assertModernMarkdown(body, page);
+        assert.ok(
+          !body.includes("utm_source") && !body.includes("route-test"),
+          "tracking must not leak into Markdown",
+        );
+      } else {
+        assertUntrackedHtml(body, page);
+        assert.equal(
+          text(body),
+          text(untracked),
+          `${path}: queries must not change visible page content`,
+        );
+        assert.deepEqual(
+          tags(body, "meta"),
+          tags(untracked, "meta"),
+          `${path}: queries must not change metadata`,
+        );
+        assert.deepEqual(
+          tags(body, "link"),
+          tags(untracked, "link"),
+          `${path}: queries must not change document links`,
+        );
+      }
+    }
+  }
+});
+
+for (const page of publicPages) {
+  test(`${page.path}: locale alias is a permanent query-preserving, cookie-free redirect`, async () => {
+    for (const suffix of ["", ".md"]) {
+      const target = suffix ? markdownPath(page.path) : page.path;
+      const path = suffix
+        ? `/en${target}`
+        : `/en${page.path === "/" ? "" : page.path}`;
+      const response = await get(`${path}${query}`);
+      assert.equal(response.status, 308, path);
+      representationHeaders(response);
+      const location = new URL(
+        response.headers.get("location"),
+        process.env.DOCS_TEST_URL,
+      );
+      assert.equal(location.origin, new URL(process.env.DOCS_TEST_URL).origin);
+      assert.equal(location.pathname, target);
+      assert.equal(location.search, query);
+      assert.equal(location.hash, "");
+      await response.body?.cancel();
+    }
+  });
+}
+
+test("trailing slashes keep permanent public paths and query strings", async () => {
+  for (const page of publicPages.filter((page) => page.path !== "/")) {
+    const response = await get(`${page.path}/${query}`);
+    assert.equal(response.status, 308, page.path);
+    assert.equal(response.headers.get("set-cookie"), null);
+    const location = new URL(
+      response.headers.get("location"),
+      process.env.DOCS_TEST_URL,
+    );
+    assert.equal(location.pathname, page.path);
+    assert.equal(location.search, query);
+    await response.body?.cancel();
+  }
+});
+
+for (const path of [
+  "/missing-page",
+  "/docs",
+  "/introduction/commands",
+  "/fr/commands",
+  "/providers/missing",
+  "/engines/missing",
+]) {
+  for (const [name, url, headers, type] of [
+    ["HTML", path, {}, "text/html"],
+    ["explicit Markdown", `${path}.md`, {}, "text/markdown"],
+    ["negotiated Markdown", path, { accept: "text/markdown" }, "text/markdown"],
+    ["API Markdown", `/api/docs-md${path}`, {}, "text/markdown"],
+  ]) {
+    test(`404 ${name}: ${url}`, async () => {
+      const response = await get(url, { headers });
+      responseType(response, type, 404);
+      representationHeaders(response);
+      const body = await response.text();
+      indexing(response, type === "text/html" ? body : undefined, true);
+      if (type === "text/markdown") {
+        assert.match(body, /not found/i);
+        assert.ok(body.includes("/sitemap.md") && body.includes("/llms.txt"));
+      } else assert.match(text(body), /not found/i);
+      const head = await get(url, { method: "HEAD", headers });
+      responseType(head, type, 404);
+      representationHeaders(head);
+      indexing(head, undefined, true);
+      assert.equal(await head.text(), "");
+    });
+  }
+}
+
+for (const path of [
+  "/%",
+  "/%25",
+  "/%2F",
+  "/%5C",
+  "/commands%2Fmissing",
+  "/%252F",
+  "/%E0%A4%A",
+  "/%C0%AF",
+  "/%00",
+  "/%7F",
+]) {
+  for (const [name, url, headers] of [
+    ["HTML", path, {}],
+    ["explicit Markdown", `${path}.md`, {}],
+    ["negotiated Markdown", path, { accept: "text/markdown" }],
+    ["API Markdown", `/api/docs-md${path}`, {}],
+  ]) {
+    test(`malformed path is a real 404, never a decoding 500: ${name} ${url}`, async () => {
+      const response = await rawGet(url, headers);
+      assert.equal(response.status, 404, url);
+      representationHeaders(response);
+      indexing(response, undefined, true);
+      assert.ok(!response.headers.has("location"));
+      const body = await response.text();
+      assert.ok(!/URIError|Internal Server Error/.test(body));
+    });
+  }
+}
+
+test("legacy Markdown handles required, missing, unknown and normalized path parameters", async () => {
+  for (const path of ["/api/docs-markdown", "/api/docs-markdown?path="]) {
+    const response = await get(path);
+    responseType(response, "application/json", 400);
+    assert.deepEqual(await response.json(), {
+      error: "Missing ?path= parameter",
+    });
+  }
+  for (const path of ["/not-a-page", "/commands.md", "/fr/commands"]) {
+    const response = await get(legacyPath(path));
+    responseType(response, "application/json", 404);
+    assert.deepEqual(await response.json(), { error: "Page not found" });
+  }
+  for (const path of [
+    "commands",
+    "/commands/",
+    "providers/browserbase",
+    "/providers/browserbase/",
+  ]) {
+    const response = await get(legacyPath(path));
+    responseType(response, "text/markdown");
+    const canonicalPath = `/${path.replace(/^\//, "").replace(/\/$/, "")}`;
+    assertLegacyMarkdown(await response.text(), pageAt(canonicalPath));
+  }
+  const duplicate = await get(
+    "/api/docs-markdown?path=%2Fcommands&path=%2Fmissing",
+  );
+  responseType(duplicate, "text/markdown");
+  // First path parameter wins, matching original URLSearchParams.get.
+  assertLegacyMarkdown(await duplicate.text(), pageAt("/commands"));
+});
+
+test("legacy Markdown never resolves traversal or malformed path values to unrelated pages", async () => {
+  for (const path of [
+    "/../commands",
+    "/commands/../../package",
+    "/commands\\missing",
+    "/commands\u0000",
+    "/%2f",
+    "/%",
+    "/%E0%A4%A",
+  ]) {
+    const response = await get(legacyPath(path));
+    assert.ok(
+      [400, 404].includes(response.status),
+      `${path}: must reject unsafe input, got ${response.status}`,
+    );
+    assert.equal(
+      response.headers.get("content-type")?.split(";")[0],
+      "application/json",
+    );
+    const body = await response.json();
+    assert.equal(typeof body.error, "string");
+    assert.ok(body.error.length > 0);
+  }
+});
+
+test("WebMCP search results use Features without changing the public URL", async () => {
+  const legacy = await get("/api/search?q=webmcp");
+  responseType(legacy, "application/json");
+  const { results } = await legacy.json();
+  const matches = results.filter((result) => result.href === "/webmcp");
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].section, "Features");
+  const native = await get("/api/search?query=webmcp&locale=en");
+  responseType(native, "application/json");
+  const nativeMatches = (await native.json()).filter(
+    (result) => result.type === "page" && result.url === "/webmcp",
+  );
+  assert.equal(nativeMatches.length, 1);
+  assert.ok(nativeMatches[0].breadcrumbs.includes("Features"));
+  assert.ok(!nativeMatches[0].breadcrumbs.includes("Reference"));
+});
+
+for (const page of fixturePages.filter(
+  (page) =>
+    ["Providers", "Engines"].includes(page.navigation.section) ||
+    page.path === "/changelog",
+)) {
+  test(`native search preserves original section breadcrumbs for ${page.path}`, async () => {
+    const response = await get(
+      `/api/search?query=${encodeURIComponent(page.navigation.title)}&locale=en`,
+    );
+    responseType(response, "application/json");
+    const matches = (await response.json()).filter(
+      (result) => result.type === "page" && result.url === page.path,
+    );
+    assert.equal(matches.length, 1);
+    assert.deepEqual(
+      matches[0].breadcrumbs,
+      ["Docs", page.navigation.section].filter(Boolean),
+    );
+  });
+}
+
+for (const probe of [
+  {
+    query: "restoreCheckFn",
+    path: "/configuration",
+    fragment: "all-options",
+    text: "restoreCheckFn",
+    kind: "HTML table code cell",
+  },
+  {
+    query: "libx264",
+    path: "/recording",
+    fragment: "requirements",
+    text: "libx264",
+    kind: "nested inline code in prose",
+  },
+  {
+    query: "unintended visual changes",
+    path: "/diffing",
+    fragment: "visual-regression-testing",
+    text: "unintended visual changes",
+    kind: "nested H3 section",
+  },
+]) {
+  test(`native search indexes ${probe.kind} with addressable content fragments`, async () => {
+    const page = pageAt(probe.path);
+    assert.ok(
+      page.modernMarkdown.includes(probe.text),
+      "query evidence must exist in original source",
+    );
+    assert.ok(
+      page.headings.some((heading) => heading.id === probe.fragment),
+      "fragment must come from the original slugger",
+    );
+    const response = await get(
+      `/api/search?query=${encodeURIComponent(probe.query)}&locale=en`,
+    );
+    responseType(response, "application/json");
+    const results = await response.json();
+    assert.ok(
+      Array.isArray(results),
+      "native query= contract is a Fumadocs result array",
+    );
+    assert.ok(
+      results.some(
+        (result) =>
+          result.type === "text" &&
+          result.url === `${probe.path}#${probe.fragment}` &&
+          result.content.includes(probe.text),
+      ),
+      JSON.stringify(results),
+    );
+    for (const result of results) {
+      assert.equal(typeof result.id, "string");
+      assert.equal(typeof result.content, "string");
+      assert.ok(["page", "heading", "text"].includes(result.type));
+      const target = new URL(result.url, origin);
+      assert.equal(target.origin, origin);
+      const destination = pageAt(target.pathname);
+      assert.ok(destination, `search leaked non-public route ${result.url}`);
+      if (target.hash) {
+        const html = await htmlFor(destination);
+        assert.ok(
+          [...html.matchAll(/\sid="([^"]*)"/g)].some(
+            (match) =>
+              decode(match[1]) === decodeURIComponent(target.hash.slice(1)),
+          ),
+          `search returned missing fragment ${result.url}`,
+        );
+      }
+    }
+  });
+}
+
+test("native search empty and unmatched queries return arrays, not legacy objects", async () => {
+  for (const query of ["", "zzzyyy-nonexistent-123456"]) {
+    const response = await get(
+      `/api/search?query=${encodeURIComponent(query)}&locale=en`,
+    );
+    responseType(response, "application/json");
+    assert.deepEqual(await response.json(), []);
+  }
+});
+
+test("Modern Web Guidance page renders its workflows, metadata and Markdown representations", async () => {
+  const path = "/modern-web-guidance";
+  const response = await get(path);
+  responseType(response, "text/html");
+  representationHeaders(response);
+  const html = await response.text();
+  indexing(response, html);
+  assert.deepEqual(
+    [...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/gi)].map((match) =>
+      text(match[1]),
+    ),
+    ["Modern Web Guidance | agent-browser"],
+  );
+  assert.deepEqual(meta(html, "og:url"), [canonical(path)]);
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "canonical")
+      .map((tag) => tag.href),
+    [canonical(path)],
+  );
+  assert.deepEqual(
+    tags(html, "link")
+      .filter((tag) => tag.rel === "alternate" && tag.type === "text/markdown")
+      .map((tag) => tag.href),
+    [`${origin}${markdownPath(path)}`],
+  );
+  const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
+  assert.ok(main, "content must be in main, not only Flight scripts");
+  const visible = text(main);
+  for (const sample of [
+    "Verify a layout-shift fix",
+    "Check a dialog transition with reduced motion",
+    "Check focus and inert behavior of a dialog",
+    "agent-browser vitals",
+    "prefers-reduced-motion",
+  ])
+    assert.ok(visible.includes(normalize(sample)), `SSR lost ${sample}`);
+  const internalLinks = new Set(
+    tags(main, "a")
+      .map((tag) => tag.href)
+      .filter((href) => typeof href === "string" && href.startsWith("/")),
+  );
+  for (const href of ["/react", "/snapshots", "/recording", "/debugging"])
+    assert.ok(internalLinks.has(href), `lost related link ${href}`);
+  for (const href of internalLinks) {
+    const link = await get(href);
+    assert.equal(link.status, 200, href);
+  }
+  const bodies = [];
+  for (const [markdownPathOrRoute, headers] of [
+    [apiPath(path), {}],
+    [markdownPath(path), {}],
+    [path, { accept: "text/markdown" }],
+  ]) {
+    const body = await get(markdownPathOrRoute, { headers });
+    responseType(body, "text/markdown");
+    representationHeaders(body);
+    bodies.push(await body.text());
+  }
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(bodies[1], bodies[2]);
+  assert.ok(bodies[1].includes("## Verify a layout-shift fix"));
+  for (const heading of renderedHeadings(main))
+    assert.ok(
+      bodies[1].includes(`${"#".repeat(heading.level)} ${heading.text}`),
+      `Markdown lost heading ${heading.text}`,
+    );
+});
+
+test("sitemap lists the marketing root and every docs canonical exactly once", async () => {
+  const response = await get("/sitemap.xml", { headers: agent });
+  responseType(response, "application/xml");
+  indexing(response);
+  const xml = await response.text();
+  assert.match(xml, /<urlset\b/);
+  const locations = [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)].map((match) =>
+    decode(match[1]),
+  );
+  assert.deepEqual(
+    locations.sort(),
+    [
+      canonical("/"),
+      ...publicPages.map((page) => docsCanonical(page.path)),
+    ].sort(),
+  );
+  assert.equal(new Set(locations).size, locations.length);
+  assert.ok(
+    !xml.includes("/en/") &&
+      !xml.includes("localhost") &&
+      !xml.includes("127.0.0.1"),
+  );
+});
+
+for (const path of ["/llms.txt", "/sitemap.md"]) {
+  test(`${path}: agent index exposes all public pages and Markdown alternatives exactly once`, async () => {
+    const response = await get(path, { headers: agent });
+    responseType(
+      response,
+      path.endsWith(".md") ? "text/markdown" : "text/plain",
+    );
+    indexing(response);
+    const body = await response.text();
+    const links = [...body.matchAll(/^- \[([^\]]+)\]\(([^)]+)\)/gm)].map(
+      (match) => [match[1], match[2]],
+    );
+    assert.deepEqual(
+      links.sort((a, b) => a[1].localeCompare(b[1])),
+      publicPages
+        .map((page) => [page.markdownTitle, docsCanonical(page.path)])
+        .sort((a, b) => a[1].localeCompare(b[1])),
+    );
+    const markdownLinks = [...body.matchAll(/\[Markdown\]\(([^)]+)\)/g)].map(
+      (match) => match[1],
+    );
+    assert.deepEqual(
+      markdownLinks.sort(),
+      publicPages
+        .map((page) => `${origin}${docsMarkdownPath(page.path)}`)
+        .sort(),
+    );
+    assert.ok(
+      !body.includes("/en/") &&
+        !body.includes("localhost") &&
+        !body.includes("127.0.0.1"),
+    );
+    const head = await get(path, { method: "HEAD", headers: agent });
+    responseType(head, path.endsWith(".md") ? "text/markdown" : "text/plain");
+    indexing(head);
+    assert.equal(await head.text(), "");
+  });
+}
+
+test("robots is environment-aware without losing the production sitemap", async () => {
+  const response = await get("/robots.txt", { headers: agent });
+  responseType(response, "text/plain");
+  indexing(response);
+  const directives = (await response.text())
+    .split(/\r?\n/)
+    .map((line) => line.trim().toLowerCase())
+    .filter(Boolean);
+  assert.ok(directives.includes("user-agent: *"));
+  assert.ok(directives.includes(`sitemap: ${origin}/sitemap.xml`));
+  assert.ok(directives.includes(noindex ? "disallow: /" : "allow: /"));
+  if (!noindex)
+    assert.ok(!directives.some((line) => /^disallow:\s*\S/.test(line)));
+});
+
+for (const resource of currentResources) {
+  test(`${resource.path}: original static resource bytes bypass locale and Markdown routing`, async () => {
+    const response = await get(resource.path, { headers: agent });
+    assert.equal(response.status, 200);
+    indexing(response);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    assert.equal(bytes.length, resource.size);
+    assert.equal(hash(bytes), resource.sha256, resource.source);
+    assert.doesNotMatch(
+      response.headers.get("content-type") ?? "",
+      /text\/(html|markdown)/,
+    );
+    if (resource.path.endsWith(".png"))
+      assert.equal(
+        response.headers.get("content-type")?.split(";")[0],
+        "image/png",
+      );
+    if (resource.path.endsWith(".json"))
+      assert.equal(
+        response.headers.get("content-type")?.split(";")[0],
+        "application/json",
+      );
+    const head = await get(resource.path, { method: "HEAD", headers: agent });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+  });
+}
+
+for (const page of publicPages) {
+  test(`${page.path}: original OG endpoint returns an actual 1200x630 PNG for agents`, async () => {
+    const response = await get(`/og${page.path === "/" ? "" : page.path}`, {
+      headers: agent,
+    });
+    responseType(response, "image/png");
+    indexing(response);
+    const png = Buffer.from(await response.arrayBuffer());
+    assert.deepEqual(
+      [...png.subarray(0, 8)],
+      [137, 80, 78, 71, 13, 10, 26, 10],
+    );
+    assert.equal(png.toString("ascii", 12, 16), "IHDR");
+    assert.equal(png.readUInt32BE(16), 1200);
+    assert.equal(png.readUInt32BE(20), 630);
+  });
+}
+
+test("homepage og:video is a faststart MP4 that answers byte ranges", async () => {
+  const path = new URL(homeOgVideo).pathname;
+  const response = await get(path, { headers: agent });
+  responseType(response, "video/mp4");
+  const mp4 = Buffer.from(await response.arrayBuffer());
+  assert.ok(mp4.length < 2_000_000, `${path}: ${mp4.length} bytes`);
+  assert.equal(mp4.toString("ascii", 4, 8), "ftyp");
+  const boxes = [];
+  for (let offset = 0; offset + 8 <= mp4.length && boxes.length < 4; ) {
+    boxes.push(mp4.toString("ascii", offset + 4, offset + 8));
+    offset += mp4.readUInt32BE(offset);
+  }
+  assert.ok(
+    boxes.indexOf("moov") !== -1 && boxes.indexOf("moov") < boxes.indexOf("mdat"),
+    `moov must precede mdat for progressive playback: ${boxes.join(",")}`,
+  );
+  const range = await get(path, { headers: { ...agent, range: "bytes=0-1023" } });
+  assert.equal(range.status, 206);
+  assert.equal(range.headers.get("content-range"), `bytes 0-1023/${mp4.length}`);
+  assert.equal((await range.arrayBuffer()).byteLength, 1024);
+});
+
+test("unknown OG routes retain the original JSON 404", async () => {
+  const response = await get("/og/missing-page", { headers: agent });
+  responseType(response, "application/json", 404);
+  assert.deepEqual(await response.json(), { error: "Not found" });
+});
+
+test("Next static CSS, JavaScript and fonts remain binary/static resources for agents", async () => {
+  const response = await get("/");
+  responseType(response, "text/html");
+  const html = await response.text();
+  const css = tags(html, "link").find(
+    (tag) => tag.rel === "stylesheet" && tag.href.startsWith("/_next/"),
+  )?.href;
+  const js = tags(html, "script").find((tag) =>
+    tag.src?.startsWith("/_next/"),
+  )?.src;
+  const font =
+    tags(html, "link").find(
+      (tag) => tag.as === "font" && tag.href.startsWith("/_next/"),
+    )?.href ?? /<([^>]+\.woff2)>/.exec(response.headers.get("link") ?? "")?.[1];
+  for (const [url, type] of [
+    [css, /^text\/css/],
+    [js, /^(application|text)\/javascript/],
+    [font, /^(font\/|application\/(font|octet-stream))/],
+  ]) {
+    assert.ok(
+      url?.startsWith("/_next/"),
+      "SSR must advertise a bundled resource",
+    );
+    const resource = await get(url, { headers: agent });
+    assert.equal(resource.status, 200);
+    assert.match(resource.headers.get("content-type") ?? "", type);
+    assert.ok((await resource.arrayBuffer()).byteLength > 0);
+    assert.equal(resource.headers.get("set-cookie"), null);
+  }
+});
+
+test('homepage introduces both tools while keeping the original introduction reachable', async () => {
+  const html = await htmlFor(pageAt('/'));
+  const headings = [...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map((match) =>
+    text(match[1])
+  );
+  assert.equal(headings.length, 1);
+  assert.equal(headings[0], 'Browser automation built for any agent');
+  for (const section of ['AgentUseCaseTabs', 'AgentTweetWall', 'AgentClosing'])
+    assert.ok(html.includes(`data-element="${section}"`), section);
+  assert.ok(!html.includes('data-element="GridSection"'));
+  assert.ok(!html.includes('data-element="FeatureSection"'));
+  assert.ok(!text(html).includes('The next step is in another app'));
+  assert.ok(!text(html).includes('From a code change to a checked result'));
+  // Real tweet bodies and attribution must be in the HTML without client fetching.
+  assert.equal([...html.matchAll(/<article\b[^>]*data-tweet-id=/g)].length, 8);
+  assert.ok(
+    text(html).includes('If you are not using agent-browser to close the loop on frontend')
+  );
+  assert.ok(
+    tags(html, 'a').some((a) => a.href === 'https://x.com/onusoz/status/2032700396955697218')
+  );
+  assert.ok(!html.includes('platform.twitter.com/widgets.js'));
+  assert.ok(text(html).includes('Add to your agent'));
+  assert.ok(tags(html, 'a').some((a) => a.href === '/introduction'));
+  assert.ok(
+    text(html).includes('Desktop')
+  );
+  const docs = await get('/introduction');
+  responseType(docs, 'text/html');
+  const intro = await docs.text();
+  assert.ok(
+    tags(intro, 'link').some((link) => link.rel === 'canonical' && link.href === `${origin}/introduction`)
+  );
+  assert.ok(text(intro).includes('Browser automation CLI designed for AI agents'));
+  const search = await get('/api/search?query=agent-browser&locale=en');
+  assert.ok(
+    (await search.json()).some((result) => result.type === 'page' && result.url === '/introduction')
+  );
+});
+
+for (const path of ['/components', '/components/hero', '/components/hero/browser', '/components/hero/desktop']) {
+  test(`${path}: removed design playground is not a public route`, async () => {
+    const response = await get(path);
+    assert.equal(response.status, 404);
+  });
+}
+
+test('marketing layout stays independent of a persisted docs chat session', async () => {
+  const response = await get('/', {
+    headers: { Cookie: 'docs-chat-open=true; docs-chat-width=600' },
+  });
+  responseType(response, 'text/html');
+  const html = await response.text();
+  assert.ok(!html.includes('body{padding-right:600px}'));
+  assert.ok(!html.includes('aria-label="Ask AI"'));
+  assert.ok(html.includes('data-geist-button'));
+  const docs = await get('/introduction', {
+    headers: { Cookie: 'docs-chat-open=true; docs-chat-width=600' },
+  });
+  responseType(docs, 'text/html');
+  assert.ok((await docs.text()).includes('body{padding-right:600px}'));
+});

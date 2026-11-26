@@ -127,6 +127,24 @@ export async function fillAndSubmitForm(
 }
 ```
 
+## MCP Server over stdin
+
+For many MCP tool calls in one sandbox, `startAgentBrowserMcp` keeps one `agent-browser mcp` process running and sends requests over the sandbox command's stdin. It requires `@vercel/sandbox` 3.7 or later, and `timeout` (milliseconds) applies to each request and to `close()`:
+
+```ts
+import { startAgentBrowserMcp, withAgentBrowserSandbox } from "@agent-browser/sandbox/vercel";
+
+const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
+  const mcp = await startAgentBrowserMcp(sandbox, { timeout: 60_000 });
+  try {
+    await mcp.callTool("agent_browser_open", { url: "https://example.com" });
+    return await mcp.callTool("agent_browser_snapshot", { interactive: true });
+  } finally {
+    await mcp.close();
+  }
+});
+```
+
 ## Sandbox Snapshots (Fast Startup)
 
 A **sandbox snapshot** is a saved VM image of a Vercel Sandbox with system dependencies + agent-browser + Chromium already installed. Think of it like a Docker image: instead of installing dependencies from scratch every time, the sandbox boots from the pre-built image.

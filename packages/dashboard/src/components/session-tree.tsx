@@ -63,11 +63,12 @@ const PROVIDER_LOGOS: Record<string, string> = {
   kernel: "/providers/kernel.svg",
 };
 
-const SUPPORTED_ENGINES = ["chrome", "lightpanda"] as const;
+const SUPPORTED_ENGINES = ["chrome", "lightpanda", "firefox", "obscura"] as const;
 
 const BROWSER_OPTIONS: { id: string; label: string; engine?: string; provider?: string }[] = [
   { id: "chrome", label: "Chrome", engine: "chrome" },
   { id: "lightpanda", label: "Lightpanda", engine: "lightpanda" },
+  { id: "firefox", label: "Firefox", engine: "firefox" },
   { id: "agentcore", label: "AgentCore", provider: "agentcore" },
   { id: "browserbase", label: "Browserbase", provider: "browserbase" },
   { id: "browserless", label: "Browserless", provider: "browserless" },
@@ -483,7 +484,7 @@ export function SessionTree() {
             value={newSessionName}
             onChange={(e) => setNewSessionName(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                 e.preventDefault();
                 handleCreateSubmit();
               }

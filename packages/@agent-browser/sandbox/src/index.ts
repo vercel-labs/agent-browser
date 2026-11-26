@@ -16,3 +16,13 @@ export {
   type BuildAgentBrowserArgvOptions,
   type BuildShellCommandOptions,
 } from "./shared.js";
+export {
+  AGENT_BROWSER_MCP_PROTOCOL_VERSION,
+  AgentBrowserMcpError,
+  connectAgentBrowserMcp,
+  type AgentBrowserMcpClient,
+  type AgentBrowserMcpProcess,
+  type AgentBrowserMcpRequestOptions,
+  type AgentBrowserMcpToolResult,
+  type ConnectAgentBrowserMcpOptions,
+} from "./mcp.js";

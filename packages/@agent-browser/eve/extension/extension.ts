@@ -11,11 +11,13 @@ export default defineExtension({
     binary: z.string().default("agent-browser"),
     caCert: z.string().optional(),
     clearCaCert: z.boolean().default(false),
+    /** Use the OS trust store for the CLI's own HTTPS requests, such as `read`. */
+    useSystemCa: z.boolean().optional(),
     /** Wrap page output in boundary markers so the model can tell tool output from page content. */
     contentBoundaries: z.boolean().default(false),
     /** Download Chromium during auto-install. */
     installBrowser: z.boolean().default(true),
-    /** npm spec for auto-install, e.g. `agent-browser@0.31.2`. Defaults to the version matching this package. */
+    /** npm spec for auto-install, e.g. a tarball or mirror. Must install this package's agent-browser minor. Defaults to the matching version. */
     installSpec: z.string().optional(),
     /** Install Chromium system libraries during auto-install. */
     installSystemDependencies: z.boolean().default(true),

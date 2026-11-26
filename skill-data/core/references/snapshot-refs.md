@@ -36,6 +36,8 @@ agent-browser snapshot
 agent-browser snapshot -i
 ```
 
+Compact snapshots (`-c`) keep visible text, status text, and their direct ancestors. Empty sibling branches are removed. Interactive snapshots (`-i`) filter out noninteractive content. MCP snapshots default to interactive; set `interactive: false` to retain visible text and status text.
+
 ### Snapshot Output Format
 
 ```
@@ -60,6 +62,21 @@ URL: https://example.com
   @e14 [a] "Privacy Policy"
 ```
 
+### Hints for ambiguous controls
+
+A control with an empty accessible name, or a name shared with another ref in the same snapshot, gets a hint read from the DOM after its ref:
+
+```
+- link [ref=e1] hint="img:cart"
+- button [ref=e2] hint="icon:icon-trash; in:Blue mug"
+- button [ref=e3] hint="icon:fa-heart; in:Blue mug"
+- button [ref=e4] hint="img:pencil; id:edit-btn; in:Blue mug"
+- textbox "Email" [ref=e5] hint="name:login-email"
+- textbox "Email" [ref=e6] hint="name:newsletter-email"
+```
+
+Hints are on by default in every snapshot mode and also appear in the `snapshot` text of `--json` output. A hint is not the accessible name, so `find role <role> --name` and stale-ref recovery ignore it: act on these elements by ref. Iframe refs never get a hint, and a control with nothing to read prints no hint.
+
 ## Using Refs
 
 Once you have refs, interact directly:
@@ -82,6 +99,10 @@ agent-browser click @e12
 
 Same-document updates preserve refs for surviving DOM elements. Replaced elements and page or iframe document replacements invalidate the corresponding refs. Invalidated IDs are never recycled within the browser session. JSON snapshot responses list refs that disappeared in `removedRefs`. Virtual accessibility nodes have snapshot-local refs.
 
+A ref keeps pointing at its DOM node while that node exists. If the node was replaced, agent-browser falls back to the one element with the same role and name, but only when the ref was unique in its snapshot. When duplicates make the match ambiguous, the action fails without acting. Run `snapshot` again and use a fresh ref.
+
+If a snapshot fails because its scope matches nothing, you can still use refs from the last successful snapshot as long as the document has not changed.
+
 ```bash
 # Get initial snapshot
 agent-browser snapshot -i
@@ -90,7 +111,8 @@ agent-browser snapshot -i
 # Click triggers page change
 agent-browser click @e1
 
-# Re-snapshot after navigation to get new refs
+# Re-snapshot after navigation to get new refs. A ref from the previous
+# page fails with "Ref @e1 is from a document that is no longer loaded" instead of acting.
 agent-browser snapshot -i
 # @e2 [heading] "Page 2"  ← New element, new ref
 ```
@@ -164,6 +186,8 @@ agent-browser snapshot @e9
 
 ## Iframes
 
+Presentational iframes use the same `Iframe` role for snapshots and stale-ref recovery.
+
 Snapshots automatically detect and inline iframe content. When the main-frame snapshot runs, each `Iframe` node is resolved and its child accessibility tree is included directly beneath it in the output. Refs assigned to elements inside iframes carry frame context, so interactions like `click`, `fill`, and `type` work without manually switching frames.
 
 ```bash
@@ -182,9 +206,10 @@ agent-browser click @e5
 ```
 
 **Key details:**
-- Only one level of iframe nesting is expanded (iframes within iframes are not recursed)
+- Nested iframes are expanded up to 4 levels deep
 - Cross-origin iframes that block accessibility tree access are silently skipped
 - Empty iframes or iframes with no interactive content are omitted from the output
+- A cross-origin frame can share the page's renderer process, for example two ports on the same host. That frame has no CDP session of its own, so agent-browser takes the ref's press point from the browser's own box geometry, which stays correct across origin boundaries, frame nesting, and transformed frames. The browser then names the element and frame that would receive that exact point, and the click is refused unless the receiver is the ref itself, an element inside it, a label for it, or the frame the ref embeds
 - To scope a snapshot to a single iframe, use `frame @ref` then `snapshot -i`
 
 ## Troubleshooting
