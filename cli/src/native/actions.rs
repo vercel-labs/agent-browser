@@ -3244,7 +3244,26 @@ fn remember_active_provider_session(
 }
 
 async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), String> {
-    if let Some(active) = state.active_provider_session.as_ref() {
+    if state
+        .active_provider_session
+        .as_ref()
+        .is_some_and(|active| active.session.provider == "browser-use")
+    {
+        if let Some(active) = state.active_provider_session.as_ref() {
+            providers::close_provider_session_with_plugins_and_trust(
+                &active.session,
+                &active.plugins,
+                &active.trust,
+            )
+            .await?;
+        }
+        state.active_provider_session = None;
+        state.active_provider_connection = false;
+        return Ok(());
+    }
+    let active = state.active_provider_session.take();
+    state.active_provider_connection = false;
+    if let Some(active) = active {
         providers::close_provider_session_with_plugins_and_trust(
             &active.session,
             &active.plugins,
@@ -3252,8 +3271,6 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
         )
         .await?;
     }
-    state.active_provider_session = None;
-    state.active_provider_connection = false;
     Ok(())
 }
 
@@ -23400,6 +23417,61 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
         let _ = api_server.join();
         let _ = ws_server.join();
+    }
+
+    #[tokio::test]
+    async fn test_kernel_cleanup_transport_error_clears_provider_state_and_reports_error() {
+        use std::net::TcpListener as StdTcpListener;
+        use std::time::Duration;
+
+        let server_config = crate::tls::test_support::server_config(
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+            crate::tls::test_support::LOCALHOST_KEY_DER,
+        );
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let conn = rustls::ServerConnection::new(server_config).unwrap();
+                let mut tls = rustls::StreamOwned::new(conn, stream);
+                let mut buf = [0u8; 64];
+                let _ = std::io::Read::read(&mut tls, &mut buf);
+            }
+        });
+
+        let guard = EnvGuard::new(&["KERNEL_ENDPOINT", "KERNEL_API_KEY"]);
+        guard.set("KERNEL_ENDPOINT", &format!("https://127.0.0.1:{port}"));
+        guard.set("KERNEL_API_KEY", "test-key");
+
+        let mut state = DaemonState::new();
+        state.active_provider_connection = true;
+        state.active_provider_session = Some(ActiveProviderSession {
+            session: providers::ProviderSession {
+                provider: "kernel".to_string(),
+                session_id: "kernel-fail-1".to_string(),
+            },
+            plugins: Vec::new(),
+            trust: crate::tls::TrustOptions::default(),
+        });
+
+        let err = close_current_browser(&mut state)
+            .await
+            .expect_err("Kernel cleanup transport error should be reported");
+        assert!(
+            err.contains("Kernel cleanup request failed"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            state.active_provider_session.is_none(),
+            "active_provider_session must be cleared even when cleanup fails"
+        );
+        assert!(
+            !state.active_provider_connection,
+            "active_provider_connection must be false even when cleanup fails"
+        );
+
+        let _ = server.join();
     }
 
     #[tokio::test]

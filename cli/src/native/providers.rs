@@ -199,10 +199,11 @@ pub async fn close_provider_session_with_plugins_and_trust(
         return Ok(());
     }
 
-    let client = provider_http_client(trust)?;
     match session.provider.as_str() {
         "browserbase" => {
-            if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
+            if let (Ok(api_key), Ok(client)) =
+                (env::var("BROWSERBASE_API_KEY"), provider_http_client(trust))
+            {
                 let _ = client
                     .post(format!(
                         "https://api.browserbase.com/v1/sessions/{}",
@@ -217,10 +218,13 @@ pub async fn close_provider_session_with_plugins_and_trust(
         }
         "browserless" => {
             // session_id holds the stop URL for browserless
-            let _ = client.delete(&session.session_id).send().await;
+            if let Ok(client) = provider_http_client(trust) {
+                let _ = client.delete(&session.session_id).send().await;
+            }
         }
         "kernel" => {
             if let Ok(api_key) = env::var("KERNEL_API_KEY") {
+                let client = provider_http_client(trust)?;
                 let endpoint = env::var("KERNEL_ENDPOINT")
                     .unwrap_or_else(|_| "https://api.onkernel.com".to_string());
                 client
@@ -1811,5 +1815,23 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         );
 
         let _ = server.join();
+    }
+
+    #[tokio::test]
+    async fn test_best_effort_provider_cleanup_ignores_unreadable_ca_cert() {
+        let missing_ca = crate::tls::TrustOptions {
+            ca_cert: Some("/nonexistent/tri2-missing-ca.pem".to_string()),
+            ..crate::tls::TrustOptions::default()
+        };
+
+        for provider in ["browserbase", "browserless", "agentcore"] {
+            let session = ProviderSession {
+                provider: provider.to_string(),
+                session_id: "https://127.0.0.1:1/stop".to_string(),
+            };
+            close_provider_session_with_plugins_and_trust(&session, &[], &missing_ca)
+                .await
+                .unwrap_or_else(|e| panic!("{provider} cleanup should ignore unreadable CA: {e}"));
+        }
     }
 }

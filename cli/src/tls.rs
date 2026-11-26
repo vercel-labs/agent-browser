@@ -162,16 +162,8 @@ pub fn configure_process(flags: &Flags) {
 /// Set process-level trust from environment variables during daemon startup,
 /// before any command envelope arrives.
 pub fn configure_process_from_env() {
-    let use_system_ca = std::env::var("AGENT_BROWSER_USE_SYSTEM_CA")
-        .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-    let clear_ca_cert = std::env::var("AGENT_BROWSER_CLEAR_CA_CERT")
-        .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-    let ca_cert = std::env::var("AGENT_BROWSER_CA_CERT")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let options = match ca_cert {
+    let (ca_cert, clear_ca_cert, use_system_ca) = crate::flags::tls_env_flags();
+    let options = match ca_cert.filter(|s| !s.is_empty()) {
         Some(path) => TrustOptions {
             use_system_ca,
             ca_cert: Some(absolute(&path)),
