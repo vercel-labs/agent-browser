@@ -862,6 +862,11 @@ impl CdpClient {
             .remove(session_id);
     }
 
+    /// Notify when the transport closes or the reader loop exits.
+    pub fn subscribe_closed(&self) -> watch::Receiver<bool> {
+        self.cancel_tx.subscribe()
+    }
+
     /// Subscribe to all raw incoming CDP messages (responses + events).
     /// Used by the inspect proxy to forward traffic to the DevTools frontend.
     pub fn subscribe_raw(&self) -> broadcast::Receiver<RawCdpMessage> {

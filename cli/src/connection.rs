@@ -1318,6 +1318,9 @@ const READ_ONLY_ACTIONS: &[&str] = &[
     "tab_list",
     "cdp_url",
     "stream_status",
+    "events_read",
+    "events_ack",
+    "events_list",
 ];
 
 fn is_read_only(cmd: &Value) -> bool {
@@ -1434,6 +1437,14 @@ pub(crate) fn read_timeout_for(cmd: &Value) -> Duration {
     let mut op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
     if cmd.get("action").and_then(Value::as_str) == Some("mousemove") {
         op_ms = op_ms.max(cmd.get("duration").and_then(Value::as_u64).unwrap_or(0));
+    }
+    if cmd.get("action").and_then(Value::as_str) == Some("events_read") {
+        op_ms = op_ms.max(
+            cmd.get("waitMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(50_000),
+        );
     }
     Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
 }
@@ -1687,6 +1698,9 @@ mod tests {
     fn only_listed_actions_count_as_read_only() {
         assert!(is_read_only(&json!({"action": "snapshot"})));
         assert!(is_read_only(&json!({"action": "url"})));
+        assert!(is_read_only(&json!({"action": "events_read"})));
+        assert!(is_read_only(&json!({"action": "events_ack"})));
+        assert!(is_read_only(&json!({"action": "events_list"})));
         assert!(!is_read_only(&json!({"action": "click"})));
         assert!(!is_read_only(&json!({"action": "evaluate"})));
         assert!(!is_read_only(&json!({"action": "some_future_action"})));
@@ -1698,6 +1712,22 @@ mod tests {
         assert_eq!(
             read_timeout_for(&json!({"action":"mousemove", "duration": 35_000})),
             Duration::from_secs(45)
+        );
+    }
+
+    #[test]
+    fn events_read_wait_ms_gets_its_requested_time_budget() {
+        assert_eq!(
+            read_timeout_for(&json!({"action":"events_read", "waitMs": 35_000})),
+            Duration::from_secs(45)
+        );
+    }
+
+    #[test]
+    fn events_read_wait_ms_is_capped() {
+        assert_eq!(
+            read_timeout_for(&json!({"action":"events_read", "waitMs": 70_000})),
+            Duration::from_secs(60)
         );
     }
 

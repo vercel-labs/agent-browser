@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -9,11 +10,12 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 use super::actions::{
-    auto_save_restore_state, close_all_browser_backends, close_current_browser, execute_command,
-    maybe_autosave_restore_state, DaemonState,
+    apply_events_read_settings, attach_settings_outcome, auto_save_restore_state,
+    check_command_policy, close_all_browser_backends, close_current_browser, error_response,
+    execute_command, maybe_autosave_restore_state, success_response, DaemonState,
 };
 use super::cdp::client::CdpClient;
 use super::state;
@@ -195,6 +197,57 @@ pub async fn run_daemon(session: &str) {
     }
 }
 
+pub(crate) async fn execute_events_read(cmd: &Value, state: &Mutex<DaemonState>) -> Value {
+    let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
+    let (bus, idle_activity, settings_outcome) = {
+        let mut state = state.lock().await;
+        let settings_outcome = match apply_events_read_settings(cmd, &mut state).await {
+            Ok(outcome) => outcome,
+            Err(response) => {
+                state.idle_activity.mark();
+                return response;
+            }
+        };
+        let mut policy_actions = vec!["events_read".to_owned()];
+        let mut approved = HashSet::new();
+        if let Some(subscription_id) = cmd
+            .get("subscriptionId")
+            .or_else(|| cmd.get("subscription_id"))
+            .and_then(Value::as_str)
+        {
+            if let Ok((actions, confirmed)) =
+                state.events.policy_for_subscription(subscription_id).await
+            {
+                policy_actions.extend(actions);
+                approved.extend(confirmed);
+            }
+        }
+        if cmd.get("ack").and_then(Value::as_bool).unwrap_or(false) {
+            policy_actions.push("events_ack".to_owned());
+        }
+        let previous = std::mem::replace(&mut state.confirmed_policy_actions, approved);
+        let denied = check_command_policy(cmd, &mut state, &policy_actions);
+        state.confirmed_policy_actions = previous;
+        if let Some(mut response) = denied {
+            attach_settings_outcome(&mut response, &settings_outcome);
+            state.idle_activity.mark();
+            return response;
+        }
+        (
+            state.events.clone(),
+            state.idle_activity.clone(),
+            settings_outcome,
+        )
+    };
+    let mut response = match super::events::ops::read(cmd, &bus).await {
+        Ok(data) => success_response(id, data),
+        Err(error) => error_response(id, &error),
+    };
+    attach_settings_outcome(&mut response, &settings_outcome);
+    idle_activity.mark();
+    response
+}
+
 /// Where the socket is bound until the daemon's files are written.
 #[cfg(unix)]
 fn pending_socket_path(socket_path: &std::path::Path) -> PathBuf {
@@ -324,6 +377,15 @@ async fn run_socket_server(
             stream_server,
             idle_activity.clone(),
         )));
+    {
+        let state = state.lock().await;
+        if let Some(server) = &state.stream_server {
+            state
+                .events
+                .set_head_sink(Some(server.event_nudges.clone()))
+                .await;
+        }
+    }
 
     // Lets handle_connection end the daemon loop after a "close" command,
     // instead of calling process::exit() which skips destructors and can
@@ -477,6 +539,15 @@ async fn run_socket_server(
             stream_server,
             idle_activity.clone(),
         )));
+    {
+        let state = state.lock().await;
+        if let Some(server) = &state.stream_server {
+            state
+                .events
+                .set_head_sink(Some(server.event_nudges.clone()))
+                .await;
+        }
+    }
 
     let close = Arc::new(CloseHandshake::default());
     let mut closed_by_command = false;
@@ -693,7 +764,9 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
-                let response = {
+                let response = if action == "events_read" {
+                    execute_events_read(&cmd, &state).await
+                } else {
                     let mut s = state.lock().await;
                     let response = execute_command(&cmd, &mut s).await;
                     // Refresh while the state lock is still held. An idle
@@ -927,6 +1000,60 @@ mod tests {
 
         state.backend_type = crate::native::actions::BackendType::WebDriver;
         assert!(state.blocks_default_idle_shutdown());
+    }
+
+    #[tokio::test]
+    async fn test_events_read_ack_requires_ack_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        fs::write(&path, r#"{"deny":["events_ack"]}"#).unwrap();
+        let mut daemon = DaemonState::new();
+        daemon.policy =
+            Some(crate::native::policy::ActionPolicy::load(path.to_str().unwrap()).unwrap());
+        let state = Mutex::new(daemon);
+        let cmd = serde_json::json!({
+            "action": "events_read", "id": "read-ack", "subscriptionId": "sub-1", "ack": true
+        });
+
+        let response = execute_events_read(&cmd, &state).await;
+
+        assert_eq!(response["success"], false);
+        assert!(response["error"].as_str().unwrap().contains("events_ack"));
+    }
+
+    #[tokio::test]
+    async fn test_events_read_applies_invocation_action_policy_before_reading() {
+        for (denied, ack) in [("events_read", false), ("events_ack", true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("policy.json");
+            fs::write(&path, format!(r#"{{"deny":["{denied}"]}}"#)).unwrap();
+            let daemon = DaemonState::new();
+            let subscription = daemon.events.add_test_subscription(1).await;
+            assert_eq!(daemon.events.list(None, false).await[0]["consumed"], 1);
+            let state = Mutex::new(daemon);
+            let cmd = serde_json::json!({
+                "action": "events_read",
+                "id": "read-policy",
+                "subscriptionId": subscription,
+                "ack": ack,
+                "settings": { "action-policy": path.to_str().unwrap() }
+            });
+
+            let response = execute_events_read(&cmd, &state).await;
+
+            assert_eq!(response["success"], false, "{denied}");
+            assert!(
+                response["error"].as_str().unwrap().contains(denied),
+                "{denied}: {}",
+                response["error"]
+            );
+            assert!(response
+                .get("data")
+                .and_then(|data| data.get("events"))
+                .is_none());
+            let state = state.lock().await;
+            assert_eq!(state.events.list(None, false).await[0]["consumed"], 1);
+        }
     }
 
     #[tokio::test]
