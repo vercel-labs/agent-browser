@@ -131,16 +131,20 @@ impl SessionParents {
         tree
     }
 
-    fn remove_target(&mut self, target_id: &str) {
+    fn take_target(&mut self, target_id: &str) -> Vec<String> {
         let sessions: Vec<String> = self
             .entries
             .iter()
             .filter(|(_, entry)| entry.target_id.as_deref() == Some(target_id))
             .map(|(sid, _)| sid.clone())
             .collect();
+        let mut gone = Vec::new();
         for sid in sessions {
-            self.take_subtree(&sid);
+            if self.entries.contains_key(&sid) {
+                gone.extend(self.take_subtree(&sid));
+            }
         }
+        gone
     }
 }
 
@@ -762,7 +766,17 @@ impl CdpClient {
                         ("Target.targetDestroyed", _) => {
                             if let Some(tid) = event.params.get("targetId").and_then(Value::as_str)
                             {
-                                parents.remove_target(tid);
+                                let gone = parents.take_target(tid);
+                                if !gone.is_empty() {
+                                    release_detached_sessions(
+                                        &pending_clone,
+                                        &raw_pending_clone,
+                                        &detached_clone,
+                                        &crashed_clone,
+                                        &gone,
+                                    )
+                                    .await;
+                                }
                             }
                         }
                         ("Inspector.targetCrashed", _) => {
@@ -779,6 +793,24 @@ impl CdpClient {
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .remove(&event.session_id);
+                        }
+                        ("Page.frameNavigated", _) => {
+                            let is_main_frame = event
+                                .params
+                                .get("frame")
+                                .and_then(Value::as_object)
+                                .is_some_and(|frame| {
+                                    frame
+                                        .get("parentId")
+                                        .and_then(Value::as_str)
+                                        .is_none_or(str::is_empty)
+                                });
+                            if is_main_frame {
+                                crashed_clone
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .remove(&event.session_id);
+                            }
                         }
                         _ => {}
                     }
@@ -2023,7 +2055,7 @@ mod tests {
         assert_eq!(parents.order.len(), 2);
         assert_eq!(parents.take_subtree("unknown"), ["unknown"]);
 
-        parents.remove_target("T-WORKER");
+        assert_eq!(parents.take_target("T-WORKER"), ["worker", "worker-child"]);
         assert!(parents.entries.is_empty());
         assert!(parents.order.is_empty());
     }
@@ -2108,6 +2140,235 @@ mod tests {
         ] {
             assert!(!is_target_crashed_error(&error), "{error}");
         }
+    }
+
+    #[tokio::test]
+    async fn target_destroyed_fails_subtree_commands_and_clears_crash_entries() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for (session_id, parent, target_id) in [
+                ("S-FRAME", "S-PAGE", "T-FRAME"),
+                ("S-NESTED", "S-FRAME", "T-NESTED"),
+                ("S-SIBLING", "S-PAGE", "T-SIBLING"),
+            ] {
+                ws.send(attached_event(session_id, parent, target_id))
+                    .await
+                    .unwrap();
+            }
+            ws.send(Message::Text(
+                json!({
+                    "method": "Inspector.targetCrashed",
+                    "params": {},
+                    "sessionId": "S-FRAME"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let mut commands = Vec::new();
+            for _ in 0..2 {
+                let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                commands.push(serde_json::from_str::<Value>(&text).unwrap());
+            }
+            ws.send(Message::Text(
+                json!({
+                    "method": "Target.targetDestroyed",
+                    "params": { "targetId": "T-FRAME" }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let sibling = commands
+                .iter()
+                .find(|command| command["sessionId"] == "S-SIBLING")
+                .unwrap();
+            ws.send(Message::Text(
+                json!({"id": sibling["id"], "result": {"value": "sibling"}}).to_string(),
+            ))
+            .await
+            .unwrap();
+            while ws.next().await.is_some() {}
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let mut events = client.subscribe();
+        let wait = Duration::from_secs(2);
+        loop {
+            let ev = tokio::time::timeout(wait, events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if ev.method == "Inspector.targetCrashed" {
+                break;
+            }
+        }
+        assert!(client
+            .crashed_sessions
+            .lock()
+            .unwrap()
+            .contains(&Some("S-FRAME".to_string())));
+
+        let send = |session_id: &'static str| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_command_no_params("Runtime.evaluate", Some(session_id))
+                    .await
+            })
+        };
+        let (nested, sibling) = (send("S-NESTED"), send("S-SIBLING"));
+
+        let error = tokio::time::timeout(wait, nested)
+            .await
+            .expect("a command under a destroyed target should fail at once")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "CDP error (Runtime.evaluate): Target closed: CDP session S-NESTED detached"
+        );
+        assert!(is_session_detached_error(&error));
+
+        let result = tokio::time::timeout(wait, sibling)
+            .await
+            .expect("a sibling session should still be answered")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["value"], "sibling");
+
+        assert!(
+            !client
+                .crashed_sessions
+                .lock()
+                .unwrap()
+                .contains(&Some("S-FRAME".to_string())),
+            "crash entry for destroyed target must be cleared"
+        );
+
+        let later = tokio::time::timeout(
+            wait,
+            client.send_command_no_params("Page.enable", Some("S-NESTED")),
+        )
+        .await
+        .expect("a later command under a destroyed target should not wait")
+        .unwrap_err();
+        assert!(is_session_detached_error(&later), "{later}");
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn main_frame_navigation_clears_crash_state_but_subframe_does_not() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (send_main_tx, send_main_rx) = oneshot::channel::<()>();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Text(
+                json!({
+                    "method": "Inspector.targetCrashed",
+                    "params": {},
+                    "sessionId": "S-PAGE"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            ws.send(Message::Text(
+                json!({
+                    "method": "Page.frameNavigated",
+                    "params": {
+                        "frame": {
+                            "id": "F-CHILD",
+                            "parentId": "F-MAIN",
+                            "url": "https://sub.test/"
+                        }
+                    },
+                    "sessionId": "S-PAGE"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let _ = send_main_rx.await;
+            ws.send(Message::Text(
+                json!({
+                    "method": "Page.frameNavigated",
+                    "params": {
+                        "frame": {
+                            "id": "F-MAIN",
+                            "url": "https://main.test/"
+                        }
+                    },
+                    "sessionId": "S-PAGE"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            let command = serde_json::from_str::<Value>(&text).unwrap();
+            assert_eq!(command["method"], "Runtime.evaluate");
+            ws.send(Message::Text(
+                json!({"id": command["id"], "result": {"value": "recovered"}}).to_string(),
+            ))
+            .await
+            .unwrap();
+            while ws.next().await.is_some() {}
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut events = client.subscribe();
+        let wait = Duration::from_secs(2);
+        loop {
+            let ev = tokio::time::timeout(wait, events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if ev.method == "Page.frameNavigated" {
+                break;
+            }
+        }
+
+        let after_subframe = tokio::time::timeout(
+            wait,
+            client.send_command_no_params("Runtime.evaluate", Some("S-PAGE")),
+        )
+        .await
+        .expect("subframe navigation must not clear crash state")
+        .unwrap_err();
+        assert!(is_target_crashed_error(&after_subframe), "{after_subframe}");
+
+        send_main_tx.send(()).unwrap();
+        loop {
+            let ev = tokio::time::timeout(wait, events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if ev.method == "Page.frameNavigated" {
+                break;
+            }
+        }
+
+        let recovered = tokio::time::timeout(
+            wait,
+            client.send_command_no_params("Runtime.evaluate", Some("S-PAGE")),
+        )
+        .await
+        .expect("main-frame navigation should allow commands again")
+        .expect("main-frame navigation should clear crash state");
+        assert_eq!(recovered["value"], "recovered");
+
+        client.close().await;
+        server.await.unwrap();
     }
 
     #[test]
