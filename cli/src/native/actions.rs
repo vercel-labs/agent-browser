@@ -13340,15 +13340,29 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             return Ok(json!({ "frame": label }));
         }
 
-        let (object_id, elem_session) = super::element::query_selector_object_in_frame(
+        let found = super::element::query_selector_object_in_frame(
             &mgr.client,
             &session_id,
             state.active_frame_id.as_deref(),
             sel,
             &state.iframe_sessions,
         )
-        .await?
-        .ok_or("Could not find frame for selector")?;
+        .await?;
+        let (object_id, elem_session) = match found {
+            Some(hit) => hit,
+            None if state.active_frame_id.is_some() => {
+                super::element::query_selector_object_in_frame(
+                    &mgr.client,
+                    &session_id,
+                    None,
+                    sel,
+                    &state.iframe_sessions,
+                )
+                .await?
+                .ok_or("Could not find frame for selector")?
+            }
+            None => return Err("Could not find frame for selector".to_string()),
+        };
 
         let describe = mgr
             .client
