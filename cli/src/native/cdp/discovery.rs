@@ -7,6 +7,8 @@ use super::types::BrowserVersionInfo;
 
 /// Default timeout for CDP discovery HTTP requests.
 const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+// Chrome can hold the WebSocket handshake while the user approves debugging.
+const DEFAULT_WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Discover the CDP WebSocket URL for the given host and port.
 ///
@@ -43,6 +45,7 @@ pub async fn discover_cdp_url_with_headers(
         port,
         query,
         DEFAULT_DISCOVERY_TIMEOUT,
+        DEFAULT_WEBSOCKET_TIMEOUT,
         headers,
         secure,
     )
@@ -56,7 +59,7 @@ pub async fn discover_cdp_url_with_timeout(
     query: Option<&str>,
     timeout: Duration,
 ) -> Result<String, String> {
-    discover(host, port, query, timeout, &[], false).await
+    discover(host, port, query, timeout, timeout, &[], false).await
 }
 
 /// HTTP and WebSocket schemes for discovery. `secure` preserves the
@@ -74,6 +77,7 @@ async fn discover(
     port: u16,
     query: Option<&str>,
     timeout: Duration,
+    websocket_timeout: Duration,
     headers: &[(String, String)],
     secure: bool,
 ) -> Result<String, String> {
@@ -108,7 +112,7 @@ async fn discover(
     // Final fallback: direct WebSocket at /devtools/browser.
     // Chrome 136+ with UI-based remote debugging (chrome://inspect) exposes
     // CDP over WebSocket but does not serve HTTP discovery endpoints.
-    match discover_cdp_ws(host, port, timeout, headers, secure).await {
+    match discover_cdp_ws(host, port, websocket_timeout, headers, secure).await {
         Ok(ws_url) => Ok(append_query(&ws_url, query)),
         Err(ws_err) => Err(format!(
             "All CDP discovery methods failed for {}:{}: /json/version: {}; /json/list: {}; WebSocket: {}",
@@ -491,6 +495,78 @@ mod tests {
         let ws_url = discover_cdp_url("127.0.0.1", port, None).await.unwrap();
         assert_eq!(ws_url, format!("ws://127.0.0.1:{}/devtools/browser", port));
         server.await.unwrap();
+    }
+
+    async fn delayed_ws_fallback() -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            accept_http(&listener, HTTP_404).await;
+            accept_http(&listener, HTTP_404).await;
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                return;
+            };
+            if let Some(Ok(Message::Text(_))) = ws.next().await {
+                let _ = ws
+                    .send(Message::Text(r#"{"id":1,"result":{}}"#.into()))
+                    .await;
+            }
+            let _ = ws.close(None).await;
+        });
+        (port, server)
+    }
+
+    #[tokio::test]
+    async fn ws_fallback_preserves_auto_discovery_timeout() {
+        let (port, server) = delayed_ws_fallback().await;
+        let result = discover_cdp_url("127.0.0.1", port, None).await;
+        server.await.unwrap();
+        assert!(result
+            .unwrap_err()
+            .contains("Timeout connecting to WebSocket"));
+    }
+
+    #[tokio::test]
+    async fn ws_fallback_with_headers_waits_for_delayed_approval() {
+        let (port, server) = delayed_ws_fallback().await;
+        let headers = vec![("X-Test".to_string(), "probe".to_string())];
+        let result = discover_cdp_url_with_headers("127.0.0.1", port, None, &headers, false).await;
+        server.await.unwrap();
+        assert_eq!(
+            result,
+            Ok(format!("ws://127.0.0.1:{port}/devtools/browser"))
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_fallback_without_headers_waits_for_delayed_approval() {
+        let (port, server) = delayed_ws_fallback().await;
+        let result = discover_cdp_url_with_headers("127.0.0.1", port, None, &[], false).await;
+        server.await.unwrap();
+        assert_eq!(
+            result,
+            Ok(format!("ws://127.0.0.1:{port}/devtools/browser"))
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_fallback_preserves_custom_timeout() {
+        let (port, server) = delayed_ws_fallback().await;
+        let result =
+            discover_cdp_url_with_timeout("127.0.0.1", port, None, Duration::from_millis(100))
+                .await;
+        server.await.unwrap();
+        assert!(result
+            .unwrap_err()
+            .contains("Timeout connecting to WebSocket"));
+    }
+
+    #[test]
+    fn explicit_target_discovery_budget_stays_below_client_read_timeout() {
+        let budget = DEFAULT_DISCOVERY_TIMEOUT * 2 + DEFAULT_WEBSOCKET_TIMEOUT;
+        assert!(budget < crate::connection::read_timeout_for(&serde_json::json!({})));
     }
 
     #[tokio::test]
