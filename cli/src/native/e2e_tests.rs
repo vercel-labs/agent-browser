@@ -32030,3 +32030,77 @@ async fn e2e_console_captures_cross_origin_oopif_logs_and_errors() {
         h.abort();
     }
 }
+
+#[tokio::test]
+#[ignore]
+async fn e2e_profiler_stop_does_not_consume_active_trace() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": "data:text/html,<h1>Trace Ownership</h1>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "trace_start" }), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "performance.mark('trace-work'); 1 + 1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let dir = tempfile::tempdir().unwrap();
+    let wrong_path = dir.path().join("wrong-profiler.json");
+    let trace_path = dir.path().join("trace.json");
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "profiler_stop",
+            "path": wrong_path.to_string_lossy(),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(Value::as_bool),
+        Some(false),
+        "profiler_stop must fail while a trace is active: {resp}"
+    );
+    assert!(!wrong_path.exists());
+
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "trace_stop",
+            "path": trace_path.to_string_lossy(),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let event_count = get_data(&resp)["eventCount"].as_u64().unwrap_or(0);
+    assert!(event_count > 0, "expected trace events, got: {resp}");
+    let saved: Value = serde_json::from_slice(&std::fs::read(&trace_path).unwrap()).unwrap();
+    assert!(
+        !saved["traceEvents"].as_array().unwrap().is_empty(),
+        "saved trace file should contain events"
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}

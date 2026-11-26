@@ -4304,7 +4304,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     Box::pin(handle_launch_prepared(
                         cmd,
                         state,
-                        LaunchRequest::Planned(prepared.take()),
+                        LaunchRequest::Planned {
+                            prepared: prepared.take(),
+                            relaunched: lifecycle_relaunched_browser,
+                        },
                     ))
                     .await
                 }
@@ -5713,7 +5716,10 @@ async fn auto_launch_with_settings(
         return Box::pin(handle_launch_prepared(
             &launch,
             state,
-            LaunchRequest::Planned(prepared),
+            LaunchRequest::Planned {
+                prepared,
+                relaunched: false,
+            },
         ))
         .await;
     }
@@ -6862,7 +6868,10 @@ enum AttachConnection {
 }
 
 enum LaunchRequest {
-    Planned(Option<AttachConnection>),
+    Planned {
+        prepared: Option<AttachConnection>,
+        relaunched: bool,
+    },
     #[cfg(test)]
     Unplanned,
 }
@@ -7958,8 +7967,11 @@ async fn handle_launch_inner_prepared(
         .or_else(|| state.settings.engine());
     let patch = launch_envelope_patch(cmd, engine.as_deref())?;
     let had_browser_before_launch = has_active_browser_session(state);
-    let (prepared, mut outcome) = match request {
-        LaunchRequest::Planned(prepared) => (prepared, SettingsOutcome::default()),
+    let (prepared, mut outcome, planned_relaunched) = match request {
+        LaunchRequest::Planned {
+            prepared,
+            relaunched,
+        } => (prepared, SettingsOutcome::default(), relaunched),
         #[cfg(test)]
         LaunchRequest::Unplanned => {
             check_capture_setting(&patch)?;
@@ -7968,10 +7980,12 @@ async fn handle_launch_inner_prepared(
                 &plugins_from_command_or_env(cmd),
             )?;
             let outcome = apply_settings_patch(state, &patch, SettingsPass::Launch).await?;
-            (None, outcome)
+            (None, outcome, false)
         }
     };
+    let had_browser_before_launch = had_browser_before_launch || planned_relaunched;
     let reusable = !outcome.relaunched_browser
+        && !planned_relaunched
         && match (state.browser.as_mut(), state.webdriver_backend.as_ref()) {
             (Some(mgr), _) => !mgr.has_process_exited() && mgr.is_connection_alive().await,
             (None, Some(webdriver)) => webdriver.is_connection_alive().await,
@@ -13369,15 +13383,29 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             return Ok(json!({ "frame": label }));
         }
 
-        let (object_id, elem_session) = super::element::query_selector_object_in_frame(
+        let found = super::element::query_selector_object_in_frame(
             &mgr.client,
             &session_id,
             state.active_frame_id.as_deref(),
             sel,
             &state.iframe_sessions,
         )
-        .await?
-        .ok_or("Could not find frame for selector")?;
+        .await?;
+        let (object_id, elem_session) = match found {
+            Some(hit) => hit,
+            None if state.active_frame_id.is_some() => {
+                super::element::query_selector_object_in_frame(
+                    &mgr.client,
+                    &session_id,
+                    None,
+                    sel,
+                    &state.iframe_sessions,
+                )
+                .await?
+                .ok_or("Could not find frame for selector")?
+            }
+            None => return Err("Could not find frame for selector".to_string()),
+        };
 
         let describe = mgr
             .client
@@ -24074,7 +24102,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert!(state.browser.is_none());
         assert!(state.domain_filter.read().await.is_none());
         assert_eq!(state.session_id, "default");
-        assert!(!state.tracing_state.active);
+        assert!(state.tracing_state.active.is_none());
         assert!(!state.recording_state.active);
         assert_eq!(state.mouse_state.x, 0.0);
         assert_eq!(state.mouse_state.y, 0.0);
