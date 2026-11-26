@@ -127,7 +127,7 @@ MCP tools pass typed values literally where they are emitted as positionals (`fi
 
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
-Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
+Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. An element inside a collapsed `<details>` or a `hidden="until-found"` section counts as hidden, and the error names the summary to click first. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
 
 A click or dblclick result includes `dialogOpened: true` when a page dialog interrupts the action. On Firefox, this also applies to `tap` and `drag`; an interrupted drag returns `dragged: false`, and with `--no-auto-dialog` a `dblclick` whose first click opens a dialog delivers the second click after the dialog closes. Resolve the dialog before sending the next page action.
 

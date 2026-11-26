@@ -10962,6 +10962,8 @@ async fn e2e_click_rejects_unreachable_elements() {
             <fieldset disabled>
                 <button id="fieldset-disabled" onclick="document.getElementById('result').textContent = 'fieldset'">Fieldset</button>
             </fieldset>
+            <details><summary>Shipping</summary><button id="in-details" onclick="document.getElementById('result').textContent = 'details'">Rates</button></details>
+            <div hidden="until-found"><button id="until-found" onclick="document.getElementById('result').textContent = 'until-found'">Contact</button></div>
             <button id="ok" onclick="document.getElementById('result').textContent = 'clicked'">Ok</button>
             <button id="straddle" style="position:absolute;top:calc(100vh - 10px)" onclick="document.getElementById('result').textContent = 'straddle'">Straddle</button>
             <button id="moving" style="position:absolute;top:2500px" onclick="document.getElementById('result').textContent = 'moving'">Moving</button>
@@ -11011,6 +11013,11 @@ async fn e2e_click_rejects_unreachable_elements() {
         ("#off-page", "is outside the viewport"),
         ("#disabled-btn", "is disabled"),
         ("#fieldset-disabled", "is disabled"),
+        (
+            "#in-details",
+            "is inside a collapsed <details> (click its summary \"Shipping\" first)",
+        ),
+        ("#until-found", "is hidden until found"),
     ];
     for (selector, expected) in cases {
         let resp = execute_command(
