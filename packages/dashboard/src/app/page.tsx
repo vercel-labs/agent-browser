@@ -1,9 +1,9 @@
 "use client";
 
 import { useAtomValue, useSetAtom } from "jotai/react";
-import { activePortAtom, sessionsAtom, newSessionDialogAtom } from "@/store/sessions";
+import { activePortAtom, activeSessionNameAtom, sessionsAtom, newSessionDialogAtom } from "@/store/sessions";
 import { useSessionsSync } from "@/store/sessions";
-import { useStreamSync, hasConsoleErrorsAtom, consoleLogsAtom } from "@/store/stream";
+import { useStreamSync, useEventHydration, hasConsoleErrorsAtom, consoleLogsAtom, watchingCountAtom } from "@/store/stream";
 import { useActivitySync } from "@/store/activity";
 import { activeExtensionsAtom } from "@/store/sessions";
 import { useChatStatusSync } from "@/store/chat";
@@ -16,6 +16,7 @@ import { ConsolePanel } from "@/components/console-panel";
 import { StoragePanel } from "@/components/storage-panel";
 import { ExtensionsPanel } from "@/components/extensions-panel";
 import { NetworkPanel } from "@/components/network-panel";
+import { EventsPanel } from "@/components/events-panel";
 import { SessionTree } from "@/components/session-tree";
 import {
   ResizablePanelGroup,
@@ -29,7 +30,9 @@ import { Plus } from "lucide-react";
 export default function DashboardPage() {
   initializeDashboardAccessToken();
   const activePort = useAtomValue(activePortAtom);
+  const activeSession = useAtomValue(activeSessionNameAtom);
   useStreamSync(activePort);
+  useEventHydration(activeSession);
   useSessionsSync();
   useActivitySync();
   useChatStatusSync();
@@ -40,6 +43,7 @@ export default function DashboardPage() {
   const isDesktop = useMediaQuery("(min-width: 768px)");
   const hasConsoleErrors = useAtomValue(hasConsoleErrorsAtom);
   const activeExtensions = useAtomValue(activeExtensionsAtom);
+  const watchingCount = useAtomValue(watchingCountAtom);
 
   const sidePanel = (
     <Tabs defaultValue="chat" className="flex h-full flex-col">
@@ -54,6 +58,12 @@ export default function DashboardPage() {
             )}
           </TabsTrigger>
           <TabsTrigger value="network" className="text-[11px]">Network</TabsTrigger>
+          <TabsTrigger value="events" className="text-[11px]">
+            Events
+            {watchingCount > 0 && (
+              <span className="ml-1 text-[9px] tabular-nums text-muted-foreground">{watchingCount}</span>
+            )}
+          </TabsTrigger>
           <TabsTrigger value="storage" className="text-[11px]">Storage</TabsTrigger>
           <TabsTrigger value="extensions" className="text-[11px]">
             Extensions
@@ -72,13 +82,16 @@ export default function DashboardPage() {
       <TabsContent value="network" className="min-h-0 flex-1 overflow-hidden">
         <NetworkPanel />
       </TabsContent>
+      <TabsContent value="events" className="min-h-0 flex-1 overflow-hidden">
+        <EventsPanel />
+      </TabsContent>
       <TabsContent value="storage" className="min-h-0 flex-1 overflow-hidden">
         <StoragePanel />
       </TabsContent>
       <TabsContent value="extensions" className="min-h-0 flex-1 overflow-hidden">
         <ExtensionsPanel />
       </TabsContent>
-      <TabsContent value="chat" className="min-h-0 flex-1 overflow-hidden">
+      <TabsContent value="chat" forceMount className="min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
         <ChatPanel />
       </TabsContent>
     </Tabs>
@@ -156,7 +169,7 @@ export default function DashboardPage() {
         <TabsContent value="viewport" className="min-h-0 overflow-hidden">
           <Viewport />
         </TabsContent>
-        <TabsContent value="activity" className="min-h-0 overflow-hidden">
+        <TabsContent value="activity" forceMount className="min-h-0 overflow-hidden data-[state=inactive]:hidden">
           {sidePanel}
         </TabsContent>
       </Tabs>

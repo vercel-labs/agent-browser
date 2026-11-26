@@ -484,6 +484,14 @@
         "to": "openai/gpt-6-luna-fast"
       },
       {
+        "from": "The dashboard is a single-page web app with three areas:",
+        "to": "The dashboard is a single-page web app with four areas:"
+      },
+      {
+        "from": "alongside Activity, Console, Network, Storage, and Extensions.",
+        "to": "alongside Activity, Events, Console, Network, Storage, and Extensions."
+      },
+      {
         "from": "it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json`, then calls `webmcp invoke` with the same `--frame`.",
         "to": "it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json` when the announced description does not show the arguments, then calls `webmcp invoke` with the same `--frame`."
       },
