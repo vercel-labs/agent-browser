@@ -209,4 +209,37 @@ test("close rejects within the timeout when a write stalls", async () => {
   const client = await connectAgentBrowserMcp(process, { timeout: 20 });
 
   await assert.rejects(client.close(), /close timed out after 20ms/);
+  assert.equal(process.stdin.locked, false);
+  assert.equal(process.stdout.locked, false);
+});
+
+
+test("releases stdin if stdout is already locked", async () => {
+  const server = fakeServer(initializeOr(() => ({ result: {} })));
+  const reader = server.process.stdout.getReader();
+  try {
+    await assert.rejects(connectAgentBrowserMcp(server.process), TypeError);
+    assert.equal(server.process.stdin.locked, false);
+    assert.equal(server.process.stdout.locked, true);
+  } finally {
+    reader.releaseLock();
+    server.kill();
+  }
+});
+
+test("releases both streams after a successful close", async () => {
+  const server = fakeServer(initializeOr(() => ({ result: {} })));
+  const client = await connectAgentBrowserMcp(server.process);
+  await client.close();
+  assert.equal(server.process.stdin.locked, false);
+  assert.equal(server.process.stdout.locked, false);
+});
+
+test("releases both streams if waiting for process exit fails", async () => {
+  const server = fakeServer(initializeOr(() => ({ result: {} })));
+  server.process.wait = async () => { throw new Error("process wait failed"); };
+  const client = await connectAgentBrowserMcp(server.process);
+  await assert.rejects(client.close(), /process wait failed/);
+  assert.equal(server.process.stdin.locked, false);
+  assert.equal(server.process.stdout.locked, false);
 });
