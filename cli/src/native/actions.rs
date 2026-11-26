@@ -9755,18 +9755,35 @@ async fn handle_history(state: &mut DaemonState, delta: i64) -> Result<Value, St
     }
 
     state.drain_cdp_events_background().await?;
+    let session_id = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .active_session_id()?
+        .to_string();
+    let main_frame_id = match state.ref_map.main_frame(&session_id) {
+        Some(id) => Some(id.to_string()),
+        None => {
+            let fetched = {
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                mgr.client
+                    .send_command_no_params("Page.getFrameTree", Some(&session_id))
+                    .await
+                    .ok()
+                    .and_then(|tree| {
+                        tree.pointer("/frameTree/frame/id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_string)
+                    })
+            };
+            if let Some(ref id) = fetched {
+                state.ref_map.set_main_frame(&session_id, id);
+            }
+            fetched
+        }
+    };
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-    let main_frame_id = state
-        .ref_map
-        .main_frame(&session_id)
-        .map(str::to_string)
-        .or_else(|| {
-            mgr.active_target_id()
-                .ok()
-                .filter(|id| *id != "provider-page")
-                .map(str::to_string)
-        });
     let auto_dismiss_dialogs = state.dialog_handler_task.is_some();
     let mut rx = mgr.client.subscribe();
     let history = mgr
@@ -18966,6 +18983,113 @@ mod tests {
         let result = handle_history(&mut state, 1).await.unwrap();
         assert_eq!(result["refsValid"], true);
         assert!(state.ref_map.resolve_entry("session", "e1").is_ok());
+    }
+
+    #[tokio::test]
+    async fn history_same_document_uses_frame_tree_not_target_id() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        for provide_frame_tree in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let method = request["method"].as_str().unwrap_or_default();
+                    let mut events = Vec::new();
+                    let response = match method {
+                        "Page.getFrameTree" if provide_frame_tree => json!({
+                            "id": request["id"],
+                            "result": {
+                                "frameTree": {
+                                    "frame": { "id": "frame-main", "loaderId": "loader-a" }
+                                }
+                            }
+                        }),
+                        "Page.getFrameTree" => json!({
+                            "id": request["id"],
+                            "error": { "code": -32601, "message": "Method not found" }
+                        }),
+                        "Page.getNavigationHistory" => json!({
+                            "id": request["id"],
+                            "result": {
+                                "currentIndex": 1,
+                                "entries": [
+                                    { "id": 1, "url": "https://example.com/#a" },
+                                    { "id": 2, "url": "https://example.com/#b" }
+                                ]
+                            }
+                        }),
+                        "Page.navigateToHistoryEntry" => {
+                            if provide_frame_tree {
+                                events.push(json!({
+                                    "method": "Page.navigatedWithinDocument",
+                                    "sessionId": "session",
+                                    "params": { "frameId": "frame-child" }
+                                }));
+                            }
+                            events.push(json!({
+                                "method": "Page.navigatedWithinDocument",
+                                "sessionId": "session",
+                                "params": { "frameId": "frame-main" }
+                            }));
+                            json!({ "id": request["id"], "result": {} })
+                        }
+                        "Runtime.evaluate" => json!({
+                            "id": request["id"],
+                            "result": { "result": { "type": "string", "value": "https://example.com/#a" } }
+                        }),
+                        _ => json!({ "id": request["id"], "result": {} }),
+                    };
+                    for event in events {
+                        if ws
+                            .send(Message::Text(event.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    if ws
+                        .send(Message::Text(response.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+
+            let client = CdpClient::connect(&url).await.unwrap();
+            let mut browser = BrowserManager::for_test(client, url);
+            browser.add_page(super::super::browser::PageInfo {
+                tab_id: 1,
+                label: None,
+                target_id: "target-different-from-frame".to_string(),
+                session_id: "session".to_string(),
+                url: "https://example.com/#b".to_string(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            });
+            let mut state = DaemonState::new();
+            state.event_rx = Some(browser.client.subscribe());
+            state.browser = Some(browser);
+
+            let result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(1),
+                handle_history(&mut state, -1),
+            )
+            .await
+            .expect("same-document history step must not stall waiting for target id")
+            .unwrap();
+            assert_eq!(result["url"], "https://example.com/#a");
+            if provide_frame_tree {
+                assert_eq!(state.ref_map.main_frame("session"), Some("frame-main"));
+            }
+        }
     }
 
     #[tokio::test]
