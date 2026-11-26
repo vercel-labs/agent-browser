@@ -1052,7 +1052,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
 
     let mut i = 0;
     let mut seen_command = false;
-    let mut wait_command_seen = false;
+    let mut command_owns_state = false;
     while i < args.len() {
         let arg = args[i].as_str();
         if arg == "--" {
@@ -1060,7 +1060,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         }
         if !arg.starts_with('-') && looks_like_command(arg) {
             if !seen_command {
-                wait_command_seen = arg == "wait";
+                command_owns_state = command_owns_state_flag(arg);
             }
             seen_command = true;
         }
@@ -1246,7 +1246,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                 }
             }
             "--state" => {
-                if !wait_command_seen {
+                if !command_owns_state {
                     if let Some(s) = args.get(i + 1) {
                         flags.state = Some(s.clone());
                         flags.cli_state = true;
@@ -1667,7 +1667,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
 
     let mut i = 0;
     let mut seen_command = false;
-    let mut wait_command_seen = false;
+    let mut command_owns_state = false;
     while i < args.len() {
         let arg = &args[i];
         if skip_next {
@@ -1683,7 +1683,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
-        if arg == "--state" && wait_command_seen {
+        if arg == "--state" && command_owns_state {
             result.push(arg.clone());
             i += 1;
             continue;
@@ -1715,7 +1715,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         }
         if !arg.starts_with('-') && looks_like_command(arg) {
             if !seen_command {
-                wait_command_seen = arg == "wait";
+                command_owns_state = command_owns_state_flag(arg.as_str());
             }
             seen_command = true;
         }
@@ -1723,6 +1723,11 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         i += 1;
     }
     result
+}
+
+/// Returns whether `command` owns `--state` as a command-local option rather than the global auth state path.
+pub fn command_owns_state_flag(command: &str) -> bool {
+    matches!(command, "wait" | "events")
 }
 
 /// Reports whether a token is a global or top-level control flag.
@@ -1889,6 +1894,27 @@ mod tests {
         assert_eq!(
             clean_args(&args("open example.com --state /tmp/auth.json")),
             args("open example.com")
+        );
+    }
+
+    #[test]
+    fn test_events_state_is_a_command_flag_unless_it_precedes_the_command() {
+        for input in [
+            "events start --selector '#x' --state hidden",
+            "events start --state hidden --selector '#x'",
+        ] {
+            let flags = parse_flags(&args(input));
+            assert_eq!(flags.state, None);
+            assert!(!flags.cli_state);
+            assert_eq!(clean_args(&args(input)), args(input));
+        }
+
+        let global = parse_flags(&args("--state /tmp/auth.json events list"));
+        assert_eq!(global.state.as_deref(), Some("/tmp/auth.json"));
+        assert!(global.cli_state);
+        assert_eq!(
+            clean_args(&args("--state /tmp/auth.json events list")),
+            args("events list")
         );
     }
 

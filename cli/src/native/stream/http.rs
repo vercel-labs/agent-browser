@@ -214,7 +214,7 @@ pub(super) async fn handle_http_request(
         }
 
         if path == "/api/chat" {
-            handle_chat_request(&mut stream, body_str).await;
+            let _ = handle_chat_request(stream, body_str).await;
             return;
         }
     }

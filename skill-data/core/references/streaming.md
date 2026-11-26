@@ -4,8 +4,13 @@ Stream a session's viewport over WebSocket and drive it with remote input. This 
 
 **Related**: [commands.md](commands.md) for full command reference, [SKILL.md](../SKILL.md) for quick start.
 
+## Event subscriptions
+
+`events start` subscribes to selector transitions or a supported CDP method, and `read`, `wait`, `ack`, `list`, `stop` and `watch` collect and manage the results without polling. The [event reference](https://agent-browser.dev/streaming#event-subscriptions) covers commands, flags, envelopes, cursors, selector and CDP recipes, and harness setup. The [security rules](https://agent-browser.dev/security#event-subscriptions) apply to CLI, MCP and eve.
+
 ## Contents
 
+- [Event subscriptions](#event-subscriptions)
 - [Enabling the stream](#enabling-the-stream)
 - [Connecting](#connecting)
 - [Messages from the server](#messages-from-the-server)
