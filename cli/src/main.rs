@@ -84,6 +84,13 @@ fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::Pl
     cmd["plugins"] = json!(plugins);
 }
 
+fn attach_tls_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("close") {
+        return;
+    }
+    cmd["tls"] = json!(tls::session_options(flags, &flags.session));
+}
+
 /// Identifies CDP metadata requests, including batches containing only those requests.
 fn command_is_cdp_url_metadata(cmd: &serde_json::Value) -> bool {
     match cmd.get("action").and_then(|value| value.as_str()) {
@@ -356,36 +363,32 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     if flags.ca_cert.is_some() && flags.clear_ca_cert {
         return Some("Cannot use --ca-cert with --no-ca-cert");
     }
-    if flags.ca_cert.is_some() && cdp {
-        return Some(
-            "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)",
-        );
-    }
-    if flags.ca_cert.is_some() && auto_connect {
-        return Some(
-            "Cannot use --ca-cert with --auto-connect (--ca-cert requires a locally launched Chromium browser on Linux)",
-        );
-    }
-    if flags.ca_cert.is_some() && provider {
-        return Some(
-            "Cannot use --ca-cert with -p/--provider (--ca-cert requires a locally launched Chromium browser on Linux)",
-        );
-    }
-    if flags.ca_cert.is_some() && flags.profile.is_some() {
-        return Some(
-            "Cannot use --ca-cert with --profile because isolated CA trust would change the profile's NSS environment",
-        );
-    }
-    if flags.ca_cert.is_some()
-        && flags
+    if flags.ca_cert.is_some() && !provider {
+        if cdp {
+            return Some(
+                "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)",
+            );
+        }
+        if auto_connect {
+            return Some(
+                "Cannot use --ca-cert with --auto-connect (--ca-cert requires a locally launched Chromium browser on Linux)",
+            );
+        }
+        if flags.profile.is_some() {
+            return Some(
+                "Cannot use --ca-cert with --profile because isolated CA trust would change the profile's NSS environment",
+            );
+        }
+        if flags
             .engine
             .as_deref()
             .is_some_and(|engine| !engine.eq_ignore_ascii_case("chrome"))
-    {
-        return Some("--ca-cert is supported only with the Chrome engine on Linux");
-    }
-    if flags.ca_cert.is_some() && !cfg!(target_os = "linux") {
-        return Some("--ca-cert browser trust is currently supported only on Linux (read, install, upgrade, and doctor accept it on every platform)");
+        {
+            return Some("--ca-cert is supported only with the Chrome engine on Linux");
+        }
+        if !cfg!(target_os = "linux") {
+            return Some("--ca-cert browser trust is currently supported only on Linux (read, install, upgrade, and doctor accept it on every platform)");
+        }
     }
 
     None
@@ -1554,6 +1557,7 @@ fn main() {
             eprintln!("{} {}", color::error_indicator(), msg);
             exit(1);
         }
+        tls::configure_process_from_env();
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(native::daemon::run_daemon(&session));
         return;
@@ -1811,10 +1815,10 @@ fn main() {
     {
         cmd["argv"] = json!(read_batch_stdin(&flags));
     }
-    match cmd.get("action").and_then(|v| v.as_str()) {
-        Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
-        Some("close") => forget_before_close(&flags.session),
-        _ => {}
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("close") {
+        forget_before_close(&flags.session);
+    } else {
+        attach_tls_to_command(&mut cmd, &flags);
     }
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
@@ -2190,10 +2194,10 @@ fn run_batch(
             }
         };
         attach_input_mode(&mut parsed, flags);
-        match parsed.get("action").and_then(|v| v.as_str()) {
-            Some("read") => parsed["tls"] = json!(tls::session_options(flags, &flags.session)),
-            Some("close") => tls::clear_session(&flags.session),
-            _ => {}
+        if parsed.get("action").and_then(|v| v.as_str()) == Some("close") {
+            tls::clear_session(&flags.session);
+        } else {
+            attach_tls_to_command(&mut parsed, flags);
         }
 
         let action = parsed
@@ -3469,10 +3473,6 @@ mod tests {
                 "Cannot use --ca-cert with --auto-connect (--ca-cert requires a locally launched Chromium browser on Linux)",
             ),
             (
-                with_ca(launch_mode_flags(false, false, true, false)),
-                "Cannot use --ca-cert with -p/--provider (--ca-cert requires a locally launched Chromium browser on Linux)",
-            ),
-            (
                 ignore_errors,
                 "Cannot use --ca-cert with --ignore-https-errors",
             ),
@@ -3490,6 +3490,27 @@ mod tests {
         for (flags, expected) in cases {
             assert_eq!(incompatible_launch_mode_error(&flags), Some(expected));
         }
+    }
+
+    #[test]
+    fn test_ca_cert_is_allowed_with_provider() {
+        let mut flags = launch_mode_flags(false, false, true, false);
+        flags.ca_cert = Some("/tmp/proxy-ca.pem".to_string());
+        assert_eq!(incompatible_launch_mode_error(&flags), None);
+    }
+
+    #[test]
+    fn test_attach_tls_to_command_carries_use_system_ca_for_provider_auto_launch() {
+        let mut flags = launch_mode_flags(false, false, true, false);
+        flags.session = format!("tri2-envelope-{}", std::process::id());
+        flags.use_system_ca = true;
+        flags.cli_use_system_ca = true;
+
+        let mut cmd = json!({ "action": "navigate", "url": "https://example.com" });
+        attach_tls_to_command(&mut cmd, &flags);
+        tls::clear_session(&flags.session);
+
+        assert_eq!(cmd["tls"]["useSystemCa"], json!(true));
     }
 
     #[test]

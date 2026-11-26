@@ -493,6 +493,14 @@ impl CdpClient {
         url: &str,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
+        Self::connect_with_headers_and_tls(url, headers, &crate::tls::TrustOptions::default()).await
+    }
+
+    pub async fn connect_with_headers_and_tls(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+        trust: &crate::tls::TrustOptions,
+    ) -> Result<Self, String> {
         let normalized_url = normalize_websocket_root_path(url);
         let mut request = normalized_url
             .as_str()
@@ -517,7 +525,15 @@ impl CdpClient {
             ..Default::default()
         };
 
-        Self::connect_request(request, ws_config, None).await
+        let connector = if url::Url::parse(&normalized_url)
+            .is_ok_and(|parsed| parsed.scheme().eq_ignore_ascii_case("wss"))
+        {
+            crate::tls::tungstenite_connector(trust)?
+        } else {
+            None
+        };
+
+        Self::connect_request(request, ws_config, connector).await
     }
 
     async fn connect_request(
@@ -2179,6 +2195,91 @@ mod tests {
 
         client.close().await;
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn wss_connect_honors_custom_ca_and_rejects_untrusted_and_hostname_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let localhost_ca = crate::tls::test_support::write_pem(
+            dir.path(),
+            "localhost-ca.pem",
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+        );
+        let wrong_host_ca = crate::tls::test_support::write_pem(
+            dir.path(),
+            "wrong-host-ca.pem",
+            crate::tls::test_support::WRONG_HOST_CERT_DER,
+        );
+
+        let server_config = crate::tls::test_support::server_config(
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+            crate::tls::test_support::LOCALHOST_KEY_DER,
+        );
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let connection = rustls::ServerConnection::new(server_config.clone()).unwrap();
+                let tls = rustls::StreamOwned::new(connection, stream);
+                if let Ok(mut ws) = tokio_tungstenite::tungstenite::accept(tls) {
+                    let _ = ws.read();
+                }
+            }
+        });
+
+        let url = format!("wss://127.0.0.1:{port}");
+        let untrusted = crate::tls::TrustOptions::default();
+        assert!(
+            CdpClient::connect_with_headers_and_tls(&url, None, &untrusted)
+                .await
+                .is_err(),
+            "wss connect should fail without custom CA"
+        );
+
+        let trusted = crate::tls::TrustOptions {
+            ca_cert: Some(localhost_ca.to_string_lossy().into_owned()),
+            ..crate::tls::TrustOptions::default()
+        };
+        let client = CdpClient::connect_with_headers_and_tls(&url, None, &trusted)
+            .await
+            .expect("wss connect should succeed with custom CA");
+        client.close().await;
+        server.join().unwrap();
+
+        let wrong_config = crate::tls::test_support::server_config(
+            crate::tls::test_support::WRONG_HOST_CERT_DER,
+            crate::tls::test_support::WRONG_HOST_KEY_DER,
+        );
+        let wrong_listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let wrong_port = wrong_listener.local_addr().unwrap().port();
+        let wrong_server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = wrong_listener.accept() {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let connection = rustls::ServerConnection::new(wrong_config).unwrap();
+                let tls = rustls::StreamOwned::new(connection, stream);
+                let _ = tokio_tungstenite::tungstenite::accept(tls);
+            }
+        });
+
+        let wrong_trust = crate::tls::TrustOptions {
+            ca_cert: Some(wrong_host_ca.to_string_lossy().into_owned()),
+            ..crate::tls::TrustOptions::default()
+        };
+        assert!(
+            CdpClient::connect_with_headers_and_tls(
+                &format!("wss://127.0.0.1:{wrong_port}"),
+                None,
+                &wrong_trust
+            )
+            .await
+            .is_err(),
+            "wss connect must reject hostname mismatch even with trusted CA"
+        );
+        wrong_server.join().unwrap();
     }
 
     #[test]

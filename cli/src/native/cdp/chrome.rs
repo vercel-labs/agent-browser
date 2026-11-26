@@ -907,21 +907,36 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
 }
 
 fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<ChromeProcess, String> {
+    try_launch_chrome_with_seed(chrome_path, options, cfg!(windows))
+}
+
+fn try_launch_chrome_with_seed(
+    chrome_path: &Path,
+    options: &LaunchOptions,
+    seed_local_state: bool,
+) -> Result<ChromeProcess, String> {
     let ChromeArgs {
         args,
         user_data_dir,
         temp_user_data_dir,
     } = build_chrome_args(options)?;
 
-    // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
-    // Puppeteer does similar cleanup before spawning.
-    let _ = std::fs::remove_file(user_data_dir.join("DevToolsActivePort"));
-
     let cleanup_temp_dir = |dir: &Option<PathBuf>| {
         if let Some(ref d) = dir {
             let _ = std::fs::remove_dir_all(d);
         }
     };
+
+    if seed_local_state {
+        if let Err(error) = prepare_profile_local_state(&user_data_dir) {
+            cleanup_temp_dir(&temp_user_data_dir);
+            return Err(error);
+        }
+    }
+
+    // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
+    // Puppeteer does similar cleanup before spawning.
+    let _ = std::fs::remove_file(user_data_dir.join("DevToolsActivePort"));
 
     #[cfg(target_os = "linux")]
     let temp_nss_home = match resolve_prepared_nss_home(options) {
@@ -1004,7 +1019,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
                 "Failed to capture Chrome stderr".to_string()
             })?;
             let reader = BufReader::new(stderr);
-            match wait_for_ws_url_until(reader, deadline) {
+            match wait_for_ws_url_until(reader, deadline, sandboxed_chrome(chrome_path, &args)) {
                 Ok(url) => url,
                 Err(fallback_err) => {
                     terminate_launched_chrome(&mut child);
@@ -1084,6 +1099,7 @@ fn wait_for_devtools_active_port(
 fn wait_for_ws_url_until(
     reader: impl BufRead,
     deadline: std::time::Instant,
+    sandboxed_chrome: Option<&Path>,
 ) -> Result<String, String> {
     let prefix = "DevTools listening on ";
     let mut stderr_lines: Vec<String> = Vec::new();
@@ -1093,6 +1109,7 @@ fn wait_for_ws_url_until(
             return Err(chrome_launch_error(
                 "Timeout waiting for Chrome DevTools URL",
                 &stderr_lines,
+                sandboxed_chrome,
             ));
         }
         let line = line.map_err(|e| format!("Failed to read Chrome stderr: {}", e))?;
@@ -1105,10 +1122,34 @@ fn wait_for_ws_url_until(
     Err(chrome_launch_error(
         "Chrome exited before providing DevTools URL",
         &stderr_lines,
+        sandboxed_chrome,
     ))
 }
 
-fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
+/// Returns the Chrome binary when it was launched with its sandbox enabled,
+/// so sandbox-specific hints only apply when the sandbox could have failed.
+fn sandboxed_chrome<'a>(chrome_path: &'a Path, args: &[String]) -> Option<&'a Path> {
+    (!args.iter().any(|a| a == "--no-sandbox")).then_some(chrome_path)
+}
+
+fn chrome_launch_error(
+    message: &str,
+    stderr_lines: &[String],
+    sandboxed_chrome: Option<&Path>,
+) -> String {
+    format_chrome_launch_error(message, stderr_lines, || {
+        sandboxed_chrome.and_then(apparmor_sandbox_hint)
+    })
+}
+
+/// Builds the launch error. `sandbox_hint` is only called when the failure
+/// looks sandbox-related (no stderr at all, or stderr mentioning the sandbox
+/// or namespaces); its hint is placed before the generic `--no-sandbox` hint.
+fn format_chrome_launch_error(
+    message: &str,
+    stderr_lines: &[String],
+    sandbox_hint: impl FnOnce() -> Option<String>,
+) -> String {
     let relevant: Vec<&String> = stderr_lines
         .iter()
         .filter(|l| {
@@ -1127,8 +1168,9 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
     if relevant.is_empty() {
         if stderr_lines.is_empty() {
             return format!(
-                "{} (no stderr output from Chrome)\nHint: try passing --args \"--no-sandbox\" if Chrome crashes silently in your environment",
-                message
+                "{} (no stderr output from Chrome){}\nHint: try passing --args \"--no-sandbox\" if Chrome crashes silently in your environment",
+                message,
+                prefixed_hint(sandbox_hint())
             );
         }
         let last_lines: Vec<&String> = stderr_lines.iter().rev().take(5).collect();
@@ -1149,9 +1191,12 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
         let lower = l.to_lowercase();
         lower.contains("sandbox") || lower.contains("namespace")
     }) {
-        "\nHint: try --args \"--no-sandbox\" (required in containers, VMs, and some Linux setups)"
+        format!(
+            "{}\nHint: try --args \"--no-sandbox\" (required in containers, VMs, and some Linux setups)",
+            prefixed_hint(sandbox_hint())
+        )
     } else {
-        ""
+        String::new()
     };
 
     format!(
@@ -1164,6 +1209,97 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
             .join("\n  "),
         hint
     )
+}
+
+fn prefixed_hint(hint: Option<String>) -> String {
+    hint.map(|h| format!("\nHint: {}", h)).unwrap_or_default()
+}
+
+/// When this sysctl reads 1, AppArmor only lets binaries covered by an AppArmor
+/// profile create unprivileged user namespaces (Ubuntu 23.10+, per Chromium's
+/// apparmor-userns-restrictions notes).
+#[cfg(target_os = "linux")]
+const APPARMOR_USERNS_SYSCTL: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+
+/// Returns a hint when the AppArmor user namespace restriction is the likely
+/// reason the Chrome sandbox failed to start. Only the Chrome downloaded by
+/// `agent-browser install` is flagged: no AppArmor profile covers it, while a
+/// system-wide Google Chrome install usually is covered.
+#[cfg(target_os = "linux")]
+fn apparmor_sandbox_hint(chrome_path: &Path) -> Option<String> {
+    let restricted = std::fs::read_to_string(APPARMOR_USERNS_SYSCTL)
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false);
+    let downloaded = chrome_path.starts_with(crate::install::get_browsers_dir());
+    apparmor_sandbox_hint_for(restricted, downloaded, || {
+        // Snap Chromium is left out on purpose: it has its own launch issues.
+        find_linux_browser(
+            LINUX_BROWSER_CANDIDATES
+                .into_iter()
+                .filter(|name| name.starts_with("google-chrome")),
+        )
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apparmor_sandbox_hint(_chrome_path: &Path) -> Option<String> {
+    None
+}
+
+/// Decides the AppArmor hint from its inputs. `find_system_chrome` is only
+/// called when the hint applies.
+#[cfg(any(target_os = "linux", test))]
+fn apparmor_sandbox_hint_for(
+    restricted: bool,
+    downloaded: bool,
+    find_system_chrome: impl FnOnce() -> Option<PathBuf>,
+) -> Option<String> {
+    if !restricted || !downloaded {
+        return None;
+    }
+    let cause = "AppArmor restricts unprivileged user namespaces on this system \
+         (kernel.apparmor_restrict_unprivileged_userns=1), which likely blocks the sandbox \
+         of the Chrome downloaded by `agent-browser install`.";
+    Some(match find_system_chrome() {
+        Some(path) => format!(
+            "{} Use the system Chrome instead: --executable-path {} \
+             (or set AGENT_BROWSER_EXECUTABLE_PATH)",
+            cause,
+            path.display()
+        ),
+        None => format!(
+            "{} Install Google Chrome system-wide and pass it with --executable-path \
+             (or set AGENT_BROWSER_EXECUTABLE_PATH)",
+            cause
+        ),
+    })
+}
+
+/// Browser binaries looked up on PATH on Linux, in order of preference.
+#[cfg(target_os = "linux")]
+const LINUX_BROWSER_CANDIDATES: [&str; 6] = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium-browser",
+    "chromium",
+    "brave-browser",
+    "brave-browser-stable",
+];
+
+/// Returns the first of `names` found on PATH.
+#[cfg(target_os = "linux")]
+fn find_linux_browser<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<PathBuf> {
+    for name in names {
+        if let Ok(output) = Command::new("which").arg(name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(PathBuf::from(path));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Finds Chrome from the install cache, macOS Applications directories, or system paths.
@@ -1198,23 +1334,8 @@ pub fn find_chrome() -> Option<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        let candidates = [
-            "google-chrome",
-            "google-chrome-stable",
-            "chromium-browser",
-            "chromium",
-            "brave-browser",
-            "brave-browser-stable",
-        ];
-        for name in &candidates {
-            if let Ok(output) = Command::new("which").arg(name).output() {
-                if output.status.success() {
-                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !path.is_empty() {
-                        return Some(PathBuf::from(path));
-                    }
-                }
-            }
+        if let Some(path) = find_linux_browser(LINUX_BROWSER_CANDIDATES) {
+            return Some(path);
         }
     }
 
@@ -1585,6 +1706,36 @@ fn format_profile_list(profiles: &[&ChromeProfile]) -> String {
         .join("\n")
 }
 
+/// Seeds `Local State` so Chrome on Windows skips its blank-password `LogonUser` probe (event 4625 per fresh profile).
+/// `os_password_last_changed` is an int64 pref, stored as a JSON string.
+fn seed_blank_password_probe_cache(user_data_dir: &Path) -> std::io::Result<()> {
+    let local_state = serde_json::json!({
+        "password_manager": {
+            "os_password_blank": false,
+            "os_password_last_changed": i64::MAX.to_string(),
+        }
+    });
+    let path = user_data_dir.join("Local State");
+    let mut file = std::fs::File::create_new(&path)?;
+    let result = file.write_all(local_state.to_string().as_bytes());
+    drop(file);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&path);
+    }
+    result
+}
+
+/// Ensures `Local State` exists in the profile directory without overwriting an existing file.
+fn prepare_profile_local_state(user_data_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(user_data_dir)
+        .map_err(|e| format!("Failed to initialize Windows Chrome profile: {e}"))?;
+    match seed_blank_password_probe_cache(user_data_dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(format!("Failed to initialize Windows Chrome profile: {e}")),
+    }
+}
+
 /// Directories to exclude when copying a Chrome profile. These are large
 /// non-auth directories that are not needed for reusing login state.
 const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
@@ -1942,15 +2093,22 @@ fn find_playwright_chromium() -> Option<PathBuf> {
     None
 }
 
-#[cfg(target_os = "linux")]
-fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
-    // Playwright's Linux layout is chrome-linux/chrome; chrome-linux64 is
-    // the Chrome-for-Testing naming kept as a fallback.
-    let standard = chromium_dir.join("chrome-linux/chrome");
-    if standard.exists() {
-        return standard;
+#[cfg(any(target_os = "linux", test))]
+fn build_linux_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
+    // Playwright's Linux layout is chrome-linux/chrome; chrome-linux64 and
+    // chrome-linux-arm64 are Chrome-for-Testing layouts kept as fallbacks.
+    for rel in ["chrome-linux/chrome", "chrome-linux-arm64/chrome"] {
+        let candidate = chromium_dir.join(rel);
+        if candidate.exists() {
+            return candidate;
+        }
     }
     chromium_dir.join("chrome-linux64/chrome")
+}
+
+#[cfg(target_os = "linux")]
+fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
+    build_linux_playwright_binary_path(chromium_dir)
 }
 
 #[cfg(target_os = "macos")]
@@ -2184,7 +2342,7 @@ exec sleep 60
 
     #[test]
     fn test_chrome_launch_error_no_stderr() {
-        let msg = chrome_launch_error("Chrome exited", &[]);
+        let msg = chrome_launch_error("Chrome exited", &[], Some(Path::new("/nonexistent/chrome")));
         assert!(msg.contains("no stderr output"));
         assert!(msg.contains("Hint:"));
         assert!(msg.contains("--no-sandbox"));
@@ -2196,7 +2354,11 @@ exec sleep 60
             "some log line".to_string(),
             "Failed to move to new namespace: sandbox error".to_string(),
         ];
-        let msg = chrome_launch_error("Chrome exited", &lines);
+        let msg = chrome_launch_error(
+            "Chrome exited",
+            &lines,
+            Some(Path::new("/nonexistent/chrome")),
+        );
         assert!(msg.contains("sandbox error"));
         assert!(msg.contains("Hint:"));
         assert!(msg.contains("--no-sandbox"));
@@ -2205,8 +2367,123 @@ exec sleep 60
     #[test]
     fn test_chrome_launch_error_generic() {
         let lines = vec!["info line".to_string(), "another info line".to_string()];
-        let msg = chrome_launch_error("Chrome exited", &lines);
+        let msg = chrome_launch_error(
+            "Chrome exited",
+            &lines,
+            Some(Path::new("/nonexistent/chrome")),
+        );
         assert!(msg.contains("last 2 lines"));
+    }
+
+    #[test]
+    fn test_build_linux_playwright_binary_path_finds_arm64() {
+        let base = std::env::temp_dir().join(format!(
+            "agent-browser-playwright-linux-bin-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let arm64 = base.join("chromium-1234");
+        let arm64_bin = arm64.join("chrome-linux-arm64/chrome");
+        std::fs::create_dir_all(arm64_bin.parent().unwrap()).unwrap();
+        std::fs::write(&arm64_bin, b"").unwrap();
+        assert_eq!(build_linux_playwright_binary_path(&arm64), arm64_bin);
+
+        let standard = base.join("chromium-1235");
+        let standard_bin = standard.join("chrome-linux/chrome");
+        std::fs::create_dir_all(standard_bin.parent().unwrap()).unwrap();
+        std::fs::write(&standard_bin, b"").unwrap();
+        assert_eq!(build_linux_playwright_binary_path(&standard), standard_bin);
+
+        let fallback = base.join("chromium-1236");
+        std::fs::create_dir_all(&fallback).unwrap();
+        assert_eq!(
+            build_linux_playwright_binary_path(&fallback),
+            fallback.join("chrome-linux64/chrome")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_sandboxed_chrome_skips_no_sandbox_launches() {
+        let chrome = Path::new("/opt/chrome/chrome");
+        let sandboxed = vec!["--headless=new".to_string()];
+        assert_eq!(sandboxed_chrome(chrome, &sandboxed), Some(chrome));
+        let unsandboxed = vec!["--headless=new".to_string(), "--no-sandbox".to_string()];
+        assert_eq!(sandboxed_chrome(chrome, &unsandboxed), None);
+    }
+
+    fn extra_hint() -> Option<String> {
+        Some("EXTRA".to_string())
+    }
+
+    #[test]
+    fn test_launch_error_sandbox_hint_before_no_sandbox_on_sandbox_stderr() {
+        let lines = vec!["FATAL: No usable sandbox!".to_string()];
+        let msg = format_chrome_launch_error("Chrome exited", &lines, extra_hint);
+        let extra = msg.find("Hint: EXTRA").expect("extra hint should be shown");
+        let fallback = msg
+            .find("--no-sandbox")
+            .expect("fallback hint should be shown");
+        assert!(extra < fallback);
+    }
+
+    #[test]
+    fn test_launch_error_sandbox_hint_before_no_sandbox_without_stderr() {
+        let msg = format_chrome_launch_error("Chrome exited", &[], extra_hint);
+        let extra = msg.find("Hint: EXTRA").expect("extra hint should be shown");
+        let fallback = msg
+            .find("--no-sandbox")
+            .expect("fallback hint should be shown");
+        assert!(extra < fallback);
+    }
+
+    #[test]
+    fn test_launch_error_sandbox_hint_skipped_for_unrelated_errors() {
+        let not_called = || -> Option<String> { panic!("hint should not be computed") };
+        let generic = vec!["info line".to_string()];
+        let msg = format_chrome_launch_error("Chrome exited", &generic, not_called);
+        assert!(!msg.contains("Hint:"));
+
+        let other_error = vec!["ERROR: permission denied opening file".to_string()];
+        let msg = format_chrome_launch_error("Chrome exited", &other_error, not_called);
+        assert!(!msg.contains("Hint:"));
+    }
+
+    #[test]
+    fn test_launch_error_without_sandbox_hint_keeps_fallback() {
+        let lines = vec!["sandbox error".to_string()];
+        let msg = format_chrome_launch_error("Chrome exited", &lines, || None);
+        assert_eq!(msg.matches("Hint:").count(), 1);
+        assert!(msg.contains("--no-sandbox"));
+    }
+
+    #[test]
+    fn test_apparmor_hint_names_system_chrome() {
+        let hint =
+            apparmor_sandbox_hint_for(true, true, || Some(PathBuf::from("/usr/bin/google-chrome")))
+                .expect("hint should apply");
+        assert!(hint.contains("apparmor_restrict_unprivileged_userns"));
+        assert!(hint.contains("likely"));
+        assert!(hint.contains("--executable-path /usr/bin/google-chrome"));
+        assert!(hint.contains("AGENT_BROWSER_EXECUTABLE_PATH"));
+    }
+
+    #[test]
+    fn test_apparmor_hint_generic_without_system_chrome() {
+        let hint = apparmor_sandbox_hint_for(true, true, || None).expect("hint should apply");
+        assert!(hint.contains("Install Google Chrome"));
+        assert!(hint.contains("--executable-path"));
+        assert!(hint.contains("AGENT_BROWSER_EXECUTABLE_PATH"));
+    }
+
+    #[test]
+    fn test_apparmor_hint_needs_restriction_and_downloaded_chrome() {
+        let not_called = || -> Option<PathBuf> { panic!("lookup should not run") };
+        assert!(apparmor_sandbox_hint_for(false, true, not_called).is_none());
+        assert!(apparmor_sandbox_hint_for(true, false, not_called).is_none());
+        assert!(apparmor_sandbox_hint_for(false, false, not_called).is_none());
     }
 
     #[test]
@@ -2319,6 +2596,117 @@ exec sleep 60
             .iter()
             .any(|a| a.starts_with("--user-data-dir=")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_seed_blank_password_probe_cache_writes_string_typed_prefs() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_blank_password_probe_cache(dir.path()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("Local State")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let pm = &json["password_manager"];
+        assert_eq!(pm["os_password_blank"], serde_json::Value::Bool(false));
+        assert_eq!(
+            pm["os_password_last_changed"],
+            serde_json::Value::String(i64::MAX.to_string())
+        );
+    }
+
+    #[test]
+    fn test_seed_blank_password_probe_cache_preserves_existing_local_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_state = dir.path().join("Local State");
+        let original = br#"{"browser":{"existing":true}}"#;
+        std::fs::write(&local_state, original).unwrap();
+
+        let error = seed_blank_password_probe_cache(dir.path()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        prepare_profile_local_state(dir.path()).unwrap();
+        assert_eq!(std::fs::read(&local_state).unwrap(), original);
+    }
+
+    #[test]
+    fn test_prepare_profile_local_state_seeds_when_local_state_missing() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let new_profile = dir.path().join("new-profile");
+        prepare_profile_local_state(&new_profile).unwrap();
+        assert!(new_profile.join("Local State").is_file());
+
+        let empty_profile = dir.path().join("empty-profile");
+        std::fs::create_dir_all(&empty_profile).unwrap();
+        prepare_profile_local_state(&empty_profile).unwrap();
+        assert!(empty_profile.join("Local State").is_file());
+
+        let non_empty_profile = dir.path().join("non-empty-profile");
+        std::fs::create_dir_all(&non_empty_profile).unwrap();
+        std::fs::write(non_empty_profile.join("Preferences"), "{}").unwrap();
+        prepare_profile_local_state(&non_empty_profile).unwrap();
+        let text = std::fs::read_to_string(non_empty_profile.join("Local State")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["password_manager"]["os_password_blank"], false);
+        assert_eq!(
+            std::fs::read_to_string(non_empty_profile.join("Preferences")).unwrap(),
+            "{}"
+        );
+
+        // Calling again hits AlreadyExists from create_new and succeeds without overwriting.
+        let original = br#"{"browser":{"existing":true}}"#;
+        std::fs::write(non_empty_profile.join("Local State"), original).unwrap();
+        prepare_profile_local_state(&non_empty_profile).unwrap();
+        assert_eq!(
+            std::fs::read(non_empty_profile.join("Local State")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn test_launch_with_seed_prepares_empty_explicit_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("new-profile");
+        let options = LaunchOptions {
+            profile: Some(profile.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let result =
+            try_launch_chrome_with_seed(&dir.path().join("unavailable-browser"), &options, true);
+        assert!(result.is_err());
+        let state = std::fs::read_to_string(profile.join("Local State")).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+        assert_eq!(state["password_manager"]["os_password_blank"], false);
+    }
+
+    #[test]
+    fn test_launch_with_seed_fails_before_spawn_when_seeding_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"file where a directory must be created").unwrap();
+        let options = LaunchOptions {
+            profile: Some(blocked.join("profile").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let error =
+            try_launch_chrome_with_seed(&dir.path().join("unavailable-browser"), &options, true)
+                .err()
+                .expect("profile initialization should fail before spawning");
+        assert!(
+            error.contains("Failed to initialize Windows Chrome profile"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_launch_without_seed_does_not_create_local_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("new-profile");
+        let options = LaunchOptions {
+            profile: Some(profile.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let result =
+            try_launch_chrome_with_seed(&dir.path().join("unavailable-browser"), &options, false);
+        assert!(result.is_err());
+        assert!(!profile.join("Local State").exists());
     }
 
     #[test]

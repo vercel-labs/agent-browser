@@ -103,7 +103,7 @@ agent-browser record start ./soak.webm --fps 10
 
 Valid rates are 1 to 60. The latest Chrome frame is held between repaints so the file duration matches wall clock.
 
-`record stop` reports `frames` written to the file and distinct `capturedFrames` received from Chrome.
+`record stop` reports `frames` written to the file, distinct `capturedFrames` received from Chrome, and `lateFrames`. When a busy machine stalls the encoder, the video holds the last image through the stall instead of failing the take, and `lateFrames` counts the frames written more than 500 ms after their slot.
 
 ## Commands
 
