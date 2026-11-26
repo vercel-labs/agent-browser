@@ -842,6 +842,8 @@ fn tool_profile_summaries() -> Vec<Value> {
     .collect()
 }
 
+// There is intentionally no MCP tool for `poppy join`: it runs a local shell
+// command (the authorizer), and an MCP client must not be able to choose one.
 fn tools() -> Vec<Value> {
     let mut tools = vec![
         tool(

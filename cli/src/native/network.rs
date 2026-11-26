@@ -306,6 +306,11 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
                 if (u.protocol === 'http:') u.protocol = 'ws:';
                 if (u.protocol === 'https:') u.protocol = 'wss:';
                 if (['ws:', 'wss:'].includes(u.protocol) && !_isDomainAllowed(u.hostname)) {{
+                    if (typeof _global.__agentBrowserPoppyNet === 'function') {{
+                        try {{
+                            _global.__agentBrowserPoppyNet(JSON.stringify({{ api: apiName, url: u.href }}));
+                        }} catch (_) {{}}
+                    }}
                     throw _securityError(apiName + ' blocked: ' + u.hostname);
                 }}
                 return u.href;

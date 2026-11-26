@@ -184,6 +184,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "chat"
             | "webmcp"
             | "flow"
+            | "poppy"
     )
 }
 
@@ -472,8 +473,8 @@ pub fn apply_attach_launch_options(cmd: &mut Value, flags: &Flags) {
     }
 }
 
-/// Stamps `timeout` on a wait-family command, `flow_save` or `flow_run` that
-/// has none, so the client read timeout follows it.
+/// Stamps `timeout` on a wait-family command, `flow_save`, `flow_run` or
+/// `poppy_join` that has none, so the client read timeout follows it.
 pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
     let Some(timeout) = timeout else {
         return;
@@ -482,7 +483,7 @@ pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
         .get("action")
         .and_then(Value::as_str)
         .is_some_and(|action| {
-            action.starts_with("wait") || action == "flow_save" || action == "flow_run"
+            action.starts_with("wait") || matches!(action, "flow_save" | "flow_run" | "poppy_join")
         });
     if is_wait && cmd.get("timeout").is_none() {
         cmd["timeout"] = json!(timeout);
@@ -768,6 +769,13 @@ fn parse_command_inner(
 
     reject_batch_global_flag(batch_item, &args[0])?;
     let cmd = args[0].as_str();
+    if batch_item && cmd == "poppy" {
+        // A join runs discovery, the authorizer and a sign-in, so it is not a batch step.
+        return Err(ParseError::InvalidValue {
+            message: "poppy join cannot run inside batch".to_string(),
+            usage: "agent-browser poppy join <url> --authorizer <command>",
+        });
+    }
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let rest = drop_end_of_options(cmd, rest);
     let id = gen_id();
@@ -839,6 +847,7 @@ fn parse_command_inner(
         "reload" => parse_bare_command(&rest, &id, "reload", &[], "reload", batch_item),
         "read" => parse_read(&rest, &id, flags),
         "webmcp" => parse_webmcp(&rest, &id),
+        "poppy" => parse_poppy(&rest, &id),
         "flow" => parse_flow(&rest, &id, batch_item),
 
         // === Core Actions ===
@@ -3162,6 +3171,51 @@ fn set_invoke_params(
     command["params"] = params;
     *has_params = true;
     Ok(())
+}
+
+const POPPY_JOIN_USAGE: &str = "poppy join <url> --authorizer <command>";
+
+fn parse_poppy(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    let subcommand = rest.first().ok_or_else(|| ParseError::MissingArguments {
+        context: "poppy".to_string(),
+        usage: POPPY_JOIN_USAGE,
+    })?;
+    if *subcommand != "join" {
+        return Err(ParseError::UnknownSubcommand {
+            subcommand: subcommand.to_string(),
+            valid_options: &["join"],
+        });
+    }
+    let mut url = None;
+    let mut authorizer = None;
+    let mut args = rest[1..].iter().copied();
+    while let Some(arg) = args.next() {
+        match arg {
+            "--authorizer" => authorizer = args.next(),
+            other if other.starts_with("--") => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unknown poppy join option: {}", other),
+                    usage: POPPY_JOIN_USAGE,
+                });
+            }
+            other if url.is_none() => url = Some(other),
+            other => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unexpected argument for poppy join: {}", other),
+                    usage: POPPY_JOIN_USAGE,
+                });
+            }
+        }
+    }
+    match (url, authorizer) {
+        (Some(url), Some(authorizer)) => {
+            Ok(json!({ "id": id, "action": "poppy_join", "url": url, "authorizer": authorizer }))
+        }
+        _ => Err(ParseError::MissingArguments {
+            context: "poppy join".to_string(),
+            usage: POPPY_JOIN_USAGE,
+        }),
+    }
 }
 
 fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
@@ -8109,6 +8163,21 @@ mod tests {
     }
 
     #[test]
+    fn test_poppy_join_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(40000);
+        let cmd = parse_command(
+            &args("poppy join https://example.com --authorizer ./auth.sh"),
+            &flags,
+        )
+        .unwrap();
+        assert_eq!(cmd["timeout"], 40000);
+        assert_eq!(
+            crate::connection::read_timeout_for(&cmd),
+            std::time::Duration::from_millis(50_000)
+        );
+    }
+
+    #[test]
     fn test_flow_run_inherits_default_timeout() {
         let flags = flags_with_default_timeout(40000);
         let cmd = parse_command(&args("flow run stoves"), &flags).unwrap();
@@ -8476,6 +8545,31 @@ mod tests {
             message.contains("Invalid JSON for WebMCP params"),
             "gave: {message}"
         );
+    }
+
+    #[test]
+    fn test_poppy_join_parses_url_and_authorizer() {
+        let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        let cmd = parse_command(
+            &args("poppy join https://example.com --authorizer ./auth.sh"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "poppy_join");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["authorizer"], "./auth.sh");
+        for bad in [
+            "poppy join https://example.com",
+            "poppy join --authorizer x",
+            "poppy join https://example.com --authorizer",
+            "poppy join https://example.com --nope x",
+            "poppy leave",
+        ] {
+            assert!(
+                parse_command(&args(bad), &default_flags()).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -9176,6 +9270,16 @@ mod tests {
         let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "batch");
         assert_eq!(cmd["bail"], false);
+    }
+
+    #[test]
+    fn test_batch_rejects_poppy_join() {
+        let err = parse_batch_command(
+            &args("poppy join https://example.com --authorizer auth"),
+            &default_flags(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
     }
 
     #[test]

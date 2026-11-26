@@ -505,6 +505,15 @@ agent-browser webmcp result <invocation-id>
 agent-browser webmcp cancel <invocation-id>
 ```
 
+## Personal Agent Protocol join
+
+Experimental. `poppy join <url> --authorizer <command>` joins the session's browser to the site's Personal Agent Protocol Session. The authorizer reads `{"code","authorize_url","origin","poppy_version"}` as one JSON line on stdin and prints `{"signed_in": true|false}`, or `{"error": "<code>"}` with a nonzero exit. Load `agent-browser skills get poppy` for the full contract and error codes.
+
+```bash
+agent-browser poppy join https://example.com --authorizer "node authorize.mjs" --json
+# {"success":true,"data":{"experimental":true,"joined":true,"signed_in":true,"url":"https://example.com/"}}
+```
+
 ## Observability Dashboard
 
 ```bash

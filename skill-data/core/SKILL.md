@@ -82,6 +82,7 @@ Load another skill with `agent-browser skills get <name>` when the task is outsi
 | `modern-web-guidance` | Apply Chrome's Modern Web Guidance to UI code and verify the built page in the browser |
 | `vercel-sandbox` | agent-browser inside Vercel Sandbox microVMs |
 | `vercel` | Vercel deployments behind Authentication, SSO, or Deployment Protection, or viewed at a different feature flag variant |
+| `poppy` | A site publishes `/.well-known/poppy.json` with a browser session endpoint and you have a Personal Agent authorizer (experimental) |
 | `agentcore` | AWS Bedrock AgentCore cloud browsers |
 
 ## Reading a page

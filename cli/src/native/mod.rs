@@ -35,6 +35,7 @@ pub mod network;
 pub mod pointer;
 #[allow(dead_code)]
 pub mod policy;
+pub mod poppy;
 #[allow(dead_code)]
 pub mod providers;
 #[allow(dead_code)]

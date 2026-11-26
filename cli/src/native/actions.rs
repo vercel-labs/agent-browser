@@ -800,6 +800,9 @@ pub struct DaemonState {
     /// Last document URL the domain filter blocked, keyed by frame ID, so
     /// navigation can report a redirect that landed on the blocked page.
     pub blocked_documents: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    /// Address rules for the tab a `poppy join` is running in, checked by the
+    /// fetch handler before each of its requests is sent.
+    pub poppy_guard: Arc<RwLock<Option<super::poppy::JoinGuard>>>,
     /// Proxy authentication credentials (username, password) for handling
     /// Fetch.authRequired events from authenticated proxies.
     pub proxy_credentials: Arc<RwLock<Option<(String, String)>>>,
@@ -920,6 +923,36 @@ fn record_har_entry_into(
 }
 
 impl DaemonState {
+    /// Fails when this session is attached through `--auto-connect`, which
+    /// is the user's own browser, not one the agent controls.
+    pub(super) fn refuse_auto_connect(&self) -> Result<(), String> {
+        if self.attached_target == Some(AttachedTarget::AutoConnect)
+            || self.settings.connection() == Connection::AutoConnect
+        {
+            return Err(
+                "This session is attached through --auto-connect; start a dedicated session without --cdp or --auto-connect"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Fails unless this session launched and owns its browser process.
+    /// External `--cdp`, `--auto-connect`, provider, and direct-page
+    /// connections cannot be terminated cleanly if a join page fails to unload.
+    pub(super) fn require_owned_browser(&self) -> Result<(), String> {
+        if self.attached_target.is_some()
+            || !matches!(self.settings.connection(), Connection::Local)
+            || self.browser.as_ref().is_some_and(|mgr| !mgr.owns_browser())
+        {
+            return Err(
+                "poppy join requires a browser launched by this session; start a dedicated session without --cdp or --auto-connect"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(super) fn tracked_snapshot_tabs(&self) -> usize {
         self.last_snapshots.len()
@@ -1067,6 +1100,7 @@ impl DaemonState {
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             blocked_documents: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            poppy_guard: Arc::new(RwLock::new(None)),
             proxy_credentials: Arc::new(RwLock::new(None)),
             fetch_handler_task: None,
             dialog_handler_task: None,
@@ -1188,6 +1222,7 @@ impl DaemonState {
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
         let blocked_documents = self.blocked_documents.clone();
+        let poppy_guard = self.poppy_guard.clone();
         let proxy_credentials = self.proxy_credentials.clone();
         let capture_session = self.recording_state.capture_session.clone();
 
@@ -1268,6 +1303,21 @@ impl DaemonState {
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
+                        let joining_guard = match poppy_guard.read().await.as_ref() {
+                            Some(guard) if waiting_for_debugger => {
+                                let target_id = target_info
+                                    .as_ref()
+                                    .map(|t| t.target_id.clone())
+                                    .unwrap_or_default();
+                                let target_type = target_info
+                                    .as_ref()
+                                    .map(|t| t.target_type.clone())
+                                    .unwrap_or_default();
+                                guard.adopt(&sid, target_id, target_type);
+                                Some(guard.clone())
+                            }
+                            _ => None,
+                        };
                         setup_auto_attached_session(
                             &client,
                             &sid,
@@ -1275,8 +1325,45 @@ impl DaemonState {
                             waiting_for_debugger,
                             df.as_ref(),
                             has_proxy_creds,
+                            joining_guard.as_ref(),
                         )
                         .await;
+                    }
+                    Some(event)
+                        if event.method == "Fetch.requestPaused"
+                            && (event.params.get("responseStatusCode").is_some()
+                                || event.params.get("responseErrorReason").is_some()) =>
+                    {
+                        let sid = event.session_id.clone().unwrap_or_default();
+                        let guard = poppy_guard.read().await.clone().filter(|g| g.guards(&sid));
+                        let client = client.clone();
+                        tokio::spawn(async move {
+                            let request_id = event.params.get("requestId").cloned();
+                            let admitted = match guard {
+                                Some(guard) => {
+                                    let network_id = event
+                                        .params
+                                        .get("networkId")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default();
+                                    let status = event
+                                        .params
+                                        .get("responseStatusCode")
+                                        .and_then(|v| v.as_i64());
+                                    guard.admits_response(network_id, status).await
+                                }
+                                None => true,
+                            };
+                            let (method, params) = if admitted {
+                                ("Fetch.continueRequest", json!({ "requestId": request_id }))
+                            } else {
+                                (
+                                    "Fetch.failRequest",
+                                    json!({ "requestId": request_id, "errorReason": "BlockedByClient" }),
+                                )
+                            };
+                            let _ = client.send_command(method, Some(params), Some(&sid)).await;
+                        });
                     }
                     Some(event) if event.method == "Fetch.requestPaused" => {
                         let request_id = event
@@ -1323,6 +1410,23 @@ impl DaemonState {
                             session_id: sid,
                             request_headers,
                         };
+
+                        let guard = poppy_guard.read().await.clone();
+                        if let Some(guard) = guard.filter(|g| g.guards(&paused.session_id)) {
+                            if !guard.admits(&paused.url).await {
+                                let _ = client
+                                    .send_command(
+                                        "Fetch.failRequest",
+                                        Some(json!({
+                                            "requestId": paused.request_id,
+                                            "errorReason": "BlockedByClient"
+                                        })),
+                                        Some(&paused.session_id),
+                                    )
+                                    .await;
+                                continue;
+                            }
+                        }
 
                         let df = domain_filter.read().await;
                         let rt = routes.read().await;
@@ -3292,6 +3396,15 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
 
 /// Close every browser backend owned by the daemon.
 ///
+pub(super) async fn close_browser_for_cleanup(state: &mut DaemonState) {
+    let _ = close_current_browser(state).await;
+    if let Some(task) = state.fetch_handler_task.take() {
+        task.abort();
+    }
+    state.attached_target = None;
+    state.ref_map.invalidate_all_documents();
+}
+
 /// Lifecycle shutdown paths use this instead of `close_current_browser`
 /// because Safari and iOS sessions live outside `state.browser`.
 pub(crate) async fn close_all_browser_backends(state: &mut DaemonState) -> Result<(), String> {
@@ -3537,6 +3650,9 @@ fn policy_actions_for_command(
         || (matches!(action, "a11y" | "vitals")
             && cmd.get("url").and_then(|v| v.as_str()).is_some())
     {
+        actions.push("navigate".to_string());
+    }
+    if action == "poppy_join" {
         actions.push("navigate".to_string());
     }
     if FIND_SUBACTION_COMMANDS.contains(&action) {
@@ -4329,6 +4445,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             }
         }
         "navigate" => handle_navigate(cmd, state).await,
+        "poppy_join" => super::poppy::handle_join(cmd, state).await,
         "read" => handle_read(cmd, state).await,
         "url" => handle_url(state).await,
         "cdp_url" => handle_cdp_url(state).await,
@@ -4564,6 +4681,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             resp
         }
         (Ok(data), None) => success_response(&id, data),
+        (Err(e), None) if e.starts_with(super::poppy::ERROR_PREFIX) => {
+            poppy_error_response(&id, &e)
+        }
         (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
     attach_tab_gone_data(&mut resp, state);
@@ -5126,9 +5246,10 @@ async fn setup_auto_attached_session(
     waiting_for_debugger: bool,
     domain_filter: Option<&DomainFilter>,
     has_proxy_creds: bool,
+    poppy_guard: Option<&super::poppy::JoinGuard>,
 ) -> AutoAttachedSetup {
     let target_needs_controls = target_info.is_some_and(target_supports_network_controls);
-    let controls_active = domain_filter.is_some() || has_proxy_creds;
+    let controls_active = domain_filter.is_some() || has_proxy_creds || poppy_guard.is_some();
     let controls_result = match target_info {
         Some(target) if controls_active && target_needs_controls => {
             bounded_auto_attached_setup("session", sid, async {
@@ -5141,7 +5262,7 @@ async fn setup_auto_attached_session(
                         has_proxy_creds,
                         target,
                     )
-                    .await
+                    .await?;
                 } else {
                     install_network_controls_for_session(
                         client,
@@ -5150,8 +5271,25 @@ async fn setup_auto_attached_session(
                         has_proxy_creds,
                         waiting_for_debugger,
                     )
-                    .await
+                    .await?;
                 }
+                if let Some(guard) = poppy_guard {
+                    guard
+                        .install_session_guard(client, sid, target_is_worker_like(target))
+                        .await?;
+                    if !target_is_worker_like(target)
+                        || target_supports_worker_fetch_controls(target)
+                    {
+                        client
+                            .send_command(
+                                "Fetch.enable",
+                                Some(super::poppy::fetch_enable_params(has_proxy_creds)),
+                                Some(sid),
+                            )
+                            .await?;
+                    }
+                }
+                Ok(())
             })
             .await
         }
@@ -5285,6 +5423,16 @@ async fn install_worker_network_controls_for_session(
     Ok(())
 }
 
+pub(super) async fn ensure_browser_auto_attach(state: &mut DaemonState) -> Result<(), String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    if state.network_auto_attach_installed || mgr.is_direct_page_connection() {
+        return Ok(());
+    }
+    mgr.enable_browser_auto_attach_pub().await?;
+    state.network_auto_attach_installed = true;
+    Ok(())
+}
+
 async fn install_active_network_controls(
     state: &mut DaemonState,
     handle_auth_requests: bool,
@@ -5345,7 +5493,7 @@ async fn install_active_network_controls(
 /// The wedged tab was replaced by a blank one: drop the old tab's refs and
 /// frame scope, and give the new tab the session setup and network controls
 /// (headers, routes, domain filter) that `tab new` installs.
-async fn adopt_replacement_tab(
+pub(super) async fn adopt_replacement_tab(
     state: &mut DaemonState,
     old_session_id: &str,
 ) -> Result<(), String> {
@@ -8125,7 +8273,7 @@ async fn launch_local_driver(
     }))
 }
 
-async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(super) async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd
         .get("url")
         .and_then(|v| v.as_str())
@@ -8551,6 +8699,7 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
         None => None,
     };
     close_all_browser_backends(state).await?;
+    *state.poppy_guard.write().await = None;
     state.attached_target = None;
 
     // Stop background Fetch handler
@@ -16425,10 +16574,14 @@ async fn build_fetch_patterns(state: &DaemonState) -> Vec<Value> {
     let has_domain_filter = state.domain_filter.read().await.is_some();
     let has_origin_headers = !state.origin_headers.read().await.is_empty();
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-    if (has_domain_filter || has_origin_headers || has_proxy_creds)
+    let has_poppy_guard = state.poppy_guard.read().await.is_some();
+    if (has_domain_filter || has_origin_headers || has_proxy_creds || has_poppy_guard)
         && !patterns.iter().any(|p| p["urlPattern"] == "*")
     {
         patterns.push(json!({ "urlPattern": "*" }));
+    }
+    if has_poppy_guard {
+        patterns.push(json!({ "urlPattern": "*", "requestStage": "Response" }));
     }
     patterns
 }
@@ -16442,6 +16595,28 @@ async fn build_fetch_enable_params(state: &DaemonState, patterns: Vec<Value>) ->
     } else {
         json!({ "patterns": patterns })
     }
+}
+
+/// Enables or disables Fetch interception on `session_id` to match the
+/// current routes, domain filter, origin headers, proxy credentials and
+/// `poppy join` guard.
+pub(super) async fn sync_fetch_interception(
+    state: &DaemonState,
+    session_id: &str,
+) -> Result<(), String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let patterns = build_fetch_patterns(state).await;
+    if patterns.is_empty() {
+        mgr.client
+            .send_command("Fetch.disable", None, Some(session_id))
+            .await?;
+    } else {
+        let params = build_fetch_enable_params(state, patterns).await;
+        mgr.client
+            .send_command("Fetch.enable", Some(params), Some(session_id))
+            .await?;
+    }
+    Ok(())
 }
 
 fn parse_route_response(cmd: &Value) -> Option<RouteResponse> {
@@ -18295,6 +18470,16 @@ fn inject_lifecycle(
     );
 }
 
+/// Splits `poppy:<code>: <message>` into the error envelope with its code.
+fn poppy_error_response(id: &str, error: &str) -> Value {
+    let rest = error.trim_start_matches(super::poppy::ERROR_PREFIX);
+    let (code, message) = rest.split_once(": ").unwrap_or(("join_failed", rest));
+    let mut resp = error_response(id, message);
+    resp["code"] = json!(code);
+    resp["data"] = json!({ "experimental": true, "joined": false });
+    resp
+}
+
 fn attach_failed_lifecycle(resp: &mut Value, launched: bool, relaunched_browser: bool) {
     if resp.get("success").and_then(Value::as_bool) != Some(false) {
         return;
@@ -19376,6 +19561,54 @@ mod tests {
         assert_eq!(error, "Recording already active");
         assert!(state.recording_state.active);
         assert!(state.browser.is_none());
+    }
+
+    #[test]
+    fn auto_connect_is_refused_for_a_poppy_join() {
+        let mut state = DaemonState::new();
+        assert!(state.refuse_auto_connect().is_ok());
+        state.settings.set(Key::AutoConnect, json!(true));
+        assert!(state.refuse_auto_connect().is_err());
+
+        let mut state = DaemonState::new();
+        state.attached_target = Some(AttachedTarget::AutoConnect);
+        assert!(state.refuse_auto_connect().is_err());
+
+        let mut state = DaemonState::new();
+        state.attached_target = Some(AttachedTarget::CdpPort(9222));
+        assert!(state.refuse_auto_connect().is_ok());
+    }
+
+    #[test]
+    fn external_browsers_are_refused_for_a_poppy_join() {
+        let state = DaemonState::new();
+        assert!(state.require_owned_browser().is_ok());
+
+        let mut state = DaemonState::new();
+        state.attached_target = Some(AttachedTarget::CdpPort(9222));
+        assert!(state.require_owned_browser().is_err());
+
+        let mut state = DaemonState::new();
+        state.settings.set(Key::Cdp, json!("http://127.0.0.1:9222"));
+        assert!(state.require_owned_browser().is_err());
+
+        let mut state = DaemonState::new();
+        state.settings.set(Key::Provider, json!("browser-use"));
+        assert!(state.require_owned_browser().is_err());
+    }
+
+    #[test]
+    fn a_poppy_error_carries_its_code() {
+        let resp = poppy_error_response(
+            "1",
+            "poppy:invalid_request: The authorizer reported an error",
+        );
+        assert_eq!(resp["code"], "invalid_request");
+        assert_eq!(resp["error"], "The authorizer reported an error");
+        assert_eq!(
+            resp["data"],
+            json!({ "experimental": true, "joined": false })
+        );
     }
 
     #[tokio::test]
@@ -21231,7 +21464,15 @@ mod tests {
                 let target = setup_test_target(target_id, target_type);
                 let outcome = tokio::time::timeout(
                     std::time::Duration::from_secs(2),
-                    setup_auto_attached_session(&client, sid, Some(&target), true, None, true),
+                    setup_auto_attached_session(
+                        &client,
+                        sid,
+                        Some(&target),
+                        true,
+                        None,
+                        true,
+                        None,
+                    ),
                 )
                 .await
                 .unwrap_or_else(|_| panic!("{target_type} {sid}: setup must not stall"));
@@ -21319,6 +21560,7 @@ mod tests {
                     false,
                     Some(&filter),
                     false,
+                    None,
                 ),
             )
             .await

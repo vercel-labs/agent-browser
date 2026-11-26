@@ -11,6 +11,7 @@ mod mcp;
 mod native;
 mod output;
 mod plugins;
+mod poppy;
 mod read;
 mod session_files;
 mod session_settings;
@@ -1805,6 +1806,11 @@ fn main() {
         return;
     }
     attach_input_mode(&mut cmd, &flags);
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("poppy_join") {
+        cmd["cwd"] = json!(std::env::current_dir()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_default());
+    }
     // Stdin batches are read before launch decisions so a batch of `read`
     // commands is recognized as browserless, like one given as arguments.
     if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") && cmd.get("commands").is_none()
@@ -1812,7 +1818,9 @@ fn main() {
         cmd["argv"] = json!(read_batch_stdin(&flags));
     }
     match cmd.get("action").and_then(|v| v.as_str()) {
-        Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
+        Some("read" | "poppy_join") => {
+            cmd["tls"] = json!(tls::session_options(&flags, &flags.session))
+        }
         Some("close") => forget_before_close(&flags.session),
         _ => {}
     }

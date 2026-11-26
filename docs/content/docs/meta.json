@@ -18,6 +18,7 @@
     "network",
     "cdp-mode",
     "webmcp",
+    "poppy",
     "streaming",
     "recording",
     "webgpu",

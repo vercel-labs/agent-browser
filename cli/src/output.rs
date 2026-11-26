@@ -4936,6 +4936,26 @@ WebMCP (experimental):
   webmcp cancel <id>         Cancel an active invocation
   Brief untrusted summaries appear only on discovery or change; no schemas
 
+Personal Agent Protocol (experimental):
+  poppy join <url> --authorizer <command>
+                             Join the session's browser to the site's Personal Agent
+                             Protocol Session. The authorizer is a shell command that
+                             reads {{code, authorize_url, origin, poppy_version}} as one
+                             JSON line on stdin and prints {{"signed_in": bool}}, or
+                             {{"error": code}} with a nonzero exit. The code is single-use
+                             and browser-bound, and may appear spent in network requests
+                             and HAR. Discovery refuses a document or endpoint that is not
+                             HTTPS or that reaches a non-public address, unless the join
+                             started on a loopback host. Until the join ends, every request
+                             the tab and the popups it opens make, redirects included, is
+                             held to the same rules before it is sent, and a refused
+                             request fails the join with request_blocked. The browser
+                             resolves hosts again, so a response it receives directly
+                             from a loopback or private address is also refused before
+                             the page sees it. Errors show only the scheme and host of a
+                             refused URL, never the code. Requires a browser launched by
+                             this session (no --cdp or --auto-connect)
+
 Saved flows (experimental, open the session with --capture flow):
   flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed
   flow save <name>           Save the steps since the last open as a flow; accepts --from <seq>,
