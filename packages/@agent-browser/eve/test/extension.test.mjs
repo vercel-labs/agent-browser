@@ -48,8 +48,8 @@ function fakeSandbox({ respond } = {}) {
   };
 }
 
-function fakeCtx(sandbox) {
-  return { getSandbox: async () => sandbox };
+function fakeCtx(sandbox, sessionId = "sess-test") {
+  return { getSandbox: async () => sandbox, session: { id: sessionId } };
 }
 
 function resetConfig(overrides = {}) {
@@ -62,6 +62,9 @@ function parseCall(command) {
   assert.ok(match, command);
   return { tool: match[1], args: JSON.parse(match[2].replaceAll("'\\''", "'")) };
 }
+
+/** The catalog tools that wrap the CLI's event subscriptions. */
+const EVENT_TOOLS = ["events_ack", "events_list", "events_read", "events_start", "events_stop"];
 
 test("ships one tool file per catalog tool it exposes", () => {
   const files = readdirSync(new URL("../extension/tools", import.meta.url)).map((file) =>
@@ -400,6 +403,105 @@ test("errors instead of hanging when the install probe stops responding", async 
   await new Promise((resolve) => setImmediate(resolve));
   t.mock.timers.tick(180_001);
   await rejection;
+});
+
+for (const contentBoundaries of [false, true]) {
+  test(`events tools call the MCP catalog with the eve session as owner (config: ${contentBoundaries})`, async () => {
+    resetConfig({ contentBoundaries });
+    const waiting = { id: "ev_1", status: "watching", events: [], cursor: "ev_1:0", head: 0, consumed: 0, waiting: true };
+    const sandbox = fakeSandbox({ respond: () => ({ stdout: OK(waiting) }) });
+    const ctx = fakeCtx(sandbox, "session-42");
+    const cases = [
+      ["events_start", { selector: "#dialog", state: "hidden", once: true, ttl: 30, key: "dialog" },
+        { selector: "#dialog", state: "hidden", once: true, ttl: 30, key: "dialog" }],
+      ["events_start", { method: "Page.frameNavigated", match: ["/url=https://example.com/"], matchRegex: ["/url=^https://"] },
+        { method: "Page.frameNavigated", match: ["/url=https://example.com/"], matchRegex: ["/url=^https://"] }],
+      ["events_read", { id: "ev_1", since: "ev_1:2", waitMs: 5000, limit: 10, ack: true },
+        { id: "ev_1", since: "ev_1:2", waitMs: 5000, limit: 10, ack: true }],
+      ["events_ack", { id: "ev_1", cursor: "ev_1:3" }, { id: "ev_1", cursor: "ev_1:3" }],
+      ["events_list", { unread: true }, { unread: true }],
+      ["events_stop", { id: "ev_1" }, { id: "ev_1" }],
+    ];
+    for (const [name, input, expected] of cases) {
+      const result = await tools[name].execute({ ...input, owner: "someone-else" }, ctx);
+      const command = sandbox.commands.at(-1);
+      const { tool, args } = parseCall(command);
+      assert.equal(tool, `agent_browser_${name}`);
+      assert.deepEqual(args, { ...expected, session: "eve-default", owner: "session-42" });
+      assert.equal(command.match(/AGENT_BROWSER_CONTENT_BOUNDARIES=1/g)?.length, 1, command);
+      if (name === "events_read") assert.deepEqual(result, waiting);
+    }
+    resetConfig();
+  });
+}
+
+test("events results keep the content boundary metadata", async () => {
+  resetConfig();
+  const waiting = { id: "ev_1", status: "watching", events: [], cursor: "ev_1:0", head: 0, consumed: 0, waiting: true };
+  const boundary = { nonce: "n-1", origin: "page" };
+  const sandbox = fakeSandbox({
+    respond: () => ({
+      stdout: JSON.stringify({
+        _meta: { agentBrowserVersion: AGENT_BROWSER_SANDBOX_VERSION },
+        content: [{ type: "text", text: "ok" }],
+        isError: false,
+        structuredContent: {
+          exitCode: 0,
+          response: { success: true, data: waiting, error: null, _boundary: boundary },
+        },
+      }),
+    }),
+  });
+  const result = await tools.events_read.execute({ id: "ev_1" }, fakeCtx(sandbox));
+  assert.deepEqual(result, { boundary, data: waiting });
+});
+
+test("tools without forced boundaries still return bare data", async () => {
+  resetConfig();
+  const boundary = { nonce: "n-1", origin: "page" };
+  const sandbox = fakeSandbox({
+    respond: () => ({
+      stdout: JSON.stringify({
+        _meta: { agentBrowserVersion: AGENT_BROWSER_SANDBOX_VERSION },
+        content: [{ type: "text", text: "ok" }],
+        isError: false,
+        structuredContent: {
+          exitCode: 0,
+          response: { success: true, data: { title: "Example" }, error: null, _boundary: boundary },
+        },
+      }),
+    }),
+  });
+  const result = await tools.open.execute({ url: "https://example.com" }, fakeCtx(sandbox));
+  assert.deepEqual(result, { title: "Example" });
+  assert.ok(!sandbox.commands.at(-1).includes("AGENT_BROWSER_CONTENT_BOUNDARIES"), sandbox.commands.at(-1));
+});
+
+test("events tools take their schemas from the MCP catalog", () => {
+  const start = tools.events_start.inputSchema.properties;
+  for (const name of ["selector", "state", "method", "match", "matchRegex", "once", "ttl", "key"]) {
+    assert.ok(name in start, `events_start is missing ${name}`);
+  }
+  for (const stale of ["matches", "ttlSeconds"]) {
+    assert.ok(!(stale in start), `events_start still exposes ${stale}`);
+  }
+  assert.equal(tools.events_read.inputSchema.properties.waitMs.maximum, 50000);
+  for (const name of EVENT_TOOLS) {
+    for (const hidden of ["owner", "session"]) {
+      assert.ok(!(hidden in tools[name].inputSchema.properties), `${name} exposes ${hidden}`);
+    }
+  }
+});
+
+test("events_start describes its selector as CSS only", () => {
+  const { description } = tools.events_start.inputSchema.properties.selector;
+  assert.match(description, /^CSS selector/);
+  assert.match(description, /Standard CSS selectors only/);
+  assert.ok(!description.includes("@e12"), description);
+  for (const unsupported of ["text=", "xpath="]) {
+    const sentence = description.split(". ").find((part) => part.includes(unsupported));
+    assert.ok(sentence?.includes("not supported"), `${unsupported} must not be offered as a selector`);
+  }
 });
 
 test("mount factory validates config", () => {

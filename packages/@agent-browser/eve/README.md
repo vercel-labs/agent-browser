@@ -2,7 +2,7 @@
 
 An [eve](https://eve.dev) extension that gives your agent a full browser automation tool set, backed by [agent-browser](https://agent-browser.dev) running inside the agent's sandbox.
 
-Mount it once and the agent gets 42 namespaced tools for navigation, accessibility snapshots with stable element refs, clicking, form filling, semantic element finding, waiting, screenshots, JavaScript evaluation, tab management, and network and console inspection. Their names, descriptions, and input schemas come from the `agent-browser mcp` tool catalog of the matching CLI version, so they stay in sync with the CLI.
+Mount it once and the agent gets 47 namespaced tools for navigation, accessibility snapshots with stable element refs, clicking, form filling, semantic element finding, waiting, event subscriptions, screenshots, JavaScript evaluation, tab management, and network and console inspection. Their names, descriptions, and input schemas come from the `agent-browser mcp` tool catalog of the matching CLI version, so they stay in sync with the CLI.
 
 ## Install
 
@@ -79,7 +79,7 @@ export default browser({
 
 ## Tools
 
-The 28 tools in the CLI's `core` MCP profile are listed to the model every turn. The other 14, marked *deferred*, stay out of the list and the model finds them with `eve__search`, so they add no context until used.
+The 33 tools in the CLI's `core` MCP profile are listed to the model every turn. The other 14, marked *deferred*, stay out of the list and the model finds them with `eve__search`, so they add no context until used.
 
 | Tool | Purpose |
 | --- | --- |
@@ -92,6 +92,11 @@ The 28 tools in the CLI's `core` MCP profile are listed to the model every turn.
 | `drag` | Drag and drop (deferred) |
 | `errors` | Page errors (deferred) |
 | `eval` | Evaluate JavaScript |
+| `events_ack` | Mark events up to a cursor as consumed |
+| `events_list` | List this session's subscriptions |
+| `events_read` | Read events after a cursor, optionally waiting |
+| `events_start` | Watch a CSS selector's visibility or a filtered CDP event |
+| `events_stop` | Stop a subscription |
 | `fill` | Fill input |
 | `find` | Find element (deferred) |
 | `forward` | Forward |
@@ -127,6 +132,10 @@ The 28 tools in the CLI's `core` MCP profile are listed to the model every turn.
 | `wait_ms` | Wait milliseconds |
 
 Cookie, storage, and saved-auth-state commands are not exposed as tools because they make credential material visible to the model. If you need them, add a scoped tool in your own agent (or an [override](#overrides)) with the guardrails your app requires.
+
+## Events
+
+Follow the [event subscription workflow](https://agent-browser.dev/streaming#event-subscriptions): start before acting, then use `events_read` with `waitMs` instead of polling. The tools inject the eve session id as owner, force content boundaries even when `contentBoundaries` is off, and cap waits at 50 seconds. See the tool table above for read, ack, list and stop.
 
 ## Overrides
 

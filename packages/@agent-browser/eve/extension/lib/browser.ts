@@ -7,10 +7,13 @@ import extension from "../extension";
 export interface BrowserToolContext {
   readonly abortSignal?: AbortSignal;
   getSandbox(): PromiseLike<EveSandboxSession | null | undefined>;
+  readonly session: { readonly id: string };
 }
 
-export const SELECTOR_HINT =
-  'Element selector: a ref from the snapshot tool like "@e12" (most reliable), a CSS selector like "#login .submit", "text=Sign in", or "xpath=//button[1]".';
+interface ContentBoundary {
+  readonly nonce: string;
+  readonly origin: string;
+}
 
 /**
  * Upper bound on acquiring the sandbox session and on a single command run.
@@ -45,7 +48,16 @@ interface McpCallResult {
   readonly content?: readonly { readonly text?: string; readonly type: string }[];
   readonly error?: { readonly message: string };
   readonly isError?: boolean;
-  readonly structuredContent?: { readonly response?: { readonly data?: unknown } | null };
+  readonly structuredContent?: {
+    readonly response?: { readonly _boundary?: ContentBoundary; readonly data?: unknown } | null;
+  };
+}
+
+export interface RunMcpToolOptions {
+  /** Set AGENT_BROWSER_CONTENT_BOUNDARIES=1 even when the mount config leaves boundaries off. */
+  readonly forceContentBoundaries?: boolean;
+  /** Return `{ boundary, data }` when the CLI attached boundary metadata to its response. */
+  readonly preserveBoundary?: boolean;
 }
 
 /**
@@ -59,13 +71,14 @@ export async function runMcpTool<TData = unknown>(
   ctx: BrowserToolContext,
   tool: string,
   args: Record<string, unknown>,
+  options: RunMcpToolOptions = {},
 ): Promise<TData> {
   const sandbox = await requireSandbox(ctx);
   await ensureInstalled(sandbox, ctx.abortSignal);
 
   const config = extension.config;
   const command = [
-    ...configEnv(),
+    ...configEnv({ forceContentBoundaries: options.forceContentBoundaries === true }),
     quoteShellArg(config.binary),
     "mcp",
     "call",
@@ -95,7 +108,12 @@ export async function runMcpTool<TData = unknown>(
     const text = result.content?.find((part) => part.type === "text")?.text ?? "unknown error";
     throw new Error(`agent-browser ${tool} failed: ${text}`);
   }
-  return (result.structuredContent?.response?.data ?? null) as TData;
+  const response = result.structuredContent?.response;
+  const data = response?.data ?? null;
+  if (options.preserveBoundary === true && response?._boundary !== undefined) {
+    return { boundary: response._boundary, data } as TData;
+  }
+  return data as TData;
 }
 
 /** The catalog this package ships describes one agent-browser minor; another minor may take different arguments. */
@@ -117,11 +135,13 @@ function matchesPackageMinor(version: string): boolean {
 }
 
 /** Server-level settings that MCP tool arguments cannot carry. */
-function configEnv(): string[] {
+function configEnv({ forceContentBoundaries = false }: { forceContentBoundaries?: boolean } = {}): string[] {
   const config = extension.config;
   const env: string[] = [];
   if (config.proxy !== undefined) env.push(`AGENT_BROWSER_PROXY=${quoteShellArg(config.proxy)}`);
-  if (config.contentBoundaries) env.push("AGENT_BROWSER_CONTENT_BOUNDARIES=1");
+  if (config.contentBoundaries || forceContentBoundaries) {
+    env.push("AGENT_BROWSER_CONTENT_BOUNDARIES=1");
+  }
   if (config.maxOutputChars !== undefined) {
     env.push(`AGENT_BROWSER_MAX_OUTPUT=${config.maxOutputChars}`);
   }

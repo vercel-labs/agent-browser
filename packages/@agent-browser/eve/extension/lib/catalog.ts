@@ -3,7 +3,7 @@ import catalog from "@agent-browser/sandbox/mcp-tools.json" with { type: "json" 
 import { defineTool } from "eve/tools";
 
 import extension from "../extension";
-import { runMcpTool, type BrowserToolContext } from "./browser";
+import { runMcpTool, type BrowserToolContext, type RunMcpToolOptions } from "./browser";
 
 const PREFIX = "agent_browser_";
 
@@ -49,6 +49,10 @@ const TOOLS = new Map(
 export interface CatalogToolOptions<TOutput> {
   /** Catalog arguments of this tool the model may not set, on top of the shared app-owned ones. */
   readonly hiddenArguments?: readonly string[];
+  /** Set the catalog `owner` argument from the eve session id and hide it from the model. */
+  readonly injectOwner?: boolean;
+  /** Force content boundaries on and return `{ boundary, data }` when the CLI attached them. */
+  readonly forceContentBoundaries?: boolean;
   /** Keep the tool out of the model's tool list; the model finds it with `eve__search`. */
   readonly deferred?: boolean;
   /** Retry once after a transient CDP race, such as a snapshot taken mid-navigation. */
@@ -65,7 +69,16 @@ export function catalogTool<TOutput = unknown>(name: string, options: CatalogToo
   if (tool === undefined) {
     throw new Error(`agent-browser ${AGENT_BROWSER_SANDBOX_VERSION} has no MCP tool named ${PREFIX}${name}.`);
   }
-  const hidden = new Set([...APP_OWNED_ARGUMENTS, ...(options.hiddenArguments ?? [])]);
+  const injectOwner = options.injectOwner === true;
+  const hidden = new Set([
+    ...APP_OWNED_ARGUMENTS,
+    ...(options.hiddenArguments ?? []),
+    ...(injectOwner ? ["owner"] : []),
+  ]);
+  const runOptions: RunMcpToolOptions =
+    options.forceContentBoundaries === true
+      ? { forceContentBoundaries: true, preserveBoundary: true }
+      : {};
   return defineTool({
     description: tool.description,
     inputSchema: modelSchema(tool.inputSchema, hidden),
@@ -73,16 +86,20 @@ export function catalogTool<TOutput = unknown>(name: string, options: CatalogToo
       const modelArguments = Object.fromEntries(
         Object.entries(input).filter(([key]) => !hidden.has(key)),
       );
-      const args = { ...modelArguments, ...appArguments() };
+      const args = {
+        ...modelArguments,
+        ...appArguments(),
+        ...(injectOwner ? { owner: ctx.session.id } : {}),
+      };
       let data: unknown;
       try {
-        data = await runMcpTool(ctx, tool.name, args);
+        data = await runMcpTool(ctx, tool.name, args, runOptions);
       } catch (error) {
         if (!options.retryOnCdpError || !(error instanceof Error) || !error.message.includes("CDP error")) {
           throw error;
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
-        data = await runMcpTool(ctx, tool.name, args);
+        data = await runMcpTool(ctx, tool.name, args, runOptions);
       }
       return (options.output ? await options.output(data, ctx) : data) as TOutput;
     },
