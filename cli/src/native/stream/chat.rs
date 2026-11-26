@@ -1,4 +1,5 @@
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde_json::{json, Value};
 
@@ -7,6 +8,105 @@ use tokio::io::AsyncWriteExt;
 pub(crate) const DEFAULT_AI_GATEWAY_URL: &str = "https://ai-gateway.vercel.sh";
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static WAKE_REGISTRY: OnceLock<Mutex<WakeRegistry>> = OnceLock::new();
+
+type WakeKey = (String, String, u64);
+
+#[derive(Default)]
+struct WakeRegistry {
+    running: HashSet<WakeKey>,
+    completed: HashMap<(String, String), u64>,
+}
+
+impl WakeRegistry {
+    fn begin(&mut self, key: WakeKey) -> bool {
+        let scope = (key.0.clone(), key.1.clone());
+        if self
+            .completed
+            .get(&scope)
+            .is_some_and(|completed| key.2 <= *completed)
+        {
+            return false;
+        }
+        self.running.insert(key)
+    }
+
+    fn complete(&mut self, key: &WakeKey) {
+        self.running.remove(key);
+        let completed = self
+            .completed
+            .entry((key.0.clone(), key.1.clone()))
+            .or_default();
+        *completed = (*completed).max(key.2);
+    }
+}
+
+struct WakeTurnGuard(Option<WakeKey>);
+
+impl Drop for WakeTurnGuard {
+    fn drop(&mut self) {
+        if let Some(key) = &self.0 {
+            wake_registry().running.remove(key);
+        }
+    }
+}
+
+fn wake_registry() -> MutexGuard<'static, WakeRegistry> {
+    WAKE_REGISTRY
+        .get_or_init(|| Mutex::new(WakeRegistry::default()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+fn wake_state_is_current(list: &Value, subscription_id: &str, seq: u64) -> bool {
+    list.pointer("/data/subscriptions")
+        .and_then(Value::as_array)
+        .is_some_and(|subscriptions| {
+            subscriptions.iter().any(|subscription| {
+                subscription["id"].as_str() == Some(subscription_id)
+                    && subscription["head"].as_u64().unwrap_or(0) >= seq
+                    && subscription["consumed"].as_u64().unwrap_or(0) < seq
+            })
+        })
+}
+
+async fn wake_is_current(session: &str, subscription_id: &str, seq: u64) -> bool {
+    let args = [
+        "--session",
+        session,
+        "--json",
+        "events",
+        "list",
+        "--owner",
+        &format!("chat:{session}"),
+    ]
+    .map(str::to_string);
+    match execute_chat_cli(&args).await {
+        Ok(output) if output.status.success() => serde_json::from_slice::<Value>(&output.stdout)
+            .is_ok_and(|list| wake_state_is_current(&list, subscription_id, seq)),
+        _ => false,
+    }
+}
+
+fn parse_event_wake(parsed: &Value, session: &str) -> Result<Option<WakeKey>, &'static str> {
+    let Some(value) = parsed.get("wake") else {
+        return Ok(None);
+    };
+    let subscription_id = value["subscriptionId"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or("wake.subscriptionId must be a non-empty string")?;
+    let seq = value["seq"]
+        .as_u64()
+        .ok_or("wake.seq must be an unsigned integer")?;
+    let cursor = value["cursor"]
+        .as_str()
+        .ok_or("wake.cursor must be a string")?;
+    if cursor != format!("{subscription_id}:{seq}") {
+        return Err("wake.cursor does not match subscriptionId and seq");
+    }
+    Ok(Some((session.into(), subscription_id.into(), seq)))
+}
 
 pub(crate) fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(reqwest::Client::new)
@@ -461,10 +561,10 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "skills",
 ];
 
-const CHAT_GLOBAL_FLAGS: &[&str] = &["--json", "--annotate"];
+const CHAT_GLOBAL_FLAGS: &[&str] = &["--json", "--annotate", "--content-boundaries"];
 
 fn is_allowed_chat_command(command: &str) -> bool {
-    ALLOWED_COMMANDS.contains(&command)
+    ALLOWED_COMMANDS.contains(&command) || command == "events"
 }
 
 /// Returns the text before the first unquoted `;` or `&&`, using the same
@@ -504,6 +604,12 @@ fn check_batch_items(words: &[String]) -> Result<(), String> {
     for item in items {
         let parts = crate::commands::shell_words_split(item);
         let command = parts.first().map(|s| s.as_str()).unwrap_or("");
+        if command == "events" {
+            return Err(
+                "Blocked: run 'events' commands directly in chat rather than inside 'batch'."
+                    .to_string(),
+            );
+        }
         if !is_allowed_chat_command(command) {
             return Err(format!(
                 "Blocked: '{}' is not a valid agent-browser command.",
@@ -531,8 +637,9 @@ fn chat_command_args(session: &str, command: &str) -> Result<Vec<String>, String
         .collect();
     if crate::flags::clean_args(&rest) != rest {
         return Err(format!(
-            "Blocked: this chat is bound to session '{}'. Global flags such as --session are not available; only --json and --annotate are allowed.",
-            session
+            "Blocked: this chat is bound to session '{}'. Global flags such as --session are not available; only {} are allowed.",
+            session,
+            CHAT_GLOBAL_FLAGS.join(", ")
         ));
     }
 
@@ -546,10 +653,85 @@ fn chat_command_args(session: &str, command: &str) -> Result<Vec<String>, String
             first_cmd
         ));
     }
-    if first_cmd == "batch" {
+    if first_cmd == "events" {
+        chat_event_args(&mut args, session)?;
+    } else if first_cmd == "batch" {
         check_batch_items(&args[3..])?;
     }
     Ok(args)
+}
+
+/// Applies the chat policy for `events`: blocks the streaming verb and unknown
+/// verbs, replaces a model-supplied owner with the chat's own, and forces
+/// content boundaries on.
+fn chat_event_args(args: &mut Vec<String>, session: &str) -> Result<(), String> {
+    let mut words = strip_chat_flag_optional_bool(&args[2..], "--content-boundaries");
+    words = strip_chat_flag(&words, "--owner");
+    let cleaned = crate::flags::clean_args(&words);
+    let verb = cleaned.get(1).map(String::as_str).unwrap_or("");
+    if verb == "watch" {
+        return Err(
+            "Blocked: 'events watch' streams until interrupted; use 'events read --wait' or 'events wait' instead."
+                .to_string(),
+        );
+    }
+    if !matches!(verb, "start" | "read" | "wait" | "ack" | "stop" | "list") {
+        return Err(format!("Blocked: unsupported events subcommand '{verb}'."));
+    }
+    words.push("--owner".to_string());
+    words.push(format!("chat:{session}"));
+    words.push("--content-boundaries".to_string());
+    words.push("true".to_string());
+    args.truncate(2);
+    args.extend(words);
+    Ok(())
+}
+
+/// Drops every `--flag`, `--flag=value`, and `--flag value` occurrence from
+/// `words`.
+fn strip_chat_flag(words: &[String], flag: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut skip_value = false;
+    for word in words {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if word == flag {
+            skip_value = true;
+            continue;
+        }
+        if word.starts_with(&format!("{flag}=")) {
+            continue;
+        }
+        result.push(word.clone());
+    }
+    result
+}
+
+/// Drops every `--flag`, `--flag=true|false`, and `--flag true|false`
+/// occurrence from `words`, keeping the word after the flag unless it is a
+/// boolean.
+fn strip_chat_flag_optional_bool(words: &[String], flag: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut skip_bool = false;
+    for word in words {
+        if skip_bool {
+            skip_bool = false;
+            if matches!(word.as_str(), "true" | "false") {
+                continue;
+            }
+        }
+        if word == flag {
+            skip_bool = true;
+            continue;
+        }
+        if word.starts_with(&format!("{flag}=")) {
+            continue;
+        }
+        result.push(word.clone());
+    }
+    result
 }
 
 /// Runs one chat tool call in `session`. When the session was open at the start
@@ -565,19 +747,7 @@ pub(crate) async fn execute_chat_tool(session: &str, command: &str, was_open: bo
             session
         );
     }
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => return format!("Failed to resolve executable: {}", e),
-    };
-
-    let mut cmd = tokio::process::Command::new(&exe);
-    cmd.args(&args)
-        .stdin(std::process::Stdio::null())
-        .env_remove("AGENT_BROWSER_DASHBOARD")
-        .env_remove("AGENT_BROWSER_DASHBOARD_PORT")
-        .env_remove("AGENT_BROWSER_STREAM_PORT");
-
-    match cmd.output().await {
+    match execute_chat_cli(&args).await {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -589,21 +759,39 @@ pub(crate) async fn execute_chat_tool(session: &str, command: &str, was_open: bo
                 stdout
             }
         }
-        Err(e) => format!("Failed to execute command: {}", e),
+        Err(error) => error,
     }
 }
 
+async fn execute_chat_cli(args: &[String]) -> Result<std::process::Output, String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("Failed to resolve executable: {}", error))?;
+
+    tokio::process::Command::new(&exe)
+        .args(args)
+        .env_remove("AGENT_BROWSER_DAEMON")
+        .env_remove("AGENT_BROWSER_DASHBOARD")
+        .env_remove("AGENT_BROWSER_DASHBOARD_PORT")
+        .env_remove("AGENT_BROWSER_STREAM_PORT")
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|error| format!("Failed to execute command: {}", error))
+}
+
+async fn wait_for_client_disconnect(reader: &mut (impl tokio::io::AsyncRead + Unpin)) {
+    let _ = tokio::io::copy(reader, &mut tokio::io::sink()).await;
+}
+
 async fn stream_gateway_response(
-    stream: &mut tokio::net::TcpStream,
+    stream: &mut tokio::net::tcp::OwnedWriteHalf,
     gw_response: reqwest::Response,
-) -> Vec<(String, String, String)> {
+) -> Option<Vec<(String, String, String)>> {
     use futures_util::StreamExt as _;
 
     let mut text_part_id = uuid::Uuid::new_v4().to_string();
     let mut text_started = false;
-    let mut tool_calls: Vec<(String, String, String)> = Vec::new();
-    let mut tool_call_args: std::collections::HashMap<usize, (String, String, String)> =
-        std::collections::HashMap::new();
+    let mut tool_call_args = BTreeMap::new();
     let mut byte_stream = gw_response.bytes_stream();
     let mut buffer = String::new();
 
@@ -628,16 +816,9 @@ async fn stream_gateway_response(
             if data == "[DONE]" {
                 if text_started {
                     let ev = format!("data: {}\n\n", json!({"type":"text-end","id":text_part_id}));
-                    let _ = stream.write_all(ev.as_bytes()).await;
+                    stream.write_all(ev.as_bytes()).await.ok()?;
                 }
-                let mut indices: Vec<usize> = tool_call_args.keys().copied().collect();
-                indices.sort();
-                for idx in indices {
-                    if let Some(tc) = tool_call_args.remove(&idx) {
-                        tool_calls.push(tc);
-                    }
-                }
-                return tool_calls;
+                return Some(tool_call_args.into_values().collect());
             }
             let Ok(sse_json) = serde_json::from_str::<Value>(data) else {
                 continue;
@@ -655,32 +836,29 @@ async fn stream_gateway_response(
                             "data: {}\n\n",
                             json!({"type":"text-start","id":text_part_id})
                         );
-                        if stream.write_all(ev.as_bytes()).await.is_err() {
-                            return tool_calls;
-                        }
+                        stream.write_all(ev.as_bytes()).await.ok()?;
                         text_started = true;
                     }
                     let ev = format!(
                         "data: {}\n\n",
                         json!({"type":"text-delta","id":text_part_id,"delta":text})
                     );
-                    if stream.write_all(ev.as_bytes()).await.is_err() {
-                        return tool_calls;
-                    }
+                    stream.write_all(ev.as_bytes()).await.ok()?;
                 }
             }
 
             if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                 if text_started {
                     let ev = format!("data: {}\n\n", json!({"type":"text-end","id":text_part_id}));
-                    let _ = stream.write_all(ev.as_bytes()).await;
+                    stream.write_all(ev.as_bytes()).await.ok()?;
                     text_started = false;
                     text_part_id = uuid::Uuid::new_v4().to_string();
                 }
 
                 for tc in tcs {
                     let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                    if let std::collections::hash_map::Entry::Vacant(e) = tool_call_args.entry(idx)
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        tool_call_args.entry(idx)
                     {
                         let id = tc
                             .get("id")
@@ -697,8 +875,8 @@ async fn stream_gateway_response(
                             "data: {}\n\n",
                             json!({"type":"tool-input-start","toolCallId":id,"toolName":name})
                         );
-                        let _ = stream.write_all(ev.as_bytes()).await;
-                        e.insert((id, name, String::new()));
+                        stream.write_all(ev.as_bytes()).await.ok()?;
+                        entry.insert((id, name, String::new()));
                     }
                     if let Some(arg_delta) = tc
                         .get("function")
@@ -711,7 +889,7 @@ async fn stream_gateway_response(
                             "data: {}\n\n",
                             json!({"type":"tool-input-delta","toolCallId":entry.0,"inputTextDelta":arg_delta})
                         );
-                        let _ = stream.write_all(ev.as_bytes()).await;
+                        stream.write_all(ev.as_bytes()).await.ok()?;
                     }
                 }
             }
@@ -720,19 +898,13 @@ async fn stream_gateway_response(
 
     if text_started {
         let ev = format!("data: {}\n\n", json!({"type":"text-end","id":text_part_id}));
-        let _ = stream.write_all(ev.as_bytes()).await;
+        stream.write_all(ev.as_bytes()).await.ok()?;
     }
-    let mut indices: Vec<usize> = tool_call_args.keys().copied().collect();
-    indices.sort();
-    for idx in indices {
-        if let Some(tc) = tool_call_args.remove(&idx) {
-            tool_calls.push(tc);
-        }
-    }
-    tool_calls
+    None
 }
 
-pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body: &str) {
+pub(super) async fn handle_chat_request(stream: tokio::net::TcpStream, body: &str) -> Option<()> {
+    let (mut client_reader, mut stream) = stream.into_split();
     let gateway_url = std::env::var("AI_GATEWAY_URL")
         .unwrap_or_else(|_| DEFAULT_AI_GATEWAY_URL.to_string())
         .trim_end_matches('/')
@@ -747,24 +919,30 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
             );
             let _ = stream.write_all(resp.as_bytes()).await;
             let _ = stream.write_all(err.as_bytes()).await;
-            return;
+            return None;
         }
     };
 
     let default_model =
         std::env::var("AI_GATEWAY_MODEL").unwrap_or_else(|_| "openai/gpt-6-luna-fast".to_string());
 
-    let parsed: Value = match serde_json::from_str(body) {
+    let (parsed, event_wake) = match serde_json::from_str::<Value>(body)
+        .map_err(|error| format!(r#"{{"error":"Invalid JSON: {}"}}"#, error))
+        .and_then(|parsed| {
+            let session = parsed["session"].as_str().unwrap_or("default");
+            let wake = parse_event_wake(&parsed, session)
+                .map_err(|error| json!({"error": error}).to_string())?;
+            Ok((parsed, wake))
+        }) {
         Ok(v) => v,
-        Err(e) => {
-            let err = format!(r#"{{"error":"Invalid JSON: {}"}}"#, e);
+        Err(err) => {
             let resp = format!(
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 err.len()
             );
             let _ = stream.write_all(resp.as_bytes()).await;
             let _ = stream.write_all(err.as_bytes()).await;
-            return;
+            return None;
         }
     };
 
@@ -779,6 +957,13 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
         .and_then(|v| v.as_str())
         .unwrap_or("default")
         .to_string();
+    let duplicate_wake = match &event_wake {
+        Some(wake) => {
+            !wake_is_current(&wake.0, &wake.1, wake.2).await || !wake_registry().begin(wake.clone())
+        }
+        None => false,
+    };
+    let wake_guard = WakeTurnGuard(event_wake.filter(|_| !duplicate_wake));
 
     let mut openai_messages: Vec<Value> =
         vec![json!({"role": "system", "content": system_prompt_for(&session)})];
@@ -843,13 +1028,18 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
     let mut compaction_failed = false;
     let mut keep_last_n: usize = frontend_count;
 
-    if total_chars > COMPACT_THRESHOLD_CHARS && openai_messages.len() > KEEP_RECENT_MESSAGES + 2 {
+    if !duplicate_wake
+        && total_chars > COMPACT_THRESHOLD_CHARS
+        && openai_messages.len() > KEEP_RECENT_MESSAGES + 2
+    {
         let split = find_safe_split(&openai_messages, KEEP_RECENT_MESSAGES);
         let to_summarize = &openai_messages[1..split];
 
-        if let Some(summary) =
-            summarize_for_compaction(client, &url, &api_key, &model, to_summarize).await
-        {
+        let summary = tokio::select! {
+            result = summarize_for_compaction(client, &url, &api_key, &model, to_summarize) => result,
+            _ = wait_for_client_disconnect(&mut client_reader) => return None,
+        };
+        if let Some(summary) = summary {
             let summary_msg = json!({
                 "role": "system",
                 "content": format!("[Conversation summary]\n{}", summary)
@@ -870,17 +1060,19 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
     }
 
     let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nx-vercel-ai-ui-message-stream: v1\r\n\r\n";
-    if stream.write_all(headers.as_bytes()).await.is_err() {
-        return;
-    }
+    stream.write_all(headers.as_bytes()).await.ok()?;
 
     let message_id = uuid::Uuid::new_v4().to_string();
     let start_ev = format!(
         "data: {}\n\n",
         json!({"type":"start","messageId":message_id})
     );
-    if stream.write_all(start_ev.as_bytes()).await.is_err() {
-        return;
+    stream.write_all(start_ev.as_bytes()).await.ok()?;
+
+    if duplicate_wake {
+        return stream.write_all(
+            b"data: {\"type\":\"finish-step\"}\n\ndata: {\"type\":\"finish\"}\n\ndata: [DONE]\n\n",
+        ).await.ok();
     }
 
     if let Some(ref summary) = compaction_summary {
@@ -895,7 +1087,7 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
                 }
             })
         );
-        let _ = stream.write_all(ev.as_bytes()).await;
+        stream.write_all(ev.as_bytes()).await.ok()?;
     } else if compaction_failed {
         let ev = format!(
             "data: {}\n\n",
@@ -907,12 +1099,13 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
                 }
             })
         );
-        let _ = stream.write_all(ev.as_bytes()).await;
+        stream.write_all(ev.as_bytes()).await.ok()?;
     }
 
     let total_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     const TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
     let was_open = crate::connection::daemon_ready(&session);
+    let mut completed_normally = false;
 
     for _step in 0..50 {
         if tokio::time::Instant::now() >= total_deadline {
@@ -920,14 +1113,12 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
                 "data: {}\n\n",
                 json!({"type":"error","errorText":"Chat session timed out (5 minute limit)."})
             );
-            let _ = stream.write_all(ev.as_bytes()).await;
+            stream.write_all(ev.as_bytes()).await.ok()?;
             break;
         }
 
         let step_ev = "data: {\"type\":\"start-step\"}\n\n";
-        if stream.write_all(step_ev.as_bytes()).await.is_err() {
-            return;
-        }
+        stream.write_all(step_ev.as_bytes()).await.ok()?;
 
         let gateway_body = json!({
             "model": model,
@@ -936,40 +1127,50 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
             "stream": true,
         });
 
-        let gw_response = match client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .body(gateway_body.to_string())
-            .send()
-            .await
-        {
+        let gateway_response = tokio::select! {
+            result = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .body(gateway_body.to_string())
+                .send() => result,
+            _ = wait_for_client_disconnect(&mut client_reader) => return None,
+        };
+        let gw_response = match gateway_response {
             Ok(r) => r,
             Err(e) => {
                 let ev = format!(
                     "data: {}\n\n",
                     json!({"type":"error","errorText":format!("Gateway request failed: {}", e)})
                 );
-                let _ = stream.write_all(ev.as_bytes()).await;
+                stream.write_all(ev.as_bytes()).await.ok()?;
                 break;
             }
         };
 
         if !gw_response.status().is_success() {
-            let body_text = gw_response.text().await.unwrap_or_default();
+            let response_body = tokio::select! {
+                result = gw_response.text() => result,
+                _ = wait_for_client_disconnect(&mut client_reader) => return None,
+            };
+            let body_text = response_body.unwrap_or_default();
             let ev = format!(
                 "data: {}\n\n",
                 json!({"type":"error","errorText":body_text})
             );
-            let _ = stream.write_all(ev.as_bytes()).await;
+            stream.write_all(ev.as_bytes()).await.ok()?;
             break;
         }
 
-        let tool_calls = stream_gateway_response(stream, gw_response).await;
+        let tool_calls = tokio::select! {
+            result = stream_gateway_response(&mut stream, gw_response) => result?,
+            _ = wait_for_client_disconnect(&mut client_reader) => return None,
+        };
 
         if tool_calls.is_empty() {
             let finish_step_ev = "data: {\"type\":\"finish-step\"}\n\n";
-            let _ = stream.write_all(finish_step_ev.as_bytes()).await;
+            stream.write_all(finish_step_ev.as_bytes()).await.ok()?;
+            completed_normally = true;
             break;
         }
 
@@ -991,18 +1192,12 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
                     "input": input
                 })
             );
-            if stream.write_all(ev.as_bytes()).await.is_err() {
-                return;
-            }
+            stream.write_all(ev.as_bytes()).await.ok()?;
 
-            let result = match tokio::time::timeout(
-                TOOL_TIMEOUT,
-                execute_chat_tool(&session, command, was_open),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
+            let result = tokio::select! {
+                result = tokio::time::timeout(TOOL_TIMEOUT, execute_chat_tool(&session, command, was_open)) =>
+                    result.unwrap_or_else(|_| "Tool execution timed out after 60 seconds.".to_string()),
+                _ = wait_for_client_disconnect(&mut client_reader) => return None,
             };
 
             let frontend_output = enrich_tool_output(&result);
@@ -1014,7 +1209,7 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
                     "output": frontend_output
                 })
             );
-            let _ = stream.write_all(ev.as_bytes()).await;
+            stream.write_all(ev.as_bytes()).await.ok()?;
 
             openai_messages.push(json!({
                 "role": "tool",
@@ -1024,13 +1219,31 @@ pub(super) async fn handle_chat_request(stream: &mut tokio::net::TcpStream, body
         }
 
         let finish_step_ev = "data: {\"type\":\"finish-step\"}\n\n";
-        let _ = stream.write_all(finish_step_ev.as_bytes()).await;
+        stream.write_all(finish_step_ev.as_bytes()).await.ok()?;
     }
 
     let finish_ev = "data: {\"type\":\"finish\"}\n\n";
-    let _ = stream.write_all(finish_ev.as_bytes()).await;
+    stream.write_all(finish_ev.as_bytes()).await.ok()?;
     let done_ev = "data: [DONE]\n\n";
-    let _ = stream.write_all(done_ev.as_bytes()).await;
+    stream.write_all(done_ev.as_bytes()).await.ok()?;
+    if completed_normally {
+        if let Some(key @ (session, subscription_id, seq)) = &wake_guard.0 {
+            wake_registry().complete(key);
+            let args = [
+                "--session".into(),
+                session.clone(),
+                "--content-boundaries".into(),
+                "events".into(),
+                "ack".into(),
+                subscription_id.clone(),
+                format!("{subscription_id}:{seq}"),
+                "--owner".into(),
+                format!("chat:{session}"),
+            ];
+            let _ = execute_chat_cli(&args).await;
+        }
+    }
+    Some(())
 }
 
 #[cfg(test)]
@@ -1040,6 +1253,133 @@ mod tests {
     #[test]
     fn chat_allows_webmcp_command() {
         assert!(is_allowed_chat_command("webmcp"));
+    }
+
+    #[test]
+    fn events_commands_force_boundaries_and_replace_owner() {
+        for command in [
+            "start --selector #done",
+            "read sub-1 --since sub-1:2",
+            "wait sub-1",
+            "ack sub-1 sub-1:3",
+            "stop sub-1",
+            "list",
+        ] {
+            let (flags, parsed) = parse_chat(&format!(
+                "events {command} --owner forged --owner=forged --content-boundaries false"
+            ));
+            assert!(flags.content_boundaries);
+            assert_eq!(parsed["owner"], "chat:chat-test");
+        }
+    }
+
+    #[test]
+    fn events_watch_is_blocked_in_chat() {
+        let error = chat_command_args("chat-test", "events watch sub-1").unwrap_err();
+        assert_eq!(
+            error,
+            "Blocked: 'events watch' streams until interrupted; use 'events read --wait' or 'events wait' instead."
+        );
+    }
+
+    #[test]
+    fn events_inside_batch_are_blocked_at_any_depth() {
+        for command in [
+            "batch 'events list'",
+            "batch 'events read sub-1'",
+            "batch 'events ack sub-1 sub-1:2'",
+            "batch 'events stop sub-1'",
+            "batch 'batch \"events list\"'",
+            "batch 'open about:blank' 'events list'",
+            "batch 'events --json list'",
+        ] {
+            let error = chat_command_args("s", command).unwrap_err();
+            assert!(
+                error.contains("run 'events' commands directly in chat"),
+                "{command}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn events_flags_before_the_verb_still_force_boundaries_and_replace_owner() {
+        for command in [
+            "events --json list",
+            "events --content-boundaries list",
+            "events --content-boundaries false read sub-1",
+            "events --json read sub-1 --wait 5000",
+            "events --content-boundaries true --owner forged list",
+        ] {
+            let (flags, parsed) = parse_chat(command);
+            assert!(flags.content_boundaries, "{command}");
+            assert_eq!(parsed["owner"], "chat:chat-test", "{command}");
+        }
+    }
+
+    #[test]
+    fn events_flags_before_a_blocked_or_unknown_verb_are_still_blocked() {
+        for command in [
+            "events --json watch sub-1",
+            "events --content-boundaries false watch sub-1",
+        ] {
+            let error = chat_command_args("s", command).unwrap_err();
+            assert!(error.contains("events watch"), "{command}: {error}");
+        }
+        for command in ["events --json tail sub-1", "events"] {
+            let error = chat_command_args("s", command).unwrap_err();
+            assert!(
+                error.contains("unsupported events subcommand"),
+                "{command}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn wake_registry_retries_aborted_turns_and_deduplicates_completed_turns() {
+        let key = ("chat-1".into(), "sub-1".into(), 3);
+        let mut registry = WakeRegistry::default();
+
+        assert!(registry.begin(key.clone()));
+        assert!(!registry.begin(key.clone()));
+        registry.running.remove(&key);
+        assert!(registry.begin(key.clone()));
+        registry.complete(&key);
+        registry.running.remove(&key);
+        assert!(!registry.begin(key.clone()));
+        assert!(wake_registry().begin(key.clone()));
+        drop(WakeTurnGuard(Some(key.clone())));
+        assert!(wake_registry().begin(key));
+    }
+
+    #[test]
+    fn completed_turns_are_not_replayable_when_acknowledgement_fails() {
+        let key = ("chat-ack".into(), "sub-ack".into(), 7);
+        let guard = WakeTurnGuard(Some(key.clone()));
+        assert!(wake_registry().begin(key.clone()));
+        wake_registry().complete(&key);
+        drop(guard);
+        assert!(!wake_registry().begin(key));
+    }
+
+    #[test]
+    fn wake_requires_an_owned_unread_subscription_cursor() {
+        let list = json!({"data": {"subscriptions": [
+            {"id": "sub-1", "head": 5, "consumed": 1},
+            {"id": "sub-2", "head": 5, "consumed": 5}
+        ]}});
+        assert!(wake_state_is_current(&list, "sub-1", 3));
+        assert!(!wake_state_is_current(&list, "sub-2", 5));
+        assert!(!wake_state_is_current(&list, "missing", 1));
+        assert!(!wake_state_is_current(&list, "sub-1", 6));
+    }
+
+    #[test]
+    fn event_wake_requires_a_cursor_for_its_subscription_and_sequence() {
+        let mut valid = json!({"wake": {"subscriptionId": "sub-1", "seq": 3, "cursor": "sub-1:3"}});
+        let wake = parse_event_wake(&valid, "chat-1").unwrap().unwrap();
+        assert_eq!(wake, ("chat-1".into(), "sub-1".into(), 3));
+        valid["wake"]["cursor"] = json!("sub-1:2");
+        assert!(parse_event_wake(&valid, "chat-1").is_err());
     }
 
     #[test]

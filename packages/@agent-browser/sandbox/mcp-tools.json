@@ -1234,6 +1234,222 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
+      "description": "Acknowledge a subscription through a returned cursor.",
+      "inputSchema": {
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "id": {
+            "description": "Subscription id.",
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "cursor"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_events_ack",
+      "profiles": [
+        "core"
+      ],
+      "title": "Acknowledge event subscription"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List event subscriptions, optionally filtered by owner or unread events.",
+      "inputSchema": {
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "unread": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_events_list",
+      "profiles": [
+        "core"
+      ],
+      "title": "List event subscriptions"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Read events from a subscription. The CLI-only wait and watch conveniences are available as events wait and events watch.",
+      "inputSchema": {
+        "properties": {
+          "ack": {
+            "default": false,
+            "description": "Acknowledge through the last returned event.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Subscription id.",
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "owner": {
+            "description": "Subscription owner label. It must match the owner set at start.",
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "since": {
+            "description": "Cursor to read after.",
+            "type": "string"
+          },
+          "waitMs": {
+            "description": "Wait up to this many milliseconds for an event.",
+            "maximum": 50000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_events_read",
+      "profiles": [
+        "core"
+      ],
+      "title": "Read event subscription"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Subscribe to selector transitions or a CDP method. Specify exactly one of selector and method.",
+      "inputSchema": {
+        "properties": {
+          "key": {
+            "description": "Idempotency key.",
+            "type": "string"
+          },
+          "match": {
+            "description": "Repeated JSON pointer equals filters: /pointer=value.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "matchRegex": {
+            "description": "Repeated JSON pointer regular-expression filters: /pointer=regex.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "method": {
+            "description": "Supported CDP method to watch.",
+            "type": "string"
+          },
+          "once": {
+            "default": false,
+            "type": "boolean"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "selector": {
+            "description": "CSS selector to watch for visible or hidden transitions. Standard CSS selectors only; snapshot refs (@eN), text=, and xpath= are not supported.",
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          },
+          "state": {
+            "default": "visible",
+            "enum": [
+              "visible",
+              "hidden"
+            ],
+            "type": "string"
+          },
+          "ttl": {
+            "description": "Subscription lifetime in seconds.",
+            "maximum": 1800,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_events_start",
+      "profiles": [
+        "core"
+      ],
+      "title": "Start event subscription"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Stop an event subscription.",
+      "inputSchema": {
+        "properties": {
+          "id": {
+            "description": "Subscription id.",
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "session": {
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "agent_browser_events_stop",
+      "profiles": [
+        "core"
+      ],
+      "title": "Stop event subscription"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Clear and fill an input by @ref or CSS selector. Date, time, color and range inputs get the value set directly; a color input takes any CSS color Chrome accepts and stores it as #rrggbb. Fails for readonly, disabled or non-text elements; warns if the value is cut by maxlength or the page does not hold it afterwards. Chrome and Firefox.",
       "inputSchema": {
         "properties": {

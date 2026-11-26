@@ -27,6 +27,11 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
 const TOOL_LIST_PAGE_SIZE: usize = 64;
 const TOOL_OPEN: &str = "agent_browser_open";
 const TOOL_READ: &str = "agent_browser_read";
+const TOOL_EVENTS_START: &str = "agent_browser_events_start";
+const TOOL_EVENTS_READ: &str = "agent_browser_events_read";
+const TOOL_EVENTS_ACK: &str = "agent_browser_events_ack";
+const TOOL_EVENTS_LIST: &str = "agent_browser_events_list";
+const TOOL_EVENTS_STOP: &str = "agent_browser_events_stop";
 const TOOL_BACK: &str = "agent_browser_back";
 const TOOL_FORWARD: &str = "agent_browser_forward";
 const TOOL_RELOAD: &str = "agent_browser_reload";
@@ -270,7 +275,7 @@ impl ToolProfile {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, tab basics, JavaScript eval, close, and profile discovery.",
+            Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, event subscriptions, tab basics, JavaScript eval, close, and profile discovery.",
             Self::Network => "Network interception, request inspection, HAR capture, headers, credentials, and offline mode.",
             Self::State => "Cookies, storage, auth profiles, saved browser state, sessions, Chrome profiles, and bundled skills.",
             Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
@@ -352,6 +357,11 @@ const CORE_PROFILE_TOOLS: &[&str] = &[
     TOOL_FLOW_STEPS,
     TOOL_FLOW_SAVE,
     TOOL_READ,
+    TOOL_EVENTS_START,
+    TOOL_EVENTS_READ,
+    TOOL_EVENTS_ACK,
+    TOOL_EVENTS_LIST,
+    TOOL_EVENTS_STOP,
     TOOL_SNAPSHOT,
     TOOL_BACK,
     TOOL_FORWARD,
@@ -961,6 +971,68 @@ fn tools() -> Vec<Value> {
                 "readTimeoutMs": { "type": "integer", "description": "Request timeout in milliseconds." }
             }),
             &[],
+        ),
+        tool(
+            TOOL_EVENTS_START,
+            "Start event subscription",
+            "Subscribe to selector transitions or a CDP method. Specify exactly one of selector and method.",
+            json!({
+                "selector": { "type": "string", "description": "CSS selector to watch for visible or hidden transitions. Standard CSS selectors only; snapshot refs (@eN), text=, and xpath= are not supported." },
+                "state": { "type": "string", "enum": ["visible", "hidden"], "default": "visible" },
+                "method": { "type": "string", "description": "Supported CDP method to watch." },
+                "match": string_array_schema("Repeated JSON pointer equals filters: /pointer=value."),
+                "matchRegex": string_array_schema("Repeated JSON pointer regular-expression filters: /pointer=regex."),
+                "once": { "type": "boolean", "default": false },
+                "ttl": { "type": "integer", "minimum": 1, "maximum": 1800, "description": "Subscription lifetime in seconds." },
+                "owner": { "type": "string" },
+                "key": { "type": "string", "description": "Idempotency key." }
+            }),
+            &[],
+        ),
+        tool(
+            TOOL_EVENTS_READ,
+            "Read event subscription",
+            "Read events from a subscription. The CLI-only wait and watch conveniences are available as events wait and events watch.",
+            json!({
+                "id": { "type": "string", "description": "Subscription id." },
+                "since": { "type": "string", "description": "Cursor to read after." },
+                "owner": { "type": "string", "description": "Subscription owner label. It must match the owner set at start." },
+                "waitMs": { "type": "integer", "minimum": 0, "maximum": 50000, "description": "Wait up to this many milliseconds for an event." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+                "ack": { "type": "boolean", "default": false, "description": "Acknowledge through the last returned event." }
+            }),
+            &["id"],
+        ),
+        tool(
+            TOOL_EVENTS_ACK,
+            "Acknowledge event subscription",
+            "Acknowledge a subscription through a returned cursor.",
+            json!({
+                "id": { "type": "string", "description": "Subscription id." },
+                "cursor": { "type": "string" },
+                "owner": { "type": "string" }
+            }),
+            &["id", "cursor"],
+        ),
+        tool(
+            TOOL_EVENTS_LIST,
+            "List event subscriptions",
+            "List event subscriptions, optionally filtered by owner or unread events.",
+            json!({
+                "owner": { "type": "string" },
+                "unread": { "type": "boolean", "default": false }
+            }),
+            &[],
+        ),
+        tool(
+            TOOL_EVENTS_STOP,
+            "Stop event subscription",
+            "Stop an event subscription.",
+            json!({
+                "id": { "type": "string", "description": "Subscription id." },
+                "owner": { "type": "string" }
+            }),
+            &["id"],
         ),
         tool(
             TOOL_SNAPSHOT,
@@ -2322,6 +2394,7 @@ fn is_read_only_tool(name: &str) -> bool {
             | TOOL_REACT_SUSPENSE
             | TOOL_VITALS
             | TOOL_STREAM_STATUS
+            | TOOL_EVENTS_LIST
             | TOOL_WEBMCP_LIST
             | TOOL_FLOW_LIST
             | TOOL_FLOW_STEPS
@@ -2530,6 +2603,11 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_TOOLS_PROFILES => call_tools_profiles(config),
         TOOL_OPEN => call_open(arguments),
         TOOL_READ => call_read(arguments),
+        TOOL_EVENTS_START => call_cli_tool(arguments, events_args(arguments, "start")?, None),
+        TOOL_EVENTS_READ => call_cli_tool(arguments, events_args(arguments, "read")?, None),
+        TOOL_EVENTS_ACK => call_cli_tool(arguments, events_args(arguments, "ack")?, None),
+        TOOL_EVENTS_LIST => call_cli_tool(arguments, events_args(arguments, "list")?, None),
+        TOOL_EVENTS_STOP => call_cli_tool(arguments, events_args(arguments, "stop")?, None),
         TOOL_SNAPSHOT => call_snapshot(arguments),
         TOOL_CLICK => call_click(arguments, "click"),
         TOOL_BACK => call_literal(arguments, &["back"]),
@@ -2900,7 +2978,7 @@ fn cli_tool_args_at(
     // The CLI reads global flags anywhere in argv, so a tool argument such as
     // a selector could otherwise carry its own --allowed-domains or --session.
     let trusted: Vec<&str> = args.iter().map(|a| global_flag_name(a)).collect();
-    let wait_selector_state = wait_selector_state_flag_index(&command_args);
+    let command_state_flag = command_state_flag_index(&command_args);
     let literal_boundary = literal_start
         .or_else(|| fill_or_type_boundary(&command_args))
         .filter(|index| command_args.get(*index).map(String::as_str) == Some("--"));
@@ -2912,7 +2990,7 @@ fn cli_tool_args_at(
         .chain(extra_args.iter().map(|t| (t, &[][..], None)));
     for (token, tool_globals, command_index) in tokens {
         let name = global_flag_name(token);
-        if wait_selector_state.is_some() && command_index == wait_selector_state {
+        if command_state_flag.is_some() && command_index == command_state_flag {
             continue;
         }
         if command_index.is_some()
@@ -3029,19 +3107,48 @@ fn collect_caller_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
     }
 }
 
-fn wait_selector_state_flag_index(command_args: &[String]) -> Option<usize> {
-    if command_args.len() < 4
-        || command_args[0] != "wait"
-        || command_args[1].starts_with('-')
-        || command_args[2] != "--state"
-        || !matches!(
-            command_args[3].as_str(),
-            "visible" | "hidden" | "attached" | "detached"
-        )
-    {
+fn command_state_flag_index(command_args: &[String]) -> Option<usize> {
+    let command = command_args.first()?.as_str();
+    if !crate::flags::command_owns_state_flag(command) {
         return None;
     }
-    Some(2)
+    match command {
+        "wait" => {
+            if command_args.len() >= 4
+                && !command_args[1].starts_with('-')
+                && command_args[2] == "--state"
+                && matches!(
+                    command_args[3].as_str(),
+                    "visible" | "hidden" | "attached" | "detached"
+                )
+            {
+                Some(2)
+            } else {
+                None
+            }
+        }
+        "events" => {
+            if command_args.get(1).map(String::as_str) != Some("start") {
+                return None;
+            }
+            let mut i = 2;
+            while i < command_args.len() {
+                match command_args[i].as_str() {
+                    "--state" => {
+                        return command_args
+                            .get(i + 1)
+                            .is_some_and(|v| matches!(v.as_str(), "visible" | "hidden"))
+                            .then_some(i);
+                    }
+                    "--once" => i += 1,
+                    flag if flag.starts_with("--") => i += 2,
+                    _ => i += 1,
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn global_flag_name(token: &str) -> &str {
@@ -4487,6 +4594,50 @@ fn call_stream_enable(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
+fn events_args(arguments: &Value, verb: &str) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["events".to_string(), verb.to_string()];
+    if matches!(verb, "read" | "ack" | "stop") {
+        args.push(required_string(arguments, "id")?);
+    }
+    if verb == "ack" {
+        args.push(required_string(arguments, "cursor")?);
+    }
+    let fields: &[&str] = match verb {
+        "start" => &["selector", "state", "method", "owner", "key"],
+        "read" => &["since", "owner"],
+        _ => &["owner"],
+    };
+    for field in fields {
+        if let Some(value) = optional_string(arguments, field)? {
+            args.extend([format!("--{}", field), value]);
+        }
+    }
+    if verb == "start" {
+        for (field, flag) in [("match", "--match"), ("matchRegex", "--match-regex")] {
+            for value in optional_string_array_allow_empty(arguments, field)?.unwrap_or_default() {
+                args.extend([flag.to_string(), value]);
+            }
+        }
+    }
+    let scalars: &[&str] = match verb {
+        "start" => &["once", "ttl"],
+        "read" => &["waitMs", "limit", "ack"],
+        "list" => &["unread"],
+        _ => &[],
+    };
+    for &field in scalars {
+        let flag = if field == "waitMs" { "wait" } else { field };
+        if matches!(field, "once" | "ack" | "unread") {
+            if optional_bool(arguments, field)?.unwrap_or(false) {
+                args.push(format!("--{}", flag));
+            }
+        } else if let Some(value) = optional_u64(arguments, field)? {
+            args.extend([format!("--{}", flag), value.to_string()]);
+        }
+    }
+    Ok(args)
+}
+
 fn call_skills_get(arguments: &Value) -> Result<Value, ProtocolError> {
     let mut args = vec!["skills".to_string(), "get".to_string()];
     if optional_bool(arguments, "all")?.unwrap_or(false) {
@@ -4753,6 +4904,29 @@ fn optional_string_array(
 ) -> Result<Option<Vec<String>>, ProtocolError> {
     match optional_value(arguments, key)? {
         Some(value) => parse_string_array(value, key).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn optional_string_array_allow_empty(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<Vec<String>>, ProtocolError> {
+    match optional_value(arguments, key)? {
+        Some(Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                item.as_str().map(ToString::to_string).ok_or_else(|| {
+                    ProtocolError::invalid_params(format!("{}[{}] must be a string", key, index))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err(ProtocolError::invalid_params(format!(
+            "{} must be an array",
+            key
+        ))),
         None => Ok(None),
     }
 }
@@ -5259,6 +5433,51 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn events_mcp_arguments_use_the_cli_parser_fields() {
+        let cases = json!([
+            ["start", {"selector": "#notice", "state": "hidden", "once": true, "ttl": 30, "owner": "chat:test", "key": "k1"}, {"action": "events_start", "selector": "#notice", "state": "hidden", "once": true, "ttl": 30, "owner": "chat:test", "key": "k1"}],
+            ["start", {"method": "Network.responseReceived", "match": ["/response/url=https://example.com", "/status=200"], "matchRegex": ["/response/url=example", "/type=json"]}, {"action": "events_start", "method": "Network.responseReceived", "match": ["/response/url=https://example.com", "/status=200"], "matchRegex": ["/response/url=example", "/type=json"], "once": false}],
+            ["start", {"method": "Network.responseReceived", "match": [], "matchRegex": []}, {"action": "events_start", "method": "Network.responseReceived", "once": false}],
+            ["read", {"id": "sub-1", "since": "sub-1:4", "waitMs": 500, "limit": 12, "ack": true, "owner": "chat:test"}, {"action": "events_read", "subscriptionId": "sub-1", "since": "sub-1:4", "waitMs": 500, "limit": 12, "ack": true, "owner": "chat:test"}],
+            ["read", {"id": "sub-1", "ack": false}, {"action": "events_read", "subscriptionId": "sub-1"}],
+            ["ack", {"id": "sub-1", "cursor": "sub-1:6", "owner": "chat:test"}, {"action": "events_ack", "subscriptionId": "sub-1", "cursor": "sub-1:6", "owner": "chat:test"}],
+            ["list", {"owner": "chat:test", "unread": true}, {"action": "events_list", "owner": "chat:test", "unread": true}],
+            ["stop", {"id": "sub-1", "owner": "chat:test"}, {"action": "events_stop", "subscriptionId": "sub-1", "owner": "chat:test"}]
+        ]);
+        let tools = super::tools_for_config(&super::McpConfig::default());
+        for case in cases.as_array().unwrap() {
+            let verb = case[0].as_str().unwrap();
+            let name = format!("agent_browser_events_{verb}");
+            assert!(tools.iter().any(|tool| tool["name"] == name));
+            let args = super::events_args(&case[1], verb).unwrap();
+            let cli_args = super::cli_tool_args_at(&case[1], args.clone(), None, None).unwrap();
+            let flags = crate::flags::parse_flags(&cli_args);
+            assert!(!flags.cli_state);
+            let mut command =
+                crate::commands::parse_command(&crate::flags::clean_args(&cli_args), &flags)
+                    .unwrap();
+            command.as_object_mut().unwrap().remove("id");
+            assert_eq!(command, case[2], "{cli_args:?}");
+        }
+        let extra_state =
+            json!({"selector": "#notice", "extraArgs": ["--state", "/tmp/auth.json"]});
+        let extra_args = super::events_args(&extra_state, "start").unwrap();
+        assert!(super::cli_tool_args_at(&extra_state, extra_args, None, None).is_err());
+        let invalid = json!([
+            ["start", {"selector": false, "state": 0}, "selector must be a string"],
+            ["start", {"match": [0], "once": 0}, "match[0] must be a string"],
+            ["start", {"match": "x"}, "match must be an array"],
+            ["start", {"once": 0, "ttl": -1}, "once must be a boolean"],
+            ["start", {"ttl": -1}, "ttl must be a non-negative integer"],
+            ["read", {"since": 0}, "id must be a string"]
+        ]);
+        for case in invalid.as_array().unwrap() {
+            let error = super::events_args(&case[1], case[0].as_str().unwrap()).unwrap_err();
+            assert_eq!(error.message, case[2].as_str().unwrap());
+        }
+    }
+
     #[test]
     fn tool_text_keeps_response_warnings() {
         let value = json!({ "success": true, "data": { "url": "about:blank" },
@@ -7445,6 +7664,14 @@ mod tests {
             .iter()
             .find(|t| t["name"].as_str() == Some(TOOL_WEBMCP_INVOKE))
             .unwrap();
+        let events_list = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_EVENTS_LIST))
+            .unwrap();
+        let events_read = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_EVENTS_READ))
+            .unwrap();
 
         assert_eq!(open["annotations"]["readOnlyHint"], false);
         assert_eq!(open["annotations"]["openWorldHint"], true);
@@ -7456,6 +7683,8 @@ mod tests {
         assert_eq!(skills_get["annotations"]["openWorldHint"], false);
         assert_eq!(webmcp_list["annotations"]["readOnlyHint"], true);
         assert_eq!(webmcp_invoke["annotations"]["readOnlyHint"], false);
+        assert_eq!(events_list["annotations"]["readOnlyHint"], true);
+        assert_eq!(events_read["annotations"]["readOnlyHint"], false);
     }
 
     #[test]

@@ -96,6 +96,7 @@ Run `agent-browser --help` for the full list, or `agent-browser <command> --help
 | Debug and performance | `console`, `errors`, `highlight`, `inspect`, `trace`, `profiler`, `vitals`, `react`, `a11y` | [Debugging](https://agent-browser.dev/debugging), [Profiler](https://agent-browser.dev/profiler), [React](https://agent-browser.dev/react) |
 | Sessions and auth | `session`, `state`, `auth`, `profiles`, `confirm`, `deny` | [Sessions](https://agent-browser.dev/sessions), [Security](https://agent-browser.dev/security) |
 | Agents and integrations | `skills`, `mcp`, `webmcp`, `flow`, `chat`, `batch`, `plugin` | [Skills](https://agent-browser.dev/skills), [WebMCP](https://agent-browser.dev/webmcp), [Plugins](https://agent-browser.dev/plugins) |
+| Events | `events` | [Streaming](https://agent-browser.dev/streaming#event-subscriptions) |
 | Observe | `stream`, `dashboard` | [Streaming](https://agent-browser.dev/streaming), [Dashboard](https://agent-browser.dev/dashboard) |
 | Setup | `install`, `upgrade`, `doctor`, `connect`, `close` | [Installation](https://agent-browser.dev/installation) |
 

@@ -25,7 +25,6 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
-#[cfg(unix)]
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{exit, Command};
@@ -72,6 +71,67 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
         "error": message.as_ref(),
         "type": error_type,
     }));
+}
+
+fn run_event_watch(
+    command: &serde_json::Value,
+    session: &str,
+    opts: &OutputOptions,
+) -> Result<(), String> {
+    const WATCH_LIMIT: usize = 100;
+    let mut request = command.clone();
+    request["action"] = json!("events_read");
+    request["waitMs"] = json!(1_000);
+    request["limit"] = json!(WATCH_LIMIT);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    runtime.block_on(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+        loop {
+            request["id"] = json!(gen_id());
+            let read = request.clone();
+            let request_session = session.to_owned();
+            let pending = tokio::task::spawn_blocking(move || send_command(read, &request_session));
+            let response = tokio::select! {
+                signal = &mut ctrl_c => {
+                    return signal.map_err(|error| format!("Failed to listen for Ctrl-C: {error}"));
+                }
+                result = pending => result
+                    .map_err(|error| format!("Event read task failed: {error}"))??,
+            };
+            if !response.success {
+                return Err(response
+                    .error
+                    .unwrap_or_else(|| "Event read failed".to_string()));
+            }
+            let data = response.data.ok_or("Event read response had no data")?;
+            let events = data["events"]
+                .as_array()
+                .ok_or("Event read response had no event list")?;
+            for event in events {
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "{}", output::format_event_line(event, opts))
+                    .map_err(|error| error.to_string())?;
+                stdout.flush().map_err(|error| error.to_string())?;
+            }
+            let cursor = data["cursor"]
+                .as_str()
+                .ok_or("Event read response had no cursor")?;
+            let cursor_seq = cursor
+                .rsplit_once(':')
+                .and_then(|(_, seq)| seq.parse::<u64>().ok())
+                .ok_or("Event read response had an invalid cursor")?;
+            let head = data["head"].as_u64().unwrap_or(0);
+            request["since"] = json!(cursor);
+            if data["status"] == "ended" && (cursor_seq >= head || events.is_empty()) {
+                return Ok(());
+            }
+        }
+    })
 }
 
 fn attach_input_mode(cmd: &mut serde_json::Value, flags: &Flags) {
@@ -2040,6 +2100,14 @@ fn main() {
     }
 
     let output_opts = OutputOptions::from_flags(&flags);
+
+    if cmd.get("action").and_then(|value| value.as_str()) == Some("events_watch") {
+        if let Err(error) = run_event_watch(&cmd, &flags.session, &output_opts) {
+            eprintln!("{} {}", color::error_indicator(), error);
+            exit(1);
+        }
+        return;
+    }
 
     match send_command_with_respawn(cmd.clone(), &flags.session, &daemon_opts) {
         Ok(mut resp) => {
