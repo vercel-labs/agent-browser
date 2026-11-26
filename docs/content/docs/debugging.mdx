@@ -85,6 +85,8 @@ When a command times out because the page stopped responding, for example a scri
 
 A command whose tab closes before Chrome answers fails right away with `Target closed: CDP session <id> detached` instead of waiting for the timeout. For example, `eval` fails this way when the script it runs calls `window.close()`. Run `agent-browser tab` to list the remaining tabs and switch to one. Iframes that a page adds and removes quickly are dropped the same way, so they don't hold up later commands.
 
+A command to a page whose renderer crashed, for example because it ran out of memory, fails right away with `Target crashed: reload the page or navigate to bring it back`. Run `agent-browser reload` or `agent-browser open <url>` to load the page again in the same tab.
+
 ## Related tools
 
 <table>

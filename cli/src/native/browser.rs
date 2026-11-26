@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
-use super::cdp::client::{is_session_detached_error, CdpClient};
+use super::cdp::client::{is_session_detached_error, is_target_crashed_error, CdpClient};
 use super::cdp::discovery::discover_cdp_url_with_headers;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::obscura::{
@@ -124,6 +124,9 @@ const RENDERER_PROBE_TIMEOUT_MS: u64 = 3_000;
 /// How long a reactivated renderer gets to start answering before the tab is
 /// declared unrecoverable.
 const REVIVED_RENDERER_TIMEOUT_MS: u64 = 10_000;
+
+/// How often a reactivated renderer that crashed is asked whether it is back.
+const RENDERER_REVIVAL_POLL: Duration = Duration::from_millis(100);
 
 /// Outcome of ensuring a tab's renderer can serve commands.
 enum RendererState {
@@ -1362,9 +1365,10 @@ impl BrowserManager {
 
     /// Whether the tab's renderer answers a renderer-bound command within
     /// `timeout_ms`. A discarded tab keeps its CDP session but has no
-    /// renderer to reply (#1528). A CDP error still counts as responding.
+    /// renderer to reply (#1528), and neither does a crashed one. Any other CDP
+    /// error still counts as responding.
     async fn renderer_responds(&self, session_id: &str, timeout_ms: u64) -> bool {
-        tokio::time::timeout(
+        let answer = tokio::time::timeout(
             Duration::from_millis(timeout_ms),
             self.client.send_command(
                 "Runtime.evaluate",
@@ -1372,6 +1376,23 @@ impl BrowserManager {
                 Some(session_id),
             ),
         )
+        .await;
+        match answer {
+            Ok(Ok(_)) => true,
+            Ok(Err(error)) => !is_target_crashed_error(&error),
+            Err(_) => false,
+        }
+    }
+
+    /// Whether a reactivated renderer answers within `timeout_ms`. A command to
+    /// a crashed renderer fails at once, so it is asked again until the page
+    /// has loaded.
+    async fn renderer_revives(&self, session_id: &str, timeout_ms: u64) -> bool {
+        tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+            while !self.renderer_responds(session_id, timeout_ms).await {
+                tokio::time::sleep(RENDERER_REVIVAL_POLL).await;
+            }
+        })
         .await
         .is_ok()
     }
@@ -1548,7 +1569,7 @@ impl BrowserManager {
             }
         }
         if self
-            .renderer_responds(session_id, REVIVED_RENDERER_TIMEOUT_MS)
+            .renderer_revives(session_id, REVIVED_RENDERER_TIMEOUT_MS)
             .await
         {
             Ok(RendererState::Revived)
@@ -5888,6 +5909,99 @@ mod tests {
             mgr.active_page_index, 0,
             "a failed switch must not leave the active tab pointing at a dead renderer"
         );
+    }
+
+    /// Mock CDP endpoint whose second tab crashed before the attach returned.
+    /// Activating it answers at once, and the page is loaded again only a
+    /// moment later.
+    async fn start_mock_cdp_browser_with_crashed_tab() -> String {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/browser/mock",
+            listener.local_addr().unwrap().port()
+        );
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+            let event = |method: &str| {
+                json!({ "method": method, "params": {}, "sessionId": "S-T-CRASHED" }).to_string()
+            };
+
+            while let Some(Ok(msg)) = rx.next().await {
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Ping(p) => {
+                        let _ = tx.send(Message::Pong(p)).await;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let Ok(cmd) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                let Some(id) = cmd["id"].as_u64() else {
+                    continue;
+                };
+                let target = cmd["params"]["targetId"].as_str().unwrap_or("");
+                let mut reloads = false;
+                let result = match cmd["method"].as_str().unwrap_or("") {
+                    "Target.getTargets" => json!({
+                        "targetInfos": [
+                            { "targetId": "T-ALIVE", "type": "page", "title": "alive",
+                              "url": "https://alive.test/", "attached": false },
+                            { "targetId": "T-CRASHED", "type": "page", "title": "crashed",
+                              "url": "https://crashed.test/", "attached": false },
+                        ]
+                    }),
+                    "Target.attachToTarget" => {
+                        if target == "T-CRASHED" {
+                            let crashed = event("Inspector.targetCrashed");
+                            let _ = tx.send(Message::Text(crashed)).await;
+                        }
+                        json!({ "sessionId": format!("S-{}", target) })
+                    }
+                    "Target.activateTarget" if target == "T-CRASHED" => {
+                        reloads = true;
+                        json!({})
+                    }
+                    "Runtime.evaluate" => {
+                        json!({ "result": { "type": "string", "value": "https://crashed.test/" } })
+                    }
+                    _ => json!({}),
+                };
+                let reply = json!({ "id": id, "result": result }).to_string();
+                let _ = tx.send(Message::Text(reply)).await;
+                if reloads {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    let reloaded = event("Inspector.targetReloadedAfterCrash");
+                    let _ = tx.send(Message::Text(reloaded)).await;
+                }
+            }
+        });
+
+        url
+    }
+
+    /// Commands to a crashed renderer fail at once, so reviving a tab has to
+    /// wait for its page to load again rather than for one answer.
+    #[tokio::test]
+    async fn test_tab_switch_revives_tab_that_crashed_in_the_background() {
+        let url = start_mock_cdp_browser_with_crashed_tab().await;
+        let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
+        assert_eq!(mgr.pages.len(), 2);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), mgr.tab_switch(1, None))
+            .await
+            .expect("tab_switch must not wait out the liveness probe")
+            .expect("switching to a crashed tab should revive it");
+
+        assert_eq!(result["revived"], json!(true));
+        assert_eq!(mgr.active_page_index, 1);
     }
 
     // -----------------------------------------------------------------------

@@ -22960,6 +22960,106 @@ async fn e2e_wedged_page_replacement_keeps_session_network_controls() {
     server.abort();
 }
 
+/// Crashes the renderer of the active tab and returns what a script that was
+/// still running on it failed with.
+async fn crash_active_page(state: &DaemonState) -> String {
+    let mgr = state.browser.as_ref().unwrap();
+    let client = mgr.client.clone();
+    let session_id = mgr.active_session_id().unwrap().to_string();
+    let running = {
+        let (client, session_id) = (client.clone(), session_id.clone());
+        tokio::spawn(async move {
+            client
+                .send_command(
+                    "Runtime.evaluate",
+                    Some(json!({ "expression": "new Promise(() => {})", "awaitPromise": true })),
+                    Some(&session_id),
+                )
+                .await
+        })
+    };
+    // The script is running once a command sent after it is answered.
+    client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({ "expression": "1" })),
+            Some(&session_id),
+        )
+        .await
+        .unwrap();
+    client
+        .send_command_no_wait("Page.crash", None, Some(&session_id))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), running)
+        .await
+        .expect("a command pending on a crashed page must fail at once")
+        .unwrap()
+        .unwrap_err()
+}
+
+/// A crashed renderer answers nothing. Commands fail at once instead of
+/// waiting out the CDP timeout, and reload or navigate brings the page back.
+#[tokio::test]
+#[ignore]
+async fn e2e_crashed_page_fails_at_once_and_loads_again() {
+    let url = "data:text/html,<title>live</title><button>Live</button>";
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for recovery in ["reload", "navigate"] {
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": url }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let error = crash_active_page(&state).await;
+        assert!(error.contains("Target crashed"), "{recovery}: {error}");
+
+        for action in [
+            json!({ "id": "3", "action": "snapshot" }),
+            json!({ "id": "4", "action": "evaluate", "script": "1" }),
+            json!({ "id": "5", "action": "click", "selector": "button" }),
+        ] {
+            let started = std::time::Instant::now();
+            let resp = execute_command(&action, &mut state).await;
+            assert_eq!(resp["success"], false, "{recovery}: {resp}");
+            assert!(
+                resp["error"].as_str().unwrap().contains("Target crashed"),
+                "{recovery}: {resp}"
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "{recovery}: {action} took {:?}",
+                started.elapsed()
+            );
+        }
+
+        let resp = execute_command(
+            &json!({ "id": "6", "action": recovery, "url": url }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(
+            &json!({ "id": "7", "action": "evaluate", "script": "document.title" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["result"], "live", "{recovery}");
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_dialog_blocked_tab_is_not_treated_as_wedged() {
