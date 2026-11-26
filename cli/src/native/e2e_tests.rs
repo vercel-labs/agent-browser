@@ -10941,6 +10941,82 @@ async fn e2e_click_reports_covering_overlay() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_click_waits_for_a_running_view_transition() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"
+        <html>
+        <head>
+            <style>::view-transition-old(root), ::view-transition-new(root) { animation-duration: 1.2s; }</style>
+        </head>
+        <body>
+            <main id="view"><button id="open">Open</button></main>
+            <div id="result">idle</div>
+            <script>
+                document.getElementById('open').onclick = () => document.startViewTransition(() => {
+                    document.getElementById('view').innerHTML =
+                        "<button id='save' onclick=\"document.getElementById('result').textContent = 'saved'\">Save</button>";
+                });
+            </script>
+        </body>
+        </html>
+    "#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#open" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Wait for the new button, and check that the transition is still running
+    // when the click below resolves its point.
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "new Promise((resolve) => { const poll = setInterval(() => { if (document.getElementById('save')) { clearInterval(poll); resolve(!!document.activeViewTransition); } }, 10); })"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "4b", "action": "click", "selector": "#save" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "gettext", "selector": "#result" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "saved");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_click_rejects_unreachable_elements() {
     let mut state = DaemonState::new();
     let resp = execute_command(

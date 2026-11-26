@@ -1369,6 +1369,21 @@ const CLICK_POINT_JS: &str = r#"(async (el, doc) => {
         }
         return m;
     };
+    // A running view transition paints captured images over the page and
+    // takes every hit until it finishes, so a click sent during it reaches no
+    // element. Wait for it, at most 3 s, before measuring.
+    const transitions = [];
+    for (let w = doc.defaultView; w; w = w.parent === w ? null : w.parent) {
+        try {
+            const running = w.document.activeViewTransition;
+            if (running) transitions.push(running.finished.catch(() => {}));
+        } catch (e) {
+            break;
+        }
+    }
+    if (transitions.length) {
+        await Promise.race([Promise.all(transitions), new Promise((resolve) => setTimeout(resolve, 3000))]);
+    }
     let m = measure();
     if (el.scrollIntoViewIfNeeded) {
         el.scrollIntoViewIfNeeded(true);
@@ -1390,6 +1405,7 @@ pub(crate) const ACTIONABILITY_JS: &str = r#"(el, inView) => {
         const rect = el.getBoundingClientRect();
         if ((rect.width <= 0 && rect.height <= 0) || ['hidden', 'collapse'].includes(el.ownerDocument.defaultView.getComputedStyle(el).visibility)) return 'not visible';
         if (el.disabled || el.matches(':disabled')) return 'disabled';
+        if (el.ownerDocument.activeViewTransition) return 'under a page transition that is still running';
         if (!inView) return 'outside the viewport';
     } catch (e) {}
     return null;
