@@ -258,6 +258,7 @@ Run `agent-browser doctor` before anything else when a command fails unexpectedl
 - **"Ref @eN is from a document that is no longer loaded"**: the page navigated, or the iframe the ref lives in navigated or was removed, after the snapshot, so nothing ran. Snapshot again.
 - **"The document changed while the snapshot was being captured"**: the page navigated, or the frame was removed, during the snapshot, so it returned no refs. Run the snapshot again.
 - **"Stale ref ... cannot be recovered"**: the element was replaced and duplicates make the match ambiguous, so nothing ran. Snapshot again.
+- **`Timed out waiting for the local daemon's response`**. If the code is `outcome_unknown`, check the session state before retrying. The command may already have run.
 - **`page_wedged`**: the page stopped responding. When agent-browser launched the browser and the tab times out twice in a row, it is replaced by a blank one, so navigate again and snapshot. With `--cdp` or `--auto-connect`, or when policy gates `tab_new` or `tab_close`, the tab is left alone; close it or switch tabs.
 - **"Target closed: CDP session ... detached"**: the tab closed while the command ran, for example a script called `window.close()`. Run `agent-browser tab`, switch to a remaining tab, and snapshot.
 - **A background tab shows stale state or its timers and animations stall**: Chrome throttles tabs in the background. Run `agent-browser tab keep live` on it before switching away.
