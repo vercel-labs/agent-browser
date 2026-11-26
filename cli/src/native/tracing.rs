@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -24,8 +25,70 @@ const DEFAULT_PROFILER_CATEGORIES: &[&str] = &[
     "toplevel",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorder {
+    Trace,
+    Profiler,
+}
+
+impl Recorder {
+    fn label(self) -> &'static str {
+        match self {
+            Recorder::Trace => "trace",
+            Recorder::Profiler => "profiler",
+        }
+    }
+
+    fn stop_command(self) -> &'static str {
+        match self {
+            Recorder::Trace => "trace stop",
+            Recorder::Profiler => "profiler stop",
+        }
+    }
+
+    fn progress_noun(self) -> &'static str {
+        match self {
+            Recorder::Trace => "tracing",
+            Recorder::Profiler => "profiling",
+        }
+    }
+
+    fn active_noun(self) -> &'static str {
+        match self {
+            Recorder::Trace => "Tracing",
+            Recorder::Profiler => "Profiling",
+        }
+    }
+}
+
+fn ensure_startable(active: Option<Recorder>, want: Recorder) -> Result<(), String> {
+    match active {
+        None => Ok(()),
+        Some(a) if a == want => Err(format!("{} already active", want.active_noun())),
+        Some(other) => Err(format!(
+            "A {} recording is already active; stop it with '{}' before starting the {}",
+            other.label(),
+            other.stop_command(),
+            want.label()
+        )),
+    }
+}
+
+fn ensure_stoppable(active: Option<Recorder>, want: Recorder) -> Result<(), String> {
+    match active {
+        Some(a) if a == want => Ok(()),
+        Some(other) => Err(format!(
+            "No {} recording in progress (a {} recording is active; use '{}')",
+            want.label(),
+            other.label(),
+            other.stop_command()
+        )),
+        None => Err(format!("No {} in progress", want.progress_noun())),
+    }
+}
+
 pub struct TracingState {
-    pub active: bool,
+    pub active: Option<Recorder>,
     pub events: Vec<Value>,
     pub events_dropped: bool,
 }
@@ -33,7 +96,7 @@ pub struct TracingState {
 impl TracingState {
     pub fn new() -> Self {
         Self {
-            active: false,
+            active: None,
             events: Vec::new(),
             events_dropped: false,
         }
@@ -45,9 +108,7 @@ pub async fn trace_start(
     session_id: &str,
     tracing_state: &mut TracingState,
 ) -> Result<Value, String> {
-    if tracing_state.active {
-        return Err("Tracing already active".to_string());
-    }
+    ensure_startable(tracing_state.active, Recorder::Trace)?;
 
     client
         .send_command(
@@ -62,7 +123,7 @@ pub async fn trace_start(
         )
         .await?;
 
-    tracing_state.active = true;
+    tracing_state.active = Some(Recorder::Trace);
     tracing_state.events.clear();
     tracing_state.events_dropped = false;
 
@@ -75,9 +136,7 @@ pub async fn trace_stop(
     tracing_state: &mut TracingState,
     path: Option<&str>,
 ) -> Result<Value, String> {
-    if !tracing_state.active {
-        return Err("No tracing in progress".to_string());
-    }
+    ensure_stoppable(tracing_state.active, Recorder::Trace)?;
 
     // Subscribe to events before stopping
     let mut rx = client.subscribe();
@@ -85,7 +144,7 @@ pub async fn trace_stop(
     client
         .send_command_no_params("Tracing.end", Some(session_id))
         .await?;
-    tracing_state.active = false;
+    tracing_state.active = None;
 
     // Collect trace data with timeout
     let mut trace_events: Vec<Value> = Vec::new();
@@ -127,8 +186,19 @@ pub async fn trace_stop(
 
     // If ReturnAsStream mode was used, read trace data from the IO stream
     if let Some(handle) = stream_handle {
-        if trace_events.is_empty() {
-            let stream_data = read_io_stream(client, session_id, &handle).await?;
+        let stream_data = if trace_events.is_empty() {
+            read_io_stream(client, session_id, &handle).await.map(Some)
+        } else {
+            Ok(None)
+        };
+        let _ = client
+            .send_command(
+                "IO.close",
+                Some(json!({ "handle": handle })),
+                Some(session_id),
+            )
+            .await;
+        if let Some(stream_data) = stream_data? {
             if let Ok(parsed) = serde_json::from_str::<Value>(&stream_data) {
                 if let Some(events) = parsed.get("traceEvents").and_then(|v| v.as_array()) {
                     trace_events.extend(events.iter().cloned());
@@ -146,14 +216,6 @@ pub async fn trace_stop(
                 }
             }
         }
-        // Close the IO stream
-        let _ = client
-            .send_command(
-                "IO.close",
-                Some(json!({ "handle": handle })),
-                Some(session_id),
-            )
-            .await;
     }
 
     let save_path = match path {
@@ -186,9 +248,7 @@ pub async fn profiler_start(
     tracing_state: &mut TracingState,
     categories: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    if tracing_state.active {
-        return Err("Profiling/tracing already active".to_string());
-    }
+    ensure_startable(tracing_state.active, Recorder::Profiler)?;
 
     let cats: Vec<String> = categories.unwrap_or_else(|| {
         DEFAULT_PROFILER_CATEGORIES
@@ -211,7 +271,7 @@ pub async fn profiler_start(
         )
         .await?;
 
-    tracing_state.active = true;
+    tracing_state.active = Some(Recorder::Profiler);
     tracing_state.events.clear();
     tracing_state.events_dropped = false;
 
@@ -224,16 +284,14 @@ pub async fn profiler_stop(
     tracing_state: &mut TracingState,
     path: Option<&str>,
 ) -> Result<Value, String> {
-    if !tracing_state.active {
-        return Err("No profiling in progress".to_string());
-    }
+    ensure_stoppable(tracing_state.active, Recorder::Profiler)?;
 
     let mut rx = client.subscribe();
 
     client
         .send_command_no_params("Tracing.end", Some(session_id))
         .await?;
-    tracing_state.active = false;
+    tracing_state.active = None;
 
     let mut events: Vec<Value> = Vec::new();
     let mut dropped = false;
@@ -320,7 +378,7 @@ async fn read_io_stream(
     session_id: &str,
     handle: &str,
 ) -> Result<String, String> {
-    let mut data = String::new();
+    let mut data = Vec::new();
     loop {
         let result = client
             .send_command(
@@ -333,16 +391,28 @@ async fn read_io_stream(
             )
             .await?;
 
-        if let Some(chunk) = result.get("data").and_then(|v| v.as_str()) {
-            data.push_str(chunk);
-        }
+        data.extend(decode_io_chunk(&result)?);
 
         let eof = result.get("eof").and_then(|v| v.as_bool()).unwrap_or(true);
         if eof {
             break;
         }
     }
-    Ok(data)
+    String::from_utf8(data).map_err(|e| format!("Trace stream is not valid UTF-8: {}", e))
+}
+
+fn decode_io_chunk(result: &Value) -> Result<Vec<u8>, String> {
+    let chunk = result
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Trace IO.read response has no data".to_string())?;
+    if result.get("base64Encoded").and_then(Value::as_bool) == Some(true) {
+        STANDARD
+            .decode(chunk)
+            .map_err(|e| format!("Invalid base64 trace chunk: {}", e))
+    } else {
+        Ok(chunk.as_bytes().to_vec())
+    }
 }
 
 fn get_clock_domain() -> Option<&'static str> {
@@ -368,5 +438,307 @@ fn get_profiles_dir() -> PathBuf {
         home.join(".agent-browser").join("tmp").join("profiles")
     } else {
         std::env::temp_dir().join("agent-browser").join("profiles")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct MockTracingServer {
+        client: CdpClient,
+        closed: Arc<AtomicBool>,
+        end_count: Arc<AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    async fn mock_tracing_client(
+        chunks: Vec<Value>,
+        fail_read: bool,
+        collected_events: Vec<Value>,
+    ) -> MockTracingServer {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let seen_close = closed.clone();
+        let end_count = Arc::new(AtomicUsize::new(0));
+        let seen_end = end_count.clone();
+        let use_stream = !chunks.is_empty() || fail_read;
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut chunks = chunks.into_iter();
+            while let Some(Ok(message)) = socket.next().await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    break;
+                };
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let method = command["method"].as_str().unwrap();
+                let mut response = json!({ "id": command["id"], "sessionId": "test" });
+                if method == "IO.read" && fail_read {
+                    response["error"] = json!({ "code": -32000, "message": "read failed" });
+                } else {
+                    response["result"] = match method {
+                        "IO.read" => chunks.next().expect("an expected IO.read"),
+                        "IO.close" => {
+                            seen_close.store(true, Ordering::SeqCst);
+                            json!({})
+                        }
+                        _ => json!({}),
+                    };
+                }
+                socket.send(response.to_string().into()).await.unwrap();
+                if method == "Tracing.end" {
+                    seen_end.fetch_add(1, Ordering::SeqCst);
+                    if !collected_events.is_empty() {
+                        socket
+                            .send(
+                                json!({
+                                    "method": "Tracing.dataCollected",
+                                    "sessionId": "test",
+                                    "params": { "value": collected_events },
+                                })
+                                .to_string()
+                                .into(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    let complete_params = if use_stream {
+                        json!({ "stream": "trace-handle" })
+                    } else {
+                        json!({})
+                    };
+                    socket
+                        .send(
+                            json!({
+                                "method": "Tracing.tracingComplete",
+                                "sessionId": "test",
+                                "params": complete_params,
+                            })
+                            .to_string()
+                            .into(),
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let client = CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        MockTracingServer {
+            client,
+            closed,
+            end_count,
+            task,
+        }
+    }
+
+    #[tokio::test]
+    async fn profiler_stop_does_not_stop_active_trace() {
+        let text = json!({ "traceEvents": [{ "name": "trace-event" }] }).to_string();
+        let chunks = vec![json!({ "data": text, "eof": true })];
+        let server = mock_tracing_client(chunks, false, Vec::new()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let wrong_path = dir.path().join("wrong-profiler.json");
+        let trace_path = dir.path().join("trace.json");
+        let mut state = TracingState::new();
+
+        trace_start(&server.client, "test", &mut state)
+            .await
+            .unwrap();
+
+        let err = profiler_stop(&server.client, "test", &mut state, wrong_path.to_str())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("trace stop"),
+            "expected guidance to use trace stop, got: {err}"
+        );
+        assert_eq!(state.active, Some(Recorder::Trace));
+        assert_eq!(server.end_count.load(Ordering::SeqCst), 0);
+        assert!(!wrong_path.exists());
+
+        let result = trace_stop(&server.client, "test", &mut state, trace_path.to_str())
+            .await
+            .unwrap();
+        assert_eq!(result["eventCount"], 1);
+        assert!(state.active.is_none());
+        assert_eq!(server.end_count.load(Ordering::SeqCst), 1);
+
+        server.client.close().await;
+        server.task.abort();
+    }
+
+    #[tokio::test]
+    async fn trace_stop_does_not_stop_active_profiler() {
+        let events = vec![json!({ "name": "profiler-event" })];
+        let server = mock_tracing_client(Vec::new(), false, events).await;
+        let dir = tempfile::tempdir().unwrap();
+        let wrong_path = dir.path().join("wrong-trace.json");
+        let profile_path = dir.path().join("profile.json");
+        let mut state = TracingState::new();
+
+        profiler_start(&server.client, "test", &mut state, None)
+            .await
+            .unwrap();
+
+        let err = trace_stop(&server.client, "test", &mut state, wrong_path.to_str())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("profiler stop"),
+            "expected guidance to use profiler stop, got: {err}"
+        );
+        assert_eq!(state.active, Some(Recorder::Profiler));
+        assert_eq!(server.end_count.load(Ordering::SeqCst), 0);
+        assert!(!wrong_path.exists());
+
+        let result = profiler_stop(&server.client, "test", &mut state, profile_path.to_str())
+            .await
+            .unwrap();
+        assert_eq!(result["eventCount"], 1);
+        assert!(state.active.is_none());
+        assert_eq!(server.end_count.load(Ordering::SeqCst), 1);
+
+        server.client.close().await;
+        server.task.abort();
+    }
+
+    #[tokio::test]
+    async fn trace_stop_decodes_stream_bytes_and_closes_the_handle() {
+        let text = json!({ "traceEvents": [{ "name": "中文" }] }).to_string();
+        let split = text.find('中').unwrap() + 1;
+        let chunks = vec![
+            json!({ "data": STANDARD.encode(&text.as_bytes()[..split]), "base64Encoded": true, "eof": false }),
+            json!({ "data": STANDARD.encode(&text.as_bytes()[split..]), "base64Encoded": true, "eof": true }),
+        ];
+        let server = mock_tracing_client(chunks, false, Vec::new()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.json");
+        let mut state = TracingState::new();
+
+        trace_start(&server.client, "test", &mut state)
+            .await
+            .unwrap();
+        let result = trace_stop(&server.client, "test", &mut state, path.to_str())
+            .await
+            .unwrap();
+        assert_eq!(result["eventCount"], 1);
+        let saved: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["traceEvents"][0]["name"], "中文");
+        assert!(server.closed.load(Ordering::SeqCst));
+        assert!(state.active.is_none());
+
+        server.client.close().await;
+        server.task.abort();
+    }
+
+    #[tokio::test]
+    async fn trace_stop_releases_a_failed_stream_and_allows_a_new_recording() {
+        let server = mock_tracing_client(Vec::new(), true, Vec::new()).await;
+        let mut state = TracingState::new();
+
+        trace_start(&server.client, "test", &mut state)
+            .await
+            .unwrap();
+        let error = trace_stop(&server.client, "test", &mut state, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("read failed"));
+        assert!(server.closed.load(Ordering::SeqCst));
+        assert!(state.active.is_none());
+        assert_eq!(
+            trace_start(&server.client, "test", &mut state)
+                .await
+                .unwrap()["started"],
+            true
+        );
+        assert_eq!(state.active, Some(Recorder::Trace));
+
+        server.client.close().await;
+        server.task.abort();
+    }
+
+    #[test]
+    fn stop_refuses_the_other_recorder() {
+        assert_eq!(
+            ensure_stoppable(Some(Recorder::Trace), Recorder::Profiler).unwrap_err(),
+            "No profiler recording in progress (a trace recording is active; use 'trace stop')"
+        );
+        assert_eq!(
+            ensure_stoppable(Some(Recorder::Profiler), Recorder::Trace).unwrap_err(),
+            "No trace recording in progress (a profiler recording is active; use 'profiler stop')"
+        );
+    }
+
+    #[test]
+    fn stop_allows_matching_and_preserves_idle_errors() {
+        assert!(ensure_stoppable(Some(Recorder::Trace), Recorder::Trace).is_ok());
+        assert!(ensure_stoppable(Some(Recorder::Profiler), Recorder::Profiler).is_ok());
+        assert_eq!(
+            ensure_stoppable(None, Recorder::Trace).unwrap_err(),
+            "No tracing in progress"
+        );
+        assert_eq!(
+            ensure_stoppable(None, Recorder::Profiler).unwrap_err(),
+            "No profiling in progress"
+        );
+    }
+
+    #[test]
+    fn start_guards_active_and_idle_states() {
+        assert!(ensure_startable(None, Recorder::Trace).is_ok());
+        assert!(ensure_startable(None, Recorder::Profiler).is_ok());
+        assert_eq!(
+            ensure_startable(Some(Recorder::Trace), Recorder::Trace).unwrap_err(),
+            "Tracing already active"
+        );
+        assert_eq!(
+            ensure_startable(Some(Recorder::Profiler), Recorder::Profiler).unwrap_err(),
+            "Profiling already active"
+        );
+        assert_eq!(
+            ensure_startable(Some(Recorder::Profiler), Recorder::Trace).unwrap_err(),
+            "A profiler recording is already active; stop it with 'profiler stop' before starting the trace"
+        );
+        assert_eq!(
+            ensure_startable(Some(Recorder::Trace), Recorder::Profiler).unwrap_err(),
+            "A trace recording is already active; stop it with 'trace stop' before starting the profiler"
+        );
+    }
+
+    #[test]
+    fn trace_chunks_decode_plain_base64_and_split_utf8() {
+        let plain = json!({ "data": "{\"traceEvents\":[" });
+        let encoded = json!({ "data": STANDARD.encode(b"]}"), "base64Encoded": true });
+        let bytes = [
+            decode_io_chunk(&plain).unwrap(),
+            decode_io_chunk(&encoded).unwrap(),
+        ]
+        .concat();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "{\"traceEvents\":[]}");
+
+        let utf8 = "中".as_bytes();
+        let first = json!({ "data": STANDARD.encode(&utf8[..1]), "base64Encoded": true });
+        let second = json!({ "data": STANDARD.encode(&utf8[1..]), "base64Encoded": true });
+        let joined = [
+            decode_io_chunk(&first).unwrap(),
+            decode_io_chunk(&second).unwrap(),
+        ]
+        .concat();
+        assert_eq!(String::from_utf8(joined).unwrap(), "中");
+    }
+
+    #[test]
+    fn trace_chunks_reject_malformed_data() {
+        assert!(decode_io_chunk(&json!({ "data": "%%%", "base64Encoded": true })).is_err());
+        assert!(decode_io_chunk(&json!({ "eof": true })).is_err());
     }
 }

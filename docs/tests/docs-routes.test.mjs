@@ -77,13 +77,13 @@ for (const page of publicPages) {
     const og =
       page.path === "/"
         ? {
-            image: `${origin}/landing/home-og.png`,
+            image: "/landing/home-og.png",
             width: "2400",
             height: "1256",
             alt: "Browser automation for any agent",
           }
         : {
-            image: `${origin}/og${page.path}`,
+            image: `/og${page.path}`,
             width: "1200",
             height: "630",
             alt: page.ogAlt,
@@ -95,16 +95,27 @@ for (const page of publicPages) {
       "og:type": "website",
       "og:site_name": "agent-browser",
       "og:locale": "en_US",
-      "og:image": og.image,
       "og:image:width": og.width,
       "og:image:height": og.height,
       "og:image:alt": og.alt,
       "twitter:card": "summary_large_image",
       "twitter:title": page.twitterTitle,
       "twitter:description": page.description,
-      "twitter:image": og.image,
     }))
       assert.deepEqual(meta(html, key), [expected], `${page.path}: ${key}`);
+    const ogImage = new URL(meta(html, "og:image")[0], origin);
+    assert.equal(ogImage.origin, origin, `${page.path}: og:image origin`);
+    assert.equal(ogImage.pathname, og.image, `${page.path}: og:image path`);
+    assert.match(
+      ogImage.searchParams.get("v") ?? "",
+      /^[0-9a-f]{8}$/,
+      `${page.path}: og:image version`,
+    );
+    assert.deepEqual(
+      meta(html, "twitter:image"),
+      [ogImage.href],
+      `${page.path}: twitter:image`,
+    );
     const video =
       page.path === "/"
         ? {
@@ -836,7 +847,7 @@ test("sitemap lists the marketing root and every docs canonical exactly once", a
 });
 
 for (const path of ["/llms.txt", "/sitemap.md"]) {
-  test(`${path}: agent index exposes all 40 public pages and Markdown alternatives exactly once`, async () => {
+  test(`${path}: agent index exposes all public pages and Markdown alternatives exactly once`, async () => {
     const response = await get(path, { headers: agent });
     responseType(
       response,
