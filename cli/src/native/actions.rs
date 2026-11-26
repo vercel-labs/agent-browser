@@ -838,6 +838,12 @@ pub struct DaemonState {
     pub idle_activity: Arc<IdleActivity>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_identity: Option<u64>,
+    /// True when the session's browser exited on its own (the background tick
+    /// saw the Chrome process go away) and no command has relaunched it yet.
+    /// The next launch reports it as a relaunch instead of a fresh launch, so
+    /// a browser that dies between commands is never silently replaced
+    /// (issue #2505). Cleared once a launch succeeds.
+    pub browser_lost: bool,
     /// CDP endpoint and headers from the last explicit CDP launch, reused when
     /// the daemon reconnects to that same endpoint on its own.
     cdp_headers: Option<(String, Vec<(String, String)>)>,
@@ -1083,6 +1089,7 @@ impl DaemonState {
             stream_server: None,
             idle_activity: Arc::new(IdleActivity::new()),
             launch_identity: None,
+            browser_lost: false,
             cdp_headers: None,
             attached_target: None,
             effective_ca_cert: None,
@@ -4217,7 +4224,12 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
             }
             lifecycle_relaunched_browser |= settings_outcome.relaunched_browser;
-            lifecycle_relaunched_browser |= has_active_browser_session(state);
+            lifecycle_relaunched_browser |= has_active_browser_session(state)
+                // The background tick may already have dropped a browser
+                // whose process exited, so `has_active_browser_session` is
+                // false by now even though this command replaces one
+                // (issue #2505).
+                || state.browser_lost;
             if has_active_browser_session(state) {
                 let _ = Box::pin(auto_save_restore_state(state)).await;
             }
@@ -4254,6 +4266,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             settle_awaited_settings(state, &mut settings_outcome);
             state.webmcp_enabled = state.settings.webmcp();
             lifecycle_launched = true;
+            // The loss has been reported by this relaunch; a later launch
+            // after an explicit close is a fresh launch, not a relaunch.
+            state.browser_lost = false;
         } else {
             lifecycle_reused = true;
         }
@@ -8035,7 +8050,10 @@ async fn handle_launch_inner_prepared(
         .map(String::from)
         .or_else(|| state.settings.engine());
     let patch = launch_envelope_patch(cmd, engine.as_deref())?;
-    let had_browser_before_launch = has_active_browser_session(state);
+    // The background tick may already have dropped a browser whose process
+    // exited, so `has_active_browser_session` is false by now even though
+    // this launch replaces one (issue #2505).
+    let had_browser_before_launch = has_active_browser_session(state) || state.browser_lost;
     let (prepared, mut outcome, planned_relaunched) = match request {
         LaunchRequest::Planned {
             prepared,
@@ -8082,6 +8100,8 @@ async fn handle_launch_inner_prepared(
     {
         Ok(extras) => {
             settle_awaited_settings(state, &mut outcome);
+            // The loss has been reported by this relaunch.
+            state.browser_lost = false;
             let mut result = json!({
                 "launched": true,
                 "relaunchedBrowser": had_browser_before_launch,
