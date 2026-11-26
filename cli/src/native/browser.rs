@@ -20,6 +20,28 @@ use super::tab_binding;
 /// `navigator.maxTouchPoints` reported while touch emulation is enabled.
 pub const TOUCH_POINTS: u32 = 5;
 
+/// A checked CDP connection retained until the browser transition commits.
+pub struct PreparedCdp {
+    pub url: String,
+    client: Option<CdpClient>,
+}
+
+impl std::fmt::Debug for PreparedCdp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedCdp").finish_non_exhaustive()
+    }
+}
+
+impl Drop for PreparedCdp {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move { client.close().await });
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Launch validation
 // ---------------------------------------------------------------------------
@@ -1066,11 +1088,11 @@ impl BrowserManager {
     }
 
     /// Resolves and probes a CDP target without creating or attaching pages.
-    /// Reuse the returned URL to avoid repeating discovery.
-    pub async fn resolve_cdp_target(
+    /// Keeps the checked connection for the eventual browser transition.
+    pub async fn prepare_cdp_target(
         input: &str,
         headers: Option<Vec<(String, String)>>,
-    ) -> Result<String, String> {
+    ) -> Result<PreparedCdp, String> {
         wait_while_cdp_port_refuses(input, CDP_PORT_WAIT).await;
         let ws_url = resolve_cdp_url(input, headers.as_deref().unwrap_or_default()).await?;
         let address = cdp_port_address(input);
@@ -1083,18 +1105,36 @@ impl BrowserManager {
             Some(address) => format!("CDP connect to {address} timed out"),
             None => "CDP connect timed out".to_string(),
         })??;
+        let prepared = PreparedCdp {
+            url: ws_url,
+            client: Some(client),
+        };
         let probe = tokio::time::timeout(
             CDP_PROBE_TIMEOUT,
-            client.send_command("Browser.getVersion", None, None),
+            prepared
+                .client
+                .as_ref()
+                .unwrap()
+                .send_command("Browser.getVersion", None, None),
         )
         .await;
-        client.close().await;
         let probe = probe.map_err(|_| match &address {
             Some(address) => format!("CDP target {address} did not answer Browser.getVersion"),
             None => "CDP target did not answer Browser.getVersion".to_string(),
         })?;
         probe?;
-        Ok(ws_url)
+        Ok(prepared)
+    }
+
+    #[cfg(test)]
+    pub async fn resolve_cdp_target(
+        input: &str,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<String, String> {
+        let mut prepared = Self::prepare_cdp_target(input, headers).await?;
+        let url = prepared.url.clone();
+        prepared.client.take().unwrap().close().await;
+        Ok(url)
     }
 
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
@@ -1117,6 +1157,24 @@ impl BrowserManager {
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url, headers.as_deref().unwrap_or_default()).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        Self::initialize_cdp(ws_url, client, direct_page).await
+    }
+
+    pub async fn connect_prepared_cdp(mut prepared: PreparedCdp) -> Result<Self, String> {
+        let client = Arc::new(
+            prepared
+                .client
+                .take()
+                .expect("prepared connection is present"),
+        );
+        Self::initialize_cdp(prepared.url.clone(), client, false).await
+    }
+
+    async fn initialize_cdp(
+        ws_url: String,
+        client: Arc<CdpClient>,
+        direct_page: bool,
+    ) -> Result<Self, String> {
         let mut manager = Self {
             client,
             browser_process: None,

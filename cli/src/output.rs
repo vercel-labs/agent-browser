@@ -5105,6 +5105,7 @@ Options:
                              (or --auto-connect false; overrides AGENT_BROWSER_AUTO_CONNECT)
   --cdp <port|url>           Connect via CDP or Firefox WebDriver BiDi; root query
                              slash is optional, Firefox accepts ?devtools=<port>
+                             Chrome CDP attach uses one debugging connection
   --cdp-headers <json>       Headers for --cdp discovery and handshake, e.g. Authorization
                              (or AGENT_BROWSER_CDP_HEADERS env)
   --pin-tab                  Pin the session to its bound tab (CDP only; Firefox

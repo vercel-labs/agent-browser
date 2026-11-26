@@ -22,6 +22,8 @@ The session stays attached until `agent-browser close`. Later commands without a
 
 If the debugging port is not open yet, `connect` and `--cdp` wait up to 2 seconds for it before failing.
 
+Connecting to Chrome uses one debugging WebSocket. If Chrome asks you to approve remote debugging, approve that connection to continue.
+
 ## Remote WebSocket URLs
 
 Connect to remote browser services via WebSocket URL:
