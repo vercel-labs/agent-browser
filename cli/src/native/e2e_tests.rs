@@ -18173,6 +18173,103 @@ async fn e2e_recording_mobile_emulation_uses_device_pixel_ratio() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_keeps_clicks_on_target_at_emulated_scale() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 390, "height": 844, "deviceScaleFactor": 2.0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "navigate",
+            "url": "data:text/html,<meta name=viewport content='width=device-width,initial-scale=1'><button id=b style='position:absolute;left:250px;top:700px;width:120px;height:60px'>Target</button><script>window.hits=[];addEventListener('pointerdown',e=>hits.push({x:e.clientX,y:e.clientY,target:e.target.id||e.target.tagName}))</script>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "click", "selector": "#b" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let rec_path = std::env::temp_dir().join(format!(
+        "ab-e2e-rec-click-scale-{}-{}.webm",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "click", "selector": "#b" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let stop_data = get_data(&resp);
+    assert_eq!(stop_data["capture"], "screenshots", "{stop_data}");
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "click", "selector": "#b" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "JSON.stringify(window.hits)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let hits: Vec<Value> =
+        serde_json::from_str(get_data(&resp)["result"].as_str().unwrap()).unwrap();
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+
+    assert_eq!(hits.len(), 3, "before, during, and after: {hits:?}");
+    for (hit, phase) in hits.iter().zip(["before", "during", "after"]) {
+        assert_eq!(
+            (hit["x"].as_f64(), hit["y"].as_f64(), hit["target"].as_str()),
+            (Some(310.0), Some(730.0), Some("b")),
+            "click {phase} recording missed target: {hits:?}"
+        );
+    }
+}
+
 /// Verify that an output path without an extension is rejected before the
 /// recording context exists: no new tab, no file, nothing to stop.
 #[tokio::test]
