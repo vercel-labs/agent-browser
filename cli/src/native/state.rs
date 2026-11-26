@@ -236,6 +236,7 @@ async fn create_scratch_target(client: &CdpClient) -> Result<CreateTargetResult,
         [(Some(true), Some(true)), (Some(true), None), (None, None)].map(|(background, hidden)| {
             CreateTargetParams {
                 url: "about:blank".to_string(),
+                browser_context_id: None,
                 background,
                 hidden,
             }

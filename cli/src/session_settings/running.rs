@@ -289,6 +289,11 @@ impl Running {
         self.str(Key::ColorScheme)
     }
 
+    /// Name of the isolated BrowserContext an external browser session opens.
+    pub fn context(&self) -> Option<String> {
+        self.str(Key::Context)
+    }
+
     /// Headed as handed to plugin providers. Looser than `headed()`, which
     /// accepts only `1` and `true`: `yes` or `on` count here.
     pub fn plugin_provider_headed(&self) -> bool {

@@ -51,6 +51,7 @@ pub fn placement(key: Key) -> Where {
         | Key::Webgpu => Where::Launch,
         Key::Cdp
         | Key::CdpHeaders
+        | Key::Context
         | Key::AutoConnect
         | Key::Provider
         | Key::Device

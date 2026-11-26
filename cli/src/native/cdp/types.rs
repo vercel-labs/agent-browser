@@ -151,6 +151,8 @@ pub struct SetDiscoverTargetsParams {
 pub struct CreateTargetParams {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_context_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub background: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
@@ -619,6 +621,7 @@ mod tests {
             url: "about:blank".to_string(),
             background: Some(true),
             hidden: Some(true),
+            ..Default::default()
         };
         assert_eq!(
             serde_json::to_string(&hidden).unwrap(),
