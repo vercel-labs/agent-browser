@@ -25,8 +25,9 @@ agent-browser read [url]      # Fetch agent-readable text, or read rendered acti
                               # Honors --allowed-domains, --content-boundaries, and --max-output
                               # Invalid --max-output values warn and keep the previous limit
                               # Options: --raw, --require-md, --outline, --llms <index|full>, --filter, --timeout <ms>
-agent-browser back            # Go back
-agent-browser forward         # Go forward
+agent-browser back            # Go back. Refs from a document Chrome restores from its
+                              # back/forward cache stay valid; JSON reports refsValid
+agent-browser forward         # Go forward (same ref rules as back)
 agent-browser reload          # Reload page
 agent-browser pushstate <url> # SPA client-side navigation. Auto-detects
                               # window.next.router.push (triggers RSC fetch on Next.js);
@@ -77,6 +78,8 @@ agent-browser snapshot --delta --full # Force full state and refresh baseline
 Delta history is per tab and option set. Responses are `full`, `unchanged`, or `delta`; URL changes or large deltas return full state. For a delta, apply `changes` (`add`, `remove`, `replace`) to ref metadata. Split the previous tree on newlines, splice `treeChange.lines` at zero-based `startLine`, replacing `deleteCount` lines, then join with newlines. Apply both parts to `baseRevision` before advancing to `revision`; use `--full` if the baseline is unavailable.
 
 A ref is tied to the document it was issued in. After a page load or an iframe navigation or removal (a click, script or redirect), using that ref fails with `Ref @eN is from a document that is no longer loaded`; snapshot again. A snapshot taken while the document is being replaced fails with `The document changed while the snapshot was being captured`; run it again. Refs survive same-document changes such as `pushState` and DOM updates.
+
+`back` and `forward` keep the refs of a document Chrome restores from its back/forward cache, or of a document the step stays in, including refs inside same-origin iframes and cross-origin OOPIFs. Chrome caches up to 6 documents per tab. A restored ref is checked when an action uses it, so a node the page removed or replaced after the restore fails as stale instead of matching by role and name. Any other navigation, including a page sent with `Cache-Control: no-store`, fails with `Ref @eN is from a document that is no longer loaded`.
 
 ## Interactions (use @refs from snapshot)
 

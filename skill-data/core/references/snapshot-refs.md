@@ -99,6 +99,8 @@ agent-browser click @e12
 
 Same-document updates preserve refs for surviving DOM elements. Replaced elements and page or iframe document replacements invalidate the corresponding refs. Invalidated IDs are never recycled within the browser session. JSON snapshot responses list refs that disappeared in `removedRefs`. Virtual accessibility nodes have snapshot-local refs.
 
+`back` and `forward` are the exception to document replacement. When Chrome restores a document you snapshotted earlier from its back/forward cache, or a step stays in the same document, the refs issued for that document stay valid, including refs inside same-origin iframes and cross-origin OOPIFs. Chrome caches up to 6 documents per tab. A restored ref is checked when an action uses it, so a node the page removed or replaced after the restore fails as stale instead of matching by role and name. Any other navigation replaces the refs and fails with `Ref @eN is from a document that is no longer loaded`.
+
 A ref keeps pointing at its DOM node while that node exists. If the node was replaced, agent-browser falls back to the one element with the same role and name, but only when the ref was unique in its snapshot. When duplicates make the match ambiguous, the action fails without acting. Run `snapshot` again and use a fresh ref.
 
 If a snapshot fails because its scope matches nothing, you can still use refs from the last successful snapshot as long as the document has not changed.
@@ -113,6 +115,8 @@ agent-browser click @e1
 
 # Re-snapshot after navigation to get new refs. A ref from the previous
 # page fails with "Ref @e1 is from a document that is no longer loaded" instead of acting.
+# After back or forward, a document Chrome restored from its back/forward cache
+# keeps its refs, so the old ref still works.
 agent-browser snapshot -i
 # @e2 [heading] "Page 2"  ← New element, new ref
 ```
@@ -139,6 +143,8 @@ agent-browser click @e5            # Navigates to new page
 agent-browser snapshot -i          # Get new refs
 agent-browser click @e1            # Use new refs
 ```
+
+After `back` or `forward`, the refs from a document Chrome restores from its back/forward cache still work, so a new snapshot is optional there.
 
 ### 3. Re-Snapshot After Dynamic Changes
 

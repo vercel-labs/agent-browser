@@ -61,15 +61,17 @@ fn landing_json(landing: navigation::Landing) -> Value {
 /// Moves `delta` entries through the active tab's history and returns `{url}` like `BrowserManager`.
 async fn traverse_history(delta: i64, state: &mut DaemonState) -> Result<Value, String> {
     let landing = navigation::load(state, Load::History { delta }).await?;
-    Ok(landing_json(landing))
+    let mut result = landing_json(landing);
+    result["refsValid"] = json!(false);
+    Ok(result)
 }
 
-/// History back. Must return what Chrome's `handle_back` returns.
+/// History back. Must return what Chrome's `handle_history` returns.
 pub async fn back(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     traverse_history(-1, state).await
 }
 
-/// History forward. Must return what Chrome's `handle_forward` returns.
+/// History forward. Must return what Chrome's `handle_history` returns.
 pub async fn forward(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     traverse_history(1, state).await
 }
@@ -516,11 +518,11 @@ mod tests {
 
         assert_eq!(
             back(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "https://example.com/current" })
+            json!({ "url": "https://example.com/current", "refsValid": false })
         );
         assert_eq!(
             forward(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "https://example.com/current" })
+            json!({ "url": "https://example.com/current", "refsValid": false })
         );
         assert_eq!(
             reload(&json!({}), &mut state).await.unwrap(),

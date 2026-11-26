@@ -78,12 +78,14 @@ mod document_identity_regressions {
     }
 
     #[tokio::test]
-    async fn durable_refs_invalidate_replaced_iframe_session() {
-        let refs = observe_documents(&[Some("a"); 2], &["session-a", "session-b"]).await;
-        assert_ne!(
-            refs[0], refs[1],
-            "backend IDs belong to their effective CDP session"
-        );
+    async fn durable_refs_survive_iframe_session_rebinding() {
+        let refs = observe_documents(
+            &[Some("a"), Some("a"), Some("b")],
+            &["session-a", "session-b", "session-b"],
+        )
+        .await;
+        assert_eq!(refs[0], refs[1], "same frame and loader preserve refs");
+        assert_ne!(refs[1], refs[2], "replaced loader invalidates refs");
     }
 
     #[tokio::test]
@@ -401,6 +403,19 @@ pub async fn take_snapshot(
     let mut visited = HashSet::new();
     let parent_session = match frame_id {
         Some(fid) => {
+            if let Ok(top_tree) = client
+                .send_command_no_params("Page.getFrameTree", Some(session_id))
+                .await
+            {
+                if let Some(top_id) = top_tree
+                    .pointer("/frameTree/frame/id")
+                    .and_then(Value::as_str)
+                {
+                    ref_map.set_main_frame(session_id, top_id);
+                }
+                let top_loader = frame_loader(&top_tree["frameTree"], None);
+                ref_map.observe_document(session_id, None, top_loader);
+            }
             visited.insert(fid.to_string());
             super::element::find_frame_host_session(client, session_id, fid, iframe_sessions)
                 .await
@@ -444,11 +459,18 @@ async fn take_snapshot_inner(
         .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
         .await
         .ok();
+    if frame_id.is_none() {
+        if let Some(main_id) = frame_tree
+            .as_ref()
+            .and_then(|tree| tree["frameTree"]["frame"]["id"].as_str())
+        {
+            ref_map.set_main_frame(session_id, main_id);
+        }
+    }
     let loader = frame_tree
         .as_ref()
         .and_then(|tree| frame_loader(&tree["frameTree"], frame_id));
-    let document_is_known =
-        ref_map.observe_document(session_id, frame_id, effective_session_id, loader);
+    let document_is_known = ref_map.observe_document(session_id, frame_id, loader);
     // Ensure domains are enabled on the iframe session (defensive fallback
     // in case the attach-time enable in execute_command was missed).
     if effective_session_id != session_id {
