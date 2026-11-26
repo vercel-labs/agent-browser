@@ -22,7 +22,7 @@ use super::auth;
 use super::bidi;
 use super::bidi::attach::target_label;
 use super::browser::{should_track_target, BrowserManager, TabKeep, WaitUntil, WedgeReport};
-use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
+use super::cdp::chrome::{prepare_nss_home, LaunchOptions, DEFAULT_AUTO_CONNECT_TIMEOUT_MS};
 use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
     session_matches, AttachToTargetParams, AttachToTargetResult, CdpEvent,
@@ -4190,6 +4190,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 &Value::Null,
                 strict_state,
                 prepared.take(),
+                auto_connect_timeout_from_command_or_env(cmd),
             ))
             .await;
             let launched = match launched {
@@ -4816,6 +4817,30 @@ async fn apply_tab_binding_on_attach_or_rollback(state: &mut DaemonState) -> Res
 // ---------------------------------------------------------------------------
 // Auto-launch
 // ---------------------------------------------------------------------------
+
+fn auto_connect_timeout_from_ms(ms: Option<u64>) -> tokio::time::Duration {
+    tokio::time::Duration::from_millis(ms.unwrap_or(DEFAULT_AUTO_CONNECT_TIMEOUT_MS))
+}
+
+fn auto_connect_timeout_from_env() -> tokio::time::Duration {
+    auto_connect_timeout_from_ms(
+        env::var("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok()),
+    )
+}
+
+fn auto_connect_timeout_from_command_or_env(cmd: &Value) -> tokio::time::Duration {
+    auto_connect_timeout_from_ms(
+        cmd.get("autoConnectTimeout")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                env::var("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+            }),
+    )
+}
 
 /// Open a fresh tab so auto-connect navigations don't hijack the user's
 /// existing tabs. Used when no persisted binding re-established a tab.
@@ -5655,11 +5680,24 @@ async fn store_proxy_credentials(state: &DaemonState, options: &LaunchOptions, l
         .map(|user| (user, options.proxy_password.clone().unwrap_or_default()));
 }
 
+/// Test entry point: resolve the auto-connect budget from the daemon
+/// environment. Production callers use `auto_launch_with_timeout` so implicit
+/// recovery honors the current invocation's `autoConnectTimeout` instead of
+/// the daemon's spawn-time environment.
+#[cfg(test)]
 async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
 ) -> Result<Value, String> {
-    auto_launch_with(state, plugins, &Value::Null, false, None).await
+    auto_launch_with(
+        state,
+        plugins,
+        &Value::Null,
+        false,
+        None,
+        auto_connect_timeout_from_env(),
+    )
+    .await
 }
 
 /// Launches or attaches the session's browser from its settings. `cmd` is the
@@ -5668,12 +5706,17 @@ async fn auto_launch(
 ///
 /// `strict_state` is set when the command named a `--state` file: a file that
 /// cannot be loaded then fails the launch instead of launching without state.
+///
+/// `auto_connect_timeout` bounds one auto-connect attempt: discovery, the
+/// remote-debugging approval wait and CDP setup. It is the current
+/// invocation's budget, never the daemon's spawn-time environment.
 async fn auto_launch_with(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
     cmd: &Value,
     strict_state: bool,
     prepared: Option<AttachConnection>,
+    auto_connect_timeout: tokio::time::Duration,
 ) -> Result<Value, String> {
     let resumed = state.attached_target.is_some() && cmd.is_null();
     let result = Box::pin(auto_launch_with_settings(
@@ -5682,6 +5725,7 @@ async fn auto_launch_with(
         cmd,
         strict_state,
         prepared,
+        auto_connect_timeout,
     ))
     .await;
     if result.is_ok() && !resumed {
@@ -5707,9 +5751,17 @@ async fn auto_launch_with_settings(
     cmd: &Value,
     strict_state: bool,
     prepared: Option<AttachConnection>,
+    auto_connect_timeout: tokio::time::Duration,
 ) -> Result<Value, String> {
     if state.attached_target.is_some() && cmd.is_null() {
-        let launch = json!({ "action": "launch", "plugins": plugins });
+        // The launch carries this invocation's budget so reattaching to an
+        // auto-connect target does not fall back to the daemon's spawn-time
+        // environment.
+        let launch = json!({
+            "action": "launch",
+            "plugins": plugins,
+            "autoConnectTimeout": auto_connect_timeout.as_millis() as u64,
+        });
         return Box::pin(handle_launch_prepared(
             &launch,
             state,
@@ -5721,12 +5773,17 @@ async fn auto_launch_with_settings(
     if matches!(connection, Connection::Cdp(_) | Connection::AutoConnect)
         || !matches!(&connection, Connection::Provider(provider) if provider_is_browser_use(provider))
     {
+        // Boxed here and in handle_launch_for_target: debug builds keep several
+        // copies of an inline launch future in the caller's poll frame, and the
+        // implicit launch chain from execute_command into connect_auto then
+        // overflows a 2 MiB tokio worker stack.
         return Box::pin(auto_launch_inner(
             state,
             plugins,
             cmd,
             strict_state,
             prepared,
+            auto_connect_timeout,
         ))
         .await;
     }
@@ -5741,6 +5798,7 @@ async fn auto_launch_with_settings(
             cmd,
             strict_state,
             prepared,
+            auto_connect_timeout,
         )),
     )
     .await
@@ -5773,6 +5831,7 @@ async fn auto_launch_inner(
     cmd: &Value,
     strict_state: bool,
     prepared: Option<AttachConnection>,
+    auto_connect_timeout: tokio::time::Duration,
 ) -> Result<Value, String> {
     // Only a browser agent-browser launches itself keeps its session setup
     // across a relaunch; an attached or provider browser starts without one,
@@ -5783,7 +5842,15 @@ async fn auto_launch_inner(
             std::mem::take(&mut state.touch_sessions),
         )
     });
-    let result = launch_browser_from_settings(state, plugins, cmd, strict_state, prepared).await;
+    let result = launch_browser_from_settings(
+        state,
+        plugins,
+        cmd,
+        strict_state,
+        prepared,
+        auto_connect_timeout,
+    )
+    .await;
     if let (Err(_), Some((setup, touch))) = (&result, saved) {
         state.session_setup = setup;
         state.touch_sessions = touch;
@@ -5797,6 +5864,7 @@ async fn launch_browser_from_settings(
     cmd: &Value,
     strict_state: bool,
     prepared: Option<AttachConnection>,
+    auto_connect_timeout: tokio::time::Duration,
 ) -> Result<Value, String> {
     let mut options = state.settings.launch_options();
     let effective_ca_cert = state.effective_ca_cert.clone();
@@ -5945,7 +6013,7 @@ async fn launch_browser_from_settings(
             storage_state,
         })?;
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_auto().await?);
+        state.browser = Some(BrowserManager::connect_auto(auto_connect_timeout).await?);
         if !apply_tab_binding_on_attach_or_rollback(state).await? {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
@@ -7994,6 +8062,7 @@ async fn handle_launch_inner_prepared(
         cmd,
         strict_state,
         prepared,
+        auto_connect_timeout_from_command_or_env(cmd),
     )
     .await
     {
@@ -15204,8 +15273,10 @@ async fn handle_flow_run_inner(
     }
     let client = super::flow::http_client(filter.clone(), &flow).await?;
     let results = {
+        let mut wiring = FlowWiring::new(state, &allow);
+        wiring.auto_connect_timeout = auto_connect_timeout_from_command_or_env(cmd);
         let mut senders = DaemonSenders {
-            wiring: FlowWiring::new(state, &allow),
+            wiring,
             client,
             flow: &flow,
             params: &params,
@@ -15409,9 +15480,20 @@ fn flow_route_answer(routes: &[RouteEntry], url: &str) -> Option<super::flow::Ro
     })
 }
 
-async fn flow_ensure_browser(state: &mut DaemonState) -> Result<(), String> {
+async fn flow_ensure_browser(
+    state: &mut DaemonState,
+    auto_connect_timeout: tokio::time::Duration,
+) -> Result<(), String> {
     if state.browser.is_none() {
-        auto_launch(state, Vec::new()).await?;
+        auto_launch_with(
+            state,
+            Vec::new(),
+            &Value::Null,
+            false,
+            None,
+            auto_connect_timeout,
+        )
+        .await?;
         state.webmcp_enabled = state.settings.webmcp();
     }
     Ok(())
@@ -15461,6 +15543,8 @@ struct FlowWiring<'a> {
     /// needed bodies the mode would not keep.
     restore_content: Option<HarContentMode>,
     mark: usize,
+    /// The flow command's auto-connect budget, for a browser launched mid-run.
+    auto_connect_timeout: tokio::time::Duration,
 }
 
 impl<'a> FlowWiring<'a> {
@@ -15471,6 +15555,7 @@ impl<'a> FlowWiring<'a> {
             started_har: false,
             restore_content: None,
             mark: 0,
+            auto_connect_timeout: auto_connect_timeout_from_env(),
         }
     }
 }
@@ -15505,7 +15590,7 @@ impl super::flow::Browser for FlowWiring<'_> {
     }
 
     async fn ensure_browser(&mut self) -> Result<(), String> {
-        flow_ensure_browser(self.state).await
+        flow_ensure_browser(self.state, self.auto_connect_timeout).await
     }
 
     async fn begin_capture(&mut self) -> Result<usize, String> {
@@ -17371,7 +17456,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 // Confirmation handlers (stub)
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_confirm(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let pending = state
         .pending_confirmation
         .take()
@@ -17386,7 +17471,7 @@ pub(crate) async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Res
         approved_actions.into_iter().collect(),
     );
     state.preloaded_flow = pending.flow.clone();
-    let replay = confirmation_replay_command(&pending.cmd);
+    let replay = confirmation_replay_command(&pending.cmd, cmd);
     let result = Box::pin(execute_command(&replay, state)).await;
     state.preloaded_flow = None;
     state.confirmed_policy_actions = previous_confirmed;
@@ -17398,10 +17483,21 @@ pub(crate) async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Res
 /// confirm actions, which already applied when it was parked, so the replay
 /// runs under the session's current policy. Its allowed domains stay, since
 /// they apply only at the launch the replay runs; a change to the session's
-/// allowed domains drops the pending confirmation instead.
-fn confirmation_replay_command(cmd: &Value) -> Value {
+/// allowed domains drops the pending confirmation instead. It takes the
+/// auto-connect budget of `confirm_cmd`, the confirming invocation.
+fn confirmation_replay_command(cmd: &Value, confirm_cmd: &Value) -> Value {
     let mut replay = cmd.clone();
     if let Some(object) = replay.as_object_mut() {
+        // The replay's auto-connect attempt runs during the confirming
+        // invocation, so it takes that invocation's budget, not the parked one.
+        match confirm_cmd.get("autoConnectTimeout") {
+            Some(timeout) => {
+                object.insert("autoConnectTimeout".to_string(), timeout.clone());
+            }
+            None => {
+                object.remove("autoConnectTimeout");
+            }
+        }
         if let Ok(patch) = Patch::from_wire(object.get("settings")) {
             match patch.without_live_security_settings().to_wire() {
                 Some(wire) => {
@@ -22927,43 +23023,87 @@ mod tests {
 
     #[test]
     fn test_a_confirmation_replay_drops_only_the_policy_settings() {
-        let replay = confirmation_replay_command(&json!({
-            "action": "launch",
-            "allowedDomains": ["a.example"],
-            "settings": {
-                "action-policy": "/tmp/a.json",
-                "confirm-actions": "read",
-                "allowed-domains": ["a.example"],
-                "profile": "/tmp/p",
-                "relaunch": true
-            }
-        }));
+        let replay = confirmation_replay_command(
+            &json!({
+                "action": "launch",
+                "allowedDomains": ["a.example"],
+                "settings": {
+                    "action-policy": "/tmp/a.json",
+                    "confirm-actions": "read",
+                    "allowed-domains": ["a.example"],
+                    "profile": "/tmp/p",
+                    "relaunch": true
+                }
+            }),
+            &json!({ "action": "confirm" }),
+        );
         assert_eq!(replay["allowedDomains"], json!(["a.example"]));
         assert_eq!(
             replay["settings"],
             json!({ "allowed-domains": ["a.example"], "profile": "/tmp/p", "relaunch": true })
         );
 
-        let only_security = confirmation_replay_command(&json!({
-            "action": "read",
-            "settings": { "action-policy": "/tmp/a.json" }
-        }));
+        let only_security = confirmation_replay_command(
+            &json!({
+                "action": "read",
+                "settings": { "action-policy": "/tmp/a.json" }
+            }),
+            &json!({ "action": "confirm" }),
+        );
         assert!(only_security.get("settings").is_none());
+    }
+
+    #[test]
+    fn test_a_confirmation_replay_takes_the_confirming_auto_connect_timeout() {
+        // The replay's auto-connect attempt runs during the confirming
+        // invocation, so that invocation's budget applies, not the parked one.
+        let parked = json!({ "action": "evaluate", "script": "1", "autoConnectTimeout": 1200 });
+
+        let changed = confirmation_replay_command(
+            &parked,
+            &json!({ "action": "confirm", "autoConnectTimeout": 180 }),
+        );
+        assert_eq!(changed["autoConnectTimeout"], 180);
+        assert_eq!(changed["script"], "1");
+        assert_eq!(
+            auto_connect_timeout_from_command_or_env(&changed),
+            tokio::time::Duration::from_millis(180)
+        );
+
+        // A confirmation without the field (a client that does not send it)
+        // leaves the replay on the environment or default, like any other
+        // command without it, rather than on the parked budget.
+        let env = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        env.remove("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT");
+        let omitted = confirmation_replay_command(&parked, &json!({ "action": "confirm" }));
+        assert!(omitted.get("autoConnectTimeout").is_none());
+        assert_eq!(
+            auto_connect_timeout_from_command_or_env(&omitted),
+            tokio::time::Duration::from_millis(DEFAULT_AUTO_CONNECT_TIMEOUT_MS)
+        );
     }
 
     #[tokio::test]
     async fn test_auto_launch_wrapper_does_not_inline_the_launch_future() {
         let (_env, mut state) = isolated_state();
         let cmd = Value::Null;
+        let timeout = auto_connect_timeout_from_env();
         let inner = std::mem::size_of_val(&auto_launch_with_settings(
             &mut state,
             Vec::new(),
             &cmd,
             false,
             None,
+            timeout,
         ));
-        let outer =
-            std::mem::size_of_val(&auto_launch_with(&mut state, Vec::new(), &cmd, false, None));
+        let outer = std::mem::size_of_val(&auto_launch_with(
+            &mut state,
+            Vec::new(),
+            &cmd,
+            false,
+            None,
+            timeout,
+        ));
         assert!(
             outer < inner,
             "auto_launch_with embeds the launch future ({outer} >= {inner} bytes)"
@@ -26701,9 +26841,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         ]);
         state.settings = state.settings.plan(&rejected).next;
 
-        let error = auto_launch_inner(&mut state, Vec::new(), &json!({}), false, None)
-            .await
-            .unwrap_err();
+        let error = auto_launch_inner(
+            &mut state,
+            Vec::new(),
+            &json!({}),
+            false,
+            None,
+            auto_connect_timeout_from_env(),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(
             error,
@@ -26898,6 +27045,40 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         env.remove("AGENT_BROWSER_DEFAULT_TIMEOUT");
         let state = DaemonState::new();
         assert_eq!(state.default_timeout_ms, 25_000);
+    }
+
+    #[test]
+    fn test_auto_connect_timeout_from_env() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        env.set("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT", "12000");
+
+        assert_eq!(
+            auto_connect_timeout_from_env(),
+            tokio::time::Duration::from_millis(12_000)
+        );
+    }
+
+    #[test]
+    fn test_auto_connect_timeout_from_command_overrides_env() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        env.set("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT", "12000");
+        let cmd = json!({ "autoConnectTimeout": 25000 });
+
+        assert_eq!(
+            auto_connect_timeout_from_command_or_env(&cmd),
+            tokio::time::Duration::from_millis(25_000)
+        );
+    }
+
+    #[test]
+    fn test_auto_connect_timeout_default() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        env.remove("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT");
+
+        assert_eq!(
+            auto_connect_timeout_from_env(),
+            tokio::time::Duration::from_millis(DEFAULT_AUTO_CONNECT_TIMEOUT_MS)
+        );
     }
 
     #[tokio::test]

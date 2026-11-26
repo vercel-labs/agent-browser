@@ -89,6 +89,8 @@ A connection target from the environment or config (`AGENT_BROWSER_CDP`, `AGENT_
 
 Security settings (`--allowed-domains`, `--action-policy`, `--confirm-actions`) are stored in an owner-only `<session>.settings` file in the socket directory before they take effect, so they survive a daemon restart (idle expiry, crash, kill, upgrade). The file wins over the environment when the daemon starts, a new value replaces it, an empty `--allowed-domains` is an error (`--relaunch` keeps the filter; only `close` removes it), and a successful `close` (or `close --all`, which also closes sessions whose daemon is gone, under their stored policy) removes the file. A relative `--action-policy` path is stored absolute. A denied or confirmation-pending `close`, and CLI-triggered daemon restarts, keep the file. A file that cannot be read or parsed, or is readable by other users on Unix, stops the daemon from starting and names the file; `agent-browser --session <name> close` clears it.
 
+`autoConnectTimeout` and `AGENT_BROWSER_AUTO_CONNECT_TIMEOUT` are not session settings: each command carries its own value, and it applies only when an auto-connect attempt runs. Omission uses the 20000ms default, including implicit recovery after a disconnect. Changing or omitting it between commands reuses the existing daemon and browser connection and reports no change.
+
 ## Session State Persistence
 
 ### Automatic Restore
