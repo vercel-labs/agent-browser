@@ -15,6 +15,7 @@ use crate::ca_bundle::CaBundle;
 pub struct ChromeProcess {
     child: Child,
     pub ws_url: String,
+    user_data_dir: PathBuf,
     temp_user_data_dir: Option<PathBuf>,
     temp_nss_home: Option<PreparedNssHome>,
     /// On Unix, the process group ID used to kill the entire Chrome process tree.
@@ -79,6 +80,11 @@ impl ChromeProcess {
     /// Returns the OS process ID of the Chrome child process.
     pub fn id(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Returns the effective `--user-data-dir` path passed to Chrome.
+    pub fn user_data_dir(&self) -> &Path {
+        &self.user_data_dir
     }
 
     /// Non-blocking check whether Chrome has exited.
@@ -430,6 +436,30 @@ struct ChromeArgs {
     temp_user_data_dir: Option<PathBuf>,
 }
 
+fn effective_user_data_dir(args: &[String], fallback: &Path) -> PathBuf {
+    let mut resolved = fallback.to_path_buf();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
+        if let Some(dir) = args[i].strip_prefix("--user-data-dir=") {
+            if !dir.is_empty() {
+                resolved = PathBuf::from(expand_tilde(dir));
+            }
+        } else if args[i] == "--user-data-dir" {
+            if let Some(dir) = args.get(i + 1) {
+                if !dir.is_empty() {
+                    resolved = PathBuf::from(expand_tilde(dir));
+                }
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+    resolved
+}
+
 fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     // Chrome only honors the last --enable-features switch on the command
     // line, so every feature must be collected into a single flag.
@@ -580,6 +610,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     }
 
     args.extend(user_args);
+    let user_data_dir = effective_user_data_dir(&args, &user_data_dir);
 
     if options.restrict_webrtc {
         // Append this after user and plugin arguments so an unsafe custom
@@ -1040,6 +1071,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     Ok(ChromeProcess {
         child,
         ws_url,
+        user_data_dir,
         temp_user_data_dir,
         temp_nss_home,
         #[cfg(unix)]
@@ -2704,6 +2736,7 @@ exec sleep 60
             let _process = ChromeProcess {
                 child,
                 ws_url: String::new(),
+                user_data_dir: dir.clone(),
                 temp_user_data_dir: Some(dir.clone()),
                 temp_nss_home: None,
                 #[cfg(unix)]
@@ -2715,6 +2748,28 @@ exec sleep 60
         }
 
         assert!(!dir.exists(), "Temp dir should be cleaned up on drop");
+    }
+
+    #[test]
+    fn test_build_args_tracks_user_data_dir_override_from_args() {
+        let mut options = LaunchOptions::default();
+        options.args = vec!["--user-data-dir=/tmp/custom-chrome-dir".to_string()];
+        let result = build_chrome_args(&options).unwrap();
+        assert_eq!(
+            result.user_data_dir,
+            PathBuf::from("/tmp/custom-chrome-dir")
+        );
+        if let Some(dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        let mut split_options = LaunchOptions::default();
+        split_options.args = vec!["--user-data-dir".to_string(), "/tmp/split-dir".to_string()];
+        let split = build_chrome_args(&split_options).unwrap();
+        assert_eq!(split.user_data_dir, PathBuf::from("/tmp/split-dir"));
+        if let Some(dir) = split.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[cfg(target_os = "linux")]

@@ -80,12 +80,21 @@ const AUTH_LOGIN_ELEMENT_REF: &str = "e1";
 const AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR: &str = "auth login --no-navigate requires an existing active HTTP(S) browser page; open the login page first";
 
 pub struct PendingConfirmation {
+    pub confirmation_id: String,
     pub action: String,
     pub cmd: Value,
     approved_actions: Vec<String>,
     /// The flow a `flow_run` was checked against, so the confirmed run
     /// executes the same file rather than one read again from disk.
     flow: Option<Box<super::flow::Flow>>,
+}
+
+fn pending_confirmation_id(id: &str) -> String {
+    if id.is_empty() {
+        crate::commands::gen_id()
+    } else {
+        id.to_string()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1507,7 +1516,7 @@ impl DaemonState {
         let initial_frame = match recording::capture_initial_image(&client, &session_id).await {
             Ok(frame) => frame,
             Err(error) => {
-                self.rollback_failed_recording_start().await;
+                self.rollback_failed_recording_start(&error).await;
                 return Err(error);
             }
         };
@@ -1520,7 +1529,7 @@ impl DaemonState {
         {
             Ok(capture_session) => capture_session,
             Err(e) => {
-                self.rollback_failed_recording_start().await;
+                self.rollback_failed_recording_start(&e).await;
                 return Err(e);
             }
         };
@@ -1544,8 +1553,9 @@ impl DaemonState {
                 recording::remove_cursor_overlays(&client, &self.recording_state.cursor_overlays)
                     .await;
                 recording::detach_capture_session(&client, &capture_session).await;
-                self.rollback_failed_recording_start().await;
-                return Err(format!("Failed to install recording cursor: {error}"));
+                let message = format!("Failed to install recording cursor: {error}");
+                self.rollback_failed_recording_start(&message).await;
+                return Err(message);
             }
         }
         let handle = recording::spawn_recording_task(
@@ -1577,8 +1587,8 @@ impl DaemonState {
     }
 
     /// Reconcile every externally visible recording flag after startup fails.
-    async fn rollback_failed_recording_start(&mut self) {
-        self.recording_state.active = false;
+    async fn rollback_failed_recording_start(&mut self, error: &str) {
+        recording::record_failed_recording(&mut self.recording_state, error);
         if let Some(ref server) = self.stream_server {
             server.set_recording(false, &self.engine).await;
         }
@@ -1586,6 +1596,59 @@ impl DaemonState {
 
     async fn stop_recording_task(&mut self) -> Result<(), String> {
         recording::stop_recording_task(&mut self.recording_state).await
+    }
+
+    /// Reap a background recording task that already exited on its own so
+    /// `session info` reports the real status and preserves its receipt.
+    async fn reap_finished_recording(&mut self) {
+        let finished = self.recording_state.active
+            && self
+                .recording_state
+                .capture_task
+                .as_ref()
+                .is_some_and(|h| h.is_finished());
+        if !finished {
+            return;
+        }
+        let task_result = self.stop_recording_task().await;
+        if let Some(ref server) = self.stream_server {
+            server.set_recording(false, &self.engine).await;
+        }
+        match task_result {
+            Ok(()) => {
+                let _ = recording::recording_stop(&mut self.recording_state);
+            }
+            Err(err) => {
+                recording::record_failed_recording(&mut self.recording_state, &err);
+            }
+        }
+    }
+
+    /// Stop the active recording, update stream state, and record its structured receipt.
+    async fn finalize_active_recording(&mut self) -> Result<Value, String> {
+        let task_result = self.stop_recording_task().await;
+        if let Some(ref server) = self.stream_server {
+            server.set_recording(false, &self.engine).await;
+        }
+        if let Err(err) = task_result {
+            let receipt = recording::record_failed_recording(&mut self.recording_state, &err);
+            self.error_data = Some(receipt);
+            return Err(err);
+        }
+        match recording::recording_stop(&mut self.recording_state) {
+            Ok(receipt) => {
+                if let Some(warning) = receipt.get("warning").and_then(Value::as_str) {
+                    self.pending_action_warning = Some(warning.to_string());
+                }
+                Ok(receipt)
+            }
+            Err(err) => {
+                if err == "No frames captured" {
+                    self.error_data = self.recording_state.last_receipt.clone();
+                }
+                Err(err)
+            }
+        }
     }
 
     pub(crate) fn drain_firefox_events(&mut self) -> bool {
@@ -3357,6 +3420,8 @@ fn skip_launch_action(action: &str) -> bool {
         "" | "launch"
             | "close"
             | "read"
+            | "recording_stop"
+            | "video_stop"
             | "har_stop"
             | "flow_save"
             | "flow_steps"
@@ -3392,6 +3457,15 @@ fn should_validate_restore_after_action(action: &str) -> bool {
     action != "launch"
 }
 
+/// Control actions that inspect or finalize daemon state without requiring a
+/// live browser transport, so a crashed/disconnected browser cannot block them.
+fn is_browserless_control_action(action: &str) -> bool {
+    matches!(
+        action,
+        "recording_stop" | "video_stop" | "session_info" | "confirm" | "deny"
+    )
+}
+
 /// A flow run that stopped on a site condition reports it as the failure's data.
 #[inline(never)]
 fn attach_flow_stop(resp: &mut Value, state: &mut DaemonState) {
@@ -3417,7 +3491,9 @@ fn park_unconfirmed_flow_write(
     }
     let flow = run_flow?;
     let policy_action = unconfirmed_flow_write(cmd, flow, state)?;
+    let confirmation_id = pending_confirmation_id(id);
     state.pending_confirmation = Some(PendingConfirmation {
+        confirmation_id: confirmation_id.clone(),
         action: policy_action.clone(),
         cmd: cmd.clone(),
         approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
@@ -3428,7 +3504,7 @@ fn park_unconfirmed_flow_write(
         "success": true,
         "data": {
             "confirmation_required": true,
-            "confirmation_id": id,
+            "confirmation_id": confirmation_id,
             "action": policy_action,
         },
     }))
@@ -3840,8 +3916,11 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     // Drain and apply pending CDP events (console, errors, screencast frames, target lifecycle)
-    if let Err(e) = state.drain_cdp_events_background().await {
-        return error_response(&id, &super::browser::to_ai_friendly_error(&e));
+    let browserless_control = is_browserless_control_action(action);
+    if !browserless_control {
+        if let Err(e) = state.drain_cdp_events_background().await {
+            return error_response(&id, &super::browser::to_ai_friendly_error(&e));
+        }
     }
 
     // After the drain, so late requests from the previous command keep its tag.
@@ -4008,7 +4087,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             }
         }
         if let Some(policy_action) = confirmation_required {
+            let confirmation_id = pending_confirmation_id(&id);
             state.pending_confirmation = Some(PendingConfirmation {
+                confirmation_id: confirmation_id.clone(),
                 action: policy_action.clone(),
                 cmd: cmd.clone(),
                 approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
@@ -4019,7 +4100,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 "success": true,
                 "data": {
                     "confirmation_required": true,
-                    "confirmation_id": id,
+                    "confirmation_id": confirmation_id,
                     "action": policy_action
                 },
             });
@@ -4036,7 +4117,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     continue;
                 }
                 if ca.requires_confirmation(policy_action) {
+                    let confirmation_id = pending_confirmation_id(&id);
                     state.pending_confirmation = Some(PendingConfirmation {
+                        confirmation_id: confirmation_id.clone(),
                         action: policy_action.to_string(),
                         cmd: cmd.clone(),
                         approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
@@ -4047,7 +4130,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                         "success": true,
                         "data": {
                             "confirmation_required": true,
-                            "confirmation_id": id,
+                            "confirmation_id": confirmation_id,
                             "action": policy_action,
                         },
                     });
@@ -4381,7 +4464,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "profiler_start" => handle_profiler_start(cmd, state).await,
         "profiler_stop" => handle_profiler_stop(cmd, state).await,
         "recording_start" => handle_recording_start(cmd, state).await,
-        "recording_stop" => handle_recording_stop(state).await,
+        "recording_stop" => handle_recording_stop(&id, state).await,
         "recording_restart" => handle_recording_restart(cmd, state).await,
         "pdf" => handle_pdf(cmd, state).await,
         "tab_list" => handle_tab_list(state).await,
@@ -4470,7 +4553,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "window_new" => handle_window_new(cmd, state).await,
         "diff_screenshot" => handle_diff_screenshot(cmd, state).await,
         "video_start" => handle_video_start(cmd, state).await,
-        "video_stop" => handle_video_stop(state).await,
+        "video_stop" => handle_video_stop(&id, state).await,
         "flow_steps" | "flow_save" | "flow_run" | "flow_list" => {
             handle_flow_command(action, cmd, state, run_flow.take()).await
         }
@@ -4613,18 +4696,20 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
-    if let Err(e) = state.drain_cdp_events_background().await {
-        resp = error_response(&id, &super::browser::to_ai_friendly_error(&e));
-        attach_tab_gone_data(&mut resp, state);
-        inject_lifecycle(
-            &mut resp,
-            state,
-            lifecycle_reused,
-            lifecycle_launched,
-            lifecycle_relaunched_browser,
-        );
-        attach_settings_outcome(&mut resp, &settings_outcome);
-        attach_failed_lifecycle(&mut resp, lifecycle_launched, lifecycle_relaunched_browser);
+    if !browserless_control {
+        if let Err(e) = state.drain_cdp_events_background().await {
+            resp = error_response(&id, &super::browser::to_ai_friendly_error(&e));
+            attach_tab_gone_data(&mut resp, state);
+            inject_lifecycle(
+                &mut resp,
+                state,
+                lifecycle_reused,
+                lifecycle_launched,
+                lifecycle_relaunched_browser,
+            );
+            attach_settings_outcome(&mut resp, &settings_outcome);
+            attach_failed_lifecycle(&mut resp, lifecycle_launched, lifecycle_relaunched_browser);
+        }
     }
     attach_webmcp_availability(&mut resp, action, state).await;
     attach_flow_availability(&mut resp, action, state).await;
@@ -10144,13 +10229,41 @@ pub(crate) async fn handle_errors(cmd: &Value, state: &mut DaemonState) -> Resul
     }
 }
 
-async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
-    let page_count = if let Some(browser) = state.browser.as_ref() {
-        browser.page_count()
-    } else if let Some(ff) = state.firefox.as_ref() {
-        bidi::tabs::tab_count(ff).await?
+async fn handle_session_info(state: &mut DaemonState) -> Result<Value, String> {
+    state.reap_finished_recording().await;
+    let (page_count, browser_info) = if let Some(browser) = state.browser.as_mut() {
+        let tabs = browser.tab_list();
+        let connected = !browser.has_process_exited() && browser.is_connected();
+        let info = json!({
+            "connected": connected,
+            "owned": browser.is_owned_browser(),
+            "pid": browser.browser_pid(),
+            "userDataDir": browser.user_data_dir().map(|p| p.to_string_lossy().into_owned()),
+            "tabs": tabs,
+        });
+        (browser.page_count(), info)
+    } else if let Some(ff) = state.firefox.as_mut() {
+        let tabs = bidi::tabs::session_tabs(ff).await?;
+        let count = tabs.len();
+        let info = json!({
+            "connected": !ff.has_exited(),
+            "owned": !ff.is_attached(),
+            "pid": ff.browser_pid(),
+            "userDataDir": ff.profile_dir().map(|p| p.to_string_lossy().into_owned()),
+            "tabs": tabs,
+        });
+        (count, info)
     } else {
-        0
+        (
+            0,
+            json!({
+                "connected": false,
+                "owned": false,
+                "pid": Value::Null,
+                "userDataDir": Value::Null,
+                "tabs": [],
+            }),
+        )
     };
     Ok(json!({
         "session": state.session_id,
@@ -10160,6 +10273,8 @@ async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
         "browserLaunched": has_active_browser_session(state),
         "pageCount": page_count,
         "engine": state.engine,
+        "browser": browser_info,
+        "recording": recording::recording_status(&state.recording_state),
         "launchHash": state.launch_identity,
         "compatibilityStatus": "current",
         "effectiveLaunch": {
@@ -11387,10 +11502,16 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
 
     // Check the external dependency before an optional navigation mutates the
     // active page. State is still inactive, so a failure needs no rollback.
-    recording::check_ffmpeg_available().await?;
+    if let Err(err) = recording::check_ffmpeg_available().await {
+        recording::record_failed_preflight(&mut state.recording_state, path, &err);
+        return Err(err);
+    }
 
     if let Some(url) = recording_url {
-        navigate_active_page(state, url, WaitUntil::Load).await?;
+        if let Err(err) = navigate_active_page(state, url, WaitUntil::Load).await {
+            recording::record_failed_preflight(&mut state.recording_state, path, &err);
+            return Err(err);
+        }
     }
     let (client, session_id) = {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
@@ -11407,17 +11528,49 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     Ok(result)
 }
 
-async fn handle_recording_stop(state: &mut DaemonState) -> Result<Value, String> {
-    // Clear the recording state even when the capture task failed, so a
-    // broken take does not block the next `record start`.
-    let task_result = state.stop_recording_task().await;
-    let result = recording::recording_stop(&mut state.recording_state);
-    task_result?;
-
-    if let Some(ref server) = state.stream_server {
-        server.set_recording(false, &state.engine).await;
+fn replay_cached_stop(
+    id: &str,
+    action: &str,
+    state: &mut DaemonState,
+) -> Option<Result<Value, String>> {
+    if id.is_empty() {
+        return None;
     }
+    let cached = state
+        .recording_state
+        .last_stop_replay
+        .as_ref()
+        .filter(|entry| entry.id == id && entry.action == action)?
+        .clone();
+    state.error_data = cached.error_data;
+    state.pending_action_warning = cached.warning;
+    Some(cached.result)
+}
 
+fn store_stop_replay(
+    id: &str,
+    action: &str,
+    result: &Result<Value, String>,
+    state: &mut DaemonState,
+) {
+    if id.is_empty() {
+        return;
+    }
+    state.recording_state.last_stop_replay = Some(recording::StopReplay {
+        id: id.to_string(),
+        action: action.to_string(),
+        result: result.clone(),
+        error_data: state.error_data.clone(),
+        warning: state.pending_action_warning.clone(),
+    });
+}
+
+async fn handle_recording_stop(id: &str, state: &mut DaemonState) -> Result<Value, String> {
+    if let Some(replayed) = replay_cached_stop(id, "recording_stop", state) {
+        return replayed;
+    }
+    let result = state.finalize_active_recording().await;
+    store_stop_replay(id, "recording_stop", &result, state);
     result
 }
 
@@ -11449,18 +11602,34 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         recording::check_ffmpeg_available().await?;
     }
 
-    let _ = state.stop_recording_task().await;
-    let previous_path = if state.recording_state.active {
-        recording::recording_stop(&mut state.recording_state)
-            .ok()
-            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+    let (previous_path, previous_recording) = if state.recording_state.active {
+        match state.finalize_active_recording().await {
+            Ok(receipt) => {
+                let prev_path = receipt
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .map(String::from);
+                (prev_path, Some(receipt))
+            }
+            Err(_) => {
+                let prev_receipt = state
+                    .error_data
+                    .take()
+                    .or_else(|| state.recording_state.last_receipt.clone());
+                (None, prev_receipt)
+            }
+        }
     } else {
-        None
+        (None, None)
     };
+    state.error_data = None;
 
     let recording_target = if state.browser.is_some() {
         if let Some(ref url) = recording_url {
-            navigate_active_page(state, url, WaitUntil::Load).await?;
+            if let Err(err) = navigate_active_page(state, url, WaitUntil::Load).await {
+                recording::record_failed_preflight(&mut state.recording_state, path, &err);
+                return Err(err);
+            }
         }
         let browser = state.browser.as_ref().ok_or("Browser not launched")?;
         Some((
@@ -11477,9 +11646,14 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         state.start_recording_task(client, session_id).await?;
     }
 
+    if let Some(ref server) = state.stream_server {
+        server.set_recording(true, &state.engine).await;
+    }
+
     Ok(json!({
         "restarted": true,
         "previousPath": previous_path,
+        "previousRecording": previous_recording,
         "path": path,
         "fps": state.recording_state.fps,
         "cursor": state.recording_state.cursor,
@@ -14923,7 +15097,10 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    recording::check_ffmpeg_available().await?;
+    if let Err(err) = recording::check_ffmpeg_available().await {
+        recording::record_failed_preflight(&mut state.recording_state, path, &err);
+        return Err(err);
+    }
     recording::recording_start(
         &mut state.recording_state,
         path,
@@ -14943,16 +15120,22 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     }))
 }
 
-async fn handle_video_stop(state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_video_stop(id: &str, state: &mut DaemonState) -> Result<Value, String> {
+    if let Some(replayed) = replay_cached_stop(id, "video_stop", state) {
+        return replayed;
+    }
     if !state.recording_state.active {
-        return Ok(json!({
+        let result = Ok(json!({
             "stopped": false,
             "note": "No video recording was started. Use recording_stop if you used recording_start."
         }));
+        store_stop_replay(id, "video_stop", &result, state);
+        return result;
     }
 
-    state.stop_recording_task().await?;
-    recording::recording_stop(&mut state.recording_state)
+    let result = state.finalize_active_recording().await;
+    store_stop_replay(id, "video_stop", &result, state);
+    result
 }
 
 /// Begin capturing network traffic for a later HAR export.
@@ -17396,14 +17579,39 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 }
 
 // ---------------------------------------------------------------------------
-// Confirmation handlers (stub)
+// Confirmation handlers
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let pending = state
+fn take_matching_confirmation(
+    cmd: &Value,
+    state: &mut DaemonState,
+) -> Result<PendingConfirmation, String> {
+    let requested = cmd
+        .get("confirmationId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("Missing 'confirmationId' parameter")?;
+
+    let Some(pending) = state.pending_confirmation.as_ref() else {
+        return Err("No pending confirmation".to_string());
+    };
+
+    if pending.confirmation_id != requested {
+        return Err(format!(
+            "Confirmation ID '{}' does not match the pending confirmation",
+            requested
+        ));
+    }
+
+    Ok(state
         .pending_confirmation
         .take()
-        .ok_or("No pending confirmation")?;
+        .expect("pending confirmation checked above"))
+}
+
+pub(crate) async fn handle_confirm(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let pending = take_matching_confirmation(cmd, state)?;
 
     let mut approved_actions = pending.approved_actions.clone();
     if !approved_actions.iter().any(|a| a == &pending.action) {
@@ -17444,11 +17652,8 @@ fn confirmation_replay_command(cmd: &Value) -> Value {
     replay
 }
 
-pub(crate) async fn handle_deny(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let pending = state
-        .pending_confirmation
-        .take()
-        .ok_or("No pending confirmation")?;
+pub(crate) async fn handle_deny(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let pending = take_matching_confirmation(cmd, state)?;
 
     Ok(json!({ "denied": true, "action": pending.action }))
 }
@@ -18378,6 +18583,7 @@ mod tests {
         state.policy = None;
         state.confirm_actions = None;
         let pending = || PendingConfirmation {
+            confirmation_id: "pending".into(),
             action: "session_info".into(),
             cmd: json!({"action": "session_info", "id": "pending"}),
             approved_actions: Vec::new(),
@@ -18408,15 +18614,22 @@ mod tests {
         );
         assert!(state.pending_confirmation.is_some());
 
-        let response =
-            execute_command(&json!({"action": "confirm", "id": "confirm"}), &mut state).await;
+        let response = execute_command(
+            &json!({"action": "confirm", "id": "confirm", "confirmationId": "pending"}),
+            &mut state,
+        )
+        .await;
         assert_eq!(response["data"]["confirmed"], true);
         assert_eq!(response["data"]["result"]["success"], true);
         assert_eq!(response["data"]["result"]["data"]["engine"], "firefox");
         assert!(state.pending_confirmation.is_none());
 
         state.pending_confirmation = Some(pending());
-        let response = execute_command(&json!({"action": "deny", "id": "deny"}), &mut state).await;
+        let response = execute_command(
+            &json!({"action": "deny", "id": "deny", "confirmationId": "pending"}),
+            &mut state,
+        )
+        .await;
         assert_eq!(response["data"]["denied"], true);
         assert_eq!(response["data"]["action"], "session_info");
         assert!(state.pending_confirmation.is_none());
@@ -22781,7 +22994,7 @@ mod tests {
         };
 
         guard.set("PATH", &original_path);
-        let stop = handle_recording_stop(&mut state)
+        let stop = handle_recording_stop("", &mut state)
             .await
             .expect("preserved recording should still stop normally");
         let _ = ws.close(None).await;
@@ -22943,8 +23156,12 @@ mod tests {
         assert_eq!(switched["success"], true);
         assert!(state.pending_confirmation.is_none());
 
-        let confirmed =
-            execute_command(&json!({ "id": "confirm", "action": "confirm" }), &mut state).await;
+        let confirmation_id = parked["data"]["confirmation_id"].as_str().unwrap();
+        let confirmed = execute_command(
+            &json!({ "id": "confirm", "action": "confirm", "confirmationId": confirmation_id }),
+            &mut state,
+        )
+        .await;
         assert_eq!(confirmed["success"], false);
         assert!(state.policy.is_some());
         assert_eq!(
@@ -23026,7 +23243,12 @@ mod tests {
         );
 
         // The launch fails (no browser binary) after the settings apply.
-        let _ = execute_command(&json!({ "id": "c", "action": "confirm" }), &mut state).await;
+        let confirmation_id = parked["data"]["confirmation_id"].as_str().unwrap();
+        let _ = execute_command(
+            &json!({ "id": "c", "action": "confirm", "confirmationId": confirmation_id }),
+            &mut state,
+        )
+        .await;
 
         assert_eq!(
             state.settings.security().allowed_domains,
@@ -23066,8 +23288,13 @@ mod tests {
         assert_eq!(first["data"]["confirmation_required"], true);
         assert_eq!(first["data"]["action"], "navigate");
 
+        let confirmation_id = first["data"]["confirmation_id"].as_str().unwrap();
         let second = execute_command(
-            &json!({ "id": "policy-plugin-confirm-2", "action": "confirm" }),
+            &json!({
+                "id": "policy-plugin-confirm-2",
+                "action": "confirm",
+                "confirmationId": confirmation_id
+            }),
             &mut state,
         )
         .await;
@@ -25946,8 +26173,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let resp = execute_command(&run, &mut state).await;
         assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
         assert_eq!(resp["data"]["action"], "flow_write:s1r1");
-        let confirmed =
-            execute_command(&json!({ "id": "c1", "action": "confirm" }), &mut state).await;
+        let confirmation_id = resp["data"]["confirmation_id"].as_str().unwrap();
+        let confirmed = execute_command(
+            &json!({ "id": "c1", "action": "confirm", "confirmationId": confirmation_id }),
+            &mut state,
+        )
+        .await;
         assert_eq!(
             confirmed["data"]["result"]["data"]["ok"], true,
             "{confirmed}"
@@ -26317,7 +26548,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nconnection: close\r\n\r\n{\"ok\":true}",
         );
         write_flow_fixture(dir.path(), other);
-        let done = execute_command(&json!({ "id": "c", "action": "confirm" }), &mut state).await;
+        let confirmation_id = ask["data"]["confirmation_id"].as_str().unwrap();
+        let done = execute_command(
+            &json!({ "id": "c", "action": "confirm", "confirmationId": confirmation_id }),
+            &mut state,
+        )
+        .await;
         assert_eq!(done["data"]["result"]["data"]["ok"], true, "{done}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(other_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -29727,8 +29963,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(parked["data"]["confirmation_required"], true, "{parked}");
         assert!(dir.path().join("s.settings").exists());
 
-        let confirmed =
-            execute_command(&json!({ "id": "2", "action": "confirm" }), &mut state).await;
+        let confirmation_id = parked["data"]["confirmation_id"].as_str().unwrap();
+        let confirmed = execute_command(
+            &json!({ "id": "2", "action": "confirm", "confirmationId": confirmation_id }),
+            &mut state,
+        )
+        .await;
         assert_eq!(confirmed["success"], true, "{confirmed}");
         assert!(!dir.path().join("s.settings").exists());
     }
@@ -30629,6 +30869,141 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             }
         }
     }
+
+    #[tokio::test]
+    async fn confirm_and_deny_require_exact_confirmation_id_without_consuming_pending() {
+        let (_env, mut state) = isolated_state();
+        state.policy = None;
+        state.confirm_actions = None;
+        state.pending_confirmation = Some(PendingConfirmation {
+            confirmation_id: "cid-secret-123".into(),
+            action: "session_info".into(),
+            cmd: json!({"action": "session_info", "id": "cid-secret-123"}),
+            approved_actions: Vec::new(),
+            flow: None,
+        });
+
+        let missing = execute_command(&json!({"id": "c1", "action": "confirm"}), &mut state).await;
+        assert_eq!(missing["success"], false);
+        assert!(missing["error"]
+            .as_str()
+            .unwrap()
+            .contains("confirmationId"));
+        assert!(state.pending_confirmation.is_some());
+
+        let wrong = execute_command(
+            &json!({"id": "c2", "action": "deny", "confirmationId": "wrong-id"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(wrong["success"], false);
+        assert!(!wrong["error"].as_str().unwrap().contains("cid-secret-123"));
+        assert!(state.pending_confirmation.is_some());
+
+        let ok = execute_command(
+            &json!({"id": "c3", "action": "confirm", "confirmationId": "cid-secret-123"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(ok["success"], true, "{ok}");
+        assert_eq!(ok["data"]["confirmed"], true);
+        assert!(state.pending_confirmation.is_none());
+    }
+
+    #[tokio::test]
+    async fn recording_stop_does_not_launch_replays_idempotently_and_keeps_error_receipt() {
+        let (_env, mut state) = isolated_state();
+        state.policy = None;
+        state.confirm_actions = None;
+
+        // Stopping without a launched browser must not attempt to launch Chrome.
+        let idle =
+            execute_command(&json!({"id": "s0", "action": "recording_stop"}), &mut state).await;
+        assert_eq!(idle["success"], false, "{idle}");
+        assert!(idle["error"].as_str().unwrap().contains("No recording"));
+        assert!(state.browser.is_none());
+
+        // A failed background capture returns a structured error receipt and
+        // replays identically on retry with the same command id.
+        recording::recording_start(
+            &mut state.recording_state,
+            "/tmp/failed-take.webm",
+            recording::RecordingOptions::default(),
+        )
+        .unwrap();
+        state.recording_state.capture_task =
+            Some(tokio::spawn(async { Err("ffmpeg exited 1".to_string()) }));
+
+        let first =
+            execute_command(&json!({"id": "s1", "action": "recording_stop"}), &mut state).await;
+        assert_eq!(first["success"], false, "{first}");
+        assert!(first["error"].as_str().unwrap().contains("ffmpeg exited 1"));
+        assert_eq!(first["data"]["success"], false);
+        assert_eq!(first["data"]["path"], "/tmp/failed-take.webm");
+        assert_eq!(first["data"]["error"], "ffmpeg exited 1");
+
+        let replay =
+            execute_command(&json!({"id": "s1", "action": "recording_stop"}), &mut state).await;
+        assert_eq!(replay, first);
+
+        // Policy changes still govern a replayed stop request.
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("deny-stop.json");
+        fs::write(
+            &policy_path,
+            r#"{"default":"allow","deny":["recording_stop"]}"#,
+        )
+        .unwrap();
+        state.policy = Some(ActionPolicy::from_path(policy_path.to_str().unwrap()));
+        let denied =
+            execute_command(&json!({"id": "s1", "action": "recording_stop"}), &mut state).await;
+        assert_eq!(denied["success"], false, "{denied}");
+        assert!(denied["error"].as_str().unwrap().contains("denied"));
+        state.policy = None;
+
+        let info =
+            execute_command(&json!({"id": "i1", "action": "session_info"}), &mut state).await;
+        assert_eq!(info["success"], true, "{info}");
+        assert_eq!(info["data"]["browser"]["connected"], false);
+        assert!(info["data"]["browser"].get("cdpUrl").is_none());
+        assert_eq!(info["data"]["recording"]["active"], false);
+        assert_eq!(
+            info["data"]["recording"]["last"]["path"],
+            "/tmp/failed-take.webm"
+        );
+        assert_eq!(
+            info["data"]["recording"]["last"]["error"],
+            "ffmpeg exited 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_info_reaps_self_ended_recording_task() {
+        let (_env, mut state) = isolated_state();
+        state.policy = None;
+        state.confirm_actions = None;
+        recording::recording_start(
+            &mut state.recording_state,
+            "/tmp/crashed-take.webm",
+            recording::RecordingOptions::default(),
+        )
+        .unwrap();
+        let task = tokio::spawn(async { Err("screencast lost".to_string()) });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        state.recording_state.capture_task = Some(task);
+
+        let info =
+            execute_command(&json!({"id": "i2", "action": "session_info"}), &mut state).await;
+        assert_eq!(info["success"], true, "{info}");
+        assert_eq!(info["data"]["recording"]["active"], false);
+        assert_eq!(
+            info["data"]["recording"]["last"]["error"],
+            "screencast lost"
+        );
+        assert!(!state.recording_state.active);
+    }
 }
 
 #[cfg(test)]
@@ -30723,9 +31098,15 @@ mod firefox_routing_tests {
             json!({}),
         ]).await;
         state.firefox = Some(ff);
-        assert_eq!(handle_session_info(&state).await.unwrap()["pageCount"], 2);
-        assert_eq!(handle_session_info(&state).await.unwrap()["pageCount"], 0);
-        assert!(handle_session_info(&state)
+        assert_eq!(
+            handle_session_info(&mut state).await.unwrap()["pageCount"],
+            2
+        );
+        assert_eq!(
+            handle_session_info(&mut state).await.unwrap()["pageCount"],
+            0
+        );
+        assert!(handle_session_info(&mut state)
             .await
             .unwrap_err()
             .contains("browsing contexts"));
@@ -31131,12 +31512,28 @@ mod firefox_routing_tests {
         let resp = execute_command(&nav, &mut state).await;
         assert_eq!(resp["data"]["confirmation_required"], true);
         assert_eq!(navigations(&calls), 0);
-        let resp = execute_command(&json!({"id":"2","action":"confirm"}), &mut state).await;
+        let cid = resp["data"]["confirmation_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let resp = execute_command(
+            &json!({"id":"2","action":"confirm","confirmationId": cid}),
+            &mut state,
+        )
+        .await;
         assert_eq!(resp["data"]["result"]["success"], true, "{resp}");
         assert_eq!(navigations(&calls), 1);
 
-        execute_command(&nav, &mut state).await;
-        let resp = execute_command(&json!({"id":"3","action":"deny"}), &mut state).await;
+        let resp = execute_command(&nav, &mut state).await;
+        let cid = resp["data"]["confirmation_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let resp = execute_command(
+            &json!({"id":"3","action":"deny","confirmationId": cid}),
+            &mut state,
+        )
+        .await;
         assert_eq!(resp["data"]["denied"], true);
         assert_eq!(navigations(&calls), 1);
     }

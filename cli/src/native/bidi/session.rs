@@ -566,6 +566,14 @@ impl FirefoxSession {
         self.process.is_none()
     }
 
+    pub fn browser_pid(&self) -> Option<u32> {
+        self.process.as_ref().map(FirefoxProcess::id)
+    }
+
+    pub fn profile_dir(&self) -> Option<&std::path::Path> {
+        self.process.as_ref().map(|p| p.profile_dir.as_path())
+    }
+
     /// Marks a fake session as daemon-owned in unit tests without spawning a Firefox process.
     #[cfg(test)]
     pub(crate) fn mark_owned(&mut self) {
