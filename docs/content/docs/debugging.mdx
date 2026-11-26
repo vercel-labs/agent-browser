@@ -29,7 +29,7 @@ agent-browser errors --clear
   </tbody>
 </table>
 
-Use `console --json` when object previews or raw CDP arguments matter for an automated diagnostic script. Use the default text output when an agent only needs to understand what the page logged.
+Use `console --json` when object previews or raw CDP arguments matter for an automated diagnostic script. Use the default text output when an agent only needs to understand what the page logged. Both `console` and `errors` include logs and uncaught exceptions from cross-origin iframes on the active tab while keeping background tabs isolated.
 
 The daemon keeps the latest 1,000 console messages and the latest 1,000 page errors, and drops the oldest sooner once either set holds about 8 MiB. A message or error keeps up to 64 KiB of text, and longer text ends with `...[truncated N bytes]`, where N is the number of bytes cut. The arguments of a console message that hold more than 64 KiB are replaced by a single note. These limits apply to every engine, so a page that logs without pause cannot grow the daemon's memory without bound.
 

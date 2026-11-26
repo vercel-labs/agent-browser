@@ -42,6 +42,51 @@ pub async fn place_in_dispatch_viewport(
     measured: &mut ClickPoint,
     target: &str,
 ) -> Result<(), String> {
+    place_in_dispatch_viewport_with_relation(
+        client,
+        dispatch_session,
+        frame_id,
+        backend_node_id,
+        measured,
+        target,
+        RELATION_JS,
+    )
+    .await
+}
+
+/// Same viewport placement as [`place_in_dispatch_viewport`], but with strict
+/// receiver validation for form controls: accepts only the control itself, a
+/// non-interactive descendant of the control, or an associated `<label>` with
+/// no intervening interactive element (link, button, other input, etc.).
+pub async fn place_form_control_in_dispatch_viewport(
+    client: &CdpClient,
+    dispatch_session: &str,
+    frame_id: Option<&str>,
+    backend_node_id: i64,
+    measured: &mut ClickPoint,
+    target: &str,
+) -> Result<(), String> {
+    place_in_dispatch_viewport_with_relation(
+        client,
+        dispatch_session,
+        frame_id,
+        backend_node_id,
+        measured,
+        target,
+        FORM_CONTROL_RELATION_JS,
+    )
+    .await
+}
+
+async fn place_in_dispatch_viewport_with_relation(
+    client: &CdpClient,
+    dispatch_session: &str,
+    frame_id: Option<&str>,
+    backend_node_id: i64,
+    measured: &mut ClickPoint,
+    target: &str,
+    relation_js: &str,
+) -> Result<(), String> {
     let tree = frame_tree(client, dispatch_session).await?;
     let root_frame = root_frame_id(&tree)
         .ok_or_else(|| "Cannot read the page frame tree: it names no root frame".to_string())?
@@ -69,6 +114,7 @@ pub async fn place_in_dispatch_viewport(
             ref_frame,
             &receiver,
             backend_node_id,
+            relation_js,
         )
         .await?
         {
@@ -79,9 +125,10 @@ pub async fn place_in_dispatch_viewport(
         return Err(intercepted_error(target, &covering));
     }
     if !frame_subtree_contains(&tree, ref_frame, &receiver.frame_id) {
+        let covering = describe_node(client, dispatch_session, receiver.backend_node_id).await;
         return Err(format!(
-            "Element '{}' cannot be clicked safely: a click at ({}, {}) would land outside its frame, so the input could reach a different element. Open the frame's own URL to interact with it.",
-            target, point.x, point.y
+            "Element '{}' is covered by <{}> and cannot be clicked safely: a click at ({}, {}) would land outside its frame, so the input could reach a different element. Open the frame's own URL to interact with it.",
+            target, covering, point.x, point.y
         ));
     }
     if frame_owner_is(
@@ -268,6 +315,7 @@ async fn node_activates_ref(
     ref_frame: &str,
     receiver: &Receiver,
     backend_node_id: i64,
+    relation_js: &str,
 ) -> Result<bool, String> {
     let context_id = isolated_context(client, session, ref_frame).await?;
     let Some(ref_object) = resolve_in_context(client, session, backend_node_id, context_id).await
@@ -284,7 +332,7 @@ async fn node_activates_ref(
             "Runtime.callFunctionOn",
             Some(serde_json::json!({
                 "objectId": ref_object,
-                "functionDeclaration": RELATION_JS,
+                "functionDeclaration": relation_js,
                 "arguments": [{ "objectId": receiver_object }],
                 "returnByValue": true,
             })),
@@ -360,6 +408,27 @@ const RELATION_JS: &str = r#"function(other) {
     if (receiverLabel && (receiverLabel.control === this || receiverLabel.contains(this))) return true;
     const refLabel = this.closest ? this.closest('label') : null;
     return Boolean(refLabel && refLabel.contains(other));
+}"#;
+
+const FORM_CONTROL_RELATION_JS: &str = r#"function(other) {
+    if (!other) return false;
+    if (other === this) return true;
+    const INTERACTIVE = 'a[href], button, input, select, textarea, summary, [role="button"], [role="link"], [contenteditable]:not([contenteditable="false"])';
+    const isInteractive = (n) => Boolean(n && n.nodeType === 1 && n.matches && n.matches(INTERACTIVE));
+    const up = (n) => n.parentNode || n.host || (n.getRootNode && n.getRootNode().host) || null;
+    // Allow non-interactive descendants of the target control itself (e.g. custom role="checkbox").
+    for (let n = other; n; n = up(n)) {
+        if (n === this) return true;
+        if (isInteractive(n)) break;
+    }
+    // Allow an associated <label> only when no other interactive element sits
+    // between the hit-test receiver and that label.
+    const receiverLabel = other.closest ? other.closest('label') : null;
+    if (!receiverLabel || receiverLabel.control !== this) return false;
+    for (let n = other; n && n !== receiverLabel; n = up(n)) {
+        if (n !== this && isInteractive(n)) return false;
+    }
+    return true;
 }"#;
 
 /// Whether the frame that would receive the press is the one the ref embeds.
