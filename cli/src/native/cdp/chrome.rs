@@ -907,21 +907,36 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
 }
 
 fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<ChromeProcess, String> {
+    try_launch_chrome_with_seed(chrome_path, options, cfg!(windows))
+}
+
+fn try_launch_chrome_with_seed(
+    chrome_path: &Path,
+    options: &LaunchOptions,
+    seed_local_state: bool,
+) -> Result<ChromeProcess, String> {
     let ChromeArgs {
         args,
         user_data_dir,
         temp_user_data_dir,
     } = build_chrome_args(options)?;
 
-    // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
-    // Puppeteer does similar cleanup before spawning.
-    let _ = std::fs::remove_file(user_data_dir.join("DevToolsActivePort"));
-
     let cleanup_temp_dir = |dir: &Option<PathBuf>| {
         if let Some(ref d) = dir {
             let _ = std::fs::remove_dir_all(d);
         }
     };
+
+    if seed_local_state {
+        if let Err(error) = prepare_profile_local_state(&user_data_dir) {
+            cleanup_temp_dir(&temp_user_data_dir);
+            return Err(error);
+        }
+    }
+
+    // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
+    // Puppeteer does similar cleanup before spawning.
+    let _ = std::fs::remove_file(user_data_dir.join("DevToolsActivePort"));
 
     #[cfg(target_os = "linux")]
     let temp_nss_home = match resolve_prepared_nss_home(options) {
@@ -1689,6 +1704,36 @@ fn format_profile_list(profiles: &[&ChromeProfile]) -> String {
         .map(|p| format!("  {} ({})", p.directory, p.name))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Seeds `Local State` so Chrome on Windows skips its blank-password `LogonUser` probe (event 4625 per fresh profile).
+/// `os_password_last_changed` is an int64 pref, stored as a JSON string.
+fn seed_blank_password_probe_cache(user_data_dir: &Path) -> std::io::Result<()> {
+    let local_state = serde_json::json!({
+        "password_manager": {
+            "os_password_blank": false,
+            "os_password_last_changed": i64::MAX.to_string(),
+        }
+    });
+    let path = user_data_dir.join("Local State");
+    let mut file = std::fs::File::create_new(&path)?;
+    let result = file.write_all(local_state.to_string().as_bytes());
+    drop(file);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&path);
+    }
+    result
+}
+
+/// Ensures `Local State` exists in the profile directory without overwriting an existing file.
+fn prepare_profile_local_state(user_data_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(user_data_dir)
+        .map_err(|e| format!("Failed to initialize Windows Chrome profile: {e}"))?;
+    match seed_blank_password_probe_cache(user_data_dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(format!("Failed to initialize Windows Chrome profile: {e}")),
+    }
 }
 
 /// Directories to exclude when copying a Chrome profile. These are large
@@ -2551,6 +2596,117 @@ exec sleep 60
             .iter()
             .any(|a| a.starts_with("--user-data-dir=")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_seed_blank_password_probe_cache_writes_string_typed_prefs() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_blank_password_probe_cache(dir.path()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("Local State")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let pm = &json["password_manager"];
+        assert_eq!(pm["os_password_blank"], serde_json::Value::Bool(false));
+        assert_eq!(
+            pm["os_password_last_changed"],
+            serde_json::Value::String(i64::MAX.to_string())
+        );
+    }
+
+    #[test]
+    fn test_seed_blank_password_probe_cache_preserves_existing_local_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_state = dir.path().join("Local State");
+        let original = br#"{"browser":{"existing":true}}"#;
+        std::fs::write(&local_state, original).unwrap();
+
+        let error = seed_blank_password_probe_cache(dir.path()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        prepare_profile_local_state(dir.path()).unwrap();
+        assert_eq!(std::fs::read(&local_state).unwrap(), original);
+    }
+
+    #[test]
+    fn test_prepare_profile_local_state_seeds_when_local_state_missing() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let new_profile = dir.path().join("new-profile");
+        prepare_profile_local_state(&new_profile).unwrap();
+        assert!(new_profile.join("Local State").is_file());
+
+        let empty_profile = dir.path().join("empty-profile");
+        std::fs::create_dir_all(&empty_profile).unwrap();
+        prepare_profile_local_state(&empty_profile).unwrap();
+        assert!(empty_profile.join("Local State").is_file());
+
+        let non_empty_profile = dir.path().join("non-empty-profile");
+        std::fs::create_dir_all(&non_empty_profile).unwrap();
+        std::fs::write(non_empty_profile.join("Preferences"), "{}").unwrap();
+        prepare_profile_local_state(&non_empty_profile).unwrap();
+        let text = std::fs::read_to_string(non_empty_profile.join("Local State")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["password_manager"]["os_password_blank"], false);
+        assert_eq!(
+            std::fs::read_to_string(non_empty_profile.join("Preferences")).unwrap(),
+            "{}"
+        );
+
+        // Calling again hits AlreadyExists from create_new and succeeds without overwriting.
+        let original = br#"{"browser":{"existing":true}}"#;
+        std::fs::write(non_empty_profile.join("Local State"), original).unwrap();
+        prepare_profile_local_state(&non_empty_profile).unwrap();
+        assert_eq!(
+            std::fs::read(non_empty_profile.join("Local State")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn test_launch_with_seed_prepares_empty_explicit_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("new-profile");
+        let options = LaunchOptions {
+            profile: Some(profile.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let result =
+            try_launch_chrome_with_seed(&dir.path().join("unavailable-browser"), &options, true);
+        assert!(result.is_err());
+        let state = std::fs::read_to_string(profile.join("Local State")).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+        assert_eq!(state["password_manager"]["os_password_blank"], false);
+    }
+
+    #[test]
+    fn test_launch_with_seed_fails_before_spawn_when_seeding_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"file where a directory must be created").unwrap();
+        let options = LaunchOptions {
+            profile: Some(blocked.join("profile").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let error =
+            try_launch_chrome_with_seed(&dir.path().join("unavailable-browser"), &options, true)
+                .err()
+                .expect("profile initialization should fail before spawning");
+        assert!(
+            error.contains("Failed to initialize Windows Chrome profile"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_launch_without_seed_does_not_create_local_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("new-profile");
+        let options = LaunchOptions {
+            profile: Some(profile.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let result =
+            try_launch_chrome_with_seed(&dir.path().join("unavailable-browser"), &options, false);
+        assert!(result.is_err());
+        assert!(!profile.join("Local State").exists());
     }
 
     #[test]
