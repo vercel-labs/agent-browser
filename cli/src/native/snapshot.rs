@@ -102,7 +102,7 @@ mod document_identity_regressions {
     }
 }
 
-const INTERACTIVE_ROLES: &[&str] = &[
+pub(crate) const INTERACTIVE_ROLES: &[&str] = &[
     "button",
     "link",
     "textbox",
@@ -125,9 +125,9 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "Iframe",
 ];
 
-const TABLE_CELL_ROLES: &[&str] = &["cell", "gridcell", "columnheader", "rowheader"];
+pub(crate) const TABLE_CELL_ROLES: &[&str] = &["cell", "gridcell", "columnheader", "rowheader"];
 
-const CONTENT_ROLES: &[&str] = &[
+pub(crate) const CONTENT_ROLES: &[&str] = &[
     "heading",
     "listitem",
     "article",
@@ -366,7 +366,8 @@ pub async fn stage_snapshot(
     Ok((tree, staged))
 }
 
-const MAX_IFRAME_SNAPSHOT_DEPTH: usize = 4;
+pub(crate) const MAX_IFRAME_SNAPSHOT_DEPTH: usize = 4;
+pub(crate) const MAX_SNAPSHOT_TREE_DEPTH: usize = 512;
 
 pub async fn take_snapshot(
     client: &CdpClient,
@@ -507,7 +508,12 @@ async fn take_snapshot_inner(
         // build_tree, so a wrapper <div> between two matched nodes would
         // turn everything below it into an extra root and render it twice.
         let has_ancestor_in_subtree = |mut idx: usize| {
+            let mut steps = 0;
             while let Some(pidx) = tree_nodes[idx].parent_idx {
+                if steps >= tree_nodes.len() {
+                    break;
+                }
+                steps += 1;
                 if in_subtree[pidx] {
                     return true;
                 }
@@ -1697,16 +1703,17 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
         }
     }
 
-    fn set_depth(nodes: &mut [TreeNode], idx: usize, depth: usize) {
-        nodes[idx].depth = depth;
-        let children: Vec<usize> = nodes[idx].children.clone();
-        for child_idx in children {
-            set_depth(nodes, child_idx, depth + 1);
+    let mut visited = vec![false; tree_nodes.len()];
+    let mut stack: Vec<(usize, usize)> = root_indices.iter().rev().map(|&r| (r, 0)).collect();
+    while let Some((idx, depth)) = stack.pop() {
+        if idx >= tree_nodes.len() || visited[idx] || depth > MAX_SNAPSHOT_TREE_DEPTH {
+            continue;
         }
-    }
-
-    for &root in &root_indices {
-        set_depth(&mut tree_nodes, root, 0);
+        visited[idx] = true;
+        tree_nodes[idx].depth = depth;
+        for &child_idx in tree_nodes[idx].children.iter().rev() {
+            stack.push((child_idx, depth + 1));
+        }
     }
 
     (tree_nodes, root_indices)
@@ -1714,134 +1721,136 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
 
 fn render_tree(
     nodes: &[TreeNode],
-    idx: usize,
+    root_idx: usize,
     indent: usize,
     output: &mut String,
     options: &SnapshotOptions,
 ) {
-    let node = &nodes[idx];
+    let mut visited = vec![false; nodes.len()];
+    let mut stack = vec![(root_idx, indent)];
 
-    // Reduce unnecessary indentation and rendering
-    if node.role.is_empty()
-        || (node.role == "generic" && !node.has_ref && node.children.len() <= 1)
-        || (node.role == "StaticText" && normalize_snapshot_name(&node.name).trim().is_empty())
-    {
-        // Ignored node -- still render children
-        for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
+    while let Some((idx, indent)) = stack.pop() {
+        if idx >= nodes.len() || visited[idx] || indent > MAX_SNAPSHOT_TREE_DEPTH {
+            continue;
         }
-        return;
-    }
+        visited[idx] = true;
+        let node = &nodes[idx];
 
-    if let Some(max_depth) = options.depth {
-        if indent > max_depth {
-            return;
-        }
-    }
-
-    let role = &node.role;
-
-    // Skip root WebArea wrapper
-    if role == "RootWebArea" || role == "WebArea" {
-        for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
-        }
-        return;
-    }
-
-    if options.interactive && !node.has_ref {
-        // In interactive mode, skip non-interactive but render children
-        for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
-        }
-        return;
-    }
-
-    let prefix = "  ".repeat(indent);
-    let mut line = format!("{}- {}", prefix, role);
-
-    let unescaped_display_name = if !node.name.is_empty() {
-        node.name.as_str()
-    } else if node.role == "Iframe" {
-        node.display_name.as_deref().unwrap_or("")
-    } else if options.interactive {
-        node.label()
-    } else {
-        ""
-    };
-    if !unescaped_display_name.is_empty() {
-        if let Ok(display_name) =
-            serde_json::to_string(&normalize_snapshot_name(unescaped_display_name))
+        if node.role.is_empty()
+            || (node.role == "generic" && !node.has_ref && node.children.len() <= 1)
+            || (node.role == "StaticText" && normalize_snapshot_name(&node.name).trim().is_empty())
         {
-            line.push_str(&format!(" {}", display_name));
+            for &child in node.children.iter().rev() {
+                stack.push((child, indent));
+            }
+            continue;
         }
-    }
 
-    // Properties
-    let mut attrs = Vec::new();
-
-    if let Some(level) = node.level {
-        attrs.push(format!("level={}", level));
-    }
-    if let Some(ref checked) = node.checked {
-        attrs.push(format!("checked={}", checked));
-    }
-    if let Some(expanded) = node.expanded {
-        attrs.push(format!("expanded={}", expanded));
-    }
-    if let Some(selected) = node.selected {
-        if selected {
-            attrs.push("selected".to_string());
+        if let Some(max_depth) = options.depth {
+            if indent > max_depth {
+                continue;
+            }
         }
-    }
-    if let Some(disabled) = node.disabled {
-        if disabled {
-            attrs.push("disabled".to_string());
+
+        let role = &node.role;
+
+        if role == "RootWebArea" || role == "WebArea" {
+            for &child in node.children.iter().rev() {
+                stack.push((child, indent));
+            }
+            continue;
         }
-    }
-    if let Some(required) = node.required {
-        if required {
-            attrs.push("required".to_string());
+
+        if options.interactive && !node.has_ref {
+            for &child in node.children.iter().rev() {
+                stack.push((child, indent));
+            }
+            continue;
         }
-    }
 
-    if let Some(ref ref_id) = node.ref_id {
-        attrs.push(format!("ref={}", ref_id));
-    }
+        let prefix = "  ".repeat(indent);
+        let mut line = format!("{}- {}", prefix, role);
 
-    if let Some(ref url) = node.url {
-        attrs.push(format!("url={}", url));
-    }
-
-    if !attrs.is_empty() {
-        line.push_str(&format!(" [{}]", attrs.join(", ")));
-    }
-
-    if let Some(ref hint) = node.hint {
-        line.push_str(&format!(" hint={:?}", hint));
-    }
-
-    // Add cursor-interactive kind & hints
-    if let Some(ref cursor_info) = node.cursor_info {
-        line.push_str(&format!(
-            " {} [{}]",
-            cursor_info.kind,
-            cursor_info.hints.join(", ")
-        ));
-    }
-
-    // Value
-    if let Some(ref val) = node.value_text {
-        if !val.is_empty() && val != &node.name {
-            line.push_str(&format!(": {}", val));
+        let unescaped_display_name = if !node.name.is_empty() {
+            node.name.as_str()
+        } else if node.role == "Iframe" {
+            node.display_name.as_deref().unwrap_or("")
+        } else if options.interactive {
+            node.label()
+        } else {
+            ""
+        };
+        if !unescaped_display_name.is_empty() {
+            if let Ok(display_name) =
+                serde_json::to_string(&normalize_snapshot_name(unescaped_display_name))
+            {
+                line.push_str(&format!(" {}", display_name));
+            }
         }
-    }
 
-    output.push_str(&line);
-    output.push('\n');
+        let mut attrs = Vec::new();
 
-    for &child in &node.children {
-        render_tree(nodes, child, indent + 1, output, options);
+        if let Some(level) = node.level {
+            attrs.push(format!("level={}", level));
+        }
+        if let Some(ref checked) = node.checked {
+            attrs.push(format!("checked={}", checked));
+        }
+        if let Some(expanded) = node.expanded {
+            attrs.push(format!("expanded={}", expanded));
+        }
+        if let Some(selected) = node.selected {
+            if selected {
+                attrs.push("selected".to_string());
+            }
+        }
+        if let Some(disabled) = node.disabled {
+            if disabled {
+                attrs.push("disabled".to_string());
+            }
+        }
+        if let Some(required) = node.required {
+            if required {
+                attrs.push("required".to_string());
+            }
+        }
+
+        if let Some(ref ref_id) = node.ref_id {
+            attrs.push(format!("ref={}", ref_id));
+        }
+
+        if let Some(ref url) = node.url {
+            attrs.push(format!("url={}", url));
+        }
+
+        if !attrs.is_empty() {
+            line.push_str(&format!(" [{}]", attrs.join(", ")));
+        }
+
+        if let Some(ref hint) = node.hint {
+            line.push_str(&format!(" hint={:?}", hint));
+        }
+
+        if let Some(ref cursor_info) = node.cursor_info {
+            line.push_str(&format!(
+                " {} [{}]",
+                cursor_info.kind,
+                cursor_info.hints.join(", ")
+            ));
+        }
+
+        if let Some(ref val) = node.value_text {
+            if !val.is_empty() && val != &node.name {
+                line.push_str(&format!(": {}", val));
+            }
+        }
+
+        output.push_str(&line);
+        output.push('\n');
+
+        for &child in node.children.iter().rev() {
+            stack.push((child, indent + 1));
+        }
     }
 }
 
@@ -2460,6 +2469,56 @@ mod tests {
             );
             assert!(output.contains("- Iframe [ref=e3]"), "{output}");
             assert!(!output.contains("dom-name"), "{output}");
+        }
+    }
+
+    #[test]
+    fn test_build_and_render_deep_or_cyclic_ax_tree_is_bounded() {
+        let depth = MAX_SNAPSHOT_TREE_DEPTH;
+        let mut nodes = Vec::with_capacity(depth + 1);
+        for i in 0..=depth {
+            nodes.push(AXNode {
+                node_id: i.to_string(),
+                role: Some(AXValue {
+                    value_type: "role".to_string(),
+                    value: Some(serde_json::json!(if i == 0 {
+                        "RootWebArea"
+                    } else {
+                        "group"
+                    })),
+                }),
+                name: None,
+                value: None,
+                description: None,
+                properties: None,
+                child_ids: Some(if i < depth {
+                    vec![(i + 1).to_string()]
+                } else {
+                    Vec::new()
+                }),
+                backend_d_o_m_node_id: None,
+                ignored: None,
+            });
+        }
+        let (tree, roots) = build_tree(&nodes);
+        assert_eq!(tree[depth].depth, depth);
+        let mut out = String::new();
+        for &r in &roots {
+            render_tree(&tree, r, 0, &mut out, &SnapshotOptions::default());
+        }
+        assert!(!out.is_empty());
+
+        nodes[depth].child_ids = Some(vec!["0".to_string()]);
+        let (cyclic_tree, cyclic_roots) = build_tree(&nodes);
+        let mut cyclic_out = String::new();
+        for &r in &cyclic_roots {
+            render_tree(
+                &cyclic_tree,
+                r,
+                0,
+                &mut cyclic_out,
+                &SnapshotOptions::default(),
+            );
         }
     }
 }
