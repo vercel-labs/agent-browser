@@ -22198,6 +22198,37 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn test_failed_capture_after_connect_rolls_back_the_cdp_endpoint() {
+        let (_env, mut state, saved, original) = isolated_home_restore_session("key-a");
+        let url = spawn_capture_rejecting_cdp_server().await;
+
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "cdpUrl": url,
+                "settings": {
+                    "restore-key": "key-b",
+                    "capture": ["flow"]
+                }
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(state.session_name.as_deref(), Some("key-a"));
+        assert_eq!(state.settings.restore().key.as_deref(), Some("key-a"));
+        assert!(state.browser.is_none(), "browser kept: {resp}");
+        assert!(state.attached_target.is_none());
+        assert_eq!(state.settings.get(Key::Cdp), None, "{resp}");
+
+        let _ = handle_close(&mut state).await;
+        assert_eq!(fs::read(&saved).unwrap(), original);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_failed_cleanup_after_a_restore_key_rollback_blocks_autosave() {
         let (_env, mut state, saved, original) = isolated_home_restore_session("key-a");
         let (applied, mut outcome) =
