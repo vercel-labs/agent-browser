@@ -159,6 +159,37 @@ pub fn configure_process(flags: &Flags) {
     let _ = PROCESS_OPTIONS.set(options);
 }
 
+/// Set process-level trust from environment variables during daemon startup,
+/// before any command envelope arrives.
+pub fn configure_process_from_env() {
+    let use_system_ca = std::env::var("AGENT_BROWSER_USE_SYSTEM_CA")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let clear_ca_cert = std::env::var("AGENT_BROWSER_CLEAR_CA_CERT")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let ca_cert = std::env::var("AGENT_BROWSER_CA_CERT")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let options = match ca_cert {
+        Some(path) => TrustOptions {
+            use_system_ca,
+            ca_cert: Some(absolute(&path)),
+            ca_cert_is_implicit: false,
+        },
+        None if clear_ca_cert => TrustOptions {
+            use_system_ca,
+            ..TrustOptions::default()
+        },
+        None => TrustOptions {
+            use_system_ca,
+            ca_cert: ambient_ca_cert().map(|path| absolute(&path)),
+            ca_cert_is_implicit: true,
+        },
+    };
+    let _ = PROCESS_OPTIONS.set(options);
+}
+
 pub fn process_options() -> TrustOptions {
     PROCESS_OPTIONS.get().cloned().unwrap_or_default()
 }
@@ -218,6 +249,13 @@ fn add_ca_bundle(store: &mut RootCertStore, path: &str) -> Result<usize, String>
     Ok(bundle.certificates().len())
 }
 
+/// Build a rustls client config for the given options.
+pub fn build_client_config(opts: &TrustOptions) -> Result<ClientConfig, String> {
+    Ok(ClientConfig::builder()
+        .with_root_certificates(build_root_store(opts)?)
+        .with_no_client_auth())
+}
+
 /// Apply the selected roots to an HTTP client builder. Default options leave
 /// the builder unchanged.
 pub fn apply_to_reqwest(
@@ -227,10 +265,30 @@ pub fn apply_to_reqwest(
     if opts.is_default() {
         return Ok(builder);
     }
-    let config = ClientConfig::builder()
-        .with_root_certificates(build_root_store(opts)?)
-        .with_no_client_auth();
-    Ok(builder.use_preconfigured_tls(config))
+    Ok(builder.use_preconfigured_tls(build_client_config(opts)?))
+}
+
+/// Build a tungstenite TLS connector for the given options. Default options
+/// leave tungstenite on its compiled-in roots.
+pub fn tungstenite_connector(
+    opts: &TrustOptions,
+) -> Result<Option<tokio_tungstenite::Connector>, String> {
+    if opts.is_default() {
+        return Ok(None);
+    }
+    Ok(Some(tokio_tungstenite::Connector::Rustls(
+        std::sync::Arc::new(build_client_config(opts)?),
+    )))
+}
+
+/// Extract resolved trust options from a daemon command envelope.
+pub fn from_command(cmd: &serde_json::Value) -> Result<TrustOptions, String> {
+    match cmd.get("tls") {
+        Some(value) => {
+            serde_json::from_value(value.clone()).map_err(|e| format!("Invalid TLS options: {e}"))
+        }
+        None => Ok(TrustOptions::default()),
+    }
 }
 
 /// One-line description of the selected roots, for `agent-browser doctor`.
@@ -340,5 +398,53 @@ mod tests {
             ..TrustOptions::default()
         };
         assert!(!build_root_store(&opts).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use base64::Engine;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    /// Self-signed EC P-256 certificate valid for `localhost` and `127.0.0.1`.
+    pub(crate) const LOCALHOST_CERT_DER: &str = "MIIBPDCB46ADAgECAgkA9xwXmIhbzQIwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgzMDA1NTU0NFoXDTM2MDgyNzA1NTU0NFowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQdmPO0sXXFRmVn7+8MViXGom2rYy8aV3Oc0pNZhUmFGaPl4MRFzc1G0yaV/WRBPF/BUh2LGsXCvUsn7NqaYkFaMeMBwwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAoGCCqGSM49BAMCA0gAMEUCIQC32oureGNAupABEmonQPAQBD7OdJjXmUxoVQNr0UB+6AIgb23GMwxTjwHyLG4tZcJST7r3cCW8K/Y+1h618j2f+Uw=";
+    pub(crate) const LOCALHOST_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgIVZST8Vhc5f3OW+4kF78f8o1nQCRwjW/Yo8CXQ35Y9uhRANCAARB2Y87SxdcVGZWfv7wxWJcaibatjLxpXc5zSk1mFSYUZo+XgxEXNzUbTJpX9ZEE8X8FSHYsaxcK9Syfs2ppiQV";
+
+    /// Self-signed EC P-256 certificate valid only for `wrong-host.invalid`.
+    pub(crate) const WRONG_HOST_CERT_DER: &str = "MIIBjjCCATOgAwIBAgIUOvEerfyM2p5C2GZvkWj0oWgTRT4wCgYIKoZIzj0EAwIwHTEbMBkGA1UEAwwSd3JvbmctaG9zdC5pbnZhbGlkMB4XDTI2MTEyNjAwMjU1M1oXDTM2MTEyMzAwMjU1M1owHTEbMBkGA1UEAwwSd3JvbmctaG9zdC5pbnZhbGlkMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/6pjGT9gScwYcp+t2drn6tbdrf08cp+J7PVK0b7FYa4l8D15VoDutQcyJkuL33ROa+r/OlUgFBnXw5Kg0RrUMqNRME8wHQYDVR0OBBYEFGLiyh74YxZsoTdHnPCCTR7nV3ipMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0RBBYwFIISd3JvbmctaG9zdC5pbnZhbGlkMAoGCCqGSM49BAMCA0kAMEYCIQD3LEC7OWptW8DFl8VlxNcSnZBvfz8t4JfbqsXwLnn8lwIhAOZSvfAz1v3O+nf7ThNaSnGtyW2W0WdHDNaxSd566SIV";
+    pub(crate) const WRONG_HOST_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgRYqJSU8+MeZliEbkwl3HVwEGOLbClw8PIujBB0vaqFGhRANCAAT/qmMZP2BJzBhyn63Z2ufq1t2t/Txyn4ns9UrRvsVhriXwPXlWgO61BzImS4vfdE5r6v86VSAUGdfDkqDRGtQy";
+
+    pub(crate) fn server_config(cert_b64: &str, key_b64: &str) -> Arc<rustls::ServerConfig> {
+        let cert = CertificateDer::from(
+            base64::engine::general_purpose::STANDARD
+                .decode(cert_b64)
+                .unwrap(),
+        );
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            base64::engine::general_purpose::STANDARD
+                .decode(key_b64)
+                .unwrap(),
+        ));
+        Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .unwrap(),
+        )
+    }
+
+    pub(crate) fn write_pem(dir: &Path, name: &str, cert_b64: &str) -> PathBuf {
+        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+        for chunk in cert_b64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).unwrap());
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
+        let path = dir.join(name);
+        std::fs::write(&path, pem).unwrap();
+        path
     }
 }
