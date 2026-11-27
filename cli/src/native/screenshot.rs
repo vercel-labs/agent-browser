@@ -9,6 +9,7 @@ use super::cdp::types::*;
 use super::element::RefMap;
 
 const ANNOTATION_OVERLAY_ID: &str = "__agent_browser_annotations__";
+const FULL_PAGE_RESTORE_KEY: &str = "__agent_browser_full_page_restore__";
 
 #[derive(Debug, Clone)]
 pub(crate) struct Rect {
@@ -131,6 +132,21 @@ impl Serialize for ScreenshotAnnotation {
 
 /// Captures screenshot bytes and optional annotations without writing a file.
 pub async fn take_screenshot(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    options: &ScreenshotOptions,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<ScreenshotResult, String> {
+    let expanded = options.full_page && expand_scroll_containers(client, session_id).await;
+    let result = take_screenshot_inner(client, session_id, ref_map, options, iframe_sessions).await;
+    if expanded {
+        restore_scroll_containers(client, session_id).await;
+    }
+    result
+}
+
+async fn take_screenshot_inner(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
@@ -267,6 +283,163 @@ async fn capture_screenshot_base64(
         .await?;
 
     Ok((result.data, clip))
+}
+
+/// Lays out the content of inner scroll containers in the document so a
+/// full-page capture includes it.
+///
+/// `Page.getLayoutMetrics` only reports what the document itself overflows.
+/// A page that scrolls inside a container (an app shell with
+/// `body { overflow: hidden }` and a scrolling content pane) reports the
+/// viewport size, so the capture would stop at the fold. When the document
+/// has no vertical overflow of its own, each scroll container at least half
+/// the viewport tall is grown to its scroll height and the ancestors that
+/// clip it are unclipped. Returns whether anything changed, in which case
+/// the caller must call [`restore_scroll_containers`] after the capture.
+async fn expand_scroll_containers(client: &CdpClient, session_id: &str) -> bool {
+    let expression = format!(
+        r#"(() => {{
+            var key = {key};
+            if (typeof window[key] === 'function') window[key]();
+            var root = document.scrollingElement || document.documentElement;
+            var vh = window.innerHeight;
+            if (!root || !vh || root.scrollHeight > vh + 1) return false;
+            var scrollers = [];
+            // Growing a container reflows the page, which can clamp the scroll
+            // offset of any element, so every offset is recorded, not only
+            // those of the containers that grow.
+            var scrolled = [];
+            var walk = function (node) {{
+                var els = node.querySelectorAll('*');
+                for (var i = 0; i < els.length; i++) {{
+                    var el = els[i];
+                    if (el.shadowRoot) walk(el.shadowRoot);
+                    if (el.scrollTop || el.scrollLeft) {{
+                        scrolled.push([el, el.scrollTop, el.scrollLeft]);
+                    }}
+                    if (el === document.documentElement || el === document.body) continue;
+                    if (el.clientHeight < vh / 2 || el.scrollHeight <= el.clientHeight + 1) continue;
+                    var oy = getComputedStyle(el).overflowY;
+                    if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') scrollers.push(el);
+                }}
+            }};
+            walk(document);
+            if (!scrollers.length) return false;
+            var saved = new Map();
+            var save = function (el) {{
+                var state = saved.get(el);
+                if (!state) {{
+                    var cs = getComputedStyle(el);
+                    state = {{
+                        style: el.getAttribute('style'),
+                        height: cs.boxSizing === 'border-box' ? el.offsetHeight : parseFloat(cs.height) || 0,
+                        extra: 0,
+                        clips: cs.overflowX !== 'visible' || cs.overflowY !== 'visible',
+                    }};
+                    saved.set(el, state);
+                }}
+                return state;
+            }};
+            var parentOf = function (el) {{
+                if (el.parentElement) return el.parentElement;
+                var host = el.getRootNode && el.getRootNode().host;
+                return host || null;
+            }};
+            var grow = function (el, state, extra) {{
+                if (extra <= state.extra) return;
+                state.extra = extra;
+                var height = (state.height + extra) + 'px';
+                el.style.setProperty('min-height', height, 'important');
+                el.style.setProperty('max-height', 'none', 'important');
+                return height;
+            }};
+            // Descendants first, so an outer container measures its expanded content.
+            for (var i = scrollers.length - 1; i >= 0; i--) {{
+                var el = scrollers[i];
+                var extra = el.scrollHeight - el.clientHeight;
+                if (extra <= 0) continue;
+                // Measure the ancestors before the container grows.
+                var chain = [];
+                for (var p = parentOf(el); p && scrollers.indexOf(p) === -1; p = parentOf(p)) {{
+                    chain.push([p, save(p)]);
+                }}
+                var height = grow(el, save(el), extra);
+                el.style.setProperty('height', height, 'important');
+                // Ancestors grow by the same amount, as if the viewport had,
+                // so siblings such as headers and footers keep their size.
+                for (var j = 0; j < chain.length; j++) {{
+                    grow(chain[j][0], chain[j][1], extra);
+                    if (chain[j][1].clips) {{
+                        chain[j][0].style.setProperty('overflow', 'visible', 'important');
+                    }}
+                }}
+            }}
+            if (!saved.size) return false;
+            window[key] = function () {{
+                delete window[key];
+                saved.forEach(function (state, el) {{
+                    if (state.style === null) {{
+                        el.removeAttribute('style');
+                        return;
+                    }}
+                    // The CSSOM write works under a strict CSP; the attribute
+                    // write puts back the author's exact text.
+                    el.style.cssText = state.style;
+                    el.setAttribute('style', state.style);
+                }});
+                for (var i = 0; i < scrolled.length; i++) {{
+                    scrolled[i][0].scrollTop = scrolled[i][1];
+                    scrolled[i][0].scrollLeft = scrolled[i][2];
+                }}
+            }};
+            return true;
+        }})()"#,
+        key = serde_json::to_string(FULL_PAGE_RESTORE_KEY).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+
+    // Best effort: a page that blocks the script still gets the plain capture.
+    let result: Result<EvaluateResult, String> = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await;
+
+    result
+        .ok()
+        .and_then(|r| r.result.value)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Undoes [`expand_scroll_containers`], including each container's scroll
+/// position.
+async fn restore_scroll_containers(client: &CdpClient, session_id: &str) {
+    let expression = format!(
+        r#"(() => {{
+            var restore = window[{key}];
+            if (typeof restore === 'function') restore();
+            return true;
+        }})()"#,
+        key = serde_json::to_string(FULL_PAGE_RESTORE_KEY).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+
+    let _: Result<EvaluateResult, String> = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await;
 }
 
 fn capture_beyond_viewport(options: &ScreenshotOptions) -> Option<bool> {

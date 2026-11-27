@@ -12245,6 +12245,178 @@ async fn e2e_screenshot_full_page_high_dpi() {
     assert_success(&resp);
 }
 
+/// A page that scrolls inside a container instead of the document (an app
+/// shell with `body { overflow: hidden }`) must still be captured in full,
+/// and the page must look untouched afterwards.
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_full_page_inner_scroll_container() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 800, "height": 600 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<style>html,body{height:100%;margin:0;overflow:hidden}body{display:flex;flex-direction:column}</style>\
+<header style='height:50px;background:%2300c'></header>\
+<main id='pane' style='flex:1;min-height:0;overflow:auto'><div style='height:3000px;background:%23c00'></div></main>\
+<footer style='height:30px;background:%230c0'></footer>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let page_state = "(() => { const p = document.getElementById('pane'); \
+        return [p.scrollTop, p.clientHeight, p.getAttribute('style'), \
+        document.body.getAttribute('style'), document.documentElement.scrollHeight].join('|'); })()";
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('pane').scrollTop = 200" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let before = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": page_state }),
+        &mut state,
+    )
+    .await;
+    assert_success(&before);
+
+    let out = std::env::temp_dir()
+        .join("agent-browser-e2e-full-page-inner-scroll.png")
+        .to_string_lossy()
+        .to_string();
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "screenshot", "fullPage": true, "path": out }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let img = image::open(&out).expect("decode screenshot").to_rgb8();
+    let _ = std::fs::remove_file(&out);
+    // 50px header, the pane's 3000px of content, then the 30px footer.
+    assert_eq!(img.dimensions(), (800, 3080));
+    let is = |y: u32, rgb: [bool; 3]| {
+        let p = img.get_pixel(400, y);
+        (0..3).all(|i| if rgb[i] { p[i] > 150 } else { p[i] < 60 })
+    };
+    assert!(is(25, [false, false, true]), "header at the top");
+    assert!(
+        is(60, [true, false, false]),
+        "pane content starts under the header"
+    );
+    assert!(
+        is(3040, [true, false, false]),
+        "pane content reaches its end"
+    );
+    assert!(is(3065, [false, true, false]), "footer follows the pane");
+
+    let after = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": page_state }),
+        &mut state,
+    )
+    .await;
+    assert_success(&after);
+    assert_eq!(
+        get_data(&before)["result"],
+        "200|520|flex:1;min-height:0;overflow:auto||600"
+    );
+    assert_eq!(get_data(&after)["result"], get_data(&before)["result"]);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Growing the main pane reflows its siblings. A small scroll container that
+/// is not grown itself can lose its overflow for the capture, which clamps its
+/// scroll offset to zero, so the offset has to be put back afterwards.
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_full_page_restores_sibling_scroll() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 800, "height": 600 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The sidebar list fills what its 400px heading leaves of the row, so it is
+    // 200px tall, under the half viewport that makes a container grow.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<style>html,body{height:100%;margin:0;overflow:hidden}body{display:flex}</style>\
+<div style='width:200px;display:flex;flex-direction:column'><div style='flex:none;height:400px'></div>\
+<div id='side' style='flex:1;min-height:0;overflow:auto'><div style='height:500px'></div></div></div>\
+<main id='pane' style='flex:1;overflow:auto'><div style='height:3000px;background:%23c00'></div></main>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let page_state = "(() => { const s = document.getElementById('side'); \
+        const p = document.getElementById('pane'); \
+        return [s.scrollTop, s.clientHeight, p.scrollTop, p.clientHeight].join('|'); })()";
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('side').scrollTop = 120; document.getElementById('pane').scrollTop = 200" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let before = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": page_state }),
+        &mut state,
+    )
+    .await;
+    assert_success(&before);
+    assert_eq!(get_data(&before)["result"], "120|200|200|600");
+
+    let out = std::env::temp_dir()
+        .join("agent-browser-e2e-full-page-sibling-scroll.png")
+        .to_string_lossy()
+        .to_string();
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "screenshot", "fullPage": true, "path": out }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let img = image::open(&out).expect("decode screenshot").to_rgb8();
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(img.dimensions(), (800, 3000));
+
+    let after = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": page_state }),
+        &mut state,
+    )
+    .await;
+    assert_success(&after);
+    assert_eq!(get_data(&after)["result"], get_data(&before)["result"]);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Share of pixels in a screenshot that are pure red (#c00), for checking
 /// that an element clip actually contains the element.
 fn red_fraction(path: &str) -> (u32, u32, f64) {
