@@ -51,6 +51,21 @@ For an `https://` CDP URL, discovery keeps the encryption of the input: requests
 
 Root WebSocket endpoints accept query strings with or without an explicit slash, so both `wss://browser-service.com?token=...` and `wss://browser-service.com/?token=...` work.
 
+### Attach to a running hosted browser
+
+If your hosting service gives you a CDP URL for a running Chrome browser, load it into `BROWSER_CDP_URL` from your secret store. The [Cloudbrowser CLI reference](https://cloudbrowser.tv/docs/cli) shows how to issue a URL for an existing browser.
+
+```bash
+(
+  export AGENT_BROWSER_CDP="$BROWSER_CDP_URL"
+  agent-browser --session remote-chrome tab new https://cloudbrowser.tv/docs/connections
+  agent-browser --session remote-chrome get text h1
+  agent-browser --session remote-chrome close
+)
+```
+
+The heading `Connect your tools` confirms that you can read a page through the CDP connection. Choose a fresh session name when an existing session points to another browser. Closing the agent-browser session disconnects it and leaves the hosted browser running.
+
 ## Attach to Firefox
 
 Firefox 150 or newer exposes WebDriver BiDi. Enable its remote debugging preferences in the profile's `user.js`, then start Firefox with both debugging ports:
