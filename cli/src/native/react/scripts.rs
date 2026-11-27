@@ -230,7 +230,12 @@ pub const RENDERS_INIT: &str = r#"
 
   function getName(fiber) {
     if (!fiber.type || typeof fiber.type === "string") return null;
-    return fiber.type.displayName || fiber.type.name || null;
+    const name = fiber.type.displayName || fiber.type.name;
+    if (name) return name;
+    if (fiber.tag === 11 && fiber.type.render) {
+      return fiber.type.render.displayName || fiber.type.render.name || null;
+    }
+    return null;
   }
 
   function brief(val) {
