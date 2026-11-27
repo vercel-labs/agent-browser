@@ -592,6 +592,8 @@ The auto-discovered `./agent-browser.json` accepts only `headed`, `json`, `debug
 
 ## Global Options
 
+A Chrome CDP attach uses one debugging WebSocket. If Chrome asks for remote debugging approval, approve that connection before continuing.
+
 ```bash
 agent-browser --session <name> ...    # Isolated browser session
 agent-browser --json ...              # JSON output for parsing

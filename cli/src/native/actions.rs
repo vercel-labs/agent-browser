@@ -21,7 +21,9 @@ use super::a11y;
 use super::auth;
 use super::bidi;
 use super::bidi::attach::target_label;
-use super::browser::{should_track_target, BrowserManager, TabKeep, WaitUntil, WedgeReport};
+use super::browser::{
+    should_track_target, BrowserManager, PreparedCdp, TabKeep, WaitUntil, WedgeReport,
+};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
@@ -5952,13 +5954,8 @@ async fn launch_browser_from_settings(
             None => detect_attach_connection(&cdp, headers.clone(), &state.trust).await?,
         };
         let mgr = match target {
-            AttachConnection::Cdp(url) => {
-                BrowserManager::connect_cdp_with_headers_and_tls(
-                    &url,
-                    headers.clone(),
-                    &state.trust,
-                )
-                .await?
+            AttachConnection::Cdp(connection) => {
+                BrowserManager::connect_prepared_cdp(connection).await?
             }
             AttachConnection::Firefox(target) => {
                 return Box::pin(launch_firefox_prepared(
@@ -6924,7 +6921,7 @@ fn combine_cdp_and_firefox_attach_errors(
 
 #[derive(Debug)]
 enum AttachConnection {
-    Cdp(String),
+    Cdp(PreparedCdp),
     Firefox(bidi::attach::AttachTarget),
 }
 
@@ -6946,9 +6943,8 @@ async fn detect_attach_connection(
     if let Ok(Some(target)) = &parsed {
         return Ok(AttachConnection::Firefox(target.clone()));
     }
-    let cdp_error = match BrowserManager::resolve_cdp_target_with_tls(target, headers, trust).await
-    {
-        Ok(url) => return Ok(AttachConnection::Cdp(url)),
+    let cdp_error = match BrowserManager::prepare_cdp_target(target, headers, trust).await {
+        Ok(connection) => return Ok(AttachConnection::Cdp(connection)),
         Err(error) => error,
     };
     let bidi = match parsed {
@@ -25140,16 +25136,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     async fn bare_cdp_server() -> (String, tokio::task::JoinHandle<()>) {
+        let (url, server, _) = counted_cdp_server().await;
+        (url, server)
+    }
+
+    async fn counted_cdp_server() -> (String, tokio::task::JoinHandle<()>, Arc<AtomicU64>) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
+        let connections = Arc::new(AtomicU64::new(0));
+        let accepted = connections.clone();
         let server = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
                     continue;
                 };
+                accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 while let Some(Ok(Message::Text(text))) = ws.next().await {
                     let request: Value = serde_json::from_str(&text).unwrap();
                     let result = match request["method"].as_str().unwrap_or("") {
@@ -25172,7 +25176,136 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 }
             }
         });
-        (url, server)
+        (url, server, connections)
+    }
+
+    #[tokio::test]
+    async fn cdp_probe_connection_is_reused_for_attach() {
+        let (target, server, connections) = counted_cdp_server().await;
+        let AttachConnection::Cdp(prepared) =
+            detect_attach_connection(&target, None, &crate::tls::TrustOptions::default())
+                .await
+                .unwrap()
+        else {
+            panic!("expected a CDP connection");
+        };
+        let mut browser = BrowserManager::connect_prepared_cdp(prepared)
+            .await
+            .unwrap();
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 1);
+        browser.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cdp_probe_reuses_connection_with_custom_ca() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = crate::tls::test_support::write_pem(
+            dir.path(),
+            "ca.pem",
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+        );
+        let trust = crate::tls::TrustOptions {
+            ca_cert: Some(ca.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let config = crate::tls::test_support::server_config(
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+            crate::tls::test_support::LOCALHOST_KEY_DER,
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = format!("wss://{}", listener.local_addr().unwrap());
+        let connections = Arc::new(AtomicU64::new(0));
+        let observed = connections.clone();
+        let server = std::thread::spawn(move || {
+            let mut ws = loop {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let tls = rustls::StreamOwned::new(
+                    rustls::ServerConnection::new(config.clone()).unwrap(),
+                    stream,
+                );
+                if let Ok(ws) = tokio_tungstenite::tungstenite::accept(tls) {
+                    break ws;
+                }
+            };
+            observed.fetch_add(1, Ordering::SeqCst);
+            while let Ok(Message::Text(text)) = ws.read() {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let result = match request["method"].as_str().unwrap_or("") {
+                    "Target.getTargets" => {
+                        json!({"targetInfos": [{"targetId": "page-1", "type": "page", "title": "", "url": "about:blank", "attached": false}]})
+                    }
+                    "Target.attachToTarget" => json!({"sessionId": "session-1"}),
+                    _ => json!({}),
+                };
+                if ws
+                    .send(Message::Text(
+                        json!({"id": request["id"], "result": result}).to_string(),
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let AttachConnection::Cdp(prepared) = detect_attach_connection(&target, None, &trust)
+            .await
+            .unwrap()
+        else {
+            panic!("expected a CDP connection");
+        };
+        let mut browser = BrowserManager::connect_prepared_cdp(prepared)
+            .await
+            .unwrap();
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        browser.close().await.unwrap();
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn abandoned_cdp_probe_closes_its_connection() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("ws://{}", listener.local_addr().unwrap());
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    continue;
+                };
+                let Some(Ok(Message::Text(text))) = ws.next().await else {
+                    return;
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                ws.send(Message::Text(
+                    json!({"id": request["id"], "result": {}}).to_string(),
+                ))
+                .await
+                .unwrap();
+                let _ = ws.next().await;
+                let _ = closed_tx.send(());
+                break;
+            }
+        });
+        let prepared =
+            detect_attach_connection(&target, None, &crate::tls::TrustOptions::default())
+                .await
+                .unwrap();
+        drop(prepared);
+        tokio::time::timeout(std::time::Duration::from_secs(2), closed_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -25187,7 +25320,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             panic!("a local CDP server at a bare WebSocket root must win");
         };
 
-        assert_eq!(url, target);
+        assert_eq!(url.url, target);
         server.abort();
     }
 
