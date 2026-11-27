@@ -699,31 +699,40 @@ fn parse_bare_command(
     Ok(json!({ "id": id, "action": action }))
 }
 
-/// Parses a command whose only flag is `--clear`.
-fn parse_clear_command(
+/// Parses a log command (`console`, `errors`) with its `--clear` and `--follow` flags.
+fn parse_log_command(
     rest: &[&str],
     id: &str,
     action: &'static str,
     usage: &'static str,
     batch_item: bool,
 ) -> Result<Value, ParseError> {
-    const FLAGS: &[FlagSpec] = &[FlagSpec {
-        name: "--clear",
-        aliases: &[],
-        takes_value: false,
-    }];
+    const FLAGS: &[FlagSpec] = &[
+        FlagSpec {
+            name: "--clear",
+            aliases: &[],
+            takes_value: false,
+        },
+        FlagSpec {
+            name: "--follow",
+            aliases: &["-f"],
+            takes_value: false,
+        },
+    ];
     let mut clear = false;
+    let mut follow = false;
     let mut scanner = ArgScanner::new(rest, FLAGS, action, usage, batch_item, DashPolicy::Reject);
     while let Some(arg) = scanner.next()? {
         match arg {
             ScannedArg::BoolFlag("--clear") => clear = true,
+            ScannedArg::BoolFlag("--follow") => follow = true,
             ScannedArg::Data(_) => {}
             ScannedArg::BoolFlag(name) | ScannedArg::ValueFlag { name, .. } => {
                 unreachable!("{action} flag {name} has no handler")
             }
         }
     }
-    Ok(json!({ "id": id, "action": action, "clear": clear }))
+    Ok(json!({ "id": id, "action": action, "clear": clear, "follow": follow }))
 }
 
 /// Reports whether a single screenshot positional is a file path rather than a selector.
@@ -2492,8 +2501,20 @@ fn parse_command_inner(
                 }),
             }
         }
-        "console" => parse_clear_command(&rest, &id, "console", "console [--clear]", batch_item),
-        "errors" => parse_clear_command(&rest, &id, "errors", "errors [--clear]", batch_item),
+        "console" => parse_log_command(
+            &rest,
+            &id,
+            "console",
+            "console [--clear] [--follow]",
+            batch_item,
+        ),
+        "errors" => parse_log_command(
+            &rest,
+            &id,
+            "errors",
+            "errors [--clear] [--follow]",
+            batch_item,
+        ),
         "highlight" => {
             parse_selector_command(&rest, &id, "highlight", "highlight <selector>", batch_item)
         }
@@ -7064,6 +7085,22 @@ mod tests {
         assert_eq!(cmd["clear"], true);
         let cmd = parse_command(&args("errors --clear"), &default_flags()).unwrap();
         assert_eq!(cmd["clear"], true);
+
+        for command in ["console", "errors"] {
+            let cmd = parse_command(&args(command), &default_flags()).unwrap();
+            assert_eq!(cmd["follow"], false, "{command}");
+            for flag in ["--follow", "-f"] {
+                let line = format!("{command} {flag}");
+                let cmd = parse_command(&args(&line), &default_flags()).unwrap();
+                assert_eq!(cmd["action"], command, "{line}");
+                assert_eq!(cmd["follow"], true, "{line}");
+                assert_eq!(cmd["clear"], false, "{line}");
+            }
+            let line = format!("{command} --clear --follow");
+            let cmd = parse_command(&args(&line), &default_flags()).unwrap();
+            assert_eq!(cmd["clear"], true, "{line}");
+            assert_eq!(cmd["follow"], true, "{line}");
+        }
 
         let cmd = parse_command(
             &args("network route **/api/* --abort --body {\"ok\":true} --allow-origin https://example.com --resource-type script"),
