@@ -80,7 +80,7 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"abc","url"
 
 `launch.mutate` plugins run automatically for local launches such as `agent-browser open`.
 
-Credential resolution, browser launch and cleanup, and launch mutation errors omit plugin response error text and unsupported protocol values from diagnostics. Manifest discovery and `plugin run` retain detailed errors. Plugins remain trusted local executables; this redaction does not sandbox them.
+Credential resolution, browser launch and cleanup, and launch mutation errors omit plugin response error text and unsupported protocol values from diagnostics. Manifest discovery and `plugin run` retain detailed errors. A plugin can add a `userMessage` string to a `success: false` response with text it marks as safe to show; core paths display that message instead of the generic failure. Plugins remain trusted local executables; this redaction does not sandbox them.
 
 ## Configure a plugin
 
@@ -140,7 +140,7 @@ Every successful response must include the same protocol and `success: true`:
 
 Only stdout is parsed. Write no logs to stdout. agent-browser suppresses plugin stderr for core integrations, so use files or your own debug mode when developing.
 
-Core integrations suppress plugin-provided error text in user-facing errors to reduce accidental secret exposure. Generic `plugin run` keeps plugin error text because it is a developer-facing command.
+Core integrations suppress plugin-provided error text in user-facing errors to reduce accidental secret exposure. Generic `plugin run` keeps plugin error text because it is a developer-facing command. A failed response may include a `userMessage` string with text that is safe to show; core commands print it in place of the generic failure, while `error` stays suppressed there.
 
 ## Plugin manifest
 
