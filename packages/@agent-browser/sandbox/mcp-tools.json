@@ -3825,6 +3825,11 @@
             "description": "Only include interactive elements.",
             "type": "boolean"
           },
+          "maxSiblings": {
+            "description": "Cap consecutive same-role sibling lines (default 50, 0 disables truncation; env AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS). Prevents huge select/listbox dropdowns from flooding context.",
+            "minimum": 0,
+            "type": "integer"
+          },
           "selector": {
             "description": "Scope the snapshot to every element matching a CSS selector.",
             "type": "string"

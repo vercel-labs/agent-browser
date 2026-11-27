@@ -1286,6 +1286,7 @@ mod tests {
             compact: false,
             depth: None,
             urls: false,
+            max_siblings: None,
         };
         let known = ref_map.observe_document("s", None, "s", Some(document_id));
         snapshot_from_ax_nodes(

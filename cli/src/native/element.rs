@@ -608,6 +608,16 @@ pub(super) async fn current_document(
     Some((effective_session_id, loader.to_string()))
 }
 
+fn ref_click_error(error: String, role: &str) -> String {
+    if role == "option" {
+        format!(
+            "{error} (options inside a <select> cannot be clicked directly; use the select command on the <select> instead)"
+        )
+    } else {
+        error
+    }
+}
+
 async fn resolve_ref_center(
     client: &CdpClient,
     session_id: &str,
@@ -635,7 +645,8 @@ async fn resolve_ref_center(
                 selector_or_ref,
                 require_actionable,
             )
-            .await?
+            .await
+            .map_err(|error| ref_click_error(error, &entry.role))?
             {
                 place_in_dispatch_viewport(
                     client,
@@ -676,7 +687,8 @@ async fn resolve_ref_center(
         selector_or_ref,
         require_actionable,
     )
-    .await?
+    .await
+    .map_err(|error| ref_click_error(error, &entry.role))?
     .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
     place_in_dispatch_viewport(
         client,

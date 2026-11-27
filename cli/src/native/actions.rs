@@ -8700,7 +8700,20 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
 // Phase 2 handlers
 // ---------------------------------------------------------------------------
 
-/// Reads the snapshot flags (`selector`, `interactive`, `compact`, `maxDepth`, `urls`) from a command.
+/// Cap for consecutive same-role siblings in rendered snapshots.
+/// The CLI/MCP layer already folds AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS into
+/// the command payload, so this only applies the explicit value or the
+/// default of 50. A value of 0 disables truncation.
+fn resolve_max_siblings(cmd: &Value) -> Option<usize> {
+    const DEFAULT_MAX_SIBLINGS: usize = 50;
+    match cmd.get("maxSiblings").and_then(|v| v.as_i64()) {
+        Some(n) if n > 0 => Some(n as usize),
+        Some(_) => None,
+        None => Some(DEFAULT_MAX_SIBLINGS),
+    }
+}
+
+/// Reads the snapshot flags (`selector`, `interactive`, `compact`, `maxDepth`, `urls`, and `maxSiblings`) from a command.
 pub(crate) fn snapshot_options(cmd: &Value) -> SnapshotOptions {
     SnapshotOptions {
         selector: cmd
@@ -8720,6 +8733,7 @@ pub(crate) fn snapshot_options(cmd: &Value) -> SnapshotOptions {
             .and_then(|v| v.as_u64())
             .map(|d| d as usize),
         urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
+        max_siblings: resolve_max_siblings(cmd),
     }
 }
 
@@ -10306,6 +10320,7 @@ pub(crate) struct SnapshotScope {
     compact: bool,
     depth: Option<usize>,
     urls: bool,
+    max_siblings: Option<usize>,
 }
 
 impl SnapshotScope {
@@ -10316,6 +10331,7 @@ impl SnapshotScope {
             compact: options.compact,
             depth: options.depth,
             urls: options.urls,
+            max_siblings: options.max_siblings,
         }
     }
 
@@ -10326,6 +10342,7 @@ impl SnapshotScope {
             compact: self.compact,
             depth: self.depth,
             urls: self.urls,
+            max_siblings: self.max_siblings,
         }
     }
 }
@@ -10367,6 +10384,17 @@ fn implicit_baseline_scope(cmd: &Value, stored: &SnapshotScope) -> Result<Snapsh
             ));
         }
         scope.depth = Some(depth as usize);
+    }
+    if cmd.get("maxSiblings").and_then(Value::as_i64).is_some() {
+        let max_siblings = resolve_max_siblings(cmd);
+        if stored.max_siblings != max_siblings {
+            differing.push(format!(
+                "--max-siblings {} (last snapshot: {})",
+                max_siblings.unwrap_or(0),
+                stored.max_siblings.unwrap_or(0)
+            ));
+        }
+        scope.max_siblings = max_siblings;
     }
     for (key, name, stored_set, field) in [
         (
@@ -10415,6 +10443,7 @@ pub(crate) fn diff_snapshot_scope(
                 .and_then(|v| v.as_u64())
                 .map(|d| d as usize),
             urls: cmd.get("urls").and_then(Value::as_bool) == Some(true),
+            max_siblings: resolve_max_siblings(cmd),
         }),
         None => match state.last_snapshots.get(session_id) {
             Some(last) => {
@@ -26042,6 +26071,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let stored = SnapshotScope {
             selector: Some("h1".to_string()),
             interactive: true,
+            max_siblings: Some(50),
             ..SnapshotScope::default()
         };
         // Nothing named: the baseline's options are reused.
@@ -26050,7 +26080,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             Ok(stored.clone())
         );
         // Naming the same options is fine.
-        let same = json!({ "selector": "h1", "interactive": true });
+        let same = json!({ "selector": "h1", "interactive": true, "maxSiblings": 50 });
         assert_eq!(implicit_baseline_scope(&same, &stored), Ok(stored.clone()));
         // Naming different ones is refused.
         for cmd in [
@@ -26058,6 +26088,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             json!({ "compact": true }),
             json!({ "maxDepth": 2 }),
             json!({ "urls": true }),
+            json!({ "maxSiblings": 2 }),
         ] {
             let err = implicit_baseline_scope(&cmd, &stored).unwrap_err();
             assert_eq!(

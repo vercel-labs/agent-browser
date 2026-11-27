@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+use std::env;
 use std::io::{self, BufRead};
 
 use crate::color;
@@ -1494,6 +1495,11 @@ fn parse_command_inner(
                     takes_value: true,
                 },
                 FlagSpec {
+                    name: "--max-siblings",
+                    aliases: &[],
+                    takes_value: true,
+                },
+                FlagSpec {
                     name: "--delta",
                     aliases: &[],
                     takes_value: false,
@@ -1531,6 +1537,20 @@ fn parse_command_inner(
                     ScannedArg::BoolFlag("--delta") => {
                         obj.insert("delta".to_string(), json!(true));
                     }
+                    ScannedArg::ValueFlag {
+                        name: "--max-siblings",
+                        value,
+                    } => match value.parse::<i64>() {
+                        Ok(n) if n >= 0 => {
+                            obj.insert("maxSiblings".to_string(), json!(n));
+                        }
+                        _ => {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("Invalid value for --max-siblings: {}", value),
+                                usage: USAGE,
+                            });
+                        }
+                    },
                     ScannedArg::BoolFlag("--full") => {
                         obj.insert("full".to_string(), json!(true));
                         obj.insert("delta".to_string(), json!(true));
@@ -1554,6 +1574,21 @@ fn parse_command_inner(
                     ScannedArg::Data(_) => {}
                     ScannedArg::BoolFlag(name) | ScannedArg::ValueFlag { name, .. } => {
                         unreachable!("snapshot flag {name} has no handler")
+                    }
+                }
+            }
+            if !obj.contains_key("maxSiblings") {
+                if let Ok(raw) = env::var("AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS") {
+                    match raw.trim().parse::<i64>() {
+                        Ok(n) if n >= 0 => {
+                            obj.insert("maxSiblings".to_string(), json!(n));
+                        }
+                        _ => {
+                            eprintln!(
+                                "warning: ignoring invalid AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS value '{}'",
+                                raw
+                            );
+                        }
                     }
                 }
             }
@@ -3736,6 +3771,27 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     "-c" | "--compact" => {
                         obj.insert("compact".to_string(), json!(true));
                     }
+                    "--max-siblings" => {
+                        let v = rest
+                            .get(i + 1)
+                            .ok_or_else(|| ParseError::MissingArguments {
+                                context: "diff snapshot --max-siblings".to_string(),
+                                usage: "diff snapshot [--max-siblings <n>] (0 disables truncation)",
+                            })?;
+                        match v.parse::<i64>() {
+                            Ok(n) if n >= 0 => {
+                                obj.insert("maxSiblings".to_string(), json!(n));
+                                i += 1;
+                            }
+                            _ => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!("Invalid value for --max-siblings: {}", v),
+                                    usage:
+                                        "diff snapshot [--max-siblings <n>] (0 disables truncation)",
+                                });
+                            }
+                        }
+                    }
                     "-i" | "--interactive" => {
                         obj.insert("interactive".to_string(), json!(true));
                     }
@@ -3769,17 +3825,32 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     other if other.starts_with('-') => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unknown flag: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--interactive] [--compact] [--depth <n>] [--urls]",
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--interactive] [--compact] [--depth <n>] [--urls] [--max-siblings <n>]",
                         });
                     }
                     other => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unexpected argument: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--interactive] [--compact] [--depth <n>] [--urls]",
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--interactive] [--compact] [--depth <n>] [--urls] [--max-siblings <n>]",
                         });
                     }
                 }
                 i += 1;
+            }
+            if !obj.contains_key("maxSiblings") {
+                if let Ok(raw) = env::var("AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS") {
+                    match raw.trim().parse::<i64>() {
+                        Ok(n) if n >= 0 => {
+                            obj.insert("maxSiblings".to_string(), json!(n));
+                        }
+                        _ => {
+                            eprintln!(
+                                "warning: ignoring invalid AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS value '{}'",
+                                raw
+                            );
+                        }
+                    }
+                }
             }
             Ok(cmd)
         }
@@ -7141,6 +7212,51 @@ mod tests {
     fn test_snapshot() {
         let cmd = parse_command(&args("snapshot"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
+    }
+
+    #[test]
+    fn test_snapshot_max_siblings_flag() {
+        let cmd = parse_command(&args("snapshot --max-siblings 20"), &default_flags()).unwrap();
+        assert_eq!(cmd["maxSiblings"], json!(20));
+        let zero = parse_command(&args("snapshot --max-siblings 0"), &default_flags()).unwrap();
+        assert_eq!(zero["maxSiblings"], json!(0));
+        assert!(parse_command(&args("snapshot --max-siblings abc"), &default_flags()).is_err());
+    }
+
+    #[test]
+    fn test_snapshot_max_siblings_env_default_and_flag_override() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS"]);
+        guard.set("AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS", "9");
+        let cmd = parse_command(&args("snapshot"), &default_flags()).unwrap();
+        assert_eq!(cmd["maxSiblings"], json!(9));
+        let flagged = parse_command(&args("snapshot --max-siblings 3"), &default_flags()).unwrap();
+        assert_eq!(flagged["maxSiblings"], json!(3));
+        let disabled = parse_command(&args("snapshot --max-siblings 0"), &default_flags()).unwrap();
+        assert_eq!(disabled["maxSiblings"], json!(0));
+        guard.remove("AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS");
+        let unset = parse_command(&args("snapshot"), &default_flags()).unwrap();
+        assert!(unset.get("maxSiblings").is_none());
+    }
+
+    #[test]
+    fn test_diff_snapshot_max_siblings_flag_and_env() {
+        let cmd = parse_command(&args("diff snapshot --max-siblings 7"), &default_flags()).unwrap();
+        assert_eq!(cmd["maxSiblings"], json!(7));
+        let zero =
+            parse_command(&args("diff snapshot --max-siblings 0"), &default_flags()).unwrap();
+        assert_eq!(zero["maxSiblings"], json!(0));
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS"]);
+        guard.set("AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS", "11");
+        let env_cmd = parse_command(&args("diff snapshot"), &default_flags()).unwrap();
+        assert_eq!(env_cmd["maxSiblings"], json!(11));
+        let flagged =
+            parse_command(&args("diff snapshot --max-siblings 2"), &default_flags()).unwrap();
+        assert_eq!(flagged["maxSiblings"], json!(2));
+        drop(guard);
+        assert!(
+            parse_command(&args("diff snapshot --max-siblings abc"), &default_flags(),).is_err()
+        );
+        assert!(parse_command(&args("diff snapshot --max-siblings"), &default_flags()).is_err());
     }
 
     #[test]

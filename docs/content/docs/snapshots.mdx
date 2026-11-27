@@ -20,6 +20,12 @@ agent-browser snapshot -s "#main"         # Scope to CSS selector
 agent-browser snapshot -i -c -d 5         # Combine options
 ```
 
+Runs of more than 50 consecutive siblings sharing the same role (like a huge `select` dropdown or a long list) collapse into a single summary line, e.g. `… 349 more "option" siblings omitted`. Refs of hidden siblings stay valid, so `select`, `find text`, and `--max-siblings 0` all keep working. Tune with `--max-siblings <n>` or `AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS`.
+
+```bash
+agent-browser snapshot --max-siblings 20  # Collapse long same-role sibling runs (0 = show all)
+```
+
 <table>
   <thead>
     <tr><th>Option</th><th>Description</th></tr>
@@ -30,6 +36,7 @@ agent-browser snapshot -i -c -d 5         # Combine options
     <tr><td><code>-c, --compact</code></td><td>Remove empty structural elements</td></tr>
     <tr><td><code>-d, --depth</code></td><td>Limit tree depth</td></tr>
     <tr><td><code>-s, --selector</code></td><td>Scope to CSS selector (every match)</td></tr>
+    <tr><td><code>--max-siblings</code></td><td>Collapse runs of consecutive same-role siblings beyond this count into a summary line (default 50, or <code>AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS</code>; 0 shows all)</td></tr>
   </tbody>
 </table>
 
