@@ -151,6 +151,56 @@ test("starts agent-browser mcp over Vercel Sandbox stdin", async () => {
   assert.deepEqual(await client.close(), { exitCode: 0 });
 });
 
+test("a stalled Vercel kill does not hide the MCP initialization timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let kills = 0;
+  const sandbox = {
+    async runCommand() {
+      return {
+        closeStdin: async () => {},
+        kill() {
+          kills += 1;
+          return new Promise(() => {});
+        },
+        async *logs() {
+          await new Promise(() => {});
+        },
+        wait: () => new Promise(() => {}),
+        writeStdin: async () => {},
+      };
+    },
+  };
+  let failure;
+  const starting = startAgentBrowserMcp(sandbox, { timeout: 20 }).catch((error) => {
+    failure = error;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(21);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(kills, 1);
+  assert.match(failure?.message ?? "startup is still pending", /initialize timed out after 20ms/);
+  await starting;
+});
+
+test("Vercel kill failures preserve the MCP initialization error", async () => {
+  const sandbox = {
+    async runCommand() {
+      return {
+        closeStdin: async () => {},
+        kill: async () => { throw new Error("kill unavailable"); },
+        async *logs() {
+          yield { stream: "stdout", data: '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"init failed"}}\n' };
+        },
+        wait: async () => ({ exitCode: 1 }),
+        writeStdin: async () => {},
+      };
+    },
+  };
+
+  await assert.rejects(startAgentBrowserMcp(sandbox), /init failed/);
+});
+
 test("never sends an already-aborted or unserializable request", async () => {
   const server = fakeServer(initializeOr((message) => ({ result: message.params })));
   const client = await connectAgentBrowserMcp(server.process);
