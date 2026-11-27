@@ -94,6 +94,7 @@ pub struct PendingConfirmation {
 struct ActiveProviderSession {
     session: providers::ProviderSession,
     plugins: Vec<crate::plugins::PluginConfig>,
+    trust: crate::tls::TrustOptions,
 }
 
 /// Captured request/response metadata used to export HAR 1.2 files.
@@ -453,7 +454,7 @@ fn validate_ca_cert_launch_mode(
     }
     if external_launch {
         return Err(
-            "CA trust is active for this session and requires a locally launched Chromium browser on Linux. Pass --no-ca-cert to clear it before using CDP, auto-connect, or a provider."
+            "CA trust is active for this session and requires a locally launched Chromium browser on Linux. Pass --no-ca-cert to clear it before using CDP or auto-connect."
                 .to_string(),
         );
     }
@@ -845,6 +846,8 @@ pub struct DaemonState {
     /// External browser this session attached to; target-less launches resolve to it.
     attached_target: Option<AttachedTarget>,
     effective_ca_cert: Option<EffectiveCaCert>,
+    /// Resolved TLS trust options for provider API, cleanup, and CDP connections.
+    pub trust: crate::tls::TrustOptions,
     /// Whether browser-level auto-attach has been enabled for the current
     /// browser so top-level popups pause before their first request.
     network_auto_attach_installed: bool,
@@ -1085,6 +1088,7 @@ impl DaemonState {
             cdp_headers: None,
             attached_target: None,
             effective_ca_cert: None,
+            trust: crate::tls::process_options(),
             network_auto_attach_installed: false,
             session_setup: SessionSetup::default(),
             touch_sessions: HashSet::new(),
@@ -1528,6 +1532,7 @@ impl DaemonState {
         };
         let shared_count = Arc::new(AtomicU64::new(0));
         let shared_captured = Arc::new(AtomicU64::new(0));
+        let shared_late = Arc::new(AtomicU64::new(0));
         let shared_contact_sheet_count = Arc::new(AtomicU64::new(0));
         let shared_screenshot_capture = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.recording_state.device_scale = initial_frame.device_scale;
@@ -1559,6 +1564,7 @@ impl DaemonState {
             self.recording_state.fps,
             shared_count.clone(),
             shared_captured.clone(),
+            shared_late.clone(),
             self.recording_state.cursor,
             self.recording_state.shared_cursor.clone(),
             self.recording_state.cursor_overlays.clone(),
@@ -1572,6 +1578,7 @@ impl DaemonState {
         self.recording_state.capture_task = Some(handle);
         self.recording_state.shared_frame_count = Some(shared_count);
         self.recording_state.shared_captured_count = Some(shared_captured);
+        self.recording_state.shared_late_frame_count = Some(shared_late);
         self.recording_state.shared_contact_sheet_count = Some(shared_contact_sheet_count);
         self.recording_state.shared_screenshot_capture = Some(shared_screenshot_capture);
         self.recording_state.cancel_tx = Some(cancel_tx);
@@ -3186,7 +3193,8 @@ async fn attach_provider_cdp(
     state: &mut DaemonState,
     plugins: &[crate::plugins::PluginConfig],
 ) -> Result<BrowserManager, String> {
-    remember_active_provider_session(state, conn.session.clone(), plugins);
+    let trust = state.trust.clone();
+    remember_active_provider_session(state, conn.session.clone(), plugins, trust.clone());
     if provider_is_browser_use(provider)
         && !url::Url::parse(&conn.ws_url).is_ok_and(|url| {
             matches!(url.scheme(), "ws" | "wss" | "http" | "https") && url.host_str().is_some()
@@ -3196,11 +3204,11 @@ async fn attach_provider_cdp(
     }
     let attach = async {
         if conn.direct_page {
-            BrowserManager::connect_cdp_direct(&conn.ws_url).await
+            BrowserManager::connect_cdp_direct_with_tls(&conn.ws_url, &trust).await
         } else if ws_headers.is_some() {
-            BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers).await
+            BrowserManager::connect_cdp_with_headers_and_tls(&conn.ws_url, ws_headers, &trust).await
         } else {
-            BrowserManager::connect_cdp(&conn.ws_url).await
+            BrowserManager::connect_cdp_with_tls(&conn.ws_url, &trust).await
         }
     };
     if provider_is_browser_use(provider) {
@@ -3230,20 +3238,44 @@ fn remember_active_provider_session(
     state: &mut DaemonState,
     session: Option<providers::ProviderSession>,
     plugins: &[crate::plugins::PluginConfig],
+    trust: crate::tls::TrustOptions,
 ) {
     state.active_provider_connection = true;
     state.active_provider_session = session.map(|session| ActiveProviderSession {
         session,
         plugins: plugins.to_vec(),
+        trust,
     });
 }
 
 async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), String> {
-    if let Some(active) = state.active_provider_session.as_ref() {
-        providers::close_provider_session_with_plugins(&active.session, &active.plugins).await?;
+    if state
+        .active_provider_session
+        .as_ref()
+        .is_some_and(|active| active.session.provider == "browser-use")
+    {
+        if let Some(active) = state.active_provider_session.as_ref() {
+            providers::close_provider_session_with_plugins_and_trust(
+                &active.session,
+                &active.plugins,
+                &active.trust,
+            )
+            .await?;
+        }
+        state.active_provider_session = None;
+        state.active_provider_connection = false;
+        return Ok(());
     }
-    state.active_provider_session = None;
+    let active = state.active_provider_session.take();
     state.active_provider_connection = false;
+    if let Some(active) = active {
+        providers::close_provider_session_with_plugins_and_trust(
+            &active.session,
+            &active.plugins,
+            &active.trust,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -3698,6 +3730,7 @@ pub(crate) fn dialog_block_error(action: &str, cmd: &Value, state: &DaemonState)
 pub(crate) const ENVELOPE_KEYS: &[&str] = &[
     "plugins",
     "settings",
+    "tls",
     "pinTab",
     "restoreKey",
     "restoreSave",
@@ -3795,6 +3828,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+
+    if cmd.get("tls").is_some() {
+        match crate::tls::from_command(cmd) {
+            Ok(trust) => state.trust = trust,
+            Err(e) => return error_response(&id, &e),
+        }
+    }
 
     let cmd_start = std::time::Instant::now();
 
@@ -5828,11 +5868,17 @@ async fn launch_browser_from_settings(
         Connection::Provider(provider) => Some(provider.clone()),
         _ => None,
     };
-    validate_ca_cert_launch_mode(
-        &options,
-        engine.as_deref(),
-        !matches!(connection, Connection::Local),
-    )?;
+    if matches!(connection, Connection::Provider(_)) {
+        if options.ca_cert.is_some() && options.ignore_https_errors {
+            return Err("--ca-cert cannot be combined with --ignore-https-errors".to_string());
+        }
+    } else {
+        validate_ca_cert_launch_mode(
+            &options,
+            engine.as_deref(),
+            !matches!(connection, Connection::Local),
+        )?;
+    }
     let enable_features = state.settings.enable_features();
     let init_script_paths = state.settings.init_scripts();
     let contained = state.domain_filter.read().await.is_some();
@@ -5905,7 +5951,7 @@ async fn launch_browser_from_settings(
             cdp_headers_for(state, &cdp).or_else(|| cdp_headers_from_settings(&state.settings));
         let target = match prepared_cdp {
             Some(url) => AttachConnection::Cdp(url),
-            None => detect_attach_connection(&cdp, headers.clone()).await?,
+            None => detect_attach_connection(&cdp, headers.clone(), &state.trust).await?,
         };
         let mgr = match target {
             AttachConnection::Cdp(connection) => {
@@ -6015,12 +6061,22 @@ async fn launch_browser_from_settings(
             return result;
         }
         if !p.is_empty() {
-            let conn =
-                providers::connect_provider_with_plugins(&p, &plugins, &state.settings).await?;
+            let conn = providers::connect_provider_with_plugins_and_trust(
+                &p,
+                &plugins,
+                &state.settings,
+                &state.trust,
+            )
+            .await?;
             let provider_metadata = conn.metadata.clone();
             if conn.direct_page && contained {
                 if let Some(ref ps) = conn.session {
-                    let _ = providers::close_provider_session_with_plugins(ps, &plugins).await;
+                    let _ = providers::close_provider_session_with_plugins_and_trust(
+                        ps,
+                        &plugins,
+                        &state.trust,
+                    )
+                    .await;
                 }
                 return Err(direct_page_allowed_domains_error());
             }
@@ -6881,12 +6937,13 @@ enum LaunchRequest {
 async fn detect_attach_connection(
     target: &str,
     headers: Option<Vec<(String, String)>>,
+    trust: &crate::tls::TrustOptions,
 ) -> Result<AttachConnection, String> {
     let parsed = bidi::attach::parse_attach_url(target);
     if let Ok(Some(target)) = &parsed {
         return Ok(AttachConnection::Firefox(target.clone()));
     }
-    let cdp_error = match BrowserManager::prepare_cdp_target(target, headers).await {
+    let cdp_error = match BrowserManager::prepare_cdp_target(target, headers, trust).await {
         Ok(connection) => return Ok(AttachConnection::Cdp(connection)),
         Err(error) => error,
     };
@@ -6962,7 +7019,7 @@ async fn prepare_transition(
             let target = if provisional.next.engine().as_deref() == Some("firefox") {
                 AttachConnection::Firefox(resolve_firefox_attach_target(target).await?)
             } else {
-                detect_attach_connection(target, headers).await?
+                detect_attach_connection(target, headers, &state.trust).await?
             };
             Some(target)
         }
@@ -6985,11 +7042,17 @@ async fn prepare_transition(
         .get(Key::CaCert)
         .and_then(Value::as_str)
         .map(String::from);
-    validate_ca_cert_launch_mode(
-        &options,
-        plan.next.engine().as_deref(),
-        !matches!(&connection, Connection::Local),
-    )?;
+    if matches!(&connection, Connection::Provider(_)) {
+        if options.ca_cert.is_some() && options.ignore_https_errors {
+            return Err("--ca-cert cannot be combined with --ignore-https-errors".to_string());
+        }
+    } else {
+        validate_ca_cert_launch_mode(
+            &options,
+            plan.next.engine().as_deref(),
+            !matches!(&connection, Connection::Local),
+        )?;
+    }
     let firefox = matches!(engine, Some(Engine::Firefox))
         || engine.is_none() && plan.next.engine().as_deref() == Some("firefox");
     if firefox {
@@ -21723,6 +21786,7 @@ mod tests {
                 capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
                 ..crate::plugins::PluginConfig::default()
             }],
+            trust: crate::tls::TrustOptions::default(),
         });
 
         let resp = execute_command(
@@ -21786,6 +21850,7 @@ mod tests {
                 capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
                 ..crate::plugins::PluginConfig::default()
             }],
+            trust: crate::tls::TrustOptions::default(),
         });
 
         let resp = execute_command(
@@ -23209,6 +23274,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
                 ..crate::plugins::PluginConfig::default()
             }],
+            trust: crate::tls::TrustOptions::default(),
         });
 
         close_current_browser(&mut state).await.unwrap();
@@ -23227,7 +23293,212 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 session_id: "0e6ae5d0-93cf-4b9c-8c62-2c9c07b6c0f7".to_string(),
             },
             plugins: Vec::new(),
+            trust: crate::tls::TrustOptions::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_daemon_launch_provider_honors_command_tls_for_api_cdp_and_cleanup() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener as StdTcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = crate::tls::test_support::write_pem(
+            dir.path(),
+            "ca.pem",
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+        );
+        let server_config = crate::tls::test_support::server_config(
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+            crate::tls::test_support::LOCALHOST_KEY_DER,
+        );
+
+        let ws_listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let ws_port = ws_listener.local_addr().unwrap().port();
+        let ws_config = server_config.clone();
+        let ws_server = std::thread::spawn(move || {
+            let Ok((stream, _)) = ws_listener.accept() else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+            let conn = rustls::ServerConnection::new(ws_config).unwrap();
+            let tls = rustls::StreamOwned::new(conn, stream);
+            let Ok(mut ws) = tokio_tungstenite::tungstenite::accept(tls) else {
+                return;
+            };
+            while let Ok(msg) = ws.read() {
+                match msg {
+                    Message::Text(text) => {
+                        let req: Value = serde_json::from_str(&text).unwrap_or_default();
+                        let id = req.get("id").and_then(Value::as_u64).unwrap_or(0);
+                        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+                        let result = match method {
+                            "Target.getTargets" => json!({
+                                "targetInfos": [{
+                                    "targetId": "target-1",
+                                    "type": "page",
+                                    "title": "Test",
+                                    "url": "about:blank",
+                                    "attached": false
+                                }]
+                            }),
+                            "Target.attachToTarget" => json!({ "sessionId": "session-1" }),
+                            "Browser.getVersion" => json!({ "product": "Chrome/130.0.0.0" }),
+                            _ => json!({}),
+                        };
+                        let reply = json!({ "id": id, "result": result }).to_string();
+                        if ws.send(Message::Text(reply)).is_err() {
+                            break;
+                        }
+                    }
+                    Message::Close(_) => {
+                        let _ = ws.close(None);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let api_listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let api_port = api_listener.local_addr().unwrap().port();
+        let delete_seen = Arc::new(AtomicBool::new(false));
+        let delete_seen_server = delete_seen.clone();
+        let api_config = server_config.clone();
+        let api_server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((stream, _)) = api_listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                let conn = rustls::ServerConnection::new(api_config.clone()).unwrap();
+                let mut tls = rustls::StreamOwned::new(conn, stream);
+                let mut buf = [0u8; 4096];
+                let Ok(n) = tls.read(&mut buf) else {
+                    continue;
+                };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                if req.starts_with("POST /browsers ") {
+                    let body = json!({
+                        "session_id": "kernel-tls-1",
+                        "cdp_ws_url": format!("wss://127.0.0.1:{ws_port}")
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = tls.write_all(resp.as_bytes());
+                } else if req.starts_with("DELETE /browsers/kernel-tls-1 ") {
+                    delete_seen_server.store(true, Ordering::SeqCst);
+                    let resp =
+                        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = tls.write_all(resp.as_bytes());
+                }
+                let _ = tls.flush();
+            }
+        });
+
+        let guard = EnvGuard::new(&["KERNEL_ENDPOINT", "KERNEL_API_KEY"]);
+        guard.set("KERNEL_ENDPOINT", &format!("https://127.0.0.1:{api_port}"));
+        guard.set("KERNEL_API_KEY", "test-key");
+
+        let mut state = DaemonState::new();
+        let launch_resp = execute_command(
+            &json!({
+                "id": "launch-1",
+                "action": "launch",
+                "tls": { "caCert": ca_path.to_string_lossy() },
+                "settings": { "provider": "kernel" }
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            launch_resp["success"], true,
+            "provider launch with custom CA should succeed: {launch_resp}"
+        );
+
+        let close_resp = execute_command(
+            &json!({
+                "id": "close-1",
+                "action": "close"
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            close_resp["success"], true,
+            "provider close should succeed: {close_resp}"
+        );
+        assert!(
+            delete_seen.load(Ordering::SeqCst),
+            "Kernel cleanup DELETE should have reached the HTTPS server"
+        );
+
+        let _ = api_server.join();
+        let _ = ws_server.join();
+    }
+
+    #[tokio::test]
+    async fn test_kernel_cleanup_transport_error_clears_provider_state_and_reports_error() {
+        use std::net::TcpListener as StdTcpListener;
+        use std::time::Duration;
+
+        let server_config = crate::tls::test_support::server_config(
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+            crate::tls::test_support::LOCALHOST_KEY_DER,
+        );
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let conn = rustls::ServerConnection::new(server_config).unwrap();
+                let mut tls = rustls::StreamOwned::new(conn, stream);
+                let mut buf = [0u8; 64];
+                let _ = std::io::Read::read(&mut tls, &mut buf);
+            }
+        });
+
+        let guard = EnvGuard::new(&["KERNEL_ENDPOINT", "KERNEL_API_KEY"]);
+        guard.set("KERNEL_ENDPOINT", &format!("https://127.0.0.1:{port}"));
+        guard.set("KERNEL_API_KEY", "test-key");
+
+        let mut state = DaemonState::new();
+        state.active_provider_connection = true;
+        state.active_provider_session = Some(ActiveProviderSession {
+            session: providers::ProviderSession {
+                provider: "kernel".to_string(),
+                session_id: "kernel-fail-1".to_string(),
+            },
+            plugins: Vec::new(),
+            trust: crate::tls::TrustOptions::default(),
+        });
+
+        let err = close_current_browser(&mut state)
+            .await
+            .expect_err("Kernel cleanup transport error should be reported");
+        assert!(
+            err.contains("Kernel cleanup request failed"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            state.active_provider_session.is_none(),
+            "active_provider_session must be cleared even when cleanup fails"
+        );
+        assert!(
+            !state.active_provider_connection,
+            "active_provider_connection must be false even when cleanup fails"
+        );
+
+        let _ = server.join();
     }
 
     #[tokio::test]
@@ -23512,7 +23783,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     fn test_provider_ownership_does_not_require_cleanup_metadata() {
         let mut state = DaemonState::new();
 
-        remember_active_provider_session(&mut state, None, &[]);
+        remember_active_provider_session(
+            &mut state,
+            None,
+            &[],
+            crate::tls::TrustOptions::default(),
+        );
 
         assert!(state.active_provider_connection);
         assert!(state.active_provider_session.is_none());
@@ -24848,7 +25124,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         ] {
             let target = format!("ws://127.0.0.1:9333{suffix}");
             let AttachConnection::Firefox(parsed) =
-                detect_attach_connection(&target, None).await.unwrap()
+                detect_attach_connection(&target, None, &crate::tls::TrustOptions::default())
+                    .await
+                    .unwrap()
             else {
                 panic!("expected a Firefox attach target");
             };
@@ -24905,7 +25183,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     async fn cdp_probe_connection_is_reused_for_attach() {
         let (target, server, connections) = counted_cdp_server().await;
         let AttachConnection::Cdp(prepared) =
-            detect_attach_connection(&target, None).await.unwrap()
+            detect_attach_connection(&target, None, &crate::tls::TrustOptions::default())
+                .await
+                .unwrap()
         else {
             panic!("expected a CDP connection");
         };
@@ -24915,6 +25195,78 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 1);
         browser.close().await.unwrap();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn cdp_probe_reuses_connection_with_custom_ca() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = crate::tls::test_support::write_pem(
+            dir.path(),
+            "ca.pem",
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+        );
+        let trust = crate::tls::TrustOptions {
+            ca_cert: Some(ca.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let config = crate::tls::test_support::server_config(
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+            crate::tls::test_support::LOCALHOST_KEY_DER,
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = format!("wss://{}", listener.local_addr().unwrap());
+        let connections = Arc::new(AtomicU64::new(0));
+        let observed = connections.clone();
+        let server = std::thread::spawn(move || {
+            let mut ws = loop {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let tls = rustls::StreamOwned::new(
+                    rustls::ServerConnection::new(config.clone()).unwrap(),
+                    stream,
+                );
+                if let Ok(ws) = tokio_tungstenite::tungstenite::accept(tls) {
+                    break ws;
+                }
+            };
+            observed.fetch_add(1, Ordering::SeqCst);
+            while let Ok(Message::Text(text)) = ws.read() {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let result = match request["method"].as_str().unwrap_or("") {
+                    "Target.getTargets" => {
+                        json!({"targetInfos": [{"targetId": "page-1", "type": "page", "title": "", "url": "about:blank", "attached": false}]})
+                    }
+                    "Target.attachToTarget" => json!({"sessionId": "session-1"}),
+                    _ => json!({}),
+                };
+                if ws
+                    .send(Message::Text(
+                        json!({"id": request["id"], "result": result}).to_string(),
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let AttachConnection::Cdp(prepared) = detect_attach_connection(&target, None, &trust)
+            .await
+            .unwrap()
+        else {
+            panic!("expected a CDP connection");
+        };
+        let mut browser = BrowserManager::connect_prepared_cdp(prepared)
+            .await
+            .unwrap();
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        browser.close().await.unwrap();
+        server.join().unwrap();
     }
 
     #[tokio::test]
@@ -24945,7 +25297,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 break;
             }
         });
-        let prepared = detect_attach_connection(&target, None).await.unwrap();
+        let prepared =
+            detect_attach_connection(&target, None, &crate::tls::TrustOptions::default())
+                .await
+                .unwrap();
         drop(prepared);
         tokio::time::timeout(std::time::Duration::from_secs(2), closed_rx)
             .await
@@ -24957,7 +25312,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     async fn bare_websocket_root_uses_cdp_before_firefox_detection() {
         let (target, server) = bare_cdp_server().await;
 
-        let AttachConnection::Cdp(url) = detect_attach_connection(&target, None).await.unwrap()
+        let AttachConnection::Cdp(url) =
+            detect_attach_connection(&target, None, &crate::tls::TrustOptions::default())
+                .await
+                .unwrap()
         else {
             panic!("a local CDP server at a bare WebSocket root must win");
         };
@@ -24982,6 +25340,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let connection = detect_attach_connection(
             &format!("ws://127.0.0.1:{port}/session?devtools=nope"),
             None,
+            &crate::tls::TrustOptions::default(),
         )
         .await;
         let error = connection.expect_err("invalid Firefox target must fail");
@@ -30488,9 +30847,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_a_session_endpoint_is_parsed_while_a_port_is_detected_over_bidi() {
-        let parsed = detect_attach_connection("ws://127.0.0.1:9/session?devtools=6080", None)
-            .await
-            .unwrap();
+        let parsed = detect_attach_connection(
+            "ws://127.0.0.1:9/session?devtools=6080",
+            None,
+            &crate::tls::TrustOptions::default(),
+        )
+        .await
+        .unwrap();
         let AttachConnection::Firefox(target) = parsed else {
             panic!("a /session endpoint is Firefox without a probe");
         };
@@ -30498,9 +30861,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(target.devtools_explicit);
 
         let (port, handshakes, server) = bidi_only_server().await;
-        let detected = detect_attach_connection(&port.to_string(), None)
-            .await
-            .unwrap();
+        let detected = detect_attach_connection(
+            &port.to_string(),
+            None,
+            &crate::tls::TrustOptions::default(),
+        )
+        .await
+        .unwrap();
         let AttachConnection::Firefox(target) = detected else {
             panic!("a port that refuses CDP but answers the BiDi handshake is Firefox");
         };

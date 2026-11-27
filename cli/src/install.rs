@@ -121,15 +121,7 @@ fn chrome_binary_in_dir(dir: &Path) -> Option<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        let bin = dir.join("chrome");
-        if bin.exists() {
-            return Some(bin);
-        }
-        let inner = dir.join("chrome-linux64/chrome");
-        if inner.exists() {
-            return Some(inner);
-        }
-        None
+        linux_chrome_binary_in_dir(dir)
     }
 
     #[cfg(target_os = "windows")]
@@ -151,35 +143,44 @@ fn chrome_binary_in_dir(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_chrome_binary_in_dir(dir: &Path) -> Option<PathBuf> {
+    for rel in [
+        "chrome",
+        "chrome-linux64/chrome",
+        "chrome-linux-arm64/chrome",
+    ] {
+        let candidate = dir.join(rel);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn platform_key_for(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
+        ("macos", "aarch64") => Some("mac-arm64"),
+        ("macos", "x86_64") => Some("mac-x64"),
+        ("linux", "x86_64") => Some("linux64"),
+        ("linux", "aarch64") => Some("linux-arm64"),
+        ("windows", "x86_64") => Some("win64"),
+        _ => None,
+    }
+}
+
+fn check_install_platform(os: &str, arch: &str) -> Result<&'static str, String> {
+    platform_key_for(os, arch).ok_or_else(|| {
+        format!(
+            "Chrome for Testing does not provide builds for {}/{}.",
+            os, arch
+        )
+    })
+}
+
 fn platform_key() -> &'static str {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "mac-arm64"
-    }
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    {
-        "mac-x64"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        "linux64"
-    }
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    {
-        "win64"
-    }
-    #[cfg(not(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "macos", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "windows", target_arch = "x86_64"),
-    )))]
-    {
-        // Compiles on unsupported platforms (e.g. linux aarch64) so the binary
-        // can still be used for other commands like `connect`. The install path
-        // guards against this at runtime before calling platform_key().
-        panic!("Unsupported platform for Chrome for Testing download")
-    }
+    platform_key_for(std::env::consts::OS, std::env::consts::ARCH)
+        .expect("Unsupported platform for Chrome for Testing download")
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -469,15 +470,8 @@ fn extract_zip(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
 }
 
 pub fn run_install(with_deps: bool) {
-    if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        eprintln!(
-            "{} Chrome for Testing does not provide Linux ARM64 builds.",
-            color::error_indicator()
-        );
-        eprintln!("  Install Chromium from your system package manager instead:");
-        eprintln!("    sudo apt install chromium-browser   # Debian/Ubuntu");
-        eprintln!("    sudo dnf install chromium            # Fedora");
-        eprintln!("  Then use: agent-browser --executable-path /usr/bin/chromium");
+    if let Err(msg) = check_install_platform(std::env::consts::OS, std::env::consts::ARCH) {
+        eprintln!("{} {}", color::error_indicator(), msg);
         exit(1);
     }
 
@@ -1247,5 +1241,57 @@ mod tests {
             "expected 'connection refused' in error, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn platform_key_for_maps_supported_platforms() {
+        assert_eq!(platform_key_for("macos", "aarch64"), Some("mac-arm64"));
+        assert_eq!(platform_key_for("macos", "x86_64"), Some("mac-x64"));
+        assert_eq!(platform_key_for("linux", "x86_64"), Some("linux64"));
+        assert_eq!(platform_key_for("linux", "aarch64"), Some("linux-arm64"));
+        assert_eq!(platform_key_for("windows", "x86_64"), Some("win64"));
+        assert_eq!(platform_key_for("linux", "riscv64"), None);
+    }
+
+    #[test]
+    fn check_install_platform_allows_linux_arm64_and_rejects_unsupported() {
+        assert_eq!(
+            check_install_platform("linux", "aarch64"),
+            Ok("linux-arm64")
+        );
+        assert!(check_install_platform("linux", "riscv64").is_err());
+    }
+
+    #[test]
+    fn linux_chrome_binary_in_dir_finds_arm64_and_x64_layouts() {
+        let base = std::env::temp_dir().join(format!(
+            "agent-browser-install-linux-bin-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+
+        let empty = base.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert_eq!(linux_chrome_binary_in_dir(&empty), None);
+
+        let arm64 = base.join("arm64");
+        let arm64_bin = arm64.join("chrome-linux-arm64/chrome");
+        fs::create_dir_all(arm64_bin.parent().unwrap()).unwrap();
+        fs::write(&arm64_bin, b"").unwrap();
+        assert_eq!(linux_chrome_binary_in_dir(&arm64), Some(arm64_bin));
+
+        let x64 = base.join("x64");
+        let x64_bin = x64.join("chrome-linux64/chrome");
+        fs::create_dir_all(x64_bin.parent().unwrap()).unwrap();
+        fs::write(&x64_bin, b"").unwrap();
+        assert_eq!(linux_chrome_binary_in_dir(&x64), Some(x64_bin));
+
+        let flat = base.join("flat");
+        let flat_bin = flat.join("chrome");
+        fs::create_dir_all(&flat).unwrap();
+        fs::write(&flat_bin, b"").unwrap();
+        assert_eq!(linux_chrome_binary_in_dir(&flat), Some(flat_bin));
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

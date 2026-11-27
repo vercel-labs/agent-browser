@@ -503,6 +503,18 @@ fn resolve_ca_cert(
     }
 }
 
+/// Resolve TLS trust environment variables using the same parsing rules as CLI flags.
+pub fn tls_env_flags() -> (Option<String>, bool, bool) {
+    let (ca_cert, clear_ca_cert) = resolve_ca_cert(
+        None,
+        None,
+        env::var("AGENT_BROWSER_CA_CERT").ok(),
+        env_var_bool("AGENT_BROWSER_CLEAR_CA_CERT"),
+    );
+    let use_system_ca = env_var_bool("AGENT_BROWSER_USE_SYSTEM_CA").unwrap_or(false);
+    (ca_cert, clear_ca_cert, use_system_ca)
+}
+
 /// Parse an optional boolean value after a flag. Returns (value, consumed_next_arg).
 /// Recognizes "true" as true, "false" as false. Bare flag defaults to true.
 fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
