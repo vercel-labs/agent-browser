@@ -3361,6 +3361,8 @@ Settings:
                              unsupported in Firefox (use set viewport plus the --user-agent
                              launch flag or AGENT_BROWSER_USER_AGENT)
   geo <lat> <lng>            Set geolocation (coordinates must be finite)
+  timezone <iana|off>        Override Intl timezone (IANA); off or default clears the override
+  locale <tag|off>           Override Intl locale (BCP 47); off or default clears the override
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
@@ -3376,6 +3378,10 @@ Examples:
   agent-browser set viewport 1920 1080 2    # 2x retina
   agent-browser set device "iPhone 12"
   agent-browser set geo 37.7749 -122.4194
+  agent-browser set timezone America/New_York
+  agent-browser set timezone off
+  agent-browser set locale en-GB
+  agent-browser set locale off
   agent-browser set offline on
   agent-browser set headers '{"X-Custom": "value"}'
   agent-browser set credentials admin secret123
@@ -4635,7 +4641,7 @@ Tool profiles:
              batch, confirm/deny
   tabs       Back/forward/reload, tabs, windows, frames, dialogs
   react      React tree/inspect/renders/suspense, vitals, pushstate
-  mobile     Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+  mobile     Viewport/device/geolocation/timezone/locale/media, touch, swipe, mouse, keyboard
   all        Every MCP tool, including the full typed CLI parity surface
 
 Common tools include:
@@ -4887,6 +4893,7 @@ Mouse:  agent-browser mouse <action> [args]
 
 Browser Settings:  agent-browser set <setting> [value]
   viewport <w> <h>, device <name>, geo <lat> <lng>
+  timezone <iana|off>, locale <tag|off>
   offline [on|off], headers <json>, credentials <user> <pass>
   media [dark|light] [reduced-motion]
 

@@ -255,6 +255,10 @@ agent-browser set viewport 1920 1080          # Set viewport size (kept across r
 agent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher res screenshots)
 agent-browser set device "iPhone 14"          # Emulate a device: viewport, user agent and touch input (touch events exist after the next navigation)
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
+agent-browser set timezone America/New_York   # Override Intl timezone (IANA)
+agent-browser set locale en-GB                # Override Intl locale (BCP 47)
+agent-browser set timezone off                # Clear timezone so later tabs do not replay it
+agent-browser set locale off                  # Clear locale so later tabs do not replay it
 agent-browser set offline on                  # Toggle offline mode
 agent-browser set headers '{"X-Key":"v"}'     # Extra HTTP headers
 agent-browser set credentials user pass       # HTTP basic auth for current and future tabs (alias: auth)
@@ -264,7 +268,7 @@ agent-browser set media light reduced-motion  # Light mode + reduced motion
 
 Firefox does not support mobile viewport mode, `set device`, or `reduced-motion` media emulation. Use `set viewport` plus the `--user-agent` launch flag (or `AGENT_BROWSER_USER_AGENT`) instead of `set device`.
 
-Viewport scales and geolocation coordinates must be finite numbers.
+Viewport scales and geolocation coordinates must be finite numbers. Timezone IDs are IANA names such as `America/New_York` or `UTC`. Locale tags are BCP 47 such as `en-GB`. Chrome validates both. `off` or `default` sends an empty CDP override for the current page and clears session setup so tabs opened later do not replay it. `set locale` changes ICU locale used by `Intl`. It does not change `navigator.language`.
 
 ## Cookies and Storage
 
@@ -562,7 +566,7 @@ Profiles:
 - `debug` - Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
-- `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+- `mobile` - Viewport/device/geolocation/timezone/locale/media, touch, swipe, mouse, keyboard
 - `all` - Every MCP tool, including the full typed CLI parity surface
 
 Common tools include:

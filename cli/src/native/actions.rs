@@ -7363,7 +7363,6 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Result<Patch, Str
             }
         }
     }
-    drop(set);
     // Obscura takes its proxy bypass from every launch, so an explicit null
     // clears it.
     if engine == Some("obscura") {
@@ -11914,7 +11913,8 @@ async fn handle_timezone(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'timezoneId' parameter")?;
     mgr.set_timezone(timezone).await?;
-    state.session_setup.timezone = Some(timezone.to_string());
+    // Empty timezoneId disables the CDP override; skip replaying it onto later tabs.
+    state.session_setup.timezone = (!timezone.is_empty()).then(|| timezone.to_string());
     Ok(json!({ "timezoneId": timezone }))
 }
 
@@ -11925,7 +11925,8 @@ async fn handle_locale(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .ok_or("Missing 'locale' parameter")?;
     mgr.set_locale(locale).await?;
-    state.session_setup.locale = Some(locale.to_string());
+    // Empty locale disables the CDP override; skip replaying it onto later tabs.
+    state.session_setup.locale = (!locale.is_empty()).then(|| locale.to_string());
     Ok(json!({ "locale": locale }))
 }
 
