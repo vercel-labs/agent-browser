@@ -22,6 +22,45 @@ agent-browser dashboard start --allowed-origins https://dashboard.example.com
 
 All sessions automatically stream to the dashboard. Local loopback origins are allowed automatically over IPv4 and IPv6 without an access token. For a reverse-proxied dashboard, use a comma-separated list of exact origins with `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS`; this lets the dashboard reject cross-origin requests and DNS-rebinding attacks. Every configured origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins. Open the matching URL once to establish the browser session and do not share it. Its unguessable token stays in the initial URL fragment, then the browser stores it in a Secure, host-bound, same-site cookie for dashboard API and stream requests. Open `http://localhost:<port>` directly for local access; the external token is never written to a loopback cookie. Configure the reverse proxy to redact cookies from logs. The browser stays on the dashboard origin while the server proxies per-session tabs, status, and stream traffic internally, so session ports do not need to be exposed. Repeated starts reuse the dashboard only when these settings match; stop it before changing the port or allowed origins.
 
+### Run in the foreground
+
+`dashboard start` runs the server as a detached background process. To run it under a process supervisor instead, such as systemd, a container entrypoint, or an app that manages its own child processes, set `AGENT_BROWSER_DASHBOARD` and run `agent-browser`. The server runs in that process until the process ends:
+
+```bash
+AGENT_BROWSER_DASHBOARD=1 AGENT_BROWSER_DASHBOARD_PORT=4848 agent-browser
+```
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>AGENT_BROWSER_DASHBOARD</code></td><td>Run the dashboard server in the current process. Any value enables it, and command-line arguments are ignored.</td><td>(unset)</td></tr>
+    <tr><td><code>AGENT_BROWSER_DASHBOARD_PORT</code></td><td>Port to listen on. A value that is not a valid port falls back to the default.</td><td><code>4848</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS</code></td><td>Comma-separated exact HTTPS origins, as with <code>--allowed-origins</code>.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN</code></td><td>Access token for the allowed origins: 64 hexadecimal characters. Required when <code>AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS</code> is set.</td><td>(none)</td></tr>
+  </tbody>
+</table>
+
+For a reverse-proxied origin, generate the token yourself and open `<origin>/#dashboard-access-token=<token>`, the URL that `dashboard start` would print:
+
+```bash
+export AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN=$(openssl rand -hex 32)
+AGENT_BROWSER_DASHBOARD=1 \
+AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS=https://dashboard.example.com \
+agent-browser
+# Open https://dashboard.example.com/#dashboard-access-token=<token>
+```
+
+A foreground server differs from `dashboard start` in these ways:
+
+- It checks no settings before it starts. With a malformed origin list it rejects every API request, and with a missing or malformed token it rejects proxied requests while loopback access keeps working.
+- It prints nothing when it is ready. Poll `http://127.0.0.1:<port>/` until it responds.
+- If it cannot bind the port, it prints the error to stderr and exits with status 0, so treat any exit as the dashboard stopping.
+- It writes no state files, so `dashboard start` and `dashboard stop` do not see it. Stop it by ending the process, for example with `SIGTERM`.
+
+The dashboard finds sessions in the socket directory, so run it with the same `AGENT_BROWSER_SOCKET_DIR` and `AGENT_BROWSER_NAMESPACE` as the sessions it should show. [AI chat](#ai-chat) reads its `AI_GATEWAY_*` variables from the same environment.
+
 ### Custom stream port
 
 By default each session binds its WebSocket stream server to an OS-assigned port. To use a specific port, set the `AGENT_BROWSER_STREAM_PORT` environment variable:

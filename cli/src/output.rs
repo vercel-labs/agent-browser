@@ -4186,6 +4186,13 @@ the browser session and do not share it. Loopback URLs do not require or
 receive this token. Configure a reverse proxy to redact cookies from logs.
 Stop the dashboard before changing its port or allowed origins.
 
+To run the server in the foreground under a process supervisor, set
+AGENT_BROWSER_DASHBOARD=1 and run agent-browser with no arguments. It
+reads AGENT_BROWSER_DASHBOARD_PORT (default: 4848),
+AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS and
+AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN (64 hex characters, required with
+allowed origins), writes no state files, and runs until the process ends.
+
 Options:
   --port <n>           Port for the dashboard server (default: 4848)
   --allowed-origins <origins>
@@ -4206,6 +4213,7 @@ Examples:
   agent-browser dashboard start --port 8080
   agent-browser dashboard start --allowed-origins https://dashboard.example.com
   agent-browser dashboard stop
+  AGENT_BROWSER_DASHBOARD=1 AGENT_BROWSER_DASHBOARD_PORT=4848 agent-browser
 "##
         }
 
@@ -5248,6 +5256,10 @@ Environment:
   AGENT_BROWSER_STREAM_MAX_HEIGHT Cap frame height in pixels (default: the viewport)
   AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS
                                  Comma-separated exact HTTPS origins allowed for a reverse-proxied dashboard
+  AGENT_BROWSER_DASHBOARD        Run the dashboard server in the foreground (see dashboard --help)
+  AGENT_BROWSER_DASHBOARD_PORT   Port for a foreground dashboard server (default: 4848)
+  AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN
+                                 64-char hex access token for a foreground dashboard's allowed origins
   AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (default: 3600000 = 1h; 0 disables)
                                  Dashboard input resets the timer; headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default
                                  Provider-owned cloud browsers remain eligible for default cleanup
