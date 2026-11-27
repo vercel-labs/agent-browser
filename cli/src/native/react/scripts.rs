@@ -54,18 +54,21 @@ pub const TREE_SNAPSHOT: &str = r#"
   const ri = (__abRiId != null && hook.rendererInterfaces && hook.rendererInterfaces.get) ? hook.rendererInterfaces.get(__abRiId) : null;
   if (!ri) throw new Error("No React renderer attached - the page has not booted React yet");
 
-  const batches = await new Promise((resolve) => {
+  const batches = await new Promise((resolve, reject) => {
     const out = [];
-    const origEmit = hook.emit;
-    hook.emit = function (event, payload) {
-      if (event === "operations") out.push(Array.from(payload));
-      return origEmit.apply(hook, arguments);
-    };
-    ri.flushInitialOperations();
-    setTimeout(() => {
-      hook.emit = origEmit;
-      resolve(out);
-    }, 50);
+    const unsubscribe = hook.sub("operations", (payload) => {
+      if (payload[0] === __abRiId) out.push(Array.from(payload));
+    });
+    try {
+      ri.flushInitialOperations();
+      setTimeout(() => {
+        unsubscribe();
+        resolve(out);
+      }, 50);
+    } catch (error) {
+      unsubscribe();
+      reject(error);
+    }
   });
 
   const nodes = batches.flatMap((ops) => {
@@ -475,18 +478,21 @@ pub const SUSPENSE_WALK: &str = r#"
   const ri = (__abRiId != null && hook.rendererInterfaces && hook.rendererInterfaces.get) ? hook.rendererInterfaces.get(__abRiId) : null;
   if (!ri) throw new Error("No React renderer attached");
 
-  const batches = await new Promise((resolve) => {
+  const batches = await new Promise((resolve, reject) => {
     const out = [];
-    const origEmit = hook.emit;
-    hook.emit = function (event, payload) {
-      if (event === "operations") out.push(payload);
-      return origEmit.apply(this, arguments);
-    };
-    ri.flushInitialOperations();
-    setTimeout(() => {
-      hook.emit = origEmit;
-      resolve(out);
-    }, 50);
+    const unsubscribe = hook.sub("operations", (payload) => {
+      if (payload[0] === __abRiId) out.push(Array.from(payload));
+    });
+    try {
+      ri.flushInitialOperations();
+      setTimeout(() => {
+        unsubscribe();
+        resolve(out);
+      }, 50);
+    } catch (error) {
+      unsubscribe();
+      reject(error);
+    }
   });
 
   const boundaryMap = new Map();
