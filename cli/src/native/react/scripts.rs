@@ -355,15 +355,17 @@ pub const RENDERS_INIT: &str = r#"
             if (!data[name]) {
               data[name] = {
                 count: 0, mounts: 0, totalTime: 0, selfTime: 0,
-                domMutations: 0, changes: [], _instances: new Set(),
+                domMutations: 0, changes: [], _instances: new WeakSet(), _instanceCount: 0,
               };
             }
             data[name].count++;
             if (!fiber.alternate) data[name].mounts++;
-            if (!data[name]._instances.has(fiber)) {
-              data[name]._instances.add(fiber);
-              if (fiber.alternate) data[name]._instances.add(fiber.alternate);
+            if (!data[name]._instances.has(fiber) &&
+                !(fiber.alternate && data[name]._instances.has(fiber.alternate))) {
+              data[name]._instanceCount++;
             }
+            data[name]._instances.add(fiber);
+            if (fiber.alternate) data[name]._instances.add(fiber.alternate);
             if (typeof fiber.actualDuration === "number") {
               data[name].totalTime += fiber.actualDuration;
               data[name].selfTime += Math.max(0, fiber.actualDuration - childrenTime(fiber));
@@ -443,7 +445,7 @@ pub const RENDERS_STOP: &str = r#"
         count: entry.count,
         mounts: entry.mounts,
         reRenders: entry.count - entry.mounts,
-        instanceCount: entry._instances.size,
+        instanceCount: entry._instanceCount,
         totalTime: round(entry.totalTime),
         selfTime: round(entry.selfTime),
         domMutations: entry.domMutations,
