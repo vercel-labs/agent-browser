@@ -639,7 +639,10 @@ const RESTORE_STORAGE_JS: &str = r#"(expectedOrigin, payload) => {
 /// Loads the cookies and origin storage in a `state.rs` JSON file, dropping fields BiDi
 /// does not support, like Chrome's `handle_state_load`. Origins that cannot be loaded, or that
 /// land somewhere else, are skipped and returned.
-pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<String>, String> {
+pub async fn load_state_path(
+    state: &mut DaemonState,
+    path: &str,
+) -> Result<Vec<state::StorageRestoreFailure>, String> {
     let json_str = state::read_state_json(path)?;
     let saved: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {e}"))?;
@@ -659,7 +662,10 @@ pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<
             continue;
         }
         let Some(canonical) = state::canonical_origin(&origin.origin) else {
-            skipped.push(origin.origin.clone());
+            skipped.push(state::StorageRestoreFailure {
+                origin: origin.origin.clone(),
+                reason: "Saved origin is not a valid storage origin",
+            });
             continue;
         };
         let nav_url = format!("{canonical}/");
@@ -674,7 +680,10 @@ pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<
         {
             Ok(landing) if !landing.prompt => landing,
             _ => {
-                skipped.push(origin.origin.clone());
+                skipped.push(state::StorageRestoreFailure {
+                    origin: origin.origin.clone(),
+                    reason: "Could not navigate to the saved origin",
+                });
                 continue;
             }
         };
@@ -691,7 +700,10 @@ pub async fn load_state_path(state: &mut DaemonState, path: &str) -> Result<Vec<
             .await
             .map_err(|e| format!("Failed to restore storage for {}: {e}", origin.origin))?;
         if restored != json!(true) {
-            skipped.push(origin.origin.clone());
+            skipped.push(state::StorageRestoreFailure {
+                origin: origin.origin.clone(),
+                reason: "Page did not stay on the saved origin",
+            });
         }
     }
 
@@ -710,9 +722,16 @@ pub async fn state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         "state load",
     )
     .await?;
-    let skipped = load_state_path(state, path).await?;
+    let failures = load_state_path(state, path).await?;
+    let result = json!({
+        "loaded": true,
+        "path": path,
+        "skippedOrigins": failures.iter().map(|f| &f.origin).collect::<Vec<_>>(),
+        "storageFailures": failures,
+    });
+    state.restore_storage_failures = failures;
     crate::native::actions::mark_explicit_storage_state_loaded(state, path);
-    Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -954,11 +973,69 @@ mod tests {
         state.session_name = Some("test".into());
         state.restore_load_failed = true;
         state.restore_status = "failed".into();
+        state
+            .restore_storage_failures
+            .push(state::StorageRestoreFailure {
+                origin: "https://example.com".into(),
+                reason: "Could not navigate to the saved origin",
+            });
         state_load(&json!({"path": path}), &mut state)
             .await
             .unwrap();
         assert!(!state.restore_load_failed);
         assert_eq!(state.restore_status, "loaded");
+        assert!(state.restore_storage_failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn partial_restore_reports_failures_and_skips_autosave() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = crate::test_utils::EnvGuard::new(&[
+            "HOME",
+            "USERPROFILE",
+            "AGENT_BROWSER_NAMESPACE",
+            "AGENT_BROWSER_ENCRYPTION_KEY",
+            "AGENT_BROWSER_SESSION_NAME",
+        ]);
+        env.set("HOME", dir.path().to_str().unwrap());
+        env.set("USERPROFILE", dir.path().to_str().unwrap());
+        env.remove("AGENT_BROWSER_NAMESPACE");
+        env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+        env.remove("AGENT_BROWSER_SESSION_NAME");
+        let (ff, _) = fake_storage_session(
+            json!({"contexts": [{"context": "ctx-active", "url": "https://example.com/"}]}),
+            json!({"type": "boolean", "value": false}),
+        )
+        .await;
+        let path = dir.path().join("state.json");
+        let saved = json!({"cookies": [], "origins": [{
+            "origin": "https://example.com",
+            "localStorage": [{"name": "token", "value": "secret"}],
+            "sessionStorage": []
+        }]})
+        .to_string();
+        std::fs::write(&path, &saved).unwrap();
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.session_name = Some("partial-restore".into());
+        state.restore_save = "auto".into();
+
+        let result = state_load(&json!({"path": path}), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(result["skippedOrigins"], json!(["https://example.com"]));
+        assert_eq!(
+            result["storageFailures"],
+            json!([{
+                "origin": "https://example.com",
+                "reason": "Page did not stay on the saved origin",
+            }])
+        );
+        assert_eq!(state.restore_status, "loaded_partial");
+        assert_eq!(state.restore_storage_failures.len(), 1);
+        crate::native::actions::maybe_autosave_restore_state(&mut state, 1).await;
+        assert_eq!(state.restore_save_status, "skipped_restore_failed");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), saved);
     }
 
     #[tokio::test]
@@ -1031,7 +1108,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(skipped, vec!["https://unreachable.example".to_string()]);
+        assert_eq!(
+            serde_json::to_value(skipped).unwrap(),
+            json!([{
+                "origin": "https://unreachable.example",
+                "reason": "Could not navigate to the saved origin",
+            }])
+        );
         assert!(state
             .firefox
             .as_ref()
@@ -1077,7 +1160,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(skipped, vec!["null".to_string()]);
+        assert_eq!(
+            serde_json::to_value(skipped).unwrap(),
+            json!([{
+                "origin": "null",
+                "reason": "Saved origin is not a valid storage origin",
+            }])
+        );
         let requests = requests.lock().unwrap();
         let navigations: Vec<_> = requests
             .iter()
