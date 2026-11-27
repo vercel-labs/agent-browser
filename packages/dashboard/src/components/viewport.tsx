@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai/react";
 import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { drawStreamFrame } from "@/lib/draw-stream-frame";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
 import {
@@ -49,7 +50,6 @@ import {
   wsRefAtom,
   activeUrlAtom,
   sendInputAtom,
-  type StreamFrame,
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 import {
@@ -140,8 +140,6 @@ export function Viewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rightClickGuardRef = useRef(createRightClickGuardState());
   const drawnFrameRef = useRef<DrawnFrame | null>(null);
-  const decodeSeqRef = useRef(0);
-  const drawnSeqRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const addressRef = useRef<HTMLInputElement>(null);
@@ -219,42 +217,21 @@ export function Viewport() {
     }
   }, [addressValue, navigating, runCmd, url]);
 
-  const drawFrame = useCallback((next: StreamFrame) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const seq = ++decodeSeqRef.current;
-    const bin = atob(next.data);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-
-    createImageBitmap(new Blob([bytes], { type: "image/jpeg" })).then((bmp) => {
-      if (seq < drawnSeqRef.current) {
-        bmp.close();
-        return;
-      }
-      drawnSeqRef.current = seq;
-      canvas.width = bmp.width;
-      canvas.height = bmp.height;
-      const ctx = canvas.getContext("2d");
-      if (ctx) ctx.drawImage(bmp, 0, 0);
-      bmp.close();
-      drawnFrameRef.current =
-        next.deviceWidth > 0 && next.deviceHeight > 0
-          ? {
-              width: next.deviceWidth,
-              height: next.deviceHeight,
-              pageScaleFactor: next.pageScaleFactor > 0 ? next.pageScaleFactor : 1,
-            }
-          : null;
-    });
-  }, []);
-
   useEffect(() => {
-    if (frame) {
-      drawFrame(frame);
+    const canvas = canvasRef.current;
+    if (frame && canvas) {
+      return drawStreamFrame(canvas, frame.data, () => {
+        drawnFrameRef.current =
+          frame.deviceWidth > 0 && frame.deviceHeight > 0
+            ? {
+                width: frame.deviceWidth,
+                height: frame.deviceHeight,
+                pageScaleFactor: frame.pageScaleFactor > 0 ? frame.pageScaleFactor : 1,
+              }
+            : null;
+      });
     }
-  }, [frame, drawFrame]);
+  }, [frame]);
 
   const isFit =
     canvasArea.width > 0 &&
