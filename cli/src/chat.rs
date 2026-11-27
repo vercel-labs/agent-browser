@@ -409,7 +409,7 @@ async fn parse_gateway_stream(
     let mut tool_call_args: std::collections::HashMap<usize, (String, String, String)> =
         std::collections::HashMap::new();
     let mut byte_stream = gw_response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
 
     while let Some(chunk_result) = byte_stream.next().await {
         let chunk = match chunk_result {
@@ -417,12 +417,7 @@ async fn parse_gateway_stream(
             Err(_) => break,
         };
 
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
+        for line in chat::take_gateway_lines(&mut buffer, &chunk) {
             if line.is_empty() {
                 continue;
             }
