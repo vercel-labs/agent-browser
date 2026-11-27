@@ -16,7 +16,7 @@ fn get_boundary_nonce() -> &'static str {
     })
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct OutputOptions {
     pub json: bool,
     pub content_boundaries: bool,
@@ -58,7 +58,11 @@ fn truncate_if_needed(content: &str, max: Option<usize>) -> String {
     }
 }
 
-fn format_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptions) -> String {
+pub(crate) fn format_with_boundaries(
+    content: &str,
+    origin: Option<&str>,
+    opts: &OutputOptions,
+) -> String {
     let content = truncate_if_needed(content, opts.max_output);
     if opts.content_boundaries {
         let origin_str = origin.unwrap_or("unknown");
@@ -103,7 +107,7 @@ fn format_snapshot_delta(
     format_with_boundaries(&content, origin, opts)
 }
 
-fn boundary_origin(data: &serde_json::Value) -> Option<&str> {
+pub(crate) fn boundary_origin(data: &serde_json::Value) -> Option<&str> {
     for key in ["origin", "finalUrl", "url"] {
         if let Some(value) = data.get(key).and_then(|v| v.as_str()) {
             return Some(value);
@@ -5117,7 +5121,7 @@ Options:
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
                              On an attached Firefox it applies to that browser and
                              close clears it.
-  --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
+  --content-boundaries       Wrap CLI and MCP page text in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
                              Invalid values warn and leave the existing output limit unchanged.
   --allowed-domains <list>   Restrict network domains and non-HTTP document navigation; must list at least one; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari/Ladybird (or AGENT_BROWSER_ALLOWED_DOMAINS)
