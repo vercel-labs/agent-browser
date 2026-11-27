@@ -341,7 +341,6 @@ fn install_rejects_an_invalid_explicit_ca_before_network_or_daemon() {
     assert!(!session.tmp.path().join("sockets/tls.pid").exists());
 }
 
-#[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
 #[test]
 fn install_fetches_manifest_with_explicit_and_native_trust() {
     let cert = include_str!("fixtures/tls/install.pem");

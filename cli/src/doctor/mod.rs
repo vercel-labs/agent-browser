@@ -12,7 +12,7 @@ mod chrome;
 mod config;
 mod daemon;
 mod environment;
-mod ffmpeg;
+pub(crate) mod ffmpeg;
 mod fix;
 mod helpers;
 mod launch;
