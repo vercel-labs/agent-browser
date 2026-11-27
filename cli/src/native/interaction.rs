@@ -367,6 +367,7 @@ pub async fn type_text_into_active_context(
                         windows_virtual_key_code: Some(key_code),
                         modifiers: None,
                         location: None,
+                        commands: None,
                     },
                     Some(session_id),
                 )
@@ -384,6 +385,7 @@ pub async fn type_text_into_active_context(
                         windows_virtual_key_code: Some(key_code),
                         modifiers: None,
                         location: None,
+                        commands: None,
                     },
                     Some(session_id),
                 )
@@ -574,6 +576,11 @@ fn single_key_event_params(
     } else {
         modifiers
     };
+    let commands = if cfg!(target_os = "macos") {
+        macos_editing_commands(&key_name, event_type, modifiers)
+    } else {
+        None
+    };
     DispatchKeyEventParams {
         event_type: event_type.to_string(),
         location: key_location(&code),
@@ -583,7 +590,19 @@ fn single_key_event_params(
         unmodified_text: if is_down { unmodified_text } else { None },
         windows_virtual_key_code: Some(key_code),
         modifiers,
+        commands,
     }
+}
+
+fn macos_editing_commands(
+    key_name: &str,
+    event_type: &str,
+    modifiers: Option<i32>,
+) -> Option<Vec<String>> {
+    (event_type == "keyDown"
+        && modifiers.is_some_and(|value| value & 4 != 0)
+        && key_name.eq_ignore_ascii_case("a"))
+    .then(|| vec!["selectAll".to_string()])
 }
 
 fn nonzero_modifiers(modifiers: i32) -> Option<i32> {
@@ -1666,6 +1685,24 @@ mod tests {
                 "type": "keyUp", "key": "w", "code": "KeyW", "windowsVirtualKeyCode": 87
             })
         );
+
+        let meta_a = params("a", "keyDown", Some(4));
+        if cfg!(target_os = "macos") {
+            assert_eq!(meta_a["commands"], serde_json::json!(["selectAll"]));
+        } else {
+            assert!(meta_a.get("commands").is_none());
+        }
+    }
+
+    #[test]
+    fn test_macos_editing_commands() {
+        assert_eq!(
+            macos_editing_commands("a", "keyDown", Some(4)),
+            Some(vec!["selectAll".to_string()])
+        );
+        assert_eq!(macos_editing_commands("a", "keyUp", Some(4)), None);
+        assert_eq!(macos_editing_commands("a", "keyDown", Some(2)), None);
+        assert_eq!(macos_editing_commands("c", "keyDown", Some(4)), None);
     }
 
     #[test]

@@ -505,6 +505,8 @@ pub struct DispatchKeyEventParams {
     pub modifiers: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]

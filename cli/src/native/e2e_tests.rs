@@ -7301,6 +7301,61 @@ async fn e2e_press_dispatches_single_keystroke() {
     assert_success(&resp);
 }
 
+/// On macOS, Chromium requires the CDP `selectAll` editing command in addition
+/// to Meta+A key events for the native text editing action to run.
+#[tokio::test]
+#[ignore]
+async fn e2e_press_meta_a_selects_all_on_macos() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": "data:text/html,<textarea id='input'>old text</textarea>"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "focus", "selector": "#input" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "press", "key": "Meta+a" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    assert_evaluate(
+        &mut state,
+        "5",
+        "(() => { const input = document.getElementById('input'); return [input.selectionStart, input.selectionEnd]; })()",
+        json!([0, 8]),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_keydown_keyup_send_code_and_key_code() {
