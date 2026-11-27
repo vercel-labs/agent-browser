@@ -21,10 +21,13 @@ use tokio_tungstenite::Connector;
 
 use super::types::{CdpCommand, CdpError, CdpEvent, CdpMessage};
 
-/// A command awaiting its response, with the session it was sent to so the
-/// reader can fail it as soon as that session detaches (#1991).
-struct PendingCommand<T> {
+struct CommandRoute {
     session_id: Option<String>,
+    needs_renderer: bool,
+}
+
+struct PendingCommand<T> {
+    route: CommandRoute,
     tx: oneshot::Sender<T>,
 }
 
@@ -76,6 +79,116 @@ impl DetachedSessions {
 
 type DetachedSessionSet = Arc<std::sync::Mutex<DetachedSessions>>;
 
+const SESSION_PARENT_LIMIT: usize = 1024;
+
+struct ParentEntry {
+    parent: String,
+    target_id: Option<String>,
+}
+
+#[derive(Default)]
+struct SessionParents {
+    entries: HashMap<String, ParentEntry>,
+    order: VecDeque<String>,
+}
+
+impl SessionParents {
+    fn insert(&mut self, session_id: &str, parent: &str, target_id: Option<&str>) {
+        let entry = ParentEntry {
+            parent: parent.to_string(),
+            target_id: target_id.map(str::to_string),
+        };
+        if self.entries.insert(session_id.to_string(), entry).is_some() {
+            return;
+        }
+        self.order.push_back(session_id.to_string());
+        while self.entries.len() > SESSION_PARENT_LIMIT {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    fn take_subtree(&mut self, root: &str) -> Vec<String> {
+        let mut tree = vec![root.to_string()];
+        let mut next = 0;
+        let mut removed_any = false;
+        while next < tree.len() {
+            if self.entries.remove(&tree[next]).is_some() {
+                removed_any = true;
+            }
+            let children: Vec<String> = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.parent == tree[next])
+                .map(|(child, _)| child.clone())
+                .collect();
+            tree.extend(children);
+            next += 1;
+        }
+        if removed_any {
+            self.order.retain(|sid| self.entries.contains_key(sid));
+        }
+        tree
+    }
+
+    fn take_target(&mut self, target_id: &str) -> Vec<String> {
+        let sessions: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.target_id.as_deref() == Some(target_id))
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        let mut gone = Vec::new();
+        for sid in sessions {
+            if self.entries.contains_key(&sid) {
+                gone.extend(self.take_subtree(&sid));
+            }
+        }
+        gone
+    }
+}
+
+type CrashedSessionSet = Arc<std::sync::Mutex<HashSet<Option<String>>>>;
+
+const TARGET_CRASHED_MESSAGE: &str = "Target crashed: reload the page or navigate to bring it back";
+
+pub fn is_target_crashed_error(error: &str) -> bool {
+    command_error_reason(error) == Some(TARGET_CRASHED_MESSAGE)
+}
+
+fn needs_renderer(method: &str) -> bool {
+    let Some((domain, command)) = method.split_once('.') else {
+        return true;
+    };
+    match domain {
+        "Browser" | "Fetch" | "IO" | "Security" | "Storage" | "Target" | "Tracing" => false,
+        "Page" => !matches!(
+            command,
+            "bringToFront"
+                | "getNavigationHistory"
+                | "handleJavaScriptDialog"
+                | "navigate"
+                | "navigateToHistoryEntry"
+                | "reload"
+                | "screencastFrameAck"
+                | "setWebLifecycleState"
+                | "startScreencast"
+                | "stopScreencast"
+        ),
+        "Network" => !matches!(
+            command,
+            "clearBrowserCookies" | "getAllCookies" | "getCookies" | "setCookies"
+        ),
+        "Emulation" => !matches!(
+            command,
+            "setDeviceMetricsOverride" | "setGeolocationOverride"
+        ),
+        _ => true,
+    }
+}
+
 const SESSION_DETACHED_PREFIX: &str = "Target closed: CDP session";
 
 fn session_detached_message(session_id: &str) -> String {
@@ -84,6 +197,15 @@ fn session_detached_message(session_id: &str) -> String {
 
 /// Chrome's protocol error for a command sent to a session it no longer has.
 const SESSION_NOT_FOUND_MESSAGE: &str = "Session with given id not found";
+
+fn command_error_reason(error: &str) -> Option<&str> {
+    let (method, reason) = error.strip_prefix("CDP error (")?.split_once("): ")?;
+    let is_method = !method.is_empty()
+        && method
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
+    is_method.then_some(reason)
+}
 
 /// Whether a command failed because its CDP session no longer exists: the
 /// session detached before or while the command was pending, or Chrome no
@@ -94,19 +216,9 @@ const SESSION_NOT_FOUND_MESSAGE: &str = "Session with given id not found";
 /// description of an exception thrown while a script was injected), and
 /// that text must not pass as a detach.
 pub fn is_session_detached_error(error: &str) -> bool {
-    let Some((method, reason)) = error
-        .strip_prefix("CDP error (")
-        .and_then(|rest| rest.split_once("): "))
-    else {
+    let Some(reason) = command_error_reason(error) else {
         return false;
     };
-    if method.is_empty()
-        || !method
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
-    {
-        return false;
-    }
     if let Some(session_id) = reason
         .strip_prefix(SESSION_DETACHED_PREFIX)
         .and_then(|rest| rest.strip_prefix(' '))
@@ -282,59 +394,92 @@ fn leading_response_id(msg: &str) -> Option<u64> {
     rest[..end].parse::<u64>().ok().filter(|id| *id > 0)
 }
 
-/// Mark `session_id` detached and fail every command still waiting on it.
-/// Both pending maps stay locked while the session is marked, and senders
-/// check the mark under the same lock before registering, so a command is
-/// either failed here or refused at send time; it never waits out the
-/// timeout in between.
-async fn release_detached_session(
+fn take_commands<T>(
+    pending: &mut HashMap<u64, PendingCommand<T>>,
+    matches: &impl Fn(&CommandRoute) -> bool,
+) -> Vec<(u64, PendingCommand<T>)> {
+    let ids: Vec<u64> = pending
+        .iter()
+        .filter(|(_, command)| matches(&command.route))
+        .map(|(id, _)| *id)
+        .collect();
+    ids.into_iter()
+        .filter_map(|id| pending.remove(&id).map(|command| (id, command)))
+        .collect()
+}
+
+fn fail_commands(
+    pending: &mut HashMap<u64, PendingCommand<CdpMessage>>,
+    raw_pending: &mut HashMap<u64, PendingCommand<String>>,
+    message: &str,
+    matches: impl Fn(&CommandRoute) -> bool,
+) {
+    for (id, command) in take_commands(pending, &matches) {
+        let _ = command.tx.send(CdpMessage {
+            id: Some(id),
+            result: None,
+            error: Some(CdpError {
+                code: None,
+                message: message.to_string(),
+                data: None,
+            }),
+            method: None,
+            params: None,
+            session_id: command.route.session_id,
+        });
+    }
+    for (id, command) in take_commands(raw_pending, &matches) {
+        let _ = command
+            .tx
+            .send(serde_json::json!({ "id": id, "error": { "message": message } }).to_string());
+    }
+}
+
+async fn release_detached_sessions(
     pending: &PendingMap,
     raw_pending: &RawPendingMap,
     detached: &DetachedSessionSet,
-    session_id: &str,
+    crashed: &CrashedSessionSet,
+    sessions: &[String],
 ) {
     let mut pending = pending.lock().await;
     let mut raw_pending = raw_pending.lock().await;
-    detached
+    for session_id in sessions {
+        detached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id);
+        crashed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&Some(session_id.clone()));
+        fail_commands(
+            &mut pending,
+            &mut raw_pending,
+            &session_detached_message(session_id),
+            |route| route.session_id.as_deref() == Some(session_id.as_str()),
+        );
+    }
+}
+
+async fn release_crashed_session(
+    pending: &PendingMap,
+    raw_pending: &RawPendingMap,
+    crashed: &CrashedSessionSet,
+    session_id: Option<&str>,
+) {
+    let mut pending = pending.lock().await;
+    let mut raw_pending = raw_pending.lock().await;
+    crashed
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(session_id);
-
-    let message = session_detached_message(session_id);
-    let ids: Vec<u64> = pending
-        .iter()
-        .filter(|(_, command)| command.session_id.as_deref() == Some(session_id))
-        .map(|(id, _)| *id)
-        .collect();
-    for id in ids {
-        if let Some(command) = pending.remove(&id) {
-            let _ = command.tx.send(CdpMessage {
-                id: Some(id),
-                result: None,
-                error: Some(CdpError {
-                    code: None,
-                    message: message.clone(),
-                    data: None,
-                }),
-                method: None,
-                params: None,
-                session_id: Some(session_id.to_string()),
-            });
-        }
-    }
-
-    let raw_ids: Vec<u64> = raw_pending
-        .iter()
-        .filter(|(_, command)| command.session_id.as_deref() == Some(session_id))
-        .map(|(id, _)| *id)
-        .collect();
-    for id in raw_ids {
-        if let Some(command) = raw_pending.remove(&id) {
-            let _ = command
-                .tx
-                .send(serde_json::json!({ "id": id, "error": { "message": message } }).to_string());
-        }
-    }
+        .insert(session_id.map(str::to_string));
+    fail_commands(
+        &mut pending,
+        &mut raw_pending,
+        TARGET_CRASHED_MESSAGE,
+        |route| route.needs_renderer && route.session_id.as_deref() == session_id,
+    );
 }
 
 pub struct CdpClient {
@@ -354,6 +499,7 @@ pub struct CdpClient {
     private_sessions: PrivateSessions,
     method_taps: MethodTaps,
     detached_sessions: DetachedSessionSet,
+    crashed_sessions: CrashedSessionSet,
     /// Gate serializing `Page.captureScreenshot` against other screenshots,
     /// input dispatch, and device-metrics updates while screenshot-mode
     /// recording is active. `None` when no screenshot-mode recording is running.
@@ -569,6 +715,7 @@ impl CdpClient {
         let private_sessions: PrivateSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let method_taps: MethodTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
         let detached_sessions: DetachedSessionSet = Arc::default();
+        let crashed_sessions: CrashedSessionSet = Arc::default();
         let screenshot_gate: ScreenshotGateSlot =
             Arc::new(std::sync::Mutex::new(ScreenshotGateState {
                 gate: None,
@@ -583,12 +730,14 @@ impl CdpClient {
         let private_clone = private_sessions.clone();
         let taps_clone = method_taps.clone();
         let detached_clone = detached_sessions.clone();
+        let crashed_clone = crashed_sessions.clone();
 
         // Notify used to stop the keepalive task when the reader loop exits.
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
         let reader_cancel_tx = cancel_tx.clone();
 
         let reader_handle = tokio::spawn(async move {
+            let mut parents = SessionParents::default();
             while let Some(msg) = ws_rx.next().await {
                 // Accept both Text and Binary frames — remote CDP proxies
                 // (e.g. Browserless) may send responses as Binary frames.
@@ -709,19 +858,82 @@ impl CdpClient {
                     let target_session = event.params.get("sessionId").and_then(Value::as_str);
                     match (event.method.as_str(), target_session) {
                         ("Target.detachedFromTarget", Some(sid)) => {
-                            release_detached_session(
+                            let gone = parents.take_subtree(sid);
+                            release_detached_sessions(
                                 &pending_clone,
                                 &raw_pending_clone,
                                 &detached_clone,
-                                sid,
+                                &crashed_clone,
+                                &gone,
                             )
                             .await;
                         }
                         ("Target.attachedToTarget", Some(sid)) => {
+                            if let Some(parent) = &event.session_id {
+                                let target_id = event
+                                    .params
+                                    .get("targetInfo")
+                                    .and_then(|info| info.get("targetId"))
+                                    .and_then(Value::as_str);
+                                parents.insert(sid, parent, target_id);
+                            }
                             detached_clone
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .remove(sid);
+                            crashed_clone
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&Some(sid.to_string()));
+                        }
+                        ("Target.targetDestroyed", _) => {
+                            if let Some(tid) = event.params.get("targetId").and_then(Value::as_str)
+                            {
+                                let gone = parents.take_target(tid);
+                                if !gone.is_empty() {
+                                    release_detached_sessions(
+                                        &pending_clone,
+                                        &raw_pending_clone,
+                                        &detached_clone,
+                                        &crashed_clone,
+                                        &gone,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        ("Inspector.targetCrashed", _) => {
+                            release_crashed_session(
+                                &pending_clone,
+                                &raw_pending_clone,
+                                &crashed_clone,
+                                event.session_id.as_deref(),
+                            )
+                            .await;
+                        }
+                        ("Inspector.targetReloadedAfterCrash", _) => {
+                            crashed_clone
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&event.session_id);
+                        }
+                        ("Page.frameNavigated", _) => {
+                            let is_main_frame = event
+                                .params
+                                .get("frame")
+                                .and_then(Value::as_object)
+                                .is_some_and(|frame| {
+                                    frame
+                                        .get("parentId")
+                                        .and_then(Value::as_str)
+                                        .is_none_or(str::is_empty)
+                                });
+                            if is_main_frame {
+                                crashed_clone
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .remove(&event.session_id);
+                            }
                         }
                         _ => {}
                     }
@@ -801,6 +1013,7 @@ impl CdpClient {
             private_sessions,
             method_taps,
             detached_sessions,
+            crashed_sessions,
             screenshot_gate,
         })
     }
@@ -856,31 +1069,34 @@ impl CdpClient {
         }
     }
 
-    /// Refuse a command to a session Chrome already reported detached.
-    /// Callers hold the pending map that the command registers in, which
-    /// orders this check against [`release_detached_session`].
-    fn ensure_session_attached(
-        &self,
-        method: &str,
-        session_id: Option<&str>,
-    ) -> Result<(), String> {
-        let Some(session_id) = session_id else {
-            return Ok(());
-        };
-        let detached = self
-            .detached_sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(session_id);
-        if detached {
-            Err(format!(
-                "CDP error ({}): {}",
-                method,
-                session_detached_message(session_id)
-            ))
-        } else {
-            Ok(())
+    fn ensure_answerable(&self, method: &str, route: &CommandRoute) -> Result<(), String> {
+        if let Some(session_id) = route.session_id.as_deref() {
+            let detached = self
+                .detached_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(session_id);
+            if detached {
+                return Err(format!(
+                    "CDP error ({}): {}",
+                    method,
+                    session_detached_message(session_id)
+                ));
+            }
         }
+        let crashed = route.needs_renderer
+            && self
+                .crashed_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&route.session_id);
+        if crashed {
+            return Err(format!(
+                "CDP error ({}): {}",
+                method, TARGET_CRASHED_MESSAGE
+            ));
+        }
+        Ok(())
     }
 
     fn ensure_open(&self) -> Result<(), String> {
@@ -928,6 +1144,11 @@ impl CdpClient {
         params: Option<Value>,
         session_id: Option<&str>,
     ) -> Result<Value, String> {
+        let route = CommandRoute {
+            session_id: session_id.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            needs_renderer: needs_renderer(method),
+        };
+        self.ensure_answerable(method, &route)?;
         let mut screenshot_guard = self.acquire_screenshot_gate(method).await;
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
@@ -935,7 +1156,7 @@ impl CdpClient {
             id,
             method: method.to_string(),
             params,
-            session_id: session_id.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            session_id: route.session_id.clone(),
         };
 
         let json = serde_json::to_string(&cmd)
@@ -956,17 +1177,11 @@ impl CdpClient {
             let mut ws_tx = self.ws_tx.lock().await;
             self.ensure_open()?;
             let mut pending = self.pending.lock().await;
-            if let Err(error) = self.ensure_session_attached(method, cmd.session_id.as_deref()) {
+            if let Err(error) = self.ensure_answerable(method, &route) {
                 guard.done = true;
                 return Err(error);
             }
-            pending.insert(
-                id,
-                PendingCommand {
-                    session_id: cmd.session_id.clone(),
-                    tx,
-                },
-            );
+            pending.insert(id, PendingCommand { route, tx });
             drop(pending);
             if let ScreenshotGateGuard::Write(flight) = &mut screenshot_guard {
                 if let Err(error) = std::future::poll_fn(|cx| ws_tx.poll_ready_unpin(cx)).await {
@@ -1136,6 +1351,11 @@ impl CdpClient {
         params: &P,
         session_id: Option<&str>,
     ) -> Result<R, String> {
+        let route = CommandRoute {
+            session_id: session_id.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            needs_renderer: needs_renderer(method),
+        };
+        self.ensure_answerable(method, &route)?;
         let _screenshot_guard = self.acquire_screenshot_gate(method).await;
         let params_value = serde_json::to_value(params)
             .map_err(|e| format!("Failed to serialize params: {}", e))?;
@@ -1144,7 +1364,7 @@ impl CdpClient {
             id,
             method: method.to_string(),
             params: Some(params_value),
-            session_id: session_id.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            session_id: route.session_id.clone(),
         };
         let json = serde_json::to_string(&cmd)
             .map_err(|e| format!("Failed to serialize CDP command: {}", e))?;
@@ -1163,17 +1383,11 @@ impl CdpClient {
             let mut ws_tx = self.ws_tx.lock().await;
             self.ensure_open()?;
             let mut raw_pending = self.raw_pending.lock().await;
-            if let Err(error) = self.ensure_session_attached(method, cmd.session_id.as_deref()) {
+            if let Err(error) = self.ensure_answerable(method, &route) {
                 guard.done = true;
                 return Err(error);
             }
-            raw_pending.insert(
-                id,
-                PendingCommand {
-                    session_id: cmd.session_id.clone(),
-                    tx,
-                },
-            );
+            raw_pending.insert(id, PendingCommand { route, tx });
             drop(raw_pending);
             if let Err(error) = ws_tx.send(Message::Text(json)).await {
                 self.raw_pending.lock().await.remove(&id);
@@ -1809,6 +2023,585 @@ mod tests {
         .await
         .expect("a reattached session should be answered")
         .unwrap();
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    fn attached_event(session_id: &str, parent: &str, target_id: &str) -> Message {
+        Message::Text(
+            json!({
+                "method": "Target.attachedToTarget",
+                "params": {
+                    "sessionId": session_id,
+                    "targetInfo": { "targetId": target_id, "type": "iframe" },
+                    "waitingForDebugger": false
+                },
+                "sessionId": parent
+            })
+            .to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn detach_fails_pending_commands_of_the_sessions_under_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for (session_id, parent, target_id) in [
+                ("S-FRAME", "S-PAGE", "T-FRAME"),
+                ("S-NESTED", "S-FRAME", "T-NESTED"),
+                ("S-DEEP", "S-NESTED", "T-DEEP"),
+                ("S-SIBLING", "S-PAGE", "T-SIBLING"),
+            ] {
+                ws.send(attached_event(session_id, parent, target_id))
+                    .await
+                    .unwrap();
+            }
+            let mut commands = Vec::new();
+            for _ in 0..3 {
+                let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                commands.push(serde_json::from_str::<Value>(&text).unwrap());
+            }
+            ws.send(Message::Text(
+                json!({
+                    "method": "Target.detachedFromTarget",
+                    "params": { "sessionId": "S-FRAME", "targetId": "T-FRAME" },
+                    "sessionId": "S-PAGE"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let sibling = commands
+                .iter()
+                .find(|command| command["sessionId"] == "S-SIBLING")
+                .unwrap();
+            ws.send(Message::Text(
+                json!({"id": sibling["id"], "result": {"value": "sibling"}}).to_string(),
+            ))
+            .await
+            .unwrap();
+            while ws.next().await.is_some() {}
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let send = |session_id: &'static str| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_command_no_params("Runtime.evaluate", Some(session_id))
+                    .await
+            })
+        };
+        let (nested, deep, sibling) = (send("S-NESTED"), send("S-DEEP"), send("S-SIBLING"));
+
+        let wait = Duration::from_secs(2);
+        for (session_id, command) in [("S-NESTED", nested), ("S-DEEP", deep)] {
+            let error = tokio::time::timeout(wait, command)
+                .await
+                .expect("a command under a detached session should fail at once")
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "CDP error (Runtime.evaluate): Target closed: CDP session {session_id} detached"
+                )
+            );
+            assert!(is_session_detached_error(&error));
+        }
+        let result = tokio::time::timeout(wait, sibling)
+            .await
+            .expect("a session beside the detached one should still be answered")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["value"], "sibling");
+
+        let error = tokio::time::timeout(
+            wait,
+            client.send_command_no_params("Page.enable", Some("S-NESTED")),
+        )
+        .await
+        .expect("a later command under a detached session should not wait")
+        .unwrap_err();
+        assert!(is_session_detached_error(&error), "{error}");
+        assert_eq!(client.pending_len().await, 0);
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn crash_fails_renderer_commands_until_the_page_is_loaded_again() {
+        for session_id in [Some("S-PAGE"), None] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let event = |method: &str| {
+                    let mut event = json!({ "method": method, "params": {} });
+                    if let Some(session_id) = session_id {
+                        event["sessionId"] = json!(session_id);
+                    }
+                    Message::Text(event.to_string())
+                };
+                let mut reload = None;
+                for _ in 0..4 {
+                    let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                    let command = serde_json::from_str::<Value>(&text).unwrap();
+                    if command["method"] == "Page.reload" {
+                        reload = Some(command["id"].clone());
+                    }
+                }
+                ws.send(event("Inspector.targetCrashed")).await.unwrap();
+                ws.send(Message::Text(
+                    json!({"id": reload.unwrap(), "result": {}}).to_string(),
+                ))
+                .await
+                .unwrap();
+                let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                let command = serde_json::from_str::<Value>(&text).unwrap();
+                assert_eq!(command["method"], "Page.navigate");
+                ws.send(event("Inspector.targetReloadedAfterCrash"))
+                    .await
+                    .unwrap();
+                ws.send(Message::Text(
+                    json!({"id": command["id"], "result": {"frameId": "F"}}).to_string(),
+                ))
+                .await
+                .unwrap();
+                let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                let command = serde_json::from_str::<Value>(&text).unwrap();
+                assert_eq!(command["method"], "Runtime.evaluate");
+                ws.send(Message::Text(
+                    json!({"id": command["id"], "result": {"value": "back"}}).to_string(),
+                ))
+                .await
+                .unwrap();
+                while ws.next().await.is_some() {}
+            });
+
+            let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+            let send = |method: &'static str, session_id: Option<&'static str>| {
+                let client = client.clone();
+                tokio::spawn(async move { client.send_command_no_params(method, session_id).await })
+            };
+            let evaluate = send("Runtime.evaluate", session_id);
+            let reload = send("Page.reload", session_id);
+            let other = send("Runtime.evaluate", Some("S-OTHER"));
+            let raw = {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    client
+                        .send_command_typed_raw::<_, RawNodes>(
+                            "Accessibility.getFullAXTree",
+                            &json!({}),
+                            session_id,
+                        )
+                        .await
+                })
+            };
+
+            let wait = Duration::from_secs(2);
+            let error = tokio::time::timeout(wait, evaluate)
+                .await
+                .expect("a crashed page's command should fail at once")
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(
+                error,
+                format!("CDP error (Runtime.evaluate): {TARGET_CRASHED_MESSAGE}")
+            );
+            assert!(is_target_crashed_error(&error));
+            assert!(!is_session_detached_error(&error));
+            let raw_error = tokio::time::timeout(wait, raw)
+                .await
+                .expect("a crashed page's raw command should fail at once")
+                .unwrap()
+                .unwrap_err();
+            assert!(is_target_crashed_error(&raw_error), "{raw_error}");
+            tokio::time::timeout(wait, reload)
+                .await
+                .expect("the reload of a crashed page should be answered")
+                .unwrap()
+                .unwrap();
+            assert!(!other.is_finished(), "another page's command still waits");
+
+            let later = tokio::time::timeout(
+                wait,
+                client.send_command_no_params("Page.getFrameTree", session_id),
+            )
+            .await
+            .expect("a later command to a crashed page should not wait")
+            .unwrap_err();
+            assert!(is_target_crashed_error(&later), "{later}");
+            let later_raw = tokio::time::timeout(
+                wait,
+                client.send_command_typed_raw::<_, RawNodes>(
+                    "Accessibility.getFullAXTree",
+                    &json!({}),
+                    session_id,
+                ),
+            )
+            .await
+            .expect("a later raw command to a crashed page should not wait")
+            .unwrap_err();
+            assert!(is_target_crashed_error(&later_raw), "{later_raw}");
+
+            let navigated = tokio::time::timeout(
+                wait,
+                client.send_command_no_params("Page.navigate", session_id),
+            )
+            .await
+            .expect("a navigation of a crashed page should be answered")
+            .unwrap();
+            assert_eq!(navigated["frameId"], "F");
+            let back = tokio::time::timeout(
+                wait,
+                client.send_command_no_params("Runtime.evaluate", session_id),
+            )
+            .await
+            .expect("a page loaded again should answer")
+            .unwrap();
+            assert_eq!(back["value"], "back");
+
+            other.abort();
+            client.close().await;
+            server.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn session_parents_subtree_and_cleanup_on_detach_and_destroy() {
+        let mut parents = SessionParents::default();
+        parents.insert("frame", "page", Some("T-FRAME"));
+        parents.insert("nested", "frame", Some("T-NESTED"));
+        parents.insert("deep", "nested", Some("T-DEEP"));
+        parents.insert("worker", "page", Some("T-WORKER"));
+        parents.insert("worker-child", "worker", Some("T-WORKER-CHILD"));
+
+        assert_eq!(parents.take_subtree("frame"), ["frame", "nested", "deep"]);
+        assert_eq!(parents.entries.len(), 2);
+        assert_eq!(parents.order.len(), 2);
+        assert_eq!(parents.take_subtree("unknown"), ["unknown"]);
+
+        assert_eq!(parents.take_target("T-WORKER"), ["worker", "worker-child"]);
+        assert!(parents.entries.is_empty());
+        assert!(parents.order.is_empty());
+    }
+
+    #[test]
+    fn session_parents_evicts_oldest_past_the_limit() {
+        let mut parents = SessionParents::default();
+        for index in 0..=SESSION_PARENT_LIMIT {
+            parents.insert(&format!("S-{index}"), "S-PAGE", Some(&format!("T-{index}")));
+        }
+        parents.insert("S-1", "S-PAGE", Some("T-1"));
+        assert!(!parents.entries.contains_key("S-0"));
+        assert!(parents.entries.contains_key("S-1"));
+        assert!(parents
+            .entries
+            .contains_key(&format!("S-{SESSION_PARENT_LIMIT}")));
+        assert_eq!(parents.entries.len(), SESSION_PARENT_LIMIT);
+        assert_eq!(parents.order.len(), SESSION_PARENT_LIMIT);
+
+        assert_eq!(parents.take_subtree("S-1"), ["S-1"]);
+        assert_eq!(parents.entries.len(), SESSION_PARENT_LIMIT - 1);
+        assert_eq!(parents.order.len(), SESSION_PARENT_LIMIT - 1);
+    }
+
+    #[test]
+    fn needs_renderer_allowlist() {
+        for method in [
+            "Browser.close",
+            "Browser.getVersion",
+            "Fetch.enable",
+            "Fetch.disable",
+            "IO.read",
+            "IO.close",
+            "Security.setIgnoreCertificateErrors",
+            "Storage.getCookies",
+            "Target.closeTarget",
+            "Target.activateTarget",
+            "Tracing.start",
+            "Tracing.end",
+            "Page.bringToFront",
+            "Page.getNavigationHistory",
+            "Page.handleJavaScriptDialog",
+            "Page.navigate",
+            "Page.navigateToHistoryEntry",
+            "Page.reload",
+            "Page.screencastFrameAck",
+            "Page.setWebLifecycleState",
+            "Page.startScreencast",
+            "Page.stopScreencast",
+            "Network.clearBrowserCookies",
+            "Network.getAllCookies",
+            "Network.getCookies",
+            "Network.setCookies",
+            "Emulation.setDeviceMetricsOverride",
+            "Emulation.setGeolocationOverride",
+        ] {
+            assert!(!needs_renderer(method), "{method}");
+        }
+        for method in [
+            "Runtime.evaluate",
+            "Page.captureScreenshot",
+            "Page.getFrameTree",
+            "Accessibility.getFullAXTree",
+            "DOM.getDocument",
+            "Input.dispatchMouseEvent",
+            "Network.enable",
+            "Emulation.setTimezoneOverride",
+            "malformed",
+        ] {
+            assert!(needs_renderer(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn page_controlled_text_is_not_a_crash() {
+        for error in [
+            TARGET_CRASHED_MESSAGE.to_string(),
+            format!("Evaluation error: {TARGET_CRASHED_MESSAGE}"),
+            format!("CDP error (Runtime.evaluate): Error: {TARGET_CRASHED_MESSAGE}"),
+            format!("CDP error (Runtime.evaluate): {TARGET_CRASHED_MESSAGE}: x"),
+            format!("CDP error (Error: x): {TARGET_CRASHED_MESSAGE}"),
+        ] {
+            assert!(!is_target_crashed_error(&error), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn target_destroyed_fails_subtree_commands_and_clears_crash_entries() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for (session_id, parent, target_id) in [
+                ("S-FRAME", "S-PAGE", "T-FRAME"),
+                ("S-NESTED", "S-FRAME", "T-NESTED"),
+                ("S-SIBLING", "S-PAGE", "T-SIBLING"),
+            ] {
+                ws.send(attached_event(session_id, parent, target_id))
+                    .await
+                    .unwrap();
+            }
+            ws.send(Message::Text(
+                json!({
+                    "method": "Inspector.targetCrashed",
+                    "params": {},
+                    "sessionId": "S-FRAME"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let mut commands = Vec::new();
+            for _ in 0..2 {
+                let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                commands.push(serde_json::from_str::<Value>(&text).unwrap());
+            }
+            ws.send(Message::Text(
+                json!({
+                    "method": "Target.targetDestroyed",
+                    "params": { "targetId": "T-FRAME" }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let sibling = commands
+                .iter()
+                .find(|command| command["sessionId"] == "S-SIBLING")
+                .unwrap();
+            ws.send(Message::Text(
+                json!({"id": sibling["id"], "result": {"value": "sibling"}}).to_string(),
+            ))
+            .await
+            .unwrap();
+            while ws.next().await.is_some() {}
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let mut events = client.subscribe();
+        let wait = Duration::from_secs(2);
+        loop {
+            let ev = tokio::time::timeout(wait, events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if ev.method == "Inspector.targetCrashed" {
+                break;
+            }
+        }
+        assert!(client
+            .crashed_sessions
+            .lock()
+            .unwrap()
+            .contains(&Some("S-FRAME".to_string())));
+
+        let send = |session_id: &'static str| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .send_command_no_params("Runtime.evaluate", Some(session_id))
+                    .await
+            })
+        };
+        let (nested, sibling) = (send("S-NESTED"), send("S-SIBLING"));
+
+        let error = tokio::time::timeout(wait, nested)
+            .await
+            .expect("a command under a destroyed target should fail at once")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "CDP error (Runtime.evaluate): Target closed: CDP session S-NESTED detached"
+        );
+        assert!(is_session_detached_error(&error));
+
+        let result = tokio::time::timeout(wait, sibling)
+            .await
+            .expect("a sibling session should still be answered")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["value"], "sibling");
+
+        assert!(
+            !client
+                .crashed_sessions
+                .lock()
+                .unwrap()
+                .contains(&Some("S-FRAME".to_string())),
+            "crash entry for destroyed target must be cleared"
+        );
+
+        let later = tokio::time::timeout(
+            wait,
+            client.send_command_no_params("Page.enable", Some("S-NESTED")),
+        )
+        .await
+        .expect("a later command under a destroyed target should not wait")
+        .unwrap_err();
+        assert!(is_session_detached_error(&later), "{later}");
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn main_frame_navigation_clears_crash_state_but_subframe_does_not() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (send_main_tx, send_main_rx) = oneshot::channel::<()>();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Text(
+                json!({
+                    "method": "Inspector.targetCrashed",
+                    "params": {},
+                    "sessionId": "S-PAGE"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            ws.send(Message::Text(
+                json!({
+                    "method": "Page.frameNavigated",
+                    "params": {
+                        "frame": {
+                            "id": "F-CHILD",
+                            "parentId": "F-MAIN",
+                            "url": "https://sub.test/"
+                        }
+                    },
+                    "sessionId": "S-PAGE"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let _ = send_main_rx.await;
+            ws.send(Message::Text(
+                json!({
+                    "method": "Page.frameNavigated",
+                    "params": {
+                        "frame": {
+                            "id": "F-MAIN",
+                            "url": "https://main.test/"
+                        }
+                    },
+                    "sessionId": "S-PAGE"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            let command = serde_json::from_str::<Value>(&text).unwrap();
+            assert_eq!(command["method"], "Runtime.evaluate");
+            ws.send(Message::Text(
+                json!({"id": command["id"], "result": {"value": "recovered"}}).to_string(),
+            ))
+            .await
+            .unwrap();
+            while ws.next().await.is_some() {}
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut events = client.subscribe();
+        let wait = Duration::from_secs(2);
+        loop {
+            let ev = tokio::time::timeout(wait, events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if ev.method == "Page.frameNavigated" {
+                break;
+            }
+        }
+
+        let after_subframe = tokio::time::timeout(
+            wait,
+            client.send_command_no_params("Runtime.evaluate", Some("S-PAGE")),
+        )
+        .await
+        .expect("subframe navigation must not clear crash state")
+        .unwrap_err();
+        assert!(is_target_crashed_error(&after_subframe), "{after_subframe}");
+
+        send_main_tx.send(()).unwrap();
+        loop {
+            let ev = tokio::time::timeout(wait, events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if ev.method == "Page.frameNavigated" {
+                break;
+            }
+        }
+
+        let recovered = tokio::time::timeout(
+            wait,
+            client.send_command_no_params("Runtime.evaluate", Some("S-PAGE")),
+        )
+        .await
+        .expect("main-frame navigation should allow commands again")
+        .expect("main-frame navigation should clear crash state");
+        assert_eq!(recovered["value"], "recovered");
 
         client.close().await;
         server.await.unwrap();
