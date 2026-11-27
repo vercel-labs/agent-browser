@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use super::cdp::client::CdpClient;
 
@@ -1074,16 +1074,16 @@ fn args_bytes_within(args: &[Value], limit: usize) -> Option<usize> {
 /// Entries kept in arrival order, oldest dropped first once either the entry count or the total
 /// weight of what is kept would pass its limit. It is the only place that decides what stays.
 struct BoundedLog<T> {
-    entries: Vec<T>,
-    weights: Vec<usize>,
+    entries: VecDeque<T>,
+    weights: VecDeque<usize>,
     total: usize,
 }
 
 impl<T> BoundedLog<T> {
     fn new() -> Self {
         Self {
-            entries: Vec::new(),
-            weights: Vec::new(),
+            entries: VecDeque::new(),
+            weights: VecDeque::new(),
             total: 0,
         }
     }
@@ -1093,11 +1093,11 @@ impl<T> BoundedLog<T> {
             && (self.entries.len() >= MAX_TRACKED_ENTRIES
                 || self.total + weight > MAX_RETAINED_BYTES)
         {
-            self.entries.remove(0);
-            self.total -= self.weights.remove(0);
+            self.entries.pop_front();
+            self.total -= self.weights.pop_front().expect("each entry has a weight");
         }
-        self.entries.push(entry);
-        self.weights.push(weight);
+        self.entries.push_back(entry);
+        self.weights.push_back(weight);
         self.total += weight;
     }
 
@@ -1124,11 +1124,11 @@ impl EventTracker {
         }
     }
 
-    pub fn console_entries(&self) -> &[ConsoleEntry] {
+    pub fn console_entries(&self) -> &VecDeque<ConsoleEntry> {
         &self.console.entries
     }
 
-    pub fn error_entries(&self) -> &[ErrorEntry] {
+    pub fn error_entries(&self) -> &VecDeque<ErrorEntry> {
         &self.errors.entries
     }
 
@@ -1396,6 +1396,62 @@ mod tests {
         assert!(script.contains("return worker"));
         assert!(!script.contains("_wrapWorkerWithCspFallback"));
         assert!(!script.contains("return new OrigCtor(checkedUrl, options)"));
+    }
+
+    #[test]
+    fn bounded_event_queues_preserve_order_after_wraparound_and_clear() {
+        let mut tracker = EventTracker::new();
+        let events = MAX_TRACKED_ENTRIES * 3 + 1;
+        for i in 0..events {
+            tracker.add_console("log", &format!("log {i}"), &[json!(i)]);
+            tracker.add_error(
+                &format!("error {i}"),
+                Some("app.js"),
+                Some(i as i64),
+                Some(1),
+            );
+        }
+        let console = tracker.get_console_json();
+        let errors = tracker.get_errors_json();
+        for (index, i) in (events - MAX_TRACKED_ENTRIES..events).enumerate() {
+            assert_eq!(console["messages"][index]["text"], format!("log {i}"));
+            assert_eq!(console["messages"][index]["args"], json!([i]));
+            assert_eq!(errors["errors"][index]["text"], format!("error {i}"));
+            assert_eq!(errors["errors"][index]["line"], i);
+        }
+        assert_eq!(tracker.console_entries().len(), MAX_TRACKED_ENTRIES);
+        assert_eq!(tracker.error_entries().len(), MAX_TRACKED_ENTRIES);
+
+        tracker.clear_console();
+        tracker.clear_errors();
+        tracker.add_console("info", "new log", &[]);
+        tracker.add_error("new error", None, None, None);
+        assert_eq!(
+            tracker.get_console_json(),
+            json!({ "messages": [{ "type": "info", "text": "new log" }] })
+        );
+        assert_eq!(
+            tracker.get_errors_json(),
+            json!({ "errors": [{ "text": "new error", "url": null, "line": null, "column": null }] })
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_bounded_event_queues() {
+        let mut tracker = EventTracker::new();
+        let start = std::time::Instant::now();
+        for _ in 0..200_000 {
+            tracker.add_console("log", "message from page", &[]);
+            tracker.add_error("page error", Some("app.js"), Some(12), Some(3));
+        }
+        std::hint::black_box(&tracker);
+        println!(
+            "bench_bounded_event_queues: events=400000 capacity=1000 elapsed_ms={:.2}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+        assert_eq!(tracker.console_entries().len(), MAX_TRACKED_ENTRIES);
+        assert_eq!(tracker.error_entries().len(), MAX_TRACKED_ENTRIES);
     }
 
     #[test]
