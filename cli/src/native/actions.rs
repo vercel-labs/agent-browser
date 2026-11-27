@@ -21,14 +21,15 @@ use super::a11y;
 use super::auth;
 use super::bidi;
 use super::bidi::attach::target_label;
-use super::browser::{should_track_target, BrowserManager, TabKeep, WaitUntil, WedgeReport};
+use super::browser::{
+    should_track_target, BrowserEvents, BrowserManager, TabKeep, WaitUntil, WedgeReport,
+};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::{is_session_detached_error, CdpClient};
 use super::cdp::types::{
-    session_matches, AttachToTargetParams, AttachToTargetResult, CdpEvent,
-    DispatchMouseEventParams, ExceptionThrownEvent, GetFullAXTreeResult,
-    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfo,
-    TargetInfoChangedEvent,
+    session_matches, AttachToTargetParams, AttachToTargetResult, DispatchMouseEventParams,
+    ExceptionThrownEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent, TargetCreatedEvent,
+    TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -750,7 +751,7 @@ pub struct DaemonState {
     store: Arc<dyn Store>,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
-    event_rx: Option<broadcast::Receiver<CdpEvent>>,
+    event_rx: Option<BrowserEvents>,
     /// Downloads seen on the attached browser, for `wait --download`.
     downloads: DownloadLedger,
     pub webmcp: webmcp::RuntimeState,
@@ -1163,8 +1164,12 @@ impl DaemonState {
 
     fn subscribe_to_browser_events(&mut self) {
         self.downloads.clear();
-        if let Some(ref browser) = self.browser {
-            self.event_rx = Some(browser.client.subscribe());
+        if let Some(ref mut browser) = self.browser {
+            self.event_rx = Some(
+                browser
+                    .take_initial_events()
+                    .unwrap_or_else(|| BrowserEvents::subscribe(&browser.client)),
+            );
         }
     }
 
@@ -1846,6 +1851,9 @@ impl DaemonState {
         // Remove destroyed targets
         let mut removed_tracked_page = false;
         for target_id in &drained.destroyed_targets {
+            if let Some(sid) = self.iframe_sessions.remove(target_id) {
+                self.active_iframe_sessions.remove(&sid);
+            }
             if let Some(ref mut mgr) = self.browser {
                 removed_tracked_page |= mgr.remove_page_by_target_id(target_id);
             }
@@ -2320,8 +2328,10 @@ impl DaemonState {
         let mut har_finished_requests: Vec<(String, Option<String>)> = Vec::new();
         let mut early_iframe_console_events: Vec<(String, String, Value)> = Vec::new();
 
-        loop {
-            match rx.try_recv() {
+        // Limit each batch to the events already queued. A busy page must not
+        // keep this synchronous drain running indefinitely.
+        for event in rx.drain() {
+            match event {
                 Ok(event) => {
                     if self.downloads.observe(&event.method, &event.params) {
                         continue;
@@ -2452,6 +2462,16 @@ impl DaemonState {
                                             .push((target_info.target_id, sid.to_string()));
                                     }
                                     Ok(target_info) if should_track_target(&target_info) => {
+                                        // Explicit attachments were already initialized by
+                                        // BrowserManager. Replaying them can select the
+                                        // wrong tab and re-enable auto-attach unnecessarily.
+                                        if self
+                                            .browser
+                                            .as_ref()
+                                            .is_some_and(|b| b.has_page_session(sid))
+                                        {
+                                            continue;
+                                        }
                                         attached_page_sessions.push((target_info, sid.to_string()));
                                     }
                                     Ok(target_info) if target_is_worker_like(&target_info) => {
@@ -3288,6 +3308,15 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
         ff.close().await;
     }
     let browser = state.browser.take();
+    // Receivers and handlers belong to this connection, including when
+    // initialization fails before the first command can use it.
+    state.event_rx = None;
+    if let Some(task) = state.fetch_handler_task.take() {
+        task.abort();
+    }
+    if let Some(task) = state.dialog_handler_task.take() {
+        task.abort();
+    }
     state.launch_identity = None;
     state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
@@ -5458,6 +5487,37 @@ async fn install_network_controls_or_close(
     Ok(())
 }
 
+/// Finish the connection before the first action (or startup script) can use
+/// it. Preparing a child can synchronously attach more children, so process
+/// those follow-up events as well. Fetch handlers and network controls must
+/// already be installed before any paused target is resumed.
+async fn finish_browser_initialization(state: &mut DaemonState) -> Result<(), String> {
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(state.default_timeout_ms),
+        async {
+            loop {
+                let drained = state.drain_cdp_events();
+                let may_attach_children = !drained.new_targets.is_empty()
+                    || !drained.attached_page_sessions.is_empty()
+                    || !drained.attached_iframe_sessions.is_empty()
+                    || !drained.attached_worker_sessions.is_empty()
+                    || !drained.attached_other_sessions.is_empty();
+                state.apply_drained_events(drained).await?;
+                if !may_attach_children {
+                    return Ok(());
+                }
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|_| Err("Timed out initializing attached browser targets".to_string()));
+    if let Err(error) = result {
+        let cleanup_error = rollback_failed_launch(state).await.err();
+        return Err(combine_provider_failure(error, cleanup_error));
+    }
+    Ok(())
+}
+
 async fn install_network_controls_or_resume_prepared_session(
     state: &mut DaemonState,
     handle_auth_requests: bool,
@@ -5767,6 +5827,8 @@ async fn auto_launch_with_settings(
     if matches!(connection, Connection::Cdp(_) | Connection::AutoConnect)
         || !matches!(&connection, Connection::Provider(provider) if provider_is_browser_use(provider))
     {
+        // Connection and target initialization have large futures. Keep them off
+        // the command stack, including when running unoptimized builds.
         return Box::pin(auto_launch_inner(
             state,
             plugins,
@@ -5983,6 +6045,7 @@ async fn launch_browser_from_settings(
         apply_tab_binding_on_attach_or_rollback(state).await?;
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
+        finish_browser_initialization(state).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
@@ -6015,6 +6078,7 @@ async fn launch_browser_from_settings(
         state.start_dialog_handler();
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
+        finish_browser_initialization(state).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
@@ -6099,6 +6163,7 @@ async fn launch_browser_from_settings(
                     state.update_stream_client().await;
                     write_provider_file(&state.session_id, &p);
                     install_network_controls_or_close(state, has_proxy_auth).await?;
+                    finish_browser_initialization(state).await?;
                     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
                     try_auto_restore_state(state).await;
                     load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
@@ -6175,6 +6240,7 @@ async fn launch_browser_from_settings(
     // succeeds, like the launch settings.
     let result = async {
         install_network_controls_or_close(state, has_proxy_auth).await?;
+        finish_browser_initialization(state).await?;
 
         let replay_warning = replay_session_setup_after_launch(state).await;
 
@@ -6877,6 +6943,7 @@ async fn handle_launch_for_target(
     deadline: std::time::Duration,
     request: LaunchRequest,
 ) -> Result<Value, String> {
+    // Match auto-launch: the full connection setup belongs on the heap.
     if cmd.get("cdpUrl").and_then(Value::as_str).is_some()
         || cmd.get("cdpPort").and_then(Value::as_u64).is_some()
         || cmd.get("autoConnect").and_then(Value::as_bool) == Some(true)
@@ -8622,10 +8689,6 @@ async fn close_session(state: &mut DaemonState, forget_settings: bool) -> Result
     close_all_browser_backends(state).await?;
     state.attached_target = None;
 
-    // Stop background Fetch handler
-    if let Some(task) = state.fetch_handler_task.take() {
-        task.abort();
-    }
     {
         let mut map = state.origin_headers.write().await;
         map.clear();
@@ -18439,6 +18502,10 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 }
 
 #[cfg(test)]
+#[path = "initial_connection_tests.rs"]
+mod initial_connection_tests;
+
+#[cfg(test)]
 mod tests {
     #[tokio::test]
     async fn firefox_dispatch_preserves_confirmation_until_confirmed_or_denied() {
@@ -20184,23 +20251,13 @@ mod tests {
     #[test]
     fn drain_drops_targets_destroyed_in_the_same_batch() {
         let mut state = DaemonState::new();
-        let (events, receiver) = broadcast::channel(16);
-        state.event_rx = Some(receiver);
-
-        events
-            .send(CdpEvent {
-                method: "Target.targetInfoChanged".to_string(),
-                params: json!({"targetInfo":{"targetId":"closed","type":"page","title":"","url":"https://example.com/","attached":false}}),
-                session_id: None,
-            })
-            .unwrap();
-        events
-            .send(CdpEvent {
-                method: "Target.targetDestroyed".to_string(),
-                params: json!({"targetId":"closed"}),
-                session_id: None,
-            })
-            .unwrap();
+        state.event_rx = Some(BrowserEvents::from_test_events([
+            (
+                "Target.targetInfoChanged",
+                json!({"targetInfo":{"targetId":"closed","type":"page","title":"","url":"https://example.com/","attached":false}}),
+            ),
+            ("Target.targetDestroyed", json!({"targetId":"closed"})),
+        ]));
 
         let drained = state.drain_cdp_events();
         assert!(drained.new_targets.is_empty());
@@ -20210,30 +20267,20 @@ mod tests {
     #[test]
     fn drain_drops_sessions_detached_in_the_same_batch() {
         let mut state = DaemonState::new();
-        let (events, receiver) = broadcast::channel(16);
-        state.event_rx = Some(receiver);
-
-        events
-            .send(CdpEvent {
-                method: "Target.attachedToTarget".to_string(),
-                params: json!({"sessionId":"old","targetInfo":{"targetId":"w","type":"service_worker","title":"","url":"https://example.com/sw.js","attached":true},"waitingForDebugger":true}),
-                session_id: None,
-            })
-            .unwrap();
-        events
-            .send(CdpEvent {
-                method: "Target.detachedFromTarget".to_string(),
-                params: json!({"sessionId":"old","targetId":"w"}),
-                session_id: None,
-            })
-            .unwrap();
-        events
-            .send(CdpEvent {
-                method: "Target.attachedToTarget".to_string(),
-                params: json!({"sessionId":"new","targetInfo":{"targetId":"w","type":"service_worker","title":"","url":"https://example.com/sw.js","attached":true},"waitingForDebugger":true}),
-                session_id: None,
-            })
-            .unwrap();
+        state.event_rx = Some(BrowserEvents::from_test_events([
+            (
+                "Target.attachedToTarget",
+                json!({"sessionId":"old","targetInfo":{"targetId":"w","type":"service_worker","title":"","url":"https://example.com/sw.js","attached":true},"waitingForDebugger":true}),
+            ),
+            (
+                "Target.detachedFromTarget",
+                json!({"sessionId":"old","targetId":"w"}),
+            ),
+            (
+                "Target.attachedToTarget",
+                json!({"sessionId":"new","targetInfo":{"targetId":"w","type":"service_worker","title":"","url":"https://example.com/sw.js","attached":true},"waitingForDebugger":true}),
+            ),
+        ]));
 
         let drained = state.drain_cdp_events();
         assert_eq!(drained.attached_worker_sessions.len(), 1);
@@ -20247,30 +20294,20 @@ mod tests {
     #[test]
     fn drain_keeps_discovered_page_when_its_session_detaches() {
         let mut state = DaemonState::new();
-        let (events, receiver) = broadcast::channel(16);
-        state.event_rx = Some(receiver);
-
-        events
-            .send(CdpEvent {
-                method: "Target.targetInfoChanged".to_string(),
-                params: json!({"targetInfo":{"targetId":"p","type":"page","title":"","url":"https://example.com/","attached":false}}),
-                session_id: None,
-            })
-            .unwrap();
-        events
-            .send(CdpEvent {
-                method: "Target.attachedToTarget".to_string(),
-                params: json!({"sessionId":"old","targetInfo":{"targetId":"p","type":"page","title":"","url":"https://example.com/","attached":true},"waitingForDebugger":true}),
-                session_id: None,
-            })
-            .unwrap();
-        events
-            .send(CdpEvent {
-                method: "Target.detachedFromTarget".to_string(),
-                params: json!({"sessionId":"old","targetId":"p"}),
-                session_id: None,
-            })
-            .unwrap();
+        state.event_rx = Some(BrowserEvents::from_test_events([
+            (
+                "Target.targetInfoChanged",
+                json!({"targetInfo":{"targetId":"p","type":"page","title":"","url":"https://example.com/","attached":false}}),
+            ),
+            (
+                "Target.attachedToTarget",
+                json!({"sessionId":"old","targetInfo":{"targetId":"p","type":"page","title":"","url":"https://example.com/","attached":true},"waitingForDebugger":true}),
+            ),
+            (
+                "Target.detachedFromTarget",
+                json!({"sessionId":"old","targetId":"p"}),
+            ),
+        ]));
 
         let drained = state.drain_cdp_events();
         assert!(drained.attached_page_sessions.is_empty());
