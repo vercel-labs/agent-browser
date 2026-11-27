@@ -871,6 +871,9 @@ pub struct DaemonState {
     active_provider_connection: bool,
     /// Browser product already checked for an outdated build, so each product is checked once even when the fetch fails.
     browser_security_checked: Option<String>,
+    /// The outdated-browser check runs in the background, since it fetches a release feed over
+    /// the network; its warning is attached to the first response after it finishes.
+    browser_security_pending: Option<tokio::task::JoinHandle<Option<String>>>,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
     /// Strict session-to-tab binding (`--pin-tab` / AGENT_BROWSER_PIN_TAB).
@@ -1094,6 +1097,7 @@ impl DaemonState {
             active_provider_session: None,
             active_provider_connection: false,
             browser_security_checked: None,
+            browser_security_pending: None,
             confirmed_policy_actions: HashSet::new(),
             pin_tab,
             last_persisted_binding: None,
@@ -3773,7 +3777,22 @@ async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
 }
 
 /// Adds a warning to the response when the connected browser is outdated with known CVEs. Checks each browser product once and never fails.
+///
+/// The check fetches a release feed over the network, so it runs in the background instead of
+/// holding up the response: a slow or blocked network added up to 3 s to the first command of
+/// every session. Its warning is attached to the first response after it finishes.
 async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value) {
+    if state
+        .browser_security_pending
+        .as_ref()
+        .is_some_and(|task| task.is_finished())
+    {
+        if let Some(task) = state.browser_security_pending.take() {
+            if let Ok(Some(w)) = task.await {
+                append_warning(response, &w);
+            }
+        }
+    }
     let disabled =
         env::var("AGENT_BROWSER_NO_VERSION_CHECK").is_ok_and(|v| v == "1" || v == "true");
     if state.active_provider_connection || disabled {
@@ -3802,9 +3821,10 @@ async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value)
         return;
     }
     state.browser_security_checked = Some(product.to_string());
-    if let Some(w) = crate::browser_security::outdated_warning(product).await {
-        append_warning(response, &w);
-    }
+    let product = product.to_string();
+    state.browser_security_pending = Some(tokio::spawn(async move {
+        crate::browser_security::outdated_warning(&product).await
+    }));
 }
 
 async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
