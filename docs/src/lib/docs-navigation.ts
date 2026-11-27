@@ -79,6 +79,7 @@ export const navigation: NavSection[] = [
       { name: "Lightpanda", href: "/engines/lightpanda" },
       { name: "Firefox", href: "/engines/firefox" },
       { name: "Obscura", href: "/engines/obscura" },
+      { name: "Moli", href: "/engines/moli" },
     ],
   },
   {

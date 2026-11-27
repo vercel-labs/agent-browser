@@ -6811,6 +6811,91 @@ mod tests {
     }
 
     #[test]
+    fn moli_extra_args_use_the_canonical_cli_parser() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+            "AGENT_BROWSER_STATE",
+            "AGENT_BROWSER_ARGS",
+            "AGENT_BROWSER_PROXY",
+            "AGENT_BROWSER_PROXY_BYPASS",
+            "AGENT_BROWSER_USER_AGENT",
+            "AGENT_BROWSER_IGNORE_HTTPS_ERRORS",
+        ]);
+        guard.set("AGENT_BROWSER_EXECUTABLE_PATH", "/tmp/moli");
+        guard.set("AGENT_BROWSER_STATE", "/tmp/moli state.json");
+        guard.set(
+            "AGENT_BROWSER_ARGS",
+            "--timeout=30,--http-cache-dir=Moli cache",
+        );
+        guard.set("AGENT_BROWSER_PROXY", "http://user:p%40ss@127.0.0.1:8080");
+        guard.set("AGENT_BROWSER_PROXY_BYPASS", "localhost");
+        guard.set("AGENT_BROWSER_USER_AGENT", "Moli adapter probe");
+        guard.set("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
+        let arguments = json!({"url": "https://example.com", "extraArgs": [
+            "--engine", "moli", "--hide-scrollbars", "false"
+        ]});
+        let (command, literal_start) = open_args(&arguments).unwrap();
+        let args = cli_tool_args_at(&arguments, command, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.engine.as_deref(), Some("moli"));
+        assert_eq!(flags.executable_path.as_deref(), Some("/tmp/moli"));
+        assert_eq!(flags.state.as_deref(), Some("/tmp/moli state.json"));
+        assert_eq!(
+            flags.args.as_deref(),
+            Some("--timeout=30,--http-cache-dir=Moli cache")
+        );
+        let proxy = flags.proxy.as_ref().unwrap();
+        assert_eq!(proxy.server, "http://127.0.0.1:8080");
+        assert_eq!(proxy.username.as_deref(), Some("user"));
+        assert_eq!(proxy.password.as_deref(), Some("p@ss"));
+        assert_eq!(flags.proxy_bypass.as_deref(), Some("localhost"));
+        assert_eq!(flags.user_agent.as_deref(), Some("Moli adapter probe"));
+        assert!(flags.ignore_https_errors);
+        assert!(!flags.hide_scrollbars);
+        use crate::session_settings::{Key, Patch, Requested};
+        assert_eq!(
+            Patch::from_flags(&flags).value(Key::ProxyBypass),
+            Some(&json!("localhost"))
+        );
+        let mut flags = flags;
+        flags.proxy_bypass = None;
+        assert_eq!(
+            Patch::from_flags(&flags).get(Key::ProxyBypass),
+            Some(&Requested::Default)
+        );
+    }
+
+    #[test]
+    fn moli_profile_environment_uses_the_canonical_cli_parser() {
+        let guard =
+            crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_PROFILE", "AGENT_BROWSER_STATE"]);
+        guard.set("AGENT_BROWSER_PROFILE", "/tmp/moli profile");
+        guard.remove("AGENT_BROWSER_STATE");
+        let arguments = json!({"url": "https://example.com", "extraArgs": ["--engine", "moli"]});
+        let (command, literal_start) = open_args(&arguments).unwrap();
+        let args = cli_tool_args_at(&arguments, command, literal_start, None).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.engine.as_deref(), Some("moli"));
+        assert_eq!(flags.profile.as_deref(), Some("/tmp/moli profile"));
+        assert!(flags.state.is_none());
+    }
+
+    #[test]
+    fn moli_stream_tool_uses_the_canonical_cli_parser() {
+        let args = cli_tool_args(
+            &json!({"extraArgs": ["--engine", "moli"]}),
+            command_parts("stream status"),
+            None,
+        )
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.engine.as_deref(), Some("moli"));
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        assert_eq!(command["action"], "stream_status");
+    }
+
+    #[test]
     fn obscura_extra_args_use_the_canonical_cli_parser() {
         let guard = crate::test_utils::EnvGuard::new(&[
             "AGENT_BROWSER_EXECUTABLE_PATH",

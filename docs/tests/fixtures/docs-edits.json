@@ -3,7 +3,7 @@
     "/commands": [
       {
         "from": "--engine <name>          # Browser engine: chrome (default), lightpanda, obscura (experimental)",
-        "to": "--engine <name>          # Browser engine: chrome (default), lightpanda, obscura, firefox"
+        "to": "--engine <name>          # Browser engine: chrome (default), lightpanda, obscura, firefox, moli (experimental)"
       },
       {
         "from": "agent-browser type <sel> <text>       # Type into element",
@@ -113,11 +113,11 @@
     "/configuration": [
       {
         "from": "Browser engine to use: chrome (default), lightpanda, obscura (experimental).",
-        "to": "Browser engine to use: chrome (default), lightpanda, firefox, obscura (experimental)."
+        "to": "Browser engine to use: chrome (default), lightpanda, firefox, obscura (experimental), moli (experimental)."
       },
       {
         "from": "<code>chrome</code> (default), <code>lightpanda</code>, <code>obscura</code> (experimental)",
-        "to": "<code>chrome</code> (default), <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code> (experimental)"
+        "to": "<code>chrome</code> (default), <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code> (experimental), <code>moli</code> (experimental)"
       },
       {
         "from": "This initial implementation does not support",
@@ -225,11 +225,11 @@
       },
       {
         "from": "<tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>obscura</code>)</td></tr>",
-        "to": "<tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code>)</td></tr>"
+        "to": "<tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>firefox</code>, <code>obscura</code>, <code>moli</code>)</td></tr>"
       },
       {
         "from": "string (chrome, lightpanda, obscura)",
-        "to": "string (chrome, lightpanda, firefox, obscura)"
+        "to": "string (chrome, lightpanda, firefox, obscura, moli)"
       },
       {
         "from": "anthropic/claude-sonnet-4.6",
@@ -587,8 +587,8 @@
   },
   "resources": {
     "/schema.json": {
-      "size": 9845,
-      "sha256": "49f5ff702ebdfd97cc87b923ac6a92cce646b6ab21d291474b202ef7ebd68b40"
+      "size": 9868,
+      "sha256": "b351cdc9fbe81743302c997ab45c5a1ce2ea8a154a750377cee16a2c9f7b7a91"
     }
   }
 }

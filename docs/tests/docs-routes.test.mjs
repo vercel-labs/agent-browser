@@ -60,6 +60,28 @@ async function htmlFor(page) {
   return htmlCache.get(page.path);
 }
 
+test("Moli engine documentation preserves installation and launch examples", async () => {
+  const page = pageAt("/engines/moli");
+  const html = await htmlFor(page);
+  const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
+  assert.ok(main);
+  for (const sample of ["--engine moli", "--executable-path", "Windows", "PowerShell", "--hide-scrollbars false"])
+    assert.ok(text(main).includes(sample), sample);
+  for (const [path, headers] of [
+    [apiPath(page.path), {}],
+    [markdownPath(page.path), {}],
+    [page.path, { accept: "text/markdown" }],
+    [legacyPath(page.path), {}],
+  ]) {
+    const response = await get(path, { headers });
+    responseType(response, "text/markdown");
+    const body = await response.text();
+    assert.ok(body.includes("# Moli (experimental)"));
+    assert.ok(body.includes("agent-browser --engine moli open example.com"));
+    assert.ok(body.includes("moli-installer.ps1"));
+  }
+});
+
 for (const page of publicPages) {
   test(`${page.path}: original title, description, OG and Twitter metadata plus canonical links`, async () => {
     const html = await htmlFor(page);
