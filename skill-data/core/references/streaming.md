@@ -2,6 +2,8 @@
 
 Stream a session's viewport over WebSocket and drive it with remote input. This is what a remote preview or embedded dashboard connects to: the browser runs wherever the daemon runs (a sandbox, a container, a CI box), and the client renders frames and sends clicks back.
 
+In the dashboard's viewport dimensions menu, **Auto-fit** keeps the active session sized to the panel. The dashboard remembers the setting across sessions. Selecting a device, aspect ratio, or custom size turns it off.
+
 **Related**: [commands.md](commands.md) for full command reference, [SKILL.md](../SKILL.md) for quick start.
 
 ## Contents
