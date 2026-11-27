@@ -125,9 +125,10 @@ async fn place_in_dispatch_viewport_with_relation(
         return Err(intercepted_error(target, &covering));
     }
     if !frame_subtree_contains(&tree, ref_frame, &receiver.frame_id) {
+        let covering = describe_node(client, dispatch_session, receiver.backend_node_id).await;
         return Err(format!(
-            "Element '{}' cannot be clicked safely: a click at ({}, {}) would land outside its frame, so the input could reach a different element. Open the frame's own URL to interact with it.",
-            target, point.x, point.y
+            "Element '{}' is covered by <{}> and cannot be clicked safely: a click at ({}, {}) would land outside its frame, so the input could reach a different element. Open the frame's own URL to interact with it.",
+            target, covering, point.x, point.y
         ));
     }
     if frame_owner_is(

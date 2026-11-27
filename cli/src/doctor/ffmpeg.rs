@@ -161,7 +161,7 @@ fn run_ffmpeg(binary: &Path, args: &[&str]) -> Option<String> {
 
 /// `ffmpeg version 8.1` from the banner's first line, dropping the
 /// copyright notice that follows it.
-fn parse_version(stdout: &str) -> Option<String> {
+pub(crate) fn parse_version(stdout: &str) -> Option<String> {
     let first = stdout.lines().next()?.trim();
     let version = first.split(" Copyright").next().unwrap_or(first).trim();
     if version.is_empty() {

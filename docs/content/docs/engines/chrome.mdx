@@ -113,3 +113,7 @@ Separate args with newlines, or with commas before another flag. Commas inside a
 ```bash
 agent-browser --args "--disable-features=Translate,HttpsUpgrades,--no-sandbox" open example.com
 ```
+
+## AppArmor user namespace restriction
+
+When `kernel.apparmor_restrict_unprivileged_userns` is `1`, AppArmor only lets binaries covered by an AppArmor profile create the user namespaces that Chrome's sandbox needs ([Chromium's notes](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md) list Ubuntu 23.10 and later). A system-wide Google Chrome install is usually covered, but the Chrome downloaded by `agent-browser install` is not, so it can exit with `No usable sandbox!`. In that case the launch error suggests a system Chrome instead. Point agent-browser at it with `--executable-path /usr/bin/google-chrome` or `AGENT_BROWSER_EXECUTABLE_PATH`. You can also add an AppArmor profile for the downloaded binary, as Chromium's notes describe.

@@ -28,6 +28,12 @@ pub struct ProviderConnection {
     pub metadata: Option<Value>,
 }
 
+fn provider_http_client(trust: &crate::tls::TrustOptions) -> Result<reqwest::Client, String> {
+    crate::tls::apply_to_reqwest(reqwest::Client::builder(), trust)?
+        .build()
+        .map_err(|e| format!("Failed to initialize provider HTTP client: {}", e))
+}
+
 /// Connects to the specified browser provider and returns a CDP WebSocket URL
 /// along with session info for cleanup on failure.
 pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection, String> {
@@ -43,7 +49,24 @@ pub async fn connect_provider_with_plugins(
     plugins: &[crate::plugins::PluginConfig],
     settings: &Running,
 ) -> Result<ProviderConnection, String> {
-    connect_provider_with_plugins_and_options(provider_name, plugins, settings, None).await
+    connect_provider_with_plugins_and_trust(
+        provider_name,
+        plugins,
+        settings,
+        &crate::tls::process_options(),
+    )
+    .await
+}
+
+/// Connects to a built-in provider or plugin provider using explicit TLS trust options.
+pub async fn connect_provider_with_plugins_and_trust(
+    provider_name: &str,
+    plugins: &[crate::plugins::PluginConfig],
+    settings: &Running,
+    trust: &crate::tls::TrustOptions,
+) -> Result<ProviderConnection, String> {
+    connect_provider_with_plugins_options_and_trust(provider_name, plugins, settings, None, trust)
+        .await
 }
 
 /// Connects to a built-in provider or plugin provider with launch options
@@ -56,9 +79,26 @@ pub async fn connect_provider_with_plugins_and_options(
     settings: &Running,
     launch_options: Option<Value>,
 ) -> Result<ProviderConnection, String> {
+    connect_provider_with_plugins_options_and_trust(
+        provider_name,
+        plugins,
+        settings,
+        launch_options,
+        &crate::tls::process_options(),
+    )
+    .await
+}
+
+async fn connect_provider_with_plugins_options_and_trust(
+    provider_name: &str,
+    plugins: &[crate::plugins::PluginConfig],
+    settings: &Running,
+    launch_options: Option<Value>,
+    trust: &crate::tls::TrustOptions,
+) -> Result<ProviderConnection, String> {
     match provider_name.to_lowercase().as_str() {
         "browserbase" => {
-            let (url, session) = connect_browserbase().await?;
+            let (url, session) = connect_browserbase(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -67,7 +107,7 @@ pub async fn connect_provider_with_plugins_and_options(
             })
         }
         "browserless" => {
-            let (url, session) = connect_browserless().await?;
+            let (url, session) = connect_browserless(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -76,7 +116,7 @@ pub async fn connect_provider_with_plugins_and_options(
             })
         }
         "browser-use" | "browseruse" => {
-            let (url, session) = connect_browser_use().await?;
+            let (url, session) = connect_browser_use(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -85,7 +125,7 @@ pub async fn connect_provider_with_plugins_and_options(
             })
         }
         "kernel" => {
-            let (url, session) = connect_kernel().await?;
+            let (url, session) = connect_kernel(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -94,7 +134,7 @@ pub async fn connect_provider_with_plugins_and_options(
             })
         }
         "agentcore" => {
-            let (url, session) = connect_agentcore().await?;
+            let (url, session) = connect_agentcore(trust).await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -125,6 +165,16 @@ pub async fn close_provider_session_with_plugins(
     session: &ProviderSession,
     plugins: &[crate::plugins::PluginConfig],
 ) -> Result<(), String> {
+    close_provider_session_with_plugins_and_trust(session, plugins, &crate::tls::process_options())
+        .await
+}
+
+/// Close a provider session with the plugin registry and TLS trust options that created it.
+pub async fn close_provider_session_with_plugins_and_trust(
+    session: &ProviderSession,
+    plugins: &[crate::plugins::PluginConfig],
+    trust: &crate::tls::TrustOptions,
+) -> Result<(), String> {
     if let Some(plugin_name) = session.provider.strip_prefix("plugin:") {
         if let Ok(cleanup) = serde_json::from_str::<Value>(&session.session_id) {
             let _ =
@@ -134,10 +184,26 @@ pub async fn close_provider_session_with_plugins(
         return Ok(());
     }
 
-    let client = reqwest::Client::new();
+    if session.provider == "browser-use" {
+        return stop_browser_use_session_at_with_tls(
+            BROWSER_USE_API_BASE,
+            &session.session_id,
+            BROWSER_USE_STOP_DEADLINE,
+            trust,
+        )
+        .await;
+    }
+
+    if session.provider == "agentcore" {
+        let _ = close_agentcore_session(&session.session_id, trust).await;
+        return Ok(());
+    }
+
     match session.provider.as_str() {
         "browserbase" => {
-            if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
+            if let (Ok(api_key), Ok(client)) =
+                (env::var("BROWSERBASE_API_KEY"), provider_http_client(trust))
+            {
                 let _ = client
                     .post(format!(
                         "https://api.browserbase.com/v1/sessions/{}",
@@ -150,23 +216,18 @@ pub async fn close_provider_session_with_plugins(
                     .await;
             }
         }
-        "browser-use" => {
-            return stop_browser_use_session_at(
-                BROWSER_USE_API_BASE,
-                &session.session_id,
-                BROWSER_USE_STOP_DEADLINE,
-            )
-            .await;
-        }
         "browserless" => {
             // session_id holds the stop URL for browserless
-            let _ = client.delete(&session.session_id).send().await;
+            if let Ok(client) = provider_http_client(trust) {
+                let _ = client.delete(&session.session_id).send().await;
+            }
         }
         "kernel" => {
             if let Ok(api_key) = env::var("KERNEL_API_KEY") {
+                let client = provider_http_client(trust)?;
                 let endpoint = env::var("KERNEL_ENDPOINT")
                     .unwrap_or_else(|_| "https://api.onkernel.com".to_string());
-                let _ = client
+                client
                     .delete(format!(
                         "{}/browsers/{}",
                         endpoint.trim_end_matches('/'),
@@ -174,12 +235,9 @@ pub async fn close_provider_session_with_plugins(
                     ))
                     .header("Authorization", format!("Bearer {}", api_key))
                     .send()
-                    .await;
+                    .await
+                    .map_err(|e| format!("Kernel cleanup request failed: {}", e))?;
             }
-        }
-        "agentcore" => {
-            // AgentCore session cleanup is handled via signed DELETE request
-            let _ = close_agentcore_session(&session.session_id).await;
         }
         _ => {}
     }
@@ -245,11 +303,13 @@ pub async fn connect_plugin_provider_with_plugins_and_options(
     })
 }
 
-async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_browserbase(
+    trust: &crate::tls::TrustOptions,
+) -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("BROWSERBASE_API_KEY")
         .map_err(|_| "BROWSERBASE_API_KEY environment variable is not set")?;
 
-    let client = reqwest::Client::new();
+    let client = provider_http_client(trust)?;
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
         .header("content-type", "application/json")
@@ -297,7 +357,9 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     ))
 }
 
-async fn connect_browserless() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_browserless(
+    trust: &crate::tls::TrustOptions,
+) -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("BROWSERLESS_API_KEY")
         .map_err(|_| "BROWSERLESS_API_KEY environment variable is not set")?;
 
@@ -325,7 +387,7 @@ async fn connect_browserless() -> Result<(String, Option<ProviderSession>), Stri
 
     let url = format!("{}/session", api_url.trim_end_matches('/'));
 
-    let client = reqwest::Client::new();
+    let client = provider_http_client(trust)?;
     let response = client
         .post(&url)
         .query(&[("token", &api_key)])
@@ -378,15 +440,19 @@ async fn connect_browserless() -> Result<(String, Option<ProviderSession>), Stri
     ))
 }
 
-async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), String> {
-    connect_browser_use_at(BROWSER_USE_API_BASE, BROWSER_USE_CREATE_DEADLINE).await
+async fn connect_browser_use(
+    trust: &crate::tls::TrustOptions,
+) -> Result<(String, Option<ProviderSession>), String> {
+    connect_browser_use_at_with_tls(BROWSER_USE_API_BASE, BROWSER_USE_CREATE_DEADLINE, trust).await
 }
 
-fn browser_use_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "Browser Use HTTP client could not be initialized".to_string())
+fn browser_use_client(trust: &crate::tls::TrustOptions) -> Result<reqwest::Client, String> {
+    crate::tls::apply_to_reqwest(
+        reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()),
+        trust,
+    )?
+    .build()
+    .map_err(|_| "Browser Use HTTP client could not be initialized".to_string())
 }
 
 async fn browser_use_response(request: reqwest::RequestBuilder) -> Result<Value, String> {
@@ -407,9 +473,18 @@ async fn browser_use_response(request: reqwest::RequestBuilder) -> Result<Value,
     response.json().await.map_err(safe_error)
 }
 
+#[cfg(test)]
 async fn connect_browser_use_at(
     base: &str,
     deadline: Duration,
+) -> Result<(String, Option<ProviderSession>), String> {
+    connect_browser_use_at_with_tls(base, deadline, &crate::tls::TrustOptions::default()).await
+}
+
+async fn connect_browser_use_at_with_tls(
+    base: &str,
+    deadline: Duration,
+    trust: &crate::tls::TrustOptions,
 ) -> Result<(String, Option<ProviderSession>), String> {
     let key = env::var("BROWSER_USE_API_KEY")
         .map_err(|_| "BROWSER_USE_API_KEY environment variable is not set")?;
@@ -417,7 +492,7 @@ async fn connect_browser_use_at(
         format!("Browser Use create {error}; the browser may still have been created; inspect Browser Use Cloud before retrying")
     };
     let response = browser_use_response(
-        browser_use_client()?
+        browser_use_client(trust)?
             .post(format!("{base}/browsers"))
             .header("X-Browser-Use-API-Key", &key)
             .timeout(deadline)
@@ -441,10 +516,26 @@ async fn connect_browser_use_at(
     ))
 }
 
+#[cfg(test)]
 async fn stop_browser_use_session_at(
     base: &str,
     session_id: &str,
     deadline: Duration,
+) -> Result<(), String> {
+    stop_browser_use_session_at_with_tls(
+        base,
+        session_id,
+        deadline,
+        &crate::tls::TrustOptions::default(),
+    )
+    .await
+}
+
+async fn stop_browser_use_session_at_with_tls(
+    base: &str,
+    session_id: &str,
+    deadline: Duration,
+    trust: &crate::tls::TrustOptions,
 ) -> Result<(), String> {
     let id = uuid::Uuid::parse_str(session_id)
         .map_err(|_| "Browser Use session id is not a valid UUID")?;
@@ -455,7 +546,7 @@ async fn stop_browser_use_session_at(
         return Err("Browser Use session identity matches a credential".to_string());
     }
     let response = browser_use_response(
-        browser_use_client()?
+        browser_use_client(trust)?
             .patch(format!("{base}/browsers/{id}"))
             .header("X-Browser-Use-API-Key", key)
             .timeout(deadline)
@@ -524,7 +615,9 @@ fn kernel_profile_from_env() -> Option<Value> {
     Some(json!({ "name": name, "save_changes": save_changes }))
 }
 
-async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_kernel(
+    trust: &crate::tls::TrustOptions,
+) -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("KERNEL_API_KEY").ok();
     let endpoint =
         env::var("KERNEL_ENDPOINT").unwrap_or_else(|_| "https://api.onkernel.com".to_string());
@@ -554,7 +647,7 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
             .insert("profile".to_string(), profile);
     }
 
-    let client = reqwest::Client::new();
+    let client = provider_http_client(trust)?;
     let mut request = client.post(&url).header("Content-Type", "application/json");
     if let Some(ref key) = api_key {
         request = request.header("Authorization", format!("Bearer {}", key));
@@ -654,7 +747,9 @@ mod agentcore {
         AGENTCORE_WS_HEADERS.with(|cell| cell.borrow_mut().take())
     }
 
-    pub async fn connect() -> Result<(String, Option<ProviderSession>), String> {
+    pub async fn connect(
+        trust: &crate::tls::TrustOptions,
+    ) -> Result<(String, Option<ProviderSession>), String> {
         let region = env::var("AGENTCORE_REGION")
             .or_else(|_| env::var("AWS_REGION"))
             .or_else(|_| env::var("AWS_DEFAULT_REGION"))
@@ -693,7 +788,7 @@ mod agentcore {
 
         let signed_headers = sign_request("PUT", &url, &region, Some(&body)).await?;
 
-        let client = reqwest::Client::new();
+        let client = super::provider_http_client(trust)?;
         let mut req = client.put(&url).body(body.clone());
         for (key, value) in &signed_headers {
             req = req.header(key.as_str(), value.as_str());
@@ -948,7 +1043,10 @@ mod agentcore {
         Ok(headers)
     }
 
-    pub async fn close_session(session_id: &str) -> Result<(), String> {
+    pub async fn close_session(
+        session_id: &str,
+        trust: &crate::tls::TrustOptions,
+    ) -> Result<(), String> {
         let info = get_agentcore_info();
         let (region, browser_id) = match &info {
             Some(i) => (i.region.clone(), i.browser_identifier.clone()),
@@ -975,7 +1073,7 @@ mod agentcore {
 
         let signed_headers = sign_request("PUT", &url, &region, Some(&body)).await?;
 
-        let client = reqwest::Client::new();
+        let client = super::provider_http_client(trust)?;
         let mut req = client.put(&url).body(body);
         for (key, value) in &signed_headers {
             req = req.header(key.as_str(), value.as_str());
@@ -988,12 +1086,17 @@ mod agentcore {
 
 pub use agentcore::{get_agentcore_info, take_agentcore_ws_headers};
 
-async fn connect_agentcore() -> Result<(String, Option<ProviderSession>), String> {
-    agentcore::connect().await
+async fn connect_agentcore(
+    trust: &crate::tls::TrustOptions,
+) -> Result<(String, Option<ProviderSession>), String> {
+    agentcore::connect(trust).await
 }
 
-async fn close_agentcore_session(session_id: &str) -> Result<(), String> {
-    agentcore::close_session(session_id).await
+async fn close_agentcore_session(
+    session_id: &str,
+    trust: &crate::tls::TrustOptions,
+) -> Result<(), String> {
+    agentcore::close_session(session_id, trust).await
 }
 
 #[cfg(test)]
@@ -1257,7 +1360,9 @@ mod tests {
         );
         guard.set("KERNEL_ENDPOINT", &base);
 
-        let (ws_url, session) = connect_kernel().await.unwrap();
+        let (ws_url, session) = connect_kernel(&crate::tls::TrustOptions::default())
+            .await
+            .unwrap();
         assert_eq!(ws_url, "wss://example.com/cdp");
         assert_eq!(session.unwrap().session_id, "s1");
 
@@ -1549,5 +1654,184 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             request["request"]["launchOptions"]["userAgent"],
             "cli-agent"
         );
+    }
+
+    fn spawn_https_kernel_server(
+        cert_b64: &str,
+        key_b64: &str,
+        connections: usize,
+    ) -> (
+        u16,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let config = crate::tls::test_support::server_config(cert_b64, key_b64);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let delete_count = Arc::new(AtomicUsize::new(0));
+        let delete_count_server = delete_count.clone();
+
+        let handle = std::thread::spawn(move || {
+            for _ in 0..connections {
+                let Ok((stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                let conn = rustls::ServerConnection::new(config.clone()).unwrap();
+                let mut tls = rustls::StreamOwned::new(conn, stream);
+                let mut buf = [0u8; 4096];
+                let Ok(n) = tls.read(&mut buf) else {
+                    continue;
+                };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                if req.starts_with("POST /browsers ") {
+                    let body = json!({
+                        "session_id": "k-123",
+                        "cdp_ws_url": "wss://127.0.0.1:9999/devtools/browser/k-123"
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = tls.write_all(resp.as_bytes());
+                } else if req.starts_with("DELETE /browsers/k-123 ") {
+                    delete_count_server.fetch_add(1, Ordering::SeqCst);
+                    let resp =
+                        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = tls.write_all(resp.as_bytes());
+                }
+                let _ = tls.flush();
+            }
+        });
+
+        (port, delete_count, handle)
+    }
+
+    #[tokio::test]
+    async fn test_kernel_connect_and_cleanup_honor_custom_ca_and_reject_untrusted() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = crate::tls::test_support::write_pem(
+            dir.path(),
+            "ca.pem",
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+        );
+        let (port, delete_count, server) = spawn_https_kernel_server(
+            crate::tls::test_support::LOCALHOST_CERT_DER,
+            crate::tls::test_support::LOCALHOST_KEY_DER,
+            4,
+        );
+
+        let guard = EnvGuard::new(&["KERNEL_ENDPOINT", "KERNEL_API_KEY"]);
+        guard.set("KERNEL_ENDPOINT", &format!("https://127.0.0.1:{port}"));
+        guard.set("KERNEL_API_KEY", "test-key");
+
+        let untrusted = crate::tls::TrustOptions::default();
+        let trusted = crate::tls::TrustOptions {
+            ca_cert: Some(ca_path.to_string_lossy().into_owned()),
+            ..crate::tls::TrustOptions::default()
+        };
+
+        let untrusted_err = connect_provider_with_plugins_and_trust(
+            "kernel",
+            &[],
+            &Running::defaults(),
+            &untrusted,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            untrusted_err.contains("Kernel request failed"),
+            "unexpected error: {untrusted_err}"
+        );
+
+        let conn =
+            connect_provider_with_plugins_and_trust("kernel", &[], &Running::defaults(), &trusted)
+                .await
+                .expect("connect_kernel should succeed with custom CA");
+        let session = conn.session.expect("kernel session");
+        assert_eq!(session.session_id, "k-123");
+
+        let cleanup_err = close_provider_session_with_plugins_and_trust(&session, &[], &untrusted)
+            .await
+            .unwrap_err();
+        assert!(
+            cleanup_err.contains("Kernel cleanup request failed"),
+            "unexpected cleanup error: {cleanup_err}"
+        );
+        assert_eq!(delete_count.load(Ordering::SeqCst), 0);
+
+        close_provider_session_with_plugins_and_trust(&session, &[], &trusted)
+            .await
+            .expect("kernel cleanup should succeed with custom CA");
+        assert_eq!(delete_count.load(Ordering::SeqCst), 1);
+
+        let _ = server.join();
+    }
+
+    #[tokio::test]
+    async fn test_kernel_connect_rejects_hostname_mismatch_even_with_trusted_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = crate::tls::test_support::write_pem(
+            dir.path(),
+            "wrong-host-ca.pem",
+            crate::tls::test_support::WRONG_HOST_CERT_DER,
+        );
+        let (port, _, server) = spawn_https_kernel_server(
+            crate::tls::test_support::WRONG_HOST_CERT_DER,
+            crate::tls::test_support::WRONG_HOST_KEY_DER,
+            1,
+        );
+
+        let guard = EnvGuard::new(&["KERNEL_ENDPOINT", "KERNEL_API_KEY"]);
+        guard.set("KERNEL_ENDPOINT", &format!("https://127.0.0.1:{port}"));
+        guard.set("KERNEL_API_KEY", "test-key");
+
+        let trusted_wrong_host = crate::tls::TrustOptions {
+            ca_cert: Some(ca_path.to_string_lossy().into_owned()),
+            ..crate::tls::TrustOptions::default()
+        };
+
+        let err = connect_provider_with_plugins_and_trust(
+            "kernel",
+            &[],
+            &Running::defaults(),
+            &trusted_wrong_host,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("Kernel request failed"),
+            "hostname mismatch must still fail: {err}"
+        );
+
+        let _ = server.join();
+    }
+
+    #[tokio::test]
+    async fn test_best_effort_provider_cleanup_ignores_unreadable_ca_cert() {
+        let missing_ca = crate::tls::TrustOptions {
+            ca_cert: Some("/nonexistent/tri2-missing-ca.pem".to_string()),
+            ..crate::tls::TrustOptions::default()
+        };
+
+        for provider in ["browserbase", "browserless", "agentcore"] {
+            let session = ProviderSession {
+                provider: provider.to_string(),
+                session_id: "https://127.0.0.1:1/stop".to_string(),
+            };
+            close_provider_session_with_plugins_and_trust(&session, &[], &missing_ca)
+                .await
+                .unwrap_or_else(|e| panic!("{provider} cleanup should ignore unreadable CA: {e}"));
+        }
     }
 }
