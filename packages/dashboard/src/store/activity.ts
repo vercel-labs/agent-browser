@@ -6,6 +6,7 @@ import { useAtomValue, useSetAtom } from "jotai/react";
 import type { ActivityEvent } from "@/types";
 import { streamEventsAtom } from "@/store/stream";
 import { activeSessionNameAtom } from "@/store/sessions";
+import { readBrowserStorage, writeBrowserStorage, removeBrowserStorage } from "@/lib/browser-storage";
 
 const PERSIST_KEY = "ab-persist-activity";
 const MAX_PERSISTED = 500;
@@ -16,7 +17,7 @@ function activityStorageKey(session: string) {
 
 function loadPersistedEvents(session: string): ActivityEvent[] {
   try {
-    const raw = localStorage.getItem(activityStorageKey(session));
+    const raw = readBrowserStorage(activityStorageKey(session));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -28,7 +29,7 @@ function loadPersistedEvents(session: string): ActivityEvent[] {
 function savePersistedEvents(session: string, events: ActivityEvent[]) {
   try {
     const capped = events.slice(-MAX_PERSISTED);
-    localStorage.setItem(activityStorageKey(session), JSON.stringify(capped));
+    writeBrowserStorage(activityStorageKey(session), JSON.stringify(capped));
   } catch {
     // Storage full or unavailable
   }
@@ -36,7 +37,7 @@ function savePersistedEvents(session: string, events: ActivityEvent[]) {
 
 function clearPersistedEvents(session: string) {
   try {
-    localStorage.removeItem(activityStorageKey(session));
+    removeBrowserStorage(activityStorageKey(session));
   } catch {
     // Ignore
   }
@@ -46,11 +47,7 @@ function clearPersistedEvents(session: string) {
 // Primitive atoms
 // ---------------------------------------------------------------------------
 
-export const persistActivityAtom = atom(
-  typeof window !== "undefined"
-    ? localStorage.getItem(PERSIST_KEY) === "true"
-    : false,
-);
+export const persistActivityAtom = atom(readBrowserStorage(PERSIST_KEY) === "true");
 
 export const restoredEventsAtom = atom<ActivityEvent[]>([]);
 
@@ -76,7 +73,7 @@ export const combinedEventsAtom = atom((get) => {
 export const togglePersistAtom = atom(null, (get, set) => {
   const next = !get(persistActivityAtom);
   set(persistActivityAtom, next);
-  localStorage.setItem(PERSIST_KEY, String(next));
+  writeBrowserStorage(PERSIST_KEY, String(next));
 
   if (!next) {
     const session = get(activeSessionNameAtom);
