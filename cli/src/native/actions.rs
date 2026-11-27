@@ -2811,6 +2811,12 @@ impl DaemonState {
                                         resource_type,
                                         request.get("postData").and_then(|v| v.as_str()),
                                     );
+                                    if let Some(mono_start) =
+                                        event.params.get("timestamp").and_then(|v| v.as_f64())
+                                    {
+                                        self.tracked_requests
+                                            .set_start_time(&request_id, mono_start);
+                                    }
                                 }
                             }
                         }
@@ -2855,7 +2861,9 @@ impl DaemonState {
                                 }
                             }
                         }
-                        "Network.loadingFinished" if self.har_recording => {
+                        "Network.loadingFinished"
+                            if self.har_recording || self.request_tracking =>
+                        {
                             let request_id = event
                                 .params
                                 .get("requestId")
@@ -2866,22 +2874,33 @@ impl DaemonState {
                                 .params
                                 .get("encodedDataLength")
                                 .and_then(|v| v.as_i64());
-                            if let Some(entry) = self
-                                .har_entries
-                                .iter_mut()
-                                .rev()
-                                .find(|e| e.request_id == request_id)
-                            {
-                                if let Some(ts) = timestamp {
-                                    entry.loading_finished_timestamp = Some(ts);
+                            if self.har_recording {
+                                if let Some(entry) = self
+                                    .har_entries
+                                    .iter_mut()
+                                    .rev()
+                                    .find(|e| e.request_id == request_id)
+                                {
+                                    if let Some(ts) = timestamp {
+                                        entry.loading_finished_timestamp = Some(ts);
+                                    }
+                                    if let Some(len) = encoded_data_length {
+                                        entry.response_body_size = len;
+                                    }
+                                    if self.har_content_mode != HarContentMode::None {
+                                        har_finished_requests.push((
+                                            request_id.to_string(),
+                                            event.session_id.clone(),
+                                        ));
+                                    }
                                 }
-                                if let Some(len) = encoded_data_length {
-                                    entry.response_body_size = len;
-                                }
-                                if self.har_content_mode != HarContentMode::None {
-                                    har_finished_requests
-                                        .push((request_id.to_string(), event.session_id.clone()));
-                                }
+                            }
+                            if self.request_tracking {
+                                self.tracked_requests.finish_request(
+                                    request_id,
+                                    timestamp,
+                                    encoded_data_length,
+                                );
                             }
                         }
                         "Network.loadingFailed" if self.har_recording => {
@@ -7363,7 +7382,6 @@ fn launch_envelope_patch(cmd: &Value, engine: Option<&str>) -> Result<Patch, Str
             }
         }
     }
-    drop(set);
     // Obscura takes its proxy bypass from every launch, so an explicit null
     // clears it.
     if engine == Some("obscura") {
@@ -15929,6 +15947,9 @@ fn tracked_fill_response(tracker: &mut RequestTracker, request_id: &str, respons
         .get("headers")
         .map(|h| network::clip_cdp_header_object(Some(h)));
     tracker.attach_response(request_id, status, mime_type, headers);
+    if let Some(len) = response.get("encodedDataLength").and_then(|v| v.as_i64()) {
+        tracker.set_encoded_data_length(request_id, len);
+    }
 }
 
 /// Copies a CDP `Response` (from `responseReceived` or a `redirectResponse`)

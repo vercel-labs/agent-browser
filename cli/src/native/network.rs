@@ -863,6 +863,15 @@ pub struct TrackedRequest {
     pub response_headers: Option<Value>,
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    /// Bytes received over the wire, from `responseReceived` and then `loadingFinished`.
+    #[serde(rename = "encodedDataLength", skip_serializing_if = "Option::is_none")]
+    pub encoded_data_length: Option<i64>,
+    /// Time from the request being sent to loading finished, in milliseconds.
+    #[serde(rename = "durationMs", skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
+    /// Monotonic start timestamp (seconds) from `requestWillBeSent`.
+    #[serde(skip)]
+    pub mono_start: Option<f64>,
 }
 
 fn header_value_bytes(value: &Value) -> usize {
@@ -971,6 +980,9 @@ impl RequestTracker {
             status: None,
             response_headers: None,
             mime_type: None,
+            encoded_data_length: None,
+            duration_ms: None,
+            mono_start: None,
         };
         let weight = tracked_request_weight(&entry);
         self.entries.push(entry);
@@ -996,6 +1008,45 @@ impl RequestTracker {
         entry.mime_type = mime_type.map(|m| clip_raw(m, MAX_REQUEST_LABEL_BYTES));
         entry.response_headers = response_headers.map(|h| clip_cdp_header_object(Some(&h)));
         self.reweigh(idx);
+    }
+
+    /// Sets the monotonic start timestamp (seconds) on the latest entry for `request_id`.
+    pub fn set_start_time(&mut self, request_id: &str, mono_start: f64) {
+        if let Some(entry) = self.latest_mut(request_id) {
+            entry.mono_start = Some(mono_start);
+        }
+    }
+
+    /// Records the transfer size on the latest entry for `request_id`; negative sizes are ignored.
+    pub fn set_encoded_data_length(&mut self, request_id: &str, len: i64) {
+        if len < 0 {
+            return;
+        }
+        if let Some(entry) = self.latest_mut(request_id) {
+            entry.encoded_data_length = Some(len);
+        }
+    }
+
+    /// Marks the latest entry for `request_id` finished: stores the final transfer size and the
+    /// duration from its start timestamp to `end` (monotonic seconds).
+    pub fn finish_request(&mut self, request_id: &str, end: Option<f64>, len: Option<i64>) {
+        if let Some(len) = len {
+            self.set_encoded_data_length(request_id, len);
+        }
+        let Some(entry) = self.latest_mut(request_id) else {
+            return;
+        };
+        if let (Some(start), Some(end)) = (entry.mono_start, end) {
+            let ms = ((end - start) * 1000.0).round();
+            if ms >= 0.0 {
+                entry.duration_ms = Some(ms);
+            }
+        }
+    }
+
+    fn latest_mut(&mut self, request_id: &str) -> Option<&mut TrackedRequest> {
+        let id = clip_raw(request_id, MAX_REQUEST_LABEL_BYTES);
+        self.entries.iter_mut().rev().find(|e| e.request_id == id)
     }
 
     /// Returns whether the latest entry for `request_id` still has no recorded request body.
@@ -1522,6 +1573,40 @@ mod tests {
     fn test_format_arg_string() {
         let arg = json!({"type": "string", "value": "hello"});
         assert_eq!(format_console_arg(&arg), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn request_tracker_records_transfer_size_and_duration() {
+        let mut tracker = RequestTracker::new();
+        tracker.record_request(
+            "r1",
+            "https://example.test/",
+            "GET",
+            json!({}),
+            1,
+            "Document",
+            None,
+        );
+        tracker.set_start_time("r1", 10.0);
+        tracker.set_encoded_data_length("r1", 512);
+        assert_eq!(tracker.entries()[0].encoded_data_length, Some(512));
+        assert_eq!(tracker.entries()[0].duration_ms, None);
+
+        tracker.finish_request("r1", Some(10.25), Some(2048));
+        let entry = &tracker.entries()[0];
+        assert_eq!(entry.encoded_data_length, Some(2048));
+        assert_eq!(entry.duration_ms, Some(250.0));
+        let serialized = serde_json::to_value(entry).unwrap();
+        assert_eq!(serialized["encodedDataLength"], 2048);
+        assert_eq!(serialized["durationMs"], 250.0);
+        assert!(serialized.get("monoStart").is_none());
+        assert!(serialized.get("mono_start").is_none());
+
+        tracker.set_encoded_data_length("r1", -1);
+        tracker.finish_request("r1", Some(5.0), None);
+        let entry = &tracker.entries()[0];
+        assert_eq!(entry.encoded_data_length, Some(2048));
+        assert_eq!(entry.duration_ms, Some(250.0));
     }
 
     #[test]
