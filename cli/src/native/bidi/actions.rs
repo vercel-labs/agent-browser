@@ -94,26 +94,48 @@ macro_rules! firefox_actions {
         }
 
         /// Runs a Firefox command after capability, pin, and dialog checks.
-        pub async fn execute(
-            $action: &str,
-            $cmd: &Value,
-            $state: &mut DaemonState,
-        ) -> Result<Value, String> {
+        ///
+        /// Boxed here, inside the callee, and per-arm so callers and the
+        /// dispatch function itself never reserve stack space for all ~70
+        /// Firefox action futures in `dev` builds.
+        #[inline(never)]
+        pub fn execute<'a>(
+            $action: &'a str,
+            $cmd: &'a Value,
+            $state: &'a mut DaemonState,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+        {
             if let Some(error) = unsupported_error($action) {
-                return Err(error);
+                return Box::pin(std::future::ready(Err(error)));
             }
             if let Some(error) = pin_gone_error($action, $cmd, $state) {
-                return Err(error);
+                return Box::pin(std::future::ready(Err(error)));
             }
             match $action {
                 $($($name)|+ => {
-                    dialog_guard($action, $state)?;
-                    $handler
+                    if let Err(error) = dialog_guard($action, $state) {
+                        return Box::pin(std::future::ready(Err(error)));
+                    }
+                    box_firefox_action(|| async move { $handler })
                 },)+
-                _ => Err(format!("`{}` is not supported on Firefox", $action)),
+                _ => Box::pin(std::future::ready(Err(format!(
+                    "`{}` is not supported on Firefox",
+                    $action
+                )))),
             }
         }
     };
+}
+
+#[inline(never)]
+fn box_firefox_action<'a, F, Fut>(
+    f: F,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>> + Send + 'a,
+{
+    Box::pin(f())
 }
 
 firefox_actions! { action, cmd, state;
@@ -144,8 +166,8 @@ firefox_actions! { action, cmd, state;
     "state_load" => storage::state_load(cmd, state).await,
     "screenshot" => capture::screenshot(cmd, state).await,
     "pdf" => capture::pdf(cmd, state).await,
-    "snapshot" => Box::pin(snapshot::snapshot(cmd, state)).await,
-    "diff_snapshot" => Box::pin(snapshot::diff_snapshot(cmd, state)).await,
+    "snapshot" => snapshot::snapshot(cmd, state).await,
+    "diff_snapshot" => snapshot::diff_snapshot(cmd, state).await,
     "click" => interact::click(cmd, state).await,
     "dblclick" => interact::dblclick(cmd, state).await,
     "hover" => interact::hover(cmd, state).await,

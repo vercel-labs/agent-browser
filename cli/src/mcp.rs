@@ -7265,8 +7265,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn mcp_human_click_preserves_session_mode() {
+    async fn assert_mcp_human_click_preserves_session_mode() {
         let mut state = crate::native::actions::DaemonState::new();
         for human in [true, false] {
             let (args, _) =
@@ -7281,6 +7280,27 @@ mod tests {
             crate::native::actions::execute_command(&command, &mut state).await;
             assert_eq!(state.input_mode, "instant");
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_human_click_preserves_session_mode() {
+        assert_mcp_human_click_preserves_session_mode().await;
+    }
+
+    #[test]
+    fn mcp_human_click_preserves_session_mode_fits_in_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(assert_mcp_human_click_preserves_session_mode());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
