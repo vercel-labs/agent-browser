@@ -1240,7 +1240,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_IS_ENABLED,
             "Is enabled",
-            "Check whether an element is enabled.",
+            "Check whether an element is enabled, including its own aria-disabled state.",
             json!({ "selector": selector_schema() }),
             &["selector"],
         ),

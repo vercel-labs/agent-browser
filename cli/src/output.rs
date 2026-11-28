@@ -3239,7 +3239,7 @@ Checks the state of an element and returns true/false.
 
 Subcommands:
   visible <selector>   Check if element is visible
-  enabled <selector>   Check if element is enabled (not disabled)
+  enabled <selector>   Check if element is enabled, including its aria-disabled state
   checked <selector>   Check if checkbox/radio is checked
 
 Global Options:

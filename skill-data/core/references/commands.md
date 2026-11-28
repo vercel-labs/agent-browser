@@ -158,6 +158,8 @@ agent-browser is enabled @e1      # Check if enabled
 agent-browser is checked @e1      # Check if checked
 ```
 
+`is enabled` returns `false` for disabled form controls and for elements with `aria-disabled="true"`.
+
 ## Screenshots and PDF
 
 ```bash
