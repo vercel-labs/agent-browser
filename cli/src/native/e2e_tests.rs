@@ -6430,6 +6430,10 @@ async fn e2e_element_queries() {
         "<p id='hidden' style='display:none'>Hidden</p>",
         "<input id='enabled' value='test'>",
         "<input id='disabled' disabled value='nope'>",
+        "<div role='menu' aria-label='Actions'>",
+        "<div role='menuitem' id='disable-aria' aria-disabled='true'>Sort</div>",
+        "<div role='menuitem' id='enable-aria' aria-disabled='false'>Refresh</div>",
+        "</div>",
         "<a id='link' href='https://example.com' data-testid='my-link'>Click me</a>",
         "</body></html>"
     );
@@ -6474,6 +6478,16 @@ async fn e2e_element_queries() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["enabled"], false);
+
+    for (selector, enabled) in [("#disable-aria", false), ("#enable-aria", true)] {
+        let resp = execute_command(
+            &json!({ "id": "aria", "action": "isenabled", "selector": selector }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["enabled"], enabled, "{selector}");
+    }
 
     // gettext
     let resp = execute_command(

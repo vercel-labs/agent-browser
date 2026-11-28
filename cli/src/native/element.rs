@@ -1630,8 +1630,11 @@ pub async fn is_element_visible(
         .unwrap_or(false))
 }
 
-pub(crate) const ELEMENT_ENABLED_JS: &str =
-    "function() { return !this.disabled && !(this.matches && this.matches(':disabled')); }";
+pub(crate) const ELEMENT_ENABLED_JS: &str = "function() {
+    return !this.disabled
+        && !(this.matches && this.matches(':disabled'))
+        && this.getAttribute?.('aria-disabled')?.toLowerCase() !== 'true';
+}";
 
 pub async fn is_element_enabled(
     client: &CdpClient,
