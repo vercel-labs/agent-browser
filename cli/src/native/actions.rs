@@ -12815,15 +12815,25 @@ async fn current_stream_status(state: &DaemonState) -> Value {
 }
 
 async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    if state.stream_server.is_some() {
-        return Err("Streaming is already enabled for this session".to_string());
-    }
-
     let requested_port = match cmd.get("port").and_then(|value| value.as_u64()) {
         Some(raw) => u16::try_from(raw)
             .map_err(|_| format!("Invalid stream port '{}': expected 0-65535", raw))?,
         None => 0,
     };
+
+    // The daemon starts the stream server at launch, so an existing server is
+    // the normal case. Treat enable as idempotent unless a different port was
+    // explicitly requested.
+    if let Some(ref server) = state.stream_server {
+        let current_port = server.port();
+        if requested_port != 0 && requested_port != current_port {
+            return Err(format!(
+                "Streaming is already enabled on port {}; run 'stream disable' first to use port {}",
+                current_port, requested_port
+            ));
+        }
+        return Ok(current_stream_status(state).await);
+    }
 
     let (server, client_slot) = StreamServer::start_without_client(
         requested_port,
@@ -23849,10 +23859,27 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             fs::read_to_string(&stream_path).expect("stream metadata file should exist");
         assert_eq!(port_file.trim(), port.to_string());
 
-        let duplicate_err = handle_stream_enable(&json!({}), &mut state)
+        let repeat_status = handle_stream_enable(&json!({}), &mut state)
             .await
-            .expect_err("duplicate enable should fail");
-        assert!(duplicate_err.contains("already enabled"));
+            .expect("enable on a running stream should succeed");
+        assert_eq!(repeat_status["enabled"], true);
+        assert_eq!(repeat_status["port"], port);
+
+        let same_port_status = handle_stream_enable(&json!({ "port": port }), &mut state)
+            .await
+            .expect("enable with the current port should succeed");
+        assert_eq!(same_port_status["port"], port);
+
+        let other_port = if port == u16::MAX as u64 {
+            port - 1
+        } else {
+            port + 1
+        };
+        let conflict_err = handle_stream_enable(&json!({ "port": other_port }), &mut state)
+            .await
+            .expect_err("enable with a different port should fail");
+        assert!(conflict_err.contains("already enabled"), "{conflict_err}");
+        assert!(conflict_err.contains("stream disable"), "{conflict_err}");
 
         let status = handle_stream_status(&state)
             .await
