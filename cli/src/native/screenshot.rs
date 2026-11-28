@@ -251,6 +251,18 @@ async fn capture_screenshot_base64(
             get_document_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions)
                 .await?
         {
+            // Capturing beyond the viewport can resize the page during capture.
+            // Keep that mode for clips that need it or when bounds are unavailable.
+            let metrics: Result<Value, _> = client
+                .send_command_no_params("Page.getLayoutMetrics", Some(session_id))
+                .await;
+            if metrics
+                .ok()
+                .and_then(|metrics| clip_fits_visual_viewport(&rect, &metrics))
+                == Some(true)
+            {
+                params.capture_beyond_viewport = Some(false);
+            }
             params.clip = Some(Viewport {
                 x: rect.x,
                 y: rect.y,
@@ -271,6 +283,20 @@ async fn capture_screenshot_base64(
 
 fn capture_beyond_viewport(options: &ScreenshotOptions) -> Option<bool> {
     (options.full_page || options.selector.is_some()).then_some(true)
+}
+
+fn clip_fits_visual_viewport(rect: &Rect, metrics: &Value) -> Option<bool> {
+    let viewport = metrics.get("cssVisualViewport")?;
+    let x = viewport.get("pageX")?.as_f64()?;
+    let y = viewport.get("pageY")?.as_f64()?;
+    let width = viewport.get("clientWidth")?.as_f64()?;
+    let height = viewport.get("clientHeight")?.as_f64()?;
+    Some(
+        rect.x >= x
+            && rect.y >= y
+            && rect.x + rect.width <= x + width
+            && rect.y + rect.height <= y + height,
+    )
 }
 
 /// Size of the full-page clip in CSS pixels, which is the unit
