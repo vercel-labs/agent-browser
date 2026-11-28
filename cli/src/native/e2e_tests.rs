@@ -12257,6 +12257,58 @@ fn red_fraction(path: &str) -> (u32, u32, f64) {
     (w, h, red as f64 / (w * h) as f64)
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_visible_selector_keeps_viewport() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "launch", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = concat!(
+        "data:text/html,<body style='margin:0'><div id='box' ",
+        "style='width:200px;height:150px;background:%23c00'></div>",
+        "<script>window.sizes=[];addEventListener('resize',()=>sizes.push([innerWidth,innerHeight]));</script>"
+    );
+    let response = execute_command(
+        &json!({ "id": "open", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+
+    let dir = tempfile::tempdir().unwrap();
+    for step in 0..3 {
+        let path = dir.path().join(format!("shot-{step}.png"));
+        let response = execute_command(
+            &json!({ "id": format!("shot-{step}"), "action": "screenshot", "selector": "#box", "path": path }),
+            &mut state,
+        )
+        .await;
+        assert_success(&response);
+        let (width, height, red) = red_fraction(path.to_str().unwrap());
+        assert_eq!((width, height), (200, 150));
+        assert!(red > 0.99);
+    }
+
+    let resize_events = execute_command(
+        &json!({
+            "id": "resizes",
+            "action": "evaluate",
+            "script": "new Promise(resolve => requestAnimationFrame(() => resolve(window.sizes)))"
+        }),
+        &mut state,
+    )
+    .await;
+    let close = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
+    assert_success(&close);
+    assert_success(&resize_events);
+    assert_eq!(get_data(&resize_events)["result"], json!([]));
+}
+
 /// Element screenshots must contain the element wherever it sits: below the
 /// initial viewport, after scrolling, and inside a same-origin iframe, at a
 /// device scale factor of 2.
