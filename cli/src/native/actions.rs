@@ -3737,13 +3737,234 @@ pub(crate) const ENVELOPE_KEYS: &[&str] = &[
     "restoreCheckFn",
 ];
 
-pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
-    execute_command_flow(cmd, state).await
+/// Boxed here, inside the callee, so callers (including tests awaiting
+/// `execute_command` directly on the default 2 MiB test thread stack) never
+/// embed `execute_command_flow` in their own stack frame or future state.
+#[inline(never)]
+pub fn execute_command<'a>(
+    cmd: &'a Value,
+    state: &'a mut DaemonState,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + 'a>> {
+    Box::pin(execute_command_flow(cmd, state))
+}
+
+#[inline(never)]
+fn box_future<'a, T, F, Fut>(
+    f: F,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T> + Send + 'a,
+{
+    Box::pin(f())
+}
+
+#[inline(never)]
+fn box_action_future<'a, F, Fut>(
+    f: F,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>> + Send + 'a,
+{
+    box_future(f)
+}
+
+enum ActionDispatch<'a> {
+    Future(std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>),
+    Ready(Result<Value, String>),
+}
+
+#[inline(never)]
+fn dispatch_standard_action<'a>(
+    action: &'a str,
+    cmd: &'a Value,
+    state: &'a mut DaemonState,
+    run_flow: Option<Box<super::flow::Flow>>,
+) -> ActionDispatch<'a> {
+    let fut = match action {
+        "navigate" => box_action_future(|| handle_navigate(cmd, state)),
+        "read" => box_action_future(|| handle_read(cmd, state)),
+        "url" => box_action_future(|| handle_url(state)),
+        "cdp_url" => box_action_future(|| handle_cdp_url(state)),
+        "inspect" => box_action_future(|| handle_inspect(state)),
+        "title" => box_action_future(|| handle_title(state)),
+        "content" => box_action_future(|| handle_content(state)),
+        "evaluate" => box_action_future(|| handle_evaluate(cmd, state)),
+        "close" => box_action_future(|| handle_close(state)),
+        "snapshot" => box_action_future(|| handle_snapshot(cmd, state)),
+        "screenshot" => box_action_future(|| handle_screenshot(cmd, state)),
+        "click" => box_action_future(|| handle_click(cmd, state, 1)),
+        "dblclick" => box_action_future(|| handle_click(cmd, state, 2)),
+        "fill" => box_action_future(|| handle_fill(cmd, state)),
+        "type" => box_action_future(|| handle_type(cmd, state)),
+        "press" => box_action_future(|| handle_press(cmd, state)),
+        "hover" => box_action_future(|| handle_hover(cmd, state)),
+        "scroll" => box_action_future(|| handle_scroll(cmd, state)),
+        "select" => box_action_future(|| handle_select(cmd, state)),
+        "check" => box_action_future(|| handle_check(cmd, state)),
+        "uncheck" => box_action_future(|| handle_uncheck(cmd, state)),
+        "wait" => box_action_future(|| handle_wait(cmd, state)),
+        "gettext" => box_action_future(|| handle_gettext(cmd, state)),
+        "getattribute" => box_action_future(|| handle_getattribute(cmd, state)),
+        "isvisible" => box_action_future(|| handle_isvisible(cmd, state)),
+        "isenabled" => box_action_future(|| handle_isenabled(cmd, state)),
+        "ischecked" => box_action_future(|| handle_ischecked(cmd, state)),
+        "back" => box_action_future(|| handle_back(state)),
+        "forward" => box_action_future(|| handle_forward(state)),
+        "reload" => box_action_future(|| handle_reload(state)),
+        "cookies_get" => box_action_future(|| handle_cookies_get(cmd, state)),
+        "cookies_set" => box_action_future(|| handle_cookies_set(cmd, state)),
+        "cookies_clear" => box_action_future(|| handle_cookies_clear(state)),
+        "storage_get" => box_action_future(|| handle_storage_get(cmd, state)),
+        "storage_set" => box_action_future(|| handle_storage_set(cmd, state)),
+        "storage_clear" => box_action_future(|| handle_storage_clear(cmd, state)),
+        "setcontent" => box_action_future(|| handle_setcontent(cmd, state)),
+        "headers" => box_action_future(|| handle_headers(cmd, state)),
+        "offline" => box_action_future(|| handle_offline(cmd, state)),
+        "console" => box_action_future(|| handle_console(cmd, state)),
+        "errors" => box_action_future(|| handle_errors(cmd, state)),
+        "session_info" => box_action_future(|| handle_session_info(state)),
+        "state_save" => box_action_future(|| handle_state_save(cmd, state)),
+        "state_load" => box_action_future(|| handle_state_load(cmd, state)),
+        "state_list" | "state_show" | "state_clear" | "state_clean" | "state_rename" => {
+            return ActionDispatch::Ready(
+                state::dispatch_state_command(cmd)
+                    .expect("dispatch_state_command must handle all state_* actions matched here"),
+            );
+        }
+        "trace_start" => box_action_future(|| handle_trace_start(state)),
+        "trace_stop" => box_action_future(|| handle_trace_stop(cmd, state)),
+        "profiler_start" => box_action_future(|| handle_profiler_start(cmd, state)),
+        "profiler_stop" => box_action_future(|| handle_profiler_stop(cmd, state)),
+        "recording_start" => box_action_future(|| handle_recording_start(cmd, state)),
+        "recording_stop" => box_action_future(|| handle_recording_stop(state)),
+        "recording_restart" => box_action_future(|| handle_recording_restart(cmd, state)),
+        "pdf" => box_action_future(|| handle_pdf(cmd, state)),
+        "tab_list" => box_action_future(|| handle_tab_list(state)),
+        "tab_new" => box_action_future(|| handle_tab_new(cmd, state)),
+        "tab_switch" => box_action_future(|| handle_tab_switch(cmd, state)),
+        "tab_close" => box_action_future(|| handle_tab_close(cmd, state)),
+        "tab_keep" => box_action_future(|| handle_tab_keep(cmd, state)),
+        "viewport" => box_action_future(|| handle_viewport(cmd, state)),
+        "useragent" | "user_agent" => box_action_future(|| handle_user_agent(cmd, state)),
+        "set_media" => box_action_future(|| handle_set_media(cmd, state)),
+        "download" => box_action_future(|| handle_download(cmd, state)),
+        "diff_snapshot" => box_action_future(|| handle_diff_snapshot(cmd, state)),
+        "diff_url" => box_action_future(|| handle_diff_url(cmd, state)),
+        "credentials_set" => box_action_future(|| handle_credentials_set(cmd)),
+        "credentials_get" => box_action_future(|| handle_credentials_get(cmd)),
+        "credentials_delete" => box_action_future(|| handle_credentials_delete(cmd)),
+        "credentials_list" => box_action_future(handle_credentials_list),
+        "mouse" => box_action_future(|| handle_mouse(cmd, state)),
+        "keyboard" => box_action_future(|| handle_keyboard(cmd, state)),
+        "focus" => box_action_future(|| handle_focus(cmd, state)),
+        "clear" => box_action_future(|| handle_clear(cmd, state)),
+        "selectall" => box_action_future(|| handle_selectall(cmd, state)),
+        "scrollintoview" => box_action_future(|| handle_scrollintoview(cmd, state)),
+        "dispatch" => box_action_future(|| handle_dispatch(cmd, state)),
+        "highlight" => box_action_future(|| handle_highlight(cmd, state)),
+        "tap" => box_action_future(|| handle_tap(cmd, state)),
+        "boundingbox" => box_action_future(|| handle_boundingbox(cmd, state)),
+        "innertext" => box_action_future(|| handle_innertext(cmd, state)),
+        "innerhtml" => box_action_future(|| handle_innerhtml(cmd, state)),
+        "inputvalue" => box_action_future(|| handle_inputvalue(cmd, state)),
+        "setvalue" => box_action_future(|| handle_setvalue(cmd, state)),
+        "count" => box_action_future(|| handle_count(cmd, state)),
+        "styles" => box_action_future(|| handle_styles(cmd, state)),
+        "bringtofront" => box_action_future(|| handle_bringtofront(state)),
+        "timezone" => box_action_future(|| handle_timezone(cmd, state)),
+        "locale" => box_action_future(|| handle_locale(cmd, state)),
+        "geolocation" => box_action_future(|| handle_geolocation(cmd, state)),
+        "permissions" => box_action_future(|| handle_permissions(cmd, state)),
+        "dialog" => box_action_future(|| handle_dialog(cmd, state)),
+        "upload" => box_action_future(|| handle_upload(cmd, state)),
+        "addscript" => box_action_future(|| handle_addscript(cmd, state)),
+        "addinitscript" => box_action_future(|| handle_addinitscript(cmd, state)),
+        "removeinitscript" => box_action_future(|| handle_removeinitscript(cmd, state)),
+        "addstyle" => box_action_future(|| handle_addstyle(cmd, state)),
+        "react_tree" => box_action_future(|| handle_react_tree(cmd, state)),
+        "react_inspect" => box_action_future(|| handle_react_inspect(cmd, state)),
+        "react_renders_start" => box_action_future(|| handle_react_renders_start(cmd, state)),
+        "react_renders_stop" => box_action_future(|| handle_react_renders_stop(cmd, state)),
+        "react_suspense" => box_action_future(|| handle_react_suspense(cmd, state)),
+        "vitals" => box_action_future(|| handle_vitals(cmd, state)),
+        "a11y" => box_action_future(|| handle_a11y(cmd, state)),
+        "pushstate" => box_action_future(|| handle_pushstate(cmd, state)),
+        "clipboard" => box_action_future(|| handle_clipboard(cmd, state)),
+        "wheel" => box_action_future(|| handle_wheel(cmd, state)),
+        "device" => box_action_future(|| handle_device(cmd, state)),
+        "screencast_start" => box_action_future(|| handle_screencast_start(cmd, state)),
+        "screencast_stop" => box_action_future(|| handle_screencast_stop(state)),
+        "stream_enable" => box_action_future(|| handle_stream_enable(cmd, state)),
+        "stream_disable" => box_action_future(|| handle_stream_disable(state)),
+        "stream_status" => box_action_future(|| handle_stream_status(state)),
+        "webmcp_list" => box_action_future(|| handle_webmcp_list(cmd, state)),
+        "webmcp_invoke" => box_action_future(|| handle_webmcp_invoke(cmd, state)),
+        "webmcp_result" => box_action_future(|| handle_webmcp_result(cmd, state)),
+        "webmcp_cancel" => box_action_future(|| handle_webmcp_cancel(cmd, state)),
+        "waitforurl" => box_action_future(|| handle_waitforurl(cmd, state)),
+        "waitforloadstate" => box_action_future(|| handle_waitforloadstate(cmd, state)),
+        "waitforfunction" => box_action_future(|| handle_waitforfunction(cmd, state)),
+        "frame" => box_action_future(|| handle_frame(cmd, state)),
+        "mainframe" => box_action_future(|| handle_mainframe(state)),
+        "getbyrole" => box_action_future(|| handle_getbyrole(cmd, state)),
+        "getbytext" => box_action_future(|| handle_getbytext(cmd, state)),
+        "getbylabel" => box_action_future(|| handle_getbylabel(cmd, state)),
+        "getbyplaceholder" => box_action_future(|| handle_getbyplaceholder(cmd, state)),
+        "getbyalttext" => box_action_future(|| handle_getbyalttext(cmd, state)),
+        "getbytitle" => box_action_future(|| handle_getbytitle(cmd, state)),
+        "getbytestid" => box_action_future(|| handle_getbytestid(cmd, state)),
+        "nth" => box_action_future(|| handle_nth(cmd, state)),
+        "find" => box_action_future(|| handle_find(cmd, state)),
+        "evalhandle" => box_action_future(|| handle_evalhandle(cmd, state)),
+        "drag" => box_action_future(|| handle_drag(cmd, state)),
+        "expose" => box_action_future(|| handle_expose(cmd, state)),
+        "pause" => box_action_future(|| handle_pause(state)),
+        "multiselect" => box_action_future(|| handle_multiselect(cmd, state)),
+        "responsebody" => box_action_future(|| handle_responsebody(cmd, state)),
+        "waitfordownload" => box_action_future(|| handle_waitfordownload(cmd, state)),
+        "window_new" => box_action_future(|| handle_window_new(cmd, state)),
+        "diff_screenshot" => box_action_future(|| handle_diff_screenshot(cmd, state)),
+        "video_start" => box_action_future(|| handle_video_start(cmd, state)),
+        "video_stop" => box_action_future(|| handle_video_stop(state)),
+        "flow_steps" | "flow_save" | "flow_run" | "flow_list" => {
+            handle_flow_command(action, cmd, state, run_flow)
+        }
+        "har_start" => box_action_future(|| handle_har_start(cmd, state)),
+        "har_stop" => box_action_future(|| handle_har_stop(cmd, state)),
+        "route" => box_action_future(|| handle_route(cmd, state)),
+        "unroute" => box_action_future(|| handle_unroute(cmd, state)),
+        "requests" => box_action_future(|| handle_requests(cmd, state)),
+        "request_detail" => box_action_future(|| handle_request_detail(cmd, state)),
+        "credentials" => box_action_future(|| handle_http_credentials(cmd, state)),
+        "emulatemedia" => box_action_future(|| handle_set_media(cmd, state)),
+        "auth_save" => box_action_future(|| handle_auth_save(cmd)),
+        "auth_login" => box_action_future(|| handle_auth_login(cmd, state)),
+        "auth_list" => box_action_future(handle_credentials_list),
+        "auth_delete" => box_action_future(|| handle_credentials_delete(cmd)),
+        "auth_show" => box_action_future(|| handle_auth_show(cmd)),
+        "confirm" => box_action_future(|| handle_confirm(cmd, state)),
+        "deny" => box_action_future(|| handle_deny(cmd, state)),
+        "swipe" => box_action_future(|| handle_swipe(cmd, state)),
+        "device_list" => box_action_future(handle_device_list),
+        "input_mouse" => box_action_future(|| handle_input_mouse(cmd, state)),
+        "input_keyboard" => box_action_future(|| handle_input_keyboard(cmd, state)),
+        "input_touch" => box_action_future(|| handle_input_touch(cmd, state)),
+        "keydown" => box_action_future(|| handle_keydown(cmd, state)),
+        "keyup" => box_action_future(|| handle_keyup(cmd, state)),
+        "inserttext" => box_action_future(|| handle_inserttext(cmd, state)),
+        "mousemove" => box_action_future(|| handle_mousemove(cmd, state)),
+        "mousedown" => box_action_future(|| handle_mousedown(cmd, state)),
+        "mouseup" => box_action_future(|| handle_mouseup(cmd, state)),
+        _ => return ActionDispatch::Ready(Err(format!("Not yet implemented: {}", action))),
+    };
+    ActionDispatch::Future(fut)
 }
 
 async fn execute_command_flow(cmd: &Value, state: &mut DaemonState) -> Value {
     let outer = state.flow.enter();
-    let mut resp = Box::pin(execute_command_inner(cmd, state)).await;
+    let mut resp = box_future(|| execute_command_inner(cmd, state)).await;
     if let Some(seq) = state.flow.exit(outer) {
         let ok = resp.get("success") == Some(&json!(true));
         let url = match state.browser.as_ref() {
@@ -3922,16 +4143,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         if let Err(e) = check_capture_setting(&patch) {
             return error_response(&id, &e);
         }
-        let outcome = match Box::pin(apply_settings_patch(
-            state,
-            &patch,
-            SettingsPass::BeforeGates,
-        ))
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(e) => return error_response(&id, &e),
-        };
+        let outcome =
+            match box_future(|| apply_settings_patch(state, &patch, SettingsPass::BeforeGates))
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(e) => return error_response(&id, &e),
+            };
         if launches {
             if let Err(e) = adjust_ca_patch(state, &mut patch) {
                 return error_response(&id, &e);
@@ -4125,7 +4343,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             || !has_active_browser_session(state));
     let (mut prepared, resolved_engine) = if must_prepare {
         match launch_patch.as_ref() {
-            Some(patch) => match Box::pin(prepare_transition(state, patch, cmd)).await {
+            Some(patch) => match box_future(|| prepare_transition(state, patch, cmd)).await {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     let message = if action == "launch" {
@@ -4165,7 +4383,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // Past every gate: the restore unit takes effect for any command, whether
     // or not it launches.
-    let restore_applied = match Box::pin(apply_restore_unit(state, &restore_patch)).await {
+    let restore_applied = match box_future(|| apply_restore_unit(state, &restore_patch)).await {
         Ok(applied) => applied,
         Err(e) => {
             let mut resp = error_response(&id, &e);
@@ -4179,7 +4397,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if let Some(patch) = settings_patch.as_ref() {
         if !needs_launch && action != "launch" && !(launches && launch_plan.is_some()) {
-            match Box::pin(apply_settings_patch(state, patch, SettingsPass::InPlace)).await {
+            match box_future(|| apply_settings_patch(state, patch, SettingsPass::InPlace)).await {
                 Ok(outcome) => settings_outcome.absorb_in_place(outcome),
                 Err(e) => {
                     let mut resp = error_response(&id, &e);
@@ -4194,21 +4412,21 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         if needs_launch {
             lifecycle_relaunched_browser |= restore_applied.relaunched_browser;
             if let Some(patch) = launch_patch.as_ref() {
-                match Box::pin(apply_settings_patch_with_engine(
-                    state,
-                    patch,
-                    SettingsPass::Launch,
-                    resolved_engine,
-                ))
+                match box_future(|| {
+                    apply_settings_patch_with_engine(
+                        state,
+                        patch,
+                        SettingsPass::Launch,
+                        resolved_engine,
+                    )
+                })
                 .await
                 {
                     Ok(outcome) => settings_outcome.absorb(outcome),
                     Err(e) => {
-                        let cleanup = Box::pin(rollback_restore_unit(
-                            state,
-                            &restore_applied,
-                            &mut settings_outcome,
-                        ))
+                        let cleanup = box_future(|| {
+                            rollback_restore_unit(state, &restore_applied, &mut settings_outcome)
+                        })
                         .await;
                         let mut resp = error_response(&id, &with_rollback_error(&e, cleanup));
                         attach_settings_outcome(&mut resp, &settings_outcome);
@@ -4219,33 +4437,28 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_relaunched_browser |= settings_outcome.relaunched_browser;
             lifecycle_relaunched_browser |= has_active_browser_session(state);
             if has_active_browser_session(state) {
-                let _ = Box::pin(auto_save_restore_state(state)).await;
+                let _ = box_future(|| auto_save_restore_state(state)).await;
             }
             let strict_state = launch_patch
                 .as_ref()
                 .is_some_and(|patch| patch.value(Key::StorageState).is_some());
-            let launched = Box::pin(auto_launch_with(
-                state,
-                plugins_from_command_or_env(cmd),
-                &Value::Null,
-                strict_state,
-                prepared.take(),
-            ))
+            let plugins = plugins_from_command_or_env(cmd);
+            let prepared_conn = prepared.take();
+            let launched = box_future(|| {
+                auto_launch_with(state, plugins, &Value::Null, strict_state, prepared_conn)
+            })
             .await;
             let launched = match launched {
-                Ok(_) => Box::pin(start_flow_capture(state)).await,
+                Ok(_) => box_future(|| start_flow_capture(state)).await,
                 Err(e) => Err(e),
             };
             if let Err(e) = launched {
                 let connection = state.settings.connection();
                 let context =
                     auto_launch_error_context(&connection, state.settings.engine().as_deref());
-                let e = Box::pin(rollback_launch(
-                    state,
-                    &restore_applied,
-                    &mut settings_outcome,
-                    &e,
-                ))
+                let e = box_future(|| {
+                    rollback_launch(state, &restore_applied, &mut settings_outcome, &e)
+                })
                 .await;
                 let mut resp = error_response(&id, &format!("{}: {}", context, e));
                 attach_settings_outcome(&mut resp, &settings_outcome);
@@ -4311,7 +4524,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 .firefox
                 .as_ref()
                 .map(|ff| ff.contexts.active_tab().to_string());
-            let result = Box::pin(bidi::actions::execute(action, cmd, state)).await;
+            let result = bidi::actions::execute(action, cmd, state).await;
             if state
                 .firefox
                 .as_ref()
@@ -4327,12 +4540,14 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         }
         "launch" => {
             let applied = match launch_patch.as_ref() {
-                Some(patch) => Box::pin(apply_settings_patch_with_engine(
-                    state,
-                    patch,
-                    SettingsPass::Launch,
-                    resolved_engine,
-                ))
+                Some(patch) => box_future(|| {
+                    apply_settings_patch_with_engine(
+                        state,
+                        patch,
+                        SettingsPass::Launch,
+                        resolved_engine,
+                    )
+                })
                 .await
                 .map(|outcome| settings_outcome.absorb(outcome)),
                 None => Ok(()),
@@ -4341,15 +4556,11 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 restore_applied.relaunched_browser || settings_outcome.relaunched_browser;
             let result = match applied {
                 Ok(()) => {
-                    Box::pin(handle_launch_prepared(
-                        cmd,
-                        state,
-                        LaunchRequest::Planned {
-                            prepared: prepared.take(),
-                            relaunched: lifecycle_relaunched_browser,
-                        },
-                    ))
-                    .await
+                    let req = LaunchRequest::Planned {
+                        prepared: prepared.take(),
+                        relaunched: lifecycle_relaunched_browser,
+                    };
+                    box_future(|| handle_launch_prepared(cmd, state, req)).await
                 }
                 Err(e) => Err(e),
             };
@@ -4359,188 +4570,16 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     state.webmcp_enabled = state.settings.webmcp();
                     Ok(data)
                 }
-                Err(e) => Err(Box::pin(rollback_launch(
-                    state,
-                    &restore_applied,
-                    &mut settings_outcome,
-                    &e,
-                ))
+                Err(e) => Err(box_future(|| {
+                    rollback_launch(state, &restore_applied, &mut settings_outcome, &e)
+                })
                 .await),
             }
         }
-        "navigate" => handle_navigate(cmd, state).await,
-        "read" => handle_read(cmd, state).await,
-        "url" => handle_url(state).await,
-        "cdp_url" => handle_cdp_url(state).await,
-        "inspect" => handle_inspect(state).await,
-        "title" => handle_title(state).await,
-        "content" => handle_content(state).await,
-        "evaluate" => handle_evaluate(cmd, state).await,
-        "close" => handle_close(state).await,
-        "snapshot" => handle_snapshot(cmd, state).await,
-        "screenshot" => handle_screenshot(cmd, state).await,
-        "click" => handle_click(cmd, state, 1).await,
-        "dblclick" => handle_click(cmd, state, 2).await,
-        "fill" => handle_fill(cmd, state).await,
-        "type" => handle_type(cmd, state).await,
-        "press" => handle_press(cmd, state).await,
-        "hover" => handle_hover(cmd, state).await,
-        "scroll" => handle_scroll(cmd, state).await,
-        "select" => handle_select(cmd, state).await,
-        "check" => handle_check(cmd, state).await,
-        "uncheck" => handle_uncheck(cmd, state).await,
-        "wait" => handle_wait(cmd, state).await,
-        "gettext" => handle_gettext(cmd, state).await,
-        "getattribute" => handle_getattribute(cmd, state).await,
-        "isvisible" => handle_isvisible(cmd, state).await,
-        "isenabled" => handle_isenabled(cmd, state).await,
-        "ischecked" => handle_ischecked(cmd, state).await,
-        "back" => handle_back(state).await,
-        "forward" => handle_forward(state).await,
-        "reload" => handle_reload(state).await,
-        "cookies_get" => handle_cookies_get(cmd, state).await,
-        "cookies_set" => handle_cookies_set(cmd, state).await,
-        "cookies_clear" => handle_cookies_clear(state).await,
-        "storage_get" => handle_storage_get(cmd, state).await,
-        "storage_set" => handle_storage_set(cmd, state).await,
-        "storage_clear" => handle_storage_clear(cmd, state).await,
-        "setcontent" => handle_setcontent(cmd, state).await,
-        "headers" => handle_headers(cmd, state).await,
-        "offline" => handle_offline(cmd, state).await,
-        "console" => handle_console(cmd, state).await,
-        "errors" => handle_errors(cmd, state).await,
-        "session_info" => handle_session_info(state).await,
-        "state_save" => handle_state_save(cmd, state).await,
-        "state_load" => handle_state_load(cmd, state).await,
-        "state_list" | "state_show" | "state_clear" | "state_clean" | "state_rename" => {
-            state::dispatch_state_command(cmd)
-                .expect("dispatch_state_command must handle all state_* actions matched here")
-        }
-        "trace_start" => handle_trace_start(state).await,
-        "trace_stop" => handle_trace_stop(cmd, state).await,
-        "profiler_start" => handle_profiler_start(cmd, state).await,
-        "profiler_stop" => handle_profiler_stop(cmd, state).await,
-        "recording_start" => handle_recording_start(cmd, state).await,
-        "recording_stop" => handle_recording_stop(state).await,
-        "recording_restart" => handle_recording_restart(cmd, state).await,
-        "pdf" => handle_pdf(cmd, state).await,
-        "tab_list" => handle_tab_list(state).await,
-        "tab_new" => handle_tab_new(cmd, state).await,
-        "tab_switch" => handle_tab_switch(cmd, state).await,
-        "tab_close" => handle_tab_close(cmd, state).await,
-        "tab_keep" => handle_tab_keep(cmd, state).await,
-        "viewport" => handle_viewport(cmd, state).await,
-        "useragent" | "user_agent" => handle_user_agent(cmd, state).await,
-        "set_media" => handle_set_media(cmd, state).await,
-        "download" => handle_download(cmd, state).await,
-        "diff_snapshot" => handle_diff_snapshot(cmd, state).await,
-        "diff_url" => handle_diff_url(cmd, state).await,
-        "credentials_set" => handle_credentials_set(cmd).await,
-        "credentials_get" => handle_credentials_get(cmd).await,
-        "credentials_delete" => handle_credentials_delete(cmd).await,
-        "credentials_list" => handle_credentials_list().await,
-        "mouse" => handle_mouse(cmd, state).await,
-        "keyboard" => handle_keyboard(cmd, state).await,
-        "focus" => handle_focus(cmd, state).await,
-        "clear" => handle_clear(cmd, state).await,
-        "selectall" => handle_selectall(cmd, state).await,
-        "scrollintoview" => handle_scrollintoview(cmd, state).await,
-        "dispatch" => handle_dispatch(cmd, state).await,
-        "highlight" => handle_highlight(cmd, state).await,
-        "tap" => handle_tap(cmd, state).await,
-        "boundingbox" => handle_boundingbox(cmd, state).await,
-        "innertext" => handle_innertext(cmd, state).await,
-        "innerhtml" => handle_innerhtml(cmd, state).await,
-        "inputvalue" => handle_inputvalue(cmd, state).await,
-        "setvalue" => handle_setvalue(cmd, state).await,
-        "count" => handle_count(cmd, state).await,
-        "styles" => handle_styles(cmd, state).await,
-        "bringtofront" => handle_bringtofront(state).await,
-        "timezone" => handle_timezone(cmd, state).await,
-        "locale" => handle_locale(cmd, state).await,
-        "geolocation" => handle_geolocation(cmd, state).await,
-        "permissions" => handle_permissions(cmd, state).await,
-        "dialog" => handle_dialog(cmd, state).await,
-        "upload" => handle_upload(cmd, state).await,
-        "addscript" => handle_addscript(cmd, state).await,
-        "addinitscript" => handle_addinitscript(cmd, state).await,
-        "removeinitscript" => handle_removeinitscript(cmd, state).await,
-        "addstyle" => handle_addstyle(cmd, state).await,
-        "react_tree" => handle_react_tree(cmd, state).await,
-        "react_inspect" => handle_react_inspect(cmd, state).await,
-        "react_renders_start" => handle_react_renders_start(cmd, state).await,
-        "react_renders_stop" => handle_react_renders_stop(cmd, state).await,
-        "react_suspense" => handle_react_suspense(cmd, state).await,
-        "vitals" => handle_vitals(cmd, state).await,
-        "a11y" => handle_a11y(cmd, state).await,
-        "pushstate" => handle_pushstate(cmd, state).await,
-        "clipboard" => handle_clipboard(cmd, state).await,
-        "wheel" => handle_wheel(cmd, state).await,
-        "device" => handle_device(cmd, state).await,
-        "screencast_start" => handle_screencast_start(cmd, state).await,
-        "screencast_stop" => handle_screencast_stop(state).await,
-        "stream_enable" => handle_stream_enable(cmd, state).await,
-        "stream_disable" => handle_stream_disable(state).await,
-        "stream_status" => handle_stream_status(state).await,
-        "webmcp_list" => handle_webmcp_list(cmd, state).await,
-        "webmcp_invoke" => handle_webmcp_invoke(cmd, state).await,
-        "webmcp_result" => handle_webmcp_result(cmd, state).await,
-        "webmcp_cancel" => handle_webmcp_cancel(cmd, state).await,
-        "waitforurl" => handle_waitforurl(cmd, state).await,
-        "waitforloadstate" => handle_waitforloadstate(cmd, state).await,
-        "waitforfunction" => handle_waitforfunction(cmd, state).await,
-        "frame" => handle_frame(cmd, state).await,
-        "mainframe" => handle_mainframe(state).await,
-        "getbyrole" => handle_getbyrole(cmd, state).await,
-        "getbytext" => handle_getbytext(cmd, state).await,
-        "getbylabel" => handle_getbylabel(cmd, state).await,
-        "getbyplaceholder" => handle_getbyplaceholder(cmd, state).await,
-        "getbyalttext" => handle_getbyalttext(cmd, state).await,
-        "getbytitle" => handle_getbytitle(cmd, state).await,
-        "getbytestid" => handle_getbytestid(cmd, state).await,
-        "nth" => handle_nth(cmd, state).await,
-        "find" => handle_find(cmd, state).await,
-        "evalhandle" => handle_evalhandle(cmd, state).await,
-        "drag" => handle_drag(cmd, state).await,
-        "expose" => handle_expose(cmd, state).await,
-        "pause" => handle_pause(state).await,
-        "multiselect" => handle_multiselect(cmd, state).await,
-        "responsebody" => handle_responsebody(cmd, state).await,
-        "waitfordownload" => handle_waitfordownload(cmd, state).await,
-        "window_new" => handle_window_new(cmd, state).await,
-        "diff_screenshot" => handle_diff_screenshot(cmd, state).await,
-        "video_start" => handle_video_start(cmd, state).await,
-        "video_stop" => handle_video_stop(state).await,
-        "flow_steps" | "flow_save" | "flow_run" | "flow_list" => {
-            handle_flow_command(action, cmd, state, run_flow.take()).await
-        }
-        "har_start" => handle_har_start(cmd, state).await,
-        "har_stop" => handle_har_stop(cmd, state).await,
-        "route" => handle_route(cmd, state).await,
-        "unroute" => handle_unroute(cmd, state).await,
-        "requests" => handle_requests(cmd, state).await,
-        "request_detail" => handle_request_detail(cmd, state).await,
-        "credentials" => handle_http_credentials(cmd, state).await,
-        "emulatemedia" => handle_set_media(cmd, state).await,
-        "auth_save" => handle_auth_save(cmd).await,
-        "auth_login" => handle_auth_login(cmd, state).await,
-        "auth_list" => handle_credentials_list().await,
-        "auth_delete" => handle_credentials_delete(cmd).await,
-        "auth_show" => handle_auth_show(cmd).await,
-        "confirm" => handle_confirm(cmd, state).await,
-        "deny" => handle_deny(cmd, state).await,
-        "swipe" => handle_swipe(cmd, state).await,
-        "device_list" => handle_device_list().await,
-        "input_mouse" => handle_input_mouse(cmd, state).await,
-        "input_keyboard" => handle_input_keyboard(cmd, state).await,
-        "input_touch" => handle_input_touch(cmd, state).await,
-        "keydown" => handle_keydown(cmd, state).await,
-        "keyup" => handle_keyup(cmd, state).await,
-        "inserttext" => handle_inserttext(cmd, state).await,
-        "mousemove" => handle_mousemove(cmd, state).await,
-        "mousedown" => handle_mousedown(cmd, state).await,
-        "mouseup" => handle_mouseup(cmd, state).await,
-        _ => Err(format!("Not yet implemented: {}", action)),
+        _ => match dispatch_standard_action(action, cmd, state, run_flow.take()) {
+            ActionDispatch::Future(fut) => fut.await,
+            ActionDispatch::Ready(res) => res,
+        },
     };
 
     if result.is_ok() && should_validate_restore_after_action(action) {
@@ -5893,15 +5932,17 @@ async fn launch_browser_from_settings(
         firefox_target.is_some() || prepared_firefox.is_some(),
         state.attached_target.as_ref(),
     ) {
-        return Box::pin(launch_firefox_prepared(
-            state,
-            options,
-            plugins,
-            connection,
-            contained,
-            strict_state,
-            prepared_firefox,
-        ))
+        return box_future(|| {
+            launch_firefox_prepared(
+                state,
+                options,
+                plugins,
+                connection,
+                contained,
+                strict_state,
+                prepared_firefox,
+            )
+        })
         .await;
     }
     if let Some(ref server) = state.stream_server {
@@ -5920,7 +5961,6 @@ async fn launch_browser_from_settings(
     store_proxy_credentials(state, &options, local).await;
     // Nor is a state file replayed into one.
     let storage_state_path = if local { storage_state_path } else { None };
-    let storage_state = storage_state_path.as_deref();
 
     // An attached browser is whatever it is: an inherited engine name would
     // mislabel it, so only a local launch or a provider reads the engine.
@@ -5933,231 +5973,314 @@ async fn launch_browser_from_settings(
     write_engine_file(&state.session_id, &state.engine);
     write_extensions_file(&state.session_id, &state.settings);
 
+    let mut ctx = LaunchBranchContext {
+        options,
+        plugins,
+        connection,
+        contained,
+        strict_state,
+        effective_ca_cert,
+        enable_features,
+        init_script_paths,
+        storage_state_path,
+        restore_key,
+        has_proxy_auth,
+        engine,
+    };
+
     if let Some(cdp) = cdp {
-        ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            contained,
-            cdp_url: Some(cdp.as_str()),
-            cdp_port: None,
-            auto_connect: false,
-            profile: options.profile.as_deref(),
-            provider_name: None,
-            args: &options.args,
-            restore_key: restore_key.as_deref(),
-            storage_state,
-        })?;
-        let headers =
-            cdp_headers_for(state, &cdp).or_else(|| cdp_headers_from_settings(&state.settings));
-        let target = match prepared_cdp {
-            Some(url) => AttachConnection::Cdp(url),
-            None => detect_attach_connection(&cdp, headers.clone(), &state.trust).await?,
-        };
-        let mgr = match target {
-            AttachConnection::Cdp(url) => {
-                BrowserManager::connect_cdp_with_headers_and_tls(
-                    &url,
-                    headers.clone(),
-                    &state.trust,
-                )
-                .await?
-            }
-            AttachConnection::Firefox(target) => {
-                return Box::pin(launch_firefox_prepared(
-                    state,
-                    options,
-                    plugins,
-                    connection,
-                    contained,
-                    strict_state,
-                    Some(target),
-                ))
-                .await;
-            }
-        };
-        state.cdp_headers = headers.map(|headers| (cdp.clone(), headers));
-        state.reset_input_state();
-        state.browser = Some(mgr);
-        state.launch_identity = Some(state.settings.launch_identity());
-        state.subscribe_to_browser_events();
-        state.start_fetch_handler();
-        state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
-        state.update_stream_client().await;
-        install_network_controls_or_close(state, has_proxy_auth).await?;
-        apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-        try_auto_restore_state(state).await;
-        load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
-        return Ok(json!({}));
+        return box_future(|| launch_cdp_from_settings(state, ctx, cdp, prepared_cdp)).await;
     }
 
     if auto_connect {
-        ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            contained,
-            cdp_url: None,
-            cdp_port: None,
-            auto_connect: true,
-            profile: options.profile.as_deref(),
-            provider_name: None,
-            args: &options.args,
-            restore_key: restore_key.as_deref(),
-            storage_state,
-        })?;
-        state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_auto().await?);
-        if !apply_tab_binding_on_attach_or_rollback(state).await? {
-            if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
-                let _ = rollback_failed_launch(state).await;
-                return Err(e);
-            }
-        }
-        state.launch_identity = Some(state.settings.launch_identity());
-        state.subscribe_to_browser_events();
-        state.start_fetch_handler();
-        state.start_dialog_handler();
-        state.update_stream_client().await;
-        install_network_controls_or_close(state, has_proxy_auth).await?;
-        apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-        try_auto_restore_state(state).await;
-        load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
-        return Ok(json!({}));
+        return box_future(|| launch_auto_connect_from_settings(state, ctx)).await;
     }
 
-    // Cloud provider: when the session's settings name a provider, connect via
-    // the provider API instead of launching a local Chrome instance, so a
-    // command that arrives before an explicit "launch" uses it too.
     if let Some(provider) = provider {
-        let p = provider.to_lowercase();
-        ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-            contained,
-            cdp_url: None,
-            cdp_port: None,
-            auto_connect: false,
-            profile: options.profile.as_deref(),
-            provider_name: Some(p.as_str()),
-            args: &options.args,
-            restore_key: restore_key.as_deref(),
-            storage_state,
-        })?;
-        // ios, safari, and ladybird are WebDriver-backed providers.
-        if p == "ios" {
-            // A relaunch keeps the device the session was set up with.
-            let mut ios_cmd = if cmd.is_object() {
-                cmd.clone()
-            } else {
-                json!({})
-            };
-            if ios_cmd.get("deviceName").is_none() {
-                if let Some(device) = state.settings.get(Key::Device).and_then(Value::as_str) {
-                    ios_cmd["deviceName"] = json!(device);
-                }
-            }
-            let result = launch_ios(&ios_cmd, state).await;
-            if result.is_ok() {
-                state.effective_ca_cert = effective_ca_cert;
-            }
-            return result;
-        }
-        if let Some(local) = LocalDriver::from_provider(&p) {
-            let result = launch_local_driver(cmd, state, local, options.headless).await;
-            if result.is_ok() {
-                state.effective_ca_cert = effective_ca_cert;
-            }
-            return result;
-        }
-        if !p.is_empty() {
-            let conn = providers::connect_provider_with_plugins_and_trust(
-                &p,
-                &plugins,
-                &state.settings,
-                &state.trust,
-            )
-            .await?;
-            let provider_metadata = conn.metadata.clone();
-            if conn.direct_page && contained {
-                if let Some(ref ps) = conn.session {
-                    let _ = providers::close_provider_session_with_plugins_and_trust(
-                        ps,
-                        &plugins,
-                        &state.trust,
-                    )
-                    .await;
-                }
-                return Err(direct_page_allowed_domains_error());
-            }
-            let ws_headers = if p == "agentcore" {
-                providers::take_agentcore_ws_headers()
-            } else {
-                None
-            };
-            match attach_provider_cdp(&p, &conn, ws_headers, state, &plugins).await {
-                Ok(mgr) => {
-                    state.reset_input_state();
-                    state.browser = Some(mgr);
-                    state.launch_identity = Some(state.settings.launch_identity());
-                    state.subscribe_to_browser_events();
-                    state.start_fetch_handler();
-                    state.start_dialog_handler();
-                    state.update_stream_client().await;
-                    write_provider_file(&state.session_id, &p);
-                    install_network_controls_or_close(state, has_proxy_auth).await?;
-                    apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
-                    try_auto_restore_state(state).await;
-                    load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
-                    state.effective_ca_cert = effective_ca_cert;
-                    let mut extras = json!({ "provider": provider });
-                    if let Some(info) = providers::get_agentcore_info() {
-                        extras["agentCoreSessionId"] = json!(info.session_id);
-                        extras["agentCoreLiveViewUrl"] = json!(info.live_view_url);
-                    } else if let Some(metadata) = provider_metadata {
-                        extras["providerMetadata"] = metadata;
-                    }
-                    return Ok(extras);
-                }
-                Err(e) => {
-                    let cleanup_error = close_active_provider_session(state).await.err();
-                    return Err(combine_provider_failure(
-                        format!("Provider '{}' connection failed: {}", p, e),
-                        cleanup_error,
-                    ));
-                }
-            }
+        if let Some(result) =
+            box_future(|| launch_provider_from_settings(state, &mut ctx, cmd, provider)).await?
+        {
+            return Ok(result);
         }
     }
 
+    box_future(|| launch_local_from_settings(state, ctx)).await
+}
+
+struct LaunchBranchContext {
+    options: LaunchOptions,
+    plugins: Vec<crate::plugins::PluginConfig>,
+    connection: Connection,
+    contained: bool,
+    strict_state: bool,
+    effective_ca_cert: Option<EffectiveCaCert>,
+    enable_features: Vec<String>,
+    init_script_paths: Vec<String>,
+    storage_state_path: Option<String>,
+    restore_key: Option<String>,
+    has_proxy_auth: bool,
+    engine: Option<String>,
+}
+
+async fn launch_cdp_from_settings(
+    state: &mut DaemonState,
+    ctx: LaunchBranchContext,
+    cdp: String,
+    prepared_cdp: Option<String>,
+) -> Result<Value, String> {
+    let storage_state = if matches!(ctx.connection, Connection::Local) {
+        ctx.storage_state_path.as_deref()
+    } else {
+        None
+    };
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        contained,
+        contained: ctx.contained,
+        cdp_url: Some(cdp.as_str()),
+        cdp_port: None,
+        auto_connect: false,
+        profile: ctx.options.profile.as_deref(),
+        provider_name: None,
+        args: &ctx.options.args,
+        restore_key: ctx.restore_key.as_deref(),
+        storage_state,
+    })?;
+    let headers =
+        cdp_headers_for(state, &cdp).or_else(|| cdp_headers_from_settings(&state.settings));
+    let target = match prepared_cdp {
+        Some(url) => AttachConnection::Cdp(url),
+        None => detect_attach_connection(&cdp, headers.clone(), &state.trust).await?,
+    };
+    let mgr = match target {
+        AttachConnection::Cdp(url) => {
+            BrowserManager::connect_cdp_with_headers_and_tls(&url, headers.clone(), &state.trust)
+                .await?
+        }
+        AttachConnection::Firefox(target) => {
+            return box_future(|| {
+                launch_firefox_prepared(
+                    state,
+                    ctx.options,
+                    ctx.plugins,
+                    ctx.connection,
+                    ctx.contained,
+                    ctx.strict_state,
+                    Some(target),
+                )
+            })
+            .await;
+        }
+    };
+    state.cdp_headers = headers.map(|headers| (cdp.clone(), headers));
+    state.reset_input_state();
+    state.browser = Some(mgr);
+    state.launch_identity = Some(state.settings.launch_identity());
+    state.subscribe_to_browser_events();
+    state.start_fetch_handler();
+    state.start_dialog_handler();
+    apply_tab_binding_on_attach_or_rollback(state).await?;
+    state.update_stream_client().await;
+    install_network_controls_or_close(state, ctx.has_proxy_auth).await?;
+    apply_launch_init_scripts(state, &ctx.enable_features, &ctx.init_script_paths).await;
+    try_auto_restore_state(state).await;
+    load_storage_state_for_launch(state, &ctx.storage_state_path, ctx.strict_state).await?;
+    Ok(json!({}))
+}
+
+async fn launch_auto_connect_from_settings(
+    state: &mut DaemonState,
+    ctx: LaunchBranchContext,
+) -> Result<Value, String> {
+    let storage_state = if matches!(ctx.connection, Connection::Local) {
+        ctx.storage_state_path.as_deref()
+    } else {
+        None
+    };
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        contained: ctx.contained,
+        cdp_url: None,
+        cdp_port: None,
+        auto_connect: true,
+        profile: ctx.options.profile.as_deref(),
+        provider_name: None,
+        args: &ctx.options.args,
+        restore_key: ctx.restore_key.as_deref(),
+        storage_state,
+    })?;
+    state.reset_input_state();
+    state.browser = Some(BrowserManager::connect_auto().await?);
+    if !apply_tab_binding_on_attach_or_rollback(state).await? {
+        if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
+            let _ = rollback_failed_launch(state).await;
+            return Err(e);
+        }
+    }
+    state.launch_identity = Some(state.settings.launch_identity());
+    state.subscribe_to_browser_events();
+    state.start_fetch_handler();
+    state.start_dialog_handler();
+    state.update_stream_client().await;
+    install_network_controls_or_close(state, ctx.has_proxy_auth).await?;
+    apply_launch_init_scripts(state, &ctx.enable_features, &ctx.init_script_paths).await;
+    try_auto_restore_state(state).await;
+    load_storage_state_for_launch(state, &ctx.storage_state_path, ctx.strict_state).await?;
+    Ok(json!({}))
+}
+
+async fn launch_provider_from_settings(
+    state: &mut DaemonState,
+    ctx: &mut LaunchBranchContext,
+    cmd: &Value,
+    provider: String,
+) -> Result<Option<Value>, String> {
+    let storage_state = if matches!(ctx.connection, Connection::Local) {
+        ctx.storage_state_path.as_deref()
+    } else {
+        None
+    };
+    let p = provider.to_lowercase();
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        contained: ctx.contained,
         cdp_url: None,
         cdp_port: None,
         auto_connect: false,
-        profile: options.profile.as_deref(),
+        profile: ctx.options.profile.as_deref(),
+        provider_name: Some(p.as_str()),
+        args: &ctx.options.args,
+        restore_key: ctx.restore_key.as_deref(),
+        storage_state,
+    })?;
+    // ios, safari, and ladybird are WebDriver-backed providers.
+    if p == "ios" {
+        // A relaunch keeps the device the session was set up with.
+        let mut ios_cmd = if cmd.is_object() {
+            cmd.clone()
+        } else {
+            json!({})
+        };
+        if ios_cmd.get("deviceName").is_none() {
+            if let Some(device) = state.settings.get(Key::Device).and_then(Value::as_str) {
+                ios_cmd["deviceName"] = json!(device);
+            }
+        }
+        let result = launch_ios(&ios_cmd, state).await;
+        if result.is_ok() {
+            state.effective_ca_cert = ctx.effective_ca_cert.clone();
+        }
+        return result.map(Some);
+    }
+    if let Some(local) = LocalDriver::from_provider(&p) {
+        let result = launch_local_driver(cmd, state, local, ctx.options.headless).await;
+        if result.is_ok() {
+            state.effective_ca_cert = ctx.effective_ca_cert.clone();
+        }
+        return result.map(Some);
+    }
+    if p.is_empty() {
+        return Ok(None);
+    }
+    let conn = providers::connect_provider_with_plugins_and_trust(
+        &p,
+        &ctx.plugins,
+        &state.settings,
+        &state.trust,
+    )
+    .await?;
+    let provider_metadata = conn.metadata.clone();
+    if conn.direct_page && ctx.contained {
+        if let Some(ref ps) = conn.session {
+            let _ = providers::close_provider_session_with_plugins_and_trust(
+                ps,
+                &ctx.plugins,
+                &state.trust,
+            )
+            .await;
+        }
+        return Err(direct_page_allowed_domains_error());
+    }
+    let ws_headers = if p == "agentcore" {
+        providers::take_agentcore_ws_headers()
+    } else {
+        None
+    };
+    match attach_provider_cdp(&p, &conn, ws_headers, state, &ctx.plugins).await {
+        Ok(mgr) => {
+            state.reset_input_state();
+            state.browser = Some(mgr);
+            state.launch_identity = Some(state.settings.launch_identity());
+            state.subscribe_to_browser_events();
+            state.start_fetch_handler();
+            state.start_dialog_handler();
+            state.update_stream_client().await;
+            write_provider_file(&state.session_id, &p);
+            install_network_controls_or_close(state, ctx.has_proxy_auth).await?;
+            apply_launch_init_scripts(state, &ctx.enable_features, &ctx.init_script_paths).await;
+            try_auto_restore_state(state).await;
+            load_storage_state_for_launch(state, &ctx.storage_state_path, ctx.strict_state).await?;
+            state.effective_ca_cert = ctx.effective_ca_cert.clone();
+            let mut extras = json!({ "provider": provider });
+            if let Some(info) = providers::get_agentcore_info() {
+                extras["agentCoreSessionId"] = json!(info.session_id);
+                extras["agentCoreLiveViewUrl"] = json!(info.live_view_url);
+            } else if let Some(metadata) = provider_metadata {
+                extras["providerMetadata"] = metadata;
+            }
+            Ok(Some(extras))
+        }
+        Err(e) => {
+            let cleanup_error = close_active_provider_session(state).await.err();
+            Err(combine_provider_failure(
+                format!("Provider '{}' connection failed: {}", p, e),
+                cleanup_error,
+            ))
+        }
+    }
+}
+
+async fn launch_local_from_settings(
+    state: &mut DaemonState,
+    mut ctx: LaunchBranchContext,
+) -> Result<Value, String> {
+    let storage_state = if matches!(ctx.connection, Connection::Local) {
+        ctx.storage_state_path.as_deref()
+    } else {
+        None
+    };
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        contained: ctx.contained,
+        cdp_url: None,
+        cdp_port: None,
+        auto_connect: false,
+        profile: ctx.options.profile.as_deref(),
         provider_name: None,
-        args: &options.args,
-        restore_key: restore_key.as_deref(),
+        args: &ctx.options.args,
+        restore_key: ctx.restore_key.as_deref(),
         storage_state,
     })?;
 
-    apply_launch_mutator_plugins(state, &mut options, plugins).await?;
-    validate_ca_cert_launch_mode(&options, engine.as_deref(), false)?;
+    apply_launch_mutator_plugins(state, &mut ctx.options, ctx.plugins).await?;
+    validate_ca_cert_launch_mode(&ctx.options, ctx.engine.as_deref(), false)?;
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        contained,
+        contained: ctx.contained,
         cdp_url: None,
         cdp_port: None,
         auto_connect: false,
-        profile: options.profile.as_deref(),
+        profile: ctx.options.profile.as_deref(),
         provider_name: None,
-        args: &options.args,
-        restore_key: restore_key.as_deref(),
+        args: &ctx.options.args,
+        restore_key: ctx.restore_key.as_deref(),
         storage_state,
     })?;
     write_extensions_file_from_paths(
         &state.session_id,
         &state.settings,
-        options.extensions.as_deref(),
+        ctx.options.extensions.as_deref(),
     );
-    if let Some(ref ca) = effective_ca_cert {
-        options.prepared_nss_home = Some(prepare_nss_home(&ca.bundle)?);
+    if let Some(ref ca) = ctx.effective_ca_cert {
+        ctx.options.prepared_nss_home = Some(prepare_nss_home(&ca.bundle)?);
     }
-    let launch_setup = SessionSetup::from_launch_options(&options);
-    let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
+    let launch_setup = SessionSetup::from_launch_options(&ctx.options);
+    let engine = ctx.engine.clone();
+    let mgr = box_future(|| BrowserManager::launch(ctx.options, engine.as_deref())).await?;
     let rollback_setup = state.session_setup.clone();
     let previous_setup = std::mem::take(&mut state.session_setup);
     state.session_setup = previous_setup.carried_into_relaunch(launch_setup);
@@ -6165,7 +6288,7 @@ async fn launch_browser_from_settings(
     state.reset_input_state();
     state.browser = Some(mgr);
     state.launch_identity = Some(state.settings.launch_identity());
-    state.effective_ca_cert = effective_ca_cert;
+    state.effective_ca_cert = ctx.effective_ca_cert;
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
     state.start_dialog_handler();
@@ -6174,13 +6297,13 @@ async fn launch_browser_from_settings(
     // The carried setup is kept only when every step after the launch
     // succeeds, like the launch settings.
     let result = async {
-        install_network_controls_or_close(state, has_proxy_auth).await?;
+        install_network_controls_or_close(state, ctx.has_proxy_auth).await?;
 
         let replay_warning = replay_session_setup_after_launch(state).await;
 
-        apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
+        apply_launch_init_scripts(state, &ctx.enable_features, &ctx.init_script_paths).await;
         try_auto_restore_state(state).await;
-        load_storage_state_for_launch(state, &storage_state_path, strict_state).await?;
+        load_storage_state_for_launch(state, &ctx.storage_state_path, ctx.strict_state).await?;
         Ok(with_session_setup_warning(state, json!({}), replay_warning))
     }
     .await;
@@ -18639,6 +18762,68 @@ mod tests {
         assert_eq!(response["success"], false);
         assert_eq!(response["error"], "Browser not launched");
         assert!(state.browser.is_none());
+    }
+
+    #[test]
+    fn execute_command_and_bidi_futures_stay_boxed_for_small_stacks() {
+        let mut state = super::DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let cmd = serde_json::json!({ "id": "box-check", "action": "unknown-test-command" });
+
+        assert_eq!(
+            std::mem::size_of_val(&super::execute_command(&cmd, &mut state)),
+            std::mem::size_of::<
+                std::pin::Pin<Box<dyn std::future::Future<Output = serde_json::Value> + Send>>,
+            >(),
+            "execute_command must return a heap-boxed future"
+        );
+        assert_eq!(
+            std::mem::size_of_val(&super::bidi::actions::execute(
+                "unknown_action",
+                &cmd,
+                &mut state
+            )),
+            std::mem::size_of::<
+                std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>,
+                >,
+            >(),
+            "bidi::actions::execute must return a heap-boxed future"
+        );
+
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let mut state = super::DaemonState::new();
+                    state.policy = None;
+                    state.confirm_actions = None;
+                    let cdp_resp = super::execute_command(
+                        &serde_json::json!({ "id": "small-stack-cdp", "action": "cdp_url" }),
+                        &mut state,
+                    )
+                    .await;
+                    assert_eq!(cdp_resp["success"], false);
+                    assert_eq!(cdp_resp["error"], "Browser not launched");
+
+                    let err = super::bidi::actions::execute(
+                        "unknown_action",
+                        &serde_json::json!({}),
+                        &mut state,
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(err.contains("not supported on Firefox"), "{err}");
+                });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[tokio::test]
