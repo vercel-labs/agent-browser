@@ -1969,7 +1969,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Check whether an element is enabled.",
+      "description": "Check whether an element is enabled, including its own aria-disabled state.",
       "inputSchema": {
         "properties": {
           "selector": {
